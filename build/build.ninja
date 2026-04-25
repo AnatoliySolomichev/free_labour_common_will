@@ -206,7 +206,7 @@ build modules/blockchain/CMakeFiles/blockchain_demo.dir/src/main.cpp.o: CXX_COMP
 
 build modules/blockchain/blockchain_demo: CXX_EXECUTABLE_LINKER__blockchain_demo_Debug modules/blockchain/CMakeFiles/blockchain_demo.dir/src/main.cpp.o | modules/blockchain/libblockchain.a || modules/blockchain/libblockchain.a
   FLAGS = -g
-  LINK_LIBRARIES = modules/blockchain/libblockchain.a  -lsodium  -llmdb  -lcbor
+  LINK_LIBRARIES = modules/blockchain/libblockchain.a  -lsodium  -llmdb
   OBJECT_DIR = modules/blockchain/CMakeFiles/blockchain_demo.dir
   POST_BUILD = :
   PRE_LINK = :
@@ -241,6 +241,15 @@ build modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_crypto.cpp.o
   TARGET_COMPILE_PDB = modules/blockchain/CMakeFiles/blockchain_tests.dir/
   TARGET_PDB = modules/blockchain/blockchain_tests.pdb
 
+build modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_serializer.cpp.o: CXX_COMPILER__blockchain_tests_unscanned_Debug /workspace/modules/blockchain/tests/test_serializer.cpp || cmake_object_order_depends_target_blockchain_tests
+  DEP_FILE = modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_serializer.cpp.o.d
+  FLAGS = -g -std=c++17 -Wall -Wextra -DGTEST_HAS_PTHREAD=1
+  INCLUDES = -I/workspace/modules/blockchain/include
+  OBJECT_DIR = modules/blockchain/CMakeFiles/blockchain_tests.dir
+  OBJECT_FILE_DIR = modules/blockchain/CMakeFiles/blockchain_tests.dir/tests
+  TARGET_COMPILE_PDB = modules/blockchain/CMakeFiles/blockchain_tests.dir/
+  TARGET_PDB = modules/blockchain/blockchain_tests.pdb
+
 
 # =============================================================================
 # Link build statements for EXECUTABLE target blockchain_tests
@@ -249,9 +258,9 @@ build modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_crypto.cpp.o
 #############################################
 # Link the executable modules/blockchain/blockchain_tests
 
-build modules/blockchain/blockchain_tests: CXX_EXECUTABLE_LINKER__blockchain_tests_Debug modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_types.cpp.o modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_crypto.cpp.o | modules/blockchain/libblockchain.a /usr/lib/x86_64-linux-gnu/libgtest_main.a /usr/lib/x86_64-linux-gnu/libgmock.a /usr/lib/x86_64-linux-gnu/libgtest.a || modules/blockchain/libblockchain.a
+build modules/blockchain/blockchain_tests: CXX_EXECUTABLE_LINKER__blockchain_tests_Debug modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_types.cpp.o modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_crypto.cpp.o modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_serializer.cpp.o | modules/blockchain/libblockchain.a /usr/lib/x86_64-linux-gnu/libgtest_main.a /usr/lib/x86_64-linux-gnu/libgmock.a /usr/lib/x86_64-linux-gnu/libgtest.a || modules/blockchain/libblockchain.a
   FLAGS = -g
-  LINK_LIBRARIES = modules/blockchain/libblockchain.a  /usr/lib/x86_64-linux-gnu/libgtest_main.a  /usr/lib/x86_64-linux-gnu/libgmock.a  -lsodium  -llmdb  -lcbor  /usr/lib/x86_64-linux-gnu/libgtest.a
+  LINK_LIBRARIES = modules/blockchain/libblockchain.a  /usr/lib/x86_64-linux-gnu/libgtest_main.a  /usr/lib/x86_64-linux-gnu/libgmock.a  -lsodium  -llmdb  /usr/lib/x86_64-linux-gnu/libgtest.a
   OBJECT_DIR = modules/blockchain/CMakeFiles/blockchain_tests.dir
   POST_BUILD = :
   PRE_LINK = :

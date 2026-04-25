@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.16)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBSODIUM REQUIRED libsodium)
 pkg_check_modules(LMDB      REQUIRED lmdb)
-pkg_check_modules(LIBCBOR   REQUIRED libcbor)
+# CBOR is implemented manually (see src/serializer.cpp) — no external CBOR library needed.
 
 # ── Library ──────────────────────────────────────────────────────────────────
 
@@ -22,13 +22,11 @@ target_include_directories(blockchain
     PUBLIC  include
     PRIVATE ${LIBSODIUM_INCLUDE_DIRS}
             ${LMDB_INCLUDE_DIRS}
-            ${LIBCBOR_INCLUDE_DIRS}
 )
 
 target_link_libraries(blockchain PRIVATE
     ${LIBSODIUM_LIBRARIES}
     ${LMDB_LIBRARIES}
-    ${LIBCBOR_LIBRARIES}
 )
 
 target_compile_options(blockchain PRIVATE -Wall -Wextra -Wpedantic)
@@ -46,6 +44,7 @@ find_package(GTest REQUIRED)
 add_executable(blockchain_tests
     tests/test_types.cpp
     tests/test_crypto.cpp
+    tests/test_serializer.cpp
 )
 
 target_link_libraries(blockchain_tests PRIVATE

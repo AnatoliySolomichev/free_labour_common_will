@@ -114,6 +114,10 @@ struct BlockAddress {
 struct ExternalRef {
     BlockAddress address;
     Hash         block_hash;
+
+    bool operator==(const ExternalRef& o) const noexcept {
+        return address == o.address && block_hash == o.block_hash;
+    }
 };
 
 // ── Node ──────────────────────────────────────────────────────────────────────
@@ -133,6 +137,15 @@ struct Node {
     NodeIndex parent_index()      const noexcept { return (index - 1) / 2; }
     NodeIndex left_child_index()  const noexcept { return 2 * index + 1; }
     NodeIndex right_child_index() const noexcept { return 2 * index + 2; }
+
+    bool operator==(const Node& o) const noexcept {
+        return index              == o.index
+            && structural_pubkey == o.structural_pubkey
+            && working_pubkey    == o.working_pubkey
+            && parent_hash       == o.parent_hash
+            && parent_sig        == o.parent_sig
+            && created_at        == o.created_at;
+    }
 };
 
 // ── Block ─────────────────────────────────────────────────────────────────────
@@ -176,6 +189,14 @@ struct Seal {
     Signature signature;
     SealMode  mode;
     Timestamp sealed_at;
+
+    bool operator==(const Seal& o) const noexcept {
+        return signer_id == o.signer_id
+            && block_hash == o.block_hash
+            && signature  == o.signature
+            && mode       == o.mode
+            && sealed_at  == o.sealed_at;
+    }
 };
 
 // ── Branch tip info (used in merge protocol §6.4) ─────────────────────────────
