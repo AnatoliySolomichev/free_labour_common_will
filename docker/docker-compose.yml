@@ -1,0 +1,23 @@
+services:
+  dev:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    volumes:
+      - ..:/workspace
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    command: bash
+
+  build:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    volumes:
+      - ..:/workspace
+    working_dir: /workspace
+    command: >
+      sh -c "cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+             && cmake --build build
+             && cd build && ctest --output-on-failure"

@@ -1,0 +1,9 @@
+/workspace/build/CMakeFiles/test.dir
+/workspace/build/CMakeFiles/edit_cache.dir
+/workspace/build/CMakeFiles/rebuild_cache.dir
+/workspace/build/modules/blockchain/CMakeFiles/blockchain.dir
+/workspace/build/modules/blockchain/CMakeFiles/blockchain_demo.dir
+/workspace/build/modules/blockchain/CMakeFiles/blockchain_tests.dir
+/workspace/build/modules/blockchain/CMakeFiles/test.dir
+/workspace/build/modules/blockchain/CMakeFiles/edit_cache.dir
+/workspace/build/modules/blockchain/CMakeFiles/rebuild_cache.dir

@@ -1,0 +1,15 @@
+# ninja log v5
+0	269	1777119752983580542	modules/blockchain/CMakeFiles/blockchain.dir/src/crypto.cpp.o	8809c17c373531b5
+0	307	1777119753019580543	modules/blockchain/CMakeFiles/blockchain.dir/src/errors.cpp.o	9e1e7569bddb1634
+0	346	1777119753059580544	modules/blockchain/CMakeFiles/blockchain.dir/src/serializer.cpp.o	af6a382a5f25c5b6
+1	433	1777119753147580546	modules/blockchain/CMakeFiles/blockchain.dir/src/validator.cpp.o	3243b4879bd499f0
+1	437	1777119753151580546	modules/blockchain/CMakeFiles/blockchain_demo.dir/src/main.cpp.o	2259b0efcf9e9cfa
+1	438	1777119753151580546	modules/blockchain/CMakeFiles/blockchain.dir/src/merge_session.cpp.o	72da5eb01cda5b57
+1	457	1777119753171580547	modules/blockchain/CMakeFiles/blockchain.dir/src/blockchain.cpp.o	3943aad5478f55cf
+1	528	1777119753243580549	modules/blockchain/CMakeFiles/blockchain.dir/src/seal_manager.cpp.o	efce84e86c9b9b87
+1	577	1777119753291580550	modules/blockchain/CMakeFiles/blockchain.dir/src/storage.cpp.o	8392cd589e4779db
+577	593	1777119753307580551	modules/blockchain/libblockchain.a	b07b52a6ac5b9fff
+593	633	1777119753347580552	modules/blockchain/blockchain_demo	aa98100d5c8a2f0b
+1	794	1777119753507580556	modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_crypto.cpp.o	10f443ad41f63586
+1	856	1777119753567580558	modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_types.cpp.o	6df64a61c99586c9
+856	906	1777119753619580559	modules/blockchain/blockchain_tests	670473afe0ffd655
