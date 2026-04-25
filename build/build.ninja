@@ -231,6 +231,34 @@ build modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_storage.cpp.
   OBJECT_DIR = modules/blockchain/CMakeFiles/blockchain_tests.dir
   OBJECT_FILE_DIR = modules/blockchain/CMakeFiles/blockchain_tests.dir/tests
 
+build modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_validator.cpp.o: CXX_COMPILER__blockchain_tests_unscanned_Debug /workspace/modules/blockchain/tests/test_validator.cpp || cmake_object_order_depends_target_blockchain_tests
+  DEP_FILE = modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_validator.cpp.o.d
+  FLAGS = -g -std=c++17 -Wall -Wextra -DGTEST_HAS_PTHREAD=1
+  INCLUDES = -I/workspace/modules/blockchain/include
+  OBJECT_DIR = modules/blockchain/CMakeFiles/blockchain_tests.dir
+  OBJECT_FILE_DIR = modules/blockchain/CMakeFiles/blockchain_tests.dir/tests
+
+build modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_blockchain.cpp.o: CXX_COMPILER__blockchain_tests_unscanned_Debug /workspace/modules/blockchain/tests/test_blockchain.cpp || cmake_object_order_depends_target_blockchain_tests
+  DEP_FILE = modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_blockchain.cpp.o.d
+  FLAGS = -g -std=c++17 -Wall -Wextra -DGTEST_HAS_PTHREAD=1
+  INCLUDES = -I/workspace/modules/blockchain/include
+  OBJECT_DIR = modules/blockchain/CMakeFiles/blockchain_tests.dir
+  OBJECT_FILE_DIR = modules/blockchain/CMakeFiles/blockchain_tests.dir/tests
+
+build modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_seal_manager.cpp.o: CXX_COMPILER__blockchain_tests_unscanned_Debug /workspace/modules/blockchain/tests/test_seal_manager.cpp || cmake_object_order_depends_target_blockchain_tests
+  DEP_FILE = modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_seal_manager.cpp.o.d
+  FLAGS = -g -std=c++17 -Wall -Wextra -DGTEST_HAS_PTHREAD=1
+  INCLUDES = -I/workspace/modules/blockchain/include
+  OBJECT_DIR = modules/blockchain/CMakeFiles/blockchain_tests.dir
+  OBJECT_FILE_DIR = modules/blockchain/CMakeFiles/blockchain_tests.dir/tests
+
+build modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_merge_session.cpp.o: CXX_COMPILER__blockchain_tests_unscanned_Debug /workspace/modules/blockchain/tests/test_merge_session.cpp || cmake_object_order_depends_target_blockchain_tests
+  DEP_FILE = modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_merge_session.cpp.o.d
+  FLAGS = -g -std=c++17 -Wall -Wextra -DGTEST_HAS_PTHREAD=1
+  INCLUDES = -I/workspace/modules/blockchain/include
+  OBJECT_DIR = modules/blockchain/CMakeFiles/blockchain_tests.dir
+  OBJECT_FILE_DIR = modules/blockchain/CMakeFiles/blockchain_tests.dir/tests
+
 
 # =============================================================================
 # Link build statements for EXECUTABLE target blockchain_tests
@@ -239,7 +267,7 @@ build modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_storage.cpp.
 #############################################
 # Link the executable modules/blockchain/blockchain_tests
 
-build modules/blockchain/blockchain_tests: CXX_EXECUTABLE_LINKER__blockchain_tests_Debug modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_types.cpp.o modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_crypto.cpp.o modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_serializer.cpp.o modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_storage.cpp.o | modules/blockchain/libblockchain.a /usr/lib/x86_64-linux-gnu/libgtest_main.a /usr/lib/x86_64-linux-gnu/libgmock.a /usr/lib/x86_64-linux-gnu/libgtest.a || modules/blockchain/libblockchain.a
+build modules/blockchain/blockchain_tests: CXX_EXECUTABLE_LINKER__blockchain_tests_Debug modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_types.cpp.o modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_crypto.cpp.o modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_serializer.cpp.o modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_storage.cpp.o modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_validator.cpp.o modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_blockchain.cpp.o modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_seal_manager.cpp.o modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_merge_session.cpp.o | modules/blockchain/libblockchain.a /usr/lib/x86_64-linux-gnu/libgtest_main.a /usr/lib/x86_64-linux-gnu/libgmock.a /usr/lib/x86_64-linux-gnu/libgtest.a || modules/blockchain/libblockchain.a
   FLAGS = -g
   LINK_LIBRARIES = modules/blockchain/libblockchain.a  /usr/lib/x86_64-linux-gnu/libgtest_main.a  /usr/lib/x86_64-linux-gnu/libgmock.a  -lsodium  -llmdb  /usr/lib/x86_64-linux-gnu/libgtest.a
   OBJECT_DIR = modules/blockchain/CMakeFiles/blockchain_tests.dir
