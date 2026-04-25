@@ -1,2 +1,2 @@
-blockchain_tests 1 0.00225545
+blockchain_tests 2 0.0182283
 ---

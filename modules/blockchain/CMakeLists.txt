@@ -45,6 +45,7 @@ add_executable(blockchain_tests
     tests/test_types.cpp
     tests/test_crypto.cpp
     tests/test_serializer.cpp
+    tests/test_storage.cpp
 )
 
 target_link_libraries(blockchain_tests PRIVATE

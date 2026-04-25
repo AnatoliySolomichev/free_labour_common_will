@@ -95,8 +95,6 @@ build modules/blockchain/CMakeFiles/blockchain.dir/src/crypto.cpp.o: CXX_COMPILE
   INCLUDES = -I/workspace/modules/blockchain/include
   OBJECT_DIR = modules/blockchain/CMakeFiles/blockchain.dir
   OBJECT_FILE_DIR = modules/blockchain/CMakeFiles/blockchain.dir/src
-  TARGET_COMPILE_PDB = modules/blockchain/CMakeFiles/blockchain.dir/blockchain.pdb
-  TARGET_PDB = modules/blockchain/libblockchain.pdb
 
 build modules/blockchain/CMakeFiles/blockchain.dir/src/errors.cpp.o: CXX_COMPILER__blockchain_unscanned_Debug /workspace/modules/blockchain/src/errors.cpp || cmake_object_order_depends_target_blockchain
   DEP_FILE = modules/blockchain/CMakeFiles/blockchain.dir/src/errors.cpp.o.d
@@ -104,8 +102,6 @@ build modules/blockchain/CMakeFiles/blockchain.dir/src/errors.cpp.o: CXX_COMPILE
   INCLUDES = -I/workspace/modules/blockchain/include
   OBJECT_DIR = modules/blockchain/CMakeFiles/blockchain.dir
   OBJECT_FILE_DIR = modules/blockchain/CMakeFiles/blockchain.dir/src
-  TARGET_COMPILE_PDB = modules/blockchain/CMakeFiles/blockchain.dir/blockchain.pdb
-  TARGET_PDB = modules/blockchain/libblockchain.pdb
 
 build modules/blockchain/CMakeFiles/blockchain.dir/src/serializer.cpp.o: CXX_COMPILER__blockchain_unscanned_Debug /workspace/modules/blockchain/src/serializer.cpp || cmake_object_order_depends_target_blockchain
   DEP_FILE = modules/blockchain/CMakeFiles/blockchain.dir/src/serializer.cpp.o.d
@@ -113,8 +109,6 @@ build modules/blockchain/CMakeFiles/blockchain.dir/src/serializer.cpp.o: CXX_COM
   INCLUDES = -I/workspace/modules/blockchain/include
   OBJECT_DIR = modules/blockchain/CMakeFiles/blockchain.dir
   OBJECT_FILE_DIR = modules/blockchain/CMakeFiles/blockchain.dir/src
-  TARGET_COMPILE_PDB = modules/blockchain/CMakeFiles/blockchain.dir/blockchain.pdb
-  TARGET_PDB = modules/blockchain/libblockchain.pdb
 
 build modules/blockchain/CMakeFiles/blockchain.dir/src/storage.cpp.o: CXX_COMPILER__blockchain_unscanned_Debug /workspace/modules/blockchain/src/storage.cpp || cmake_object_order_depends_target_blockchain
   DEP_FILE = modules/blockchain/CMakeFiles/blockchain.dir/src/storage.cpp.o.d
@@ -122,8 +116,6 @@ build modules/blockchain/CMakeFiles/blockchain.dir/src/storage.cpp.o: CXX_COMPIL
   INCLUDES = -I/workspace/modules/blockchain/include
   OBJECT_DIR = modules/blockchain/CMakeFiles/blockchain.dir
   OBJECT_FILE_DIR = modules/blockchain/CMakeFiles/blockchain.dir/src
-  TARGET_COMPILE_PDB = modules/blockchain/CMakeFiles/blockchain.dir/blockchain.pdb
-  TARGET_PDB = modules/blockchain/libblockchain.pdb
 
 build modules/blockchain/CMakeFiles/blockchain.dir/src/validator.cpp.o: CXX_COMPILER__blockchain_unscanned_Debug /workspace/modules/blockchain/src/validator.cpp || cmake_object_order_depends_target_blockchain
   DEP_FILE = modules/blockchain/CMakeFiles/blockchain.dir/src/validator.cpp.o.d
@@ -131,8 +123,6 @@ build modules/blockchain/CMakeFiles/blockchain.dir/src/validator.cpp.o: CXX_COMP
   INCLUDES = -I/workspace/modules/blockchain/include
   OBJECT_DIR = modules/blockchain/CMakeFiles/blockchain.dir
   OBJECT_FILE_DIR = modules/blockchain/CMakeFiles/blockchain.dir/src
-  TARGET_COMPILE_PDB = modules/blockchain/CMakeFiles/blockchain.dir/blockchain.pdb
-  TARGET_PDB = modules/blockchain/libblockchain.pdb
 
 build modules/blockchain/CMakeFiles/blockchain.dir/src/seal_manager.cpp.o: CXX_COMPILER__blockchain_unscanned_Debug /workspace/modules/blockchain/src/seal_manager.cpp || cmake_object_order_depends_target_blockchain
   DEP_FILE = modules/blockchain/CMakeFiles/blockchain.dir/src/seal_manager.cpp.o.d
@@ -140,8 +130,6 @@ build modules/blockchain/CMakeFiles/blockchain.dir/src/seal_manager.cpp.o: CXX_C
   INCLUDES = -I/workspace/modules/blockchain/include
   OBJECT_DIR = modules/blockchain/CMakeFiles/blockchain.dir
   OBJECT_FILE_DIR = modules/blockchain/CMakeFiles/blockchain.dir/src
-  TARGET_COMPILE_PDB = modules/blockchain/CMakeFiles/blockchain.dir/blockchain.pdb
-  TARGET_PDB = modules/blockchain/libblockchain.pdb
 
 build modules/blockchain/CMakeFiles/blockchain.dir/src/merge_session.cpp.o: CXX_COMPILER__blockchain_unscanned_Debug /workspace/modules/blockchain/src/merge_session.cpp || cmake_object_order_depends_target_blockchain
   DEP_FILE = modules/blockchain/CMakeFiles/blockchain.dir/src/merge_session.cpp.o.d
@@ -149,8 +137,6 @@ build modules/blockchain/CMakeFiles/blockchain.dir/src/merge_session.cpp.o: CXX_
   INCLUDES = -I/workspace/modules/blockchain/include
   OBJECT_DIR = modules/blockchain/CMakeFiles/blockchain.dir
   OBJECT_FILE_DIR = modules/blockchain/CMakeFiles/blockchain.dir/src
-  TARGET_COMPILE_PDB = modules/blockchain/CMakeFiles/blockchain.dir/blockchain.pdb
-  TARGET_PDB = modules/blockchain/libblockchain.pdb
 
 build modules/blockchain/CMakeFiles/blockchain.dir/src/blockchain.cpp.o: CXX_COMPILER__blockchain_unscanned_Debug /workspace/modules/blockchain/src/blockchain.cpp || cmake_object_order_depends_target_blockchain
   DEP_FILE = modules/blockchain/CMakeFiles/blockchain.dir/src/blockchain.cpp.o.d
@@ -158,8 +144,6 @@ build modules/blockchain/CMakeFiles/blockchain.dir/src/blockchain.cpp.o: CXX_COM
   INCLUDES = -I/workspace/modules/blockchain/include
   OBJECT_DIR = modules/blockchain/CMakeFiles/blockchain.dir
   OBJECT_FILE_DIR = modules/blockchain/CMakeFiles/blockchain.dir/src
-  TARGET_COMPILE_PDB = modules/blockchain/CMakeFiles/blockchain.dir/blockchain.pdb
-  TARGET_PDB = modules/blockchain/libblockchain.pdb
 
 
 # =============================================================================
@@ -174,9 +158,8 @@ build modules/blockchain/libblockchain.a: CXX_STATIC_LIBRARY_LINKER__blockchain_
   OBJECT_DIR = modules/blockchain/CMakeFiles/blockchain.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = modules/blockchain/CMakeFiles/blockchain.dir/blockchain.pdb
   TARGET_FILE = modules/blockchain/libblockchain.a
-  TARGET_PDB = modules/blockchain/libblockchain.pdb
+  TARGET_PDB = blockchain.a.dbg
 
 # =============================================================================
 # Object build statements for EXECUTABLE target blockchain_demo
@@ -193,8 +176,6 @@ build modules/blockchain/CMakeFiles/blockchain_demo.dir/src/main.cpp.o: CXX_COMP
   INCLUDES = -I/workspace/modules/blockchain/include
   OBJECT_DIR = modules/blockchain/CMakeFiles/blockchain_demo.dir
   OBJECT_FILE_DIR = modules/blockchain/CMakeFiles/blockchain_demo.dir/src
-  TARGET_COMPILE_PDB = modules/blockchain/CMakeFiles/blockchain_demo.dir/
-  TARGET_PDB = modules/blockchain/blockchain_demo.pdb
 
 
 # =============================================================================
@@ -210,9 +191,8 @@ build modules/blockchain/blockchain_demo: CXX_EXECUTABLE_LINKER__blockchain_demo
   OBJECT_DIR = modules/blockchain/CMakeFiles/blockchain_demo.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = modules/blockchain/CMakeFiles/blockchain_demo.dir/
   TARGET_FILE = modules/blockchain/blockchain_demo
-  TARGET_PDB = modules/blockchain/blockchain_demo.pdb
+  TARGET_PDB = blockchain_demo.dbg
 
 # =============================================================================
 # Object build statements for EXECUTABLE target blockchain_tests
@@ -229,8 +209,6 @@ build modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_types.cpp.o:
   INCLUDES = -I/workspace/modules/blockchain/include
   OBJECT_DIR = modules/blockchain/CMakeFiles/blockchain_tests.dir
   OBJECT_FILE_DIR = modules/blockchain/CMakeFiles/blockchain_tests.dir/tests
-  TARGET_COMPILE_PDB = modules/blockchain/CMakeFiles/blockchain_tests.dir/
-  TARGET_PDB = modules/blockchain/blockchain_tests.pdb
 
 build modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_crypto.cpp.o: CXX_COMPILER__blockchain_tests_unscanned_Debug /workspace/modules/blockchain/tests/test_crypto.cpp || cmake_object_order_depends_target_blockchain_tests
   DEP_FILE = modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_crypto.cpp.o.d
@@ -238,8 +216,6 @@ build modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_crypto.cpp.o
   INCLUDES = -I/workspace/modules/blockchain/include
   OBJECT_DIR = modules/blockchain/CMakeFiles/blockchain_tests.dir
   OBJECT_FILE_DIR = modules/blockchain/CMakeFiles/blockchain_tests.dir/tests
-  TARGET_COMPILE_PDB = modules/blockchain/CMakeFiles/blockchain_tests.dir/
-  TARGET_PDB = modules/blockchain/blockchain_tests.pdb
 
 build modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_serializer.cpp.o: CXX_COMPILER__blockchain_tests_unscanned_Debug /workspace/modules/blockchain/tests/test_serializer.cpp || cmake_object_order_depends_target_blockchain_tests
   DEP_FILE = modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_serializer.cpp.o.d
@@ -247,8 +223,13 @@ build modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_serializer.c
   INCLUDES = -I/workspace/modules/blockchain/include
   OBJECT_DIR = modules/blockchain/CMakeFiles/blockchain_tests.dir
   OBJECT_FILE_DIR = modules/blockchain/CMakeFiles/blockchain_tests.dir/tests
-  TARGET_COMPILE_PDB = modules/blockchain/CMakeFiles/blockchain_tests.dir/
-  TARGET_PDB = modules/blockchain/blockchain_tests.pdb
+
+build modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_storage.cpp.o: CXX_COMPILER__blockchain_tests_unscanned_Debug /workspace/modules/blockchain/tests/test_storage.cpp || cmake_object_order_depends_target_blockchain_tests
+  DEP_FILE = modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_storage.cpp.o.d
+  FLAGS = -g -std=c++17 -Wall -Wextra -DGTEST_HAS_PTHREAD=1
+  INCLUDES = -I/workspace/modules/blockchain/include
+  OBJECT_DIR = modules/blockchain/CMakeFiles/blockchain_tests.dir
+  OBJECT_FILE_DIR = modules/blockchain/CMakeFiles/blockchain_tests.dir/tests
 
 
 # =============================================================================
@@ -258,15 +239,14 @@ build modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_serializer.c
 #############################################
 # Link the executable modules/blockchain/blockchain_tests
 
-build modules/blockchain/blockchain_tests: CXX_EXECUTABLE_LINKER__blockchain_tests_Debug modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_types.cpp.o modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_crypto.cpp.o modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_serializer.cpp.o | modules/blockchain/libblockchain.a /usr/lib/x86_64-linux-gnu/libgtest_main.a /usr/lib/x86_64-linux-gnu/libgmock.a /usr/lib/x86_64-linux-gnu/libgtest.a || modules/blockchain/libblockchain.a
+build modules/blockchain/blockchain_tests: CXX_EXECUTABLE_LINKER__blockchain_tests_Debug modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_types.cpp.o modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_crypto.cpp.o modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_serializer.cpp.o modules/blockchain/CMakeFiles/blockchain_tests.dir/tests/test_storage.cpp.o | modules/blockchain/libblockchain.a /usr/lib/x86_64-linux-gnu/libgtest_main.a /usr/lib/x86_64-linux-gnu/libgmock.a /usr/lib/x86_64-linux-gnu/libgtest.a || modules/blockchain/libblockchain.a
   FLAGS = -g
   LINK_LIBRARIES = modules/blockchain/libblockchain.a  /usr/lib/x86_64-linux-gnu/libgtest_main.a  /usr/lib/x86_64-linux-gnu/libgmock.a  -lsodium  -llmdb  /usr/lib/x86_64-linux-gnu/libgtest.a
   OBJECT_DIR = modules/blockchain/CMakeFiles/blockchain_tests.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = modules/blockchain/CMakeFiles/blockchain_tests.dir/
   TARGET_FILE = modules/blockchain/blockchain_tests
-  TARGET_PDB = modules/blockchain/blockchain_tests.pdb
+  TARGET_PDB = blockchain_tests.dbg
 
 
 #############################################
@@ -338,14 +318,14 @@ build modules/blockchain/all: phony modules/blockchain/libblockchain.a modules/b
 #############################################
 # Re-run CMake if any of its inputs changed.
 
-build build.ninja: RERUN_CMAKE | /usr/lib/x86_64-linux-gnu/cmake/GTest/GMockTargets-none.cmake /usr/lib/x86_64-linux-gnu/cmake/GTest/GMockTargets.cmake /usr/lib/x86_64-linux-gnu/cmake/GTest/GTestConfig.cmake /usr/lib/x86_64-linux-gnu/cmake/GTest/GTestConfigVersion.cmake /usr/lib/x86_64-linux-gnu/cmake/GTest/GTestTargets-none.cmake /usr/lib/x86_64-linux-gnu/cmake/GTest/GTestTargets.cmake /usr/share/cmake-3.28/Modules/CMakeCXXCompiler.cmake.in /usr/share/cmake-3.28/Modules/CMakeCXXCompilerABI.cpp /usr/share/cmake-3.28/Modules/CMakeCXXInformation.cmake /usr/share/cmake-3.28/Modules/CMakeCommonLanguageInclude.cmake /usr/share/cmake-3.28/Modules/CMakeCompilerIdDetection.cmake /usr/share/cmake-3.28/Modules/CMakeDetermineCXXCompiler.cmake /usr/share/cmake-3.28/Modules/CMakeDetermineCompileFeatures.cmake /usr/share/cmake-3.28/Modules/CMakeDetermineCompiler.cmake /usr/share/cmake-3.28/Modules/CMakeDetermineCompilerABI.cmake /usr/share/cmake-3.28/Modules/CMakeDetermineCompilerId.cmake /usr/share/cmake-3.28/Modules/CMakeDetermineSystem.cmake /usr/share/cmake-3.28/Modules/CMakeFindBinUtils.cmake /usr/share/cmake-3.28/Modules/CMakeFindDependencyMacro.cmake /usr/share/cmake-3.28/Modules/CMakeGenericSystem.cmake /usr/share/cmake-3.28/Modules/CMakeInitializeConfigs.cmake /usr/share/cmake-3.28/Modules/CMakeLanguageInformation.cmake /usr/share/cmake-3.28/Modules/CMakeNinjaFindMake.cmake /usr/share/cmake-3.28/Modules/CMakeParseImplicitIncludeInfo.cmake /usr/share/cmake-3.28/Modules/CMakeParseImplicitLinkInfo.cmake /usr/share/cmake-3.28/Modules/CMakeParseLibraryArchitecture.cmake /usr/share/cmake-3.28/Modules/CMakeSystem.cmake.in /usr/share/cmake-3.28/Modules/CMakeSystemSpecificInformation.cmake /usr/share/cmake-3.28/Modules/CMakeSystemSpecificInitialize.cmake /usr/share/cmake-3.28/Modules/CMakeTestCXXCompiler.cmake /usr/share/cmake-3.28/Modules/CMakeTestCompilerCommon.cmake /usr/share/cmake-3.28/Modules/CheckCXXSourceCompiles.cmake /usr/share/cmake-3.28/Modules/CheckIncludeFileCXX.cmake /usr/share/cmake-3.28/Modules/CheckLibraryExists.cmake /usr/share/cmake-3.28/Modules/Compiler/ADSP-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/ARMCC-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/ARMClang-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/AppleClang-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/Borland-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/CMakeCommonCompilerMacros.cmake /usr/share/cmake-3.28/Modules/Compiler/Clang-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/Clang-DetermineCompilerInternal.cmake /usr/share/cmake-3.28/Modules/Compiler/Comeau-CXX-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/Compaq-CXX-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/Cray-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/CrayClang-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/Embarcadero-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/Fujitsu-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/FujitsuClang-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/GHS-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/GNU-CXX-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/GNU-CXX.cmake /usr/share/cmake-3.28/Modules/Compiler/GNU-FindBinUtils.cmake /usr/share/cmake-3.28/Modules/Compiler/GNU.cmake /usr/share/cmake-3.28/Modules/Compiler/HP-CXX-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/IAR-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/IBMCPP-CXX-DetermineVersionInternal.cmake /usr/share/cmake-3.28/Modules/Compiler/IBMClang-CXX-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/Intel-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/IntelLLVM-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/LCC-CXX-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/MSVC-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/NVHPC-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/NVIDIA-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/OpenWatcom-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/OrangeC-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/PGI-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/PathScale-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/SCO-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/SunPro-CXX-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/TI-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/Tasking-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/VisualAge-CXX-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/Watcom-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/XL-CXX-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/XLClang-CXX-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/zOS-CXX-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/FindGTest.cmake /usr/share/cmake-3.28/Modules/FindPackageHandleStandardArgs.cmake /usr/share/cmake-3.28/Modules/FindPackageMessage.cmake /usr/share/cmake-3.28/Modules/FindPkgConfig.cmake /usr/share/cmake-3.28/Modules/FindThreads.cmake /usr/share/cmake-3.28/Modules/GoogleTest.cmake /usr/share/cmake-3.28/Modules/Internal/CheckSourceCompiles.cmake /usr/share/cmake-3.28/Modules/Internal/FeatureTesting.cmake /usr/share/cmake-3.28/Modules/Platform/Linux-Determine-CXX.cmake /usr/share/cmake-3.28/Modules/Platform/Linux-GNU-CXX.cmake /usr/share/cmake-3.28/Modules/Platform/Linux-GNU.cmake /usr/share/cmake-3.28/Modules/Platform/Linux-Initialize.cmake /usr/share/cmake-3.28/Modules/Platform/Linux.cmake /usr/share/cmake-3.28/Modules/Platform/UnixPaths.cmake /workspace/CMakeLists.txt /workspace/modules/blockchain/CMakeLists.txt CMakeCache.txt CMakeFiles/3.28.3/CMakeCXXCompiler.cmake CMakeFiles/3.28.3/CMakeSystem.cmake
+build build.ninja: RERUN_CMAKE | /usr/lib/x86_64-linux-gnu/cmake/GTest/GMockTargets-none.cmake /usr/lib/x86_64-linux-gnu/cmake/GTest/GMockTargets.cmake /usr/lib/x86_64-linux-gnu/cmake/GTest/GTestConfig.cmake /usr/lib/x86_64-linux-gnu/cmake/GTest/GTestConfigVersion.cmake /usr/lib/x86_64-linux-gnu/cmake/GTest/GTestTargets-none.cmake /usr/lib/x86_64-linux-gnu/cmake/GTest/GTestTargets.cmake /usr/share/cmake-3.28/Modules/CMakeCXXInformation.cmake /usr/share/cmake-3.28/Modules/CMakeCommonLanguageInclude.cmake /usr/share/cmake-3.28/Modules/CMakeFindDependencyMacro.cmake /usr/share/cmake-3.28/Modules/CMakeGenericSystem.cmake /usr/share/cmake-3.28/Modules/CMakeInitializeConfigs.cmake /usr/share/cmake-3.28/Modules/CMakeLanguageInformation.cmake /usr/share/cmake-3.28/Modules/CMakeSystemSpecificInformation.cmake /usr/share/cmake-3.28/Modules/CMakeSystemSpecificInitialize.cmake /usr/share/cmake-3.28/Modules/CheckCXXSourceCompiles.cmake /usr/share/cmake-3.28/Modules/CheckIncludeFileCXX.cmake /usr/share/cmake-3.28/Modules/CheckLibraryExists.cmake /usr/share/cmake-3.28/Modules/Compiler/CMakeCommonCompilerMacros.cmake /usr/share/cmake-3.28/Modules/Compiler/GNU-CXX.cmake /usr/share/cmake-3.28/Modules/Compiler/GNU.cmake /usr/share/cmake-3.28/Modules/FindGTest.cmake /usr/share/cmake-3.28/Modules/FindPackageHandleStandardArgs.cmake /usr/share/cmake-3.28/Modules/FindPackageMessage.cmake /usr/share/cmake-3.28/Modules/FindPkgConfig.cmake /usr/share/cmake-3.28/Modules/FindThreads.cmake /usr/share/cmake-3.28/Modules/GoogleTest.cmake /usr/share/cmake-3.28/Modules/Internal/CheckSourceCompiles.cmake /usr/share/cmake-3.28/Modules/Platform/Linux-GNU-CXX.cmake /usr/share/cmake-3.28/Modules/Platform/Linux-GNU.cmake /usr/share/cmake-3.28/Modules/Platform/Linux-Initialize.cmake /usr/share/cmake-3.28/Modules/Platform/Linux.cmake /usr/share/cmake-3.28/Modules/Platform/UnixPaths.cmake /workspace/CMakeLists.txt /workspace/modules/blockchain/CMakeLists.txt CMakeCache.txt CMakeFiles/3.28.3/CMakeCXXCompiler.cmake CMakeFiles/3.28.3/CMakeSystem.cmake
   pool = console
 
 
 #############################################
 # A missing CMake input file is not an error.
 
-build /usr/lib/x86_64-linux-gnu/cmake/GTest/GMockTargets-none.cmake /usr/lib/x86_64-linux-gnu/cmake/GTest/GMockTargets.cmake /usr/lib/x86_64-linux-gnu/cmake/GTest/GTestConfig.cmake /usr/lib/x86_64-linux-gnu/cmake/GTest/GTestConfigVersion.cmake /usr/lib/x86_64-linux-gnu/cmake/GTest/GTestTargets-none.cmake /usr/lib/x86_64-linux-gnu/cmake/GTest/GTestTargets.cmake /usr/share/cmake-3.28/Modules/CMakeCXXCompiler.cmake.in /usr/share/cmake-3.28/Modules/CMakeCXXCompilerABI.cpp /usr/share/cmake-3.28/Modules/CMakeCXXInformation.cmake /usr/share/cmake-3.28/Modules/CMakeCommonLanguageInclude.cmake /usr/share/cmake-3.28/Modules/CMakeCompilerIdDetection.cmake /usr/share/cmake-3.28/Modules/CMakeDetermineCXXCompiler.cmake /usr/share/cmake-3.28/Modules/CMakeDetermineCompileFeatures.cmake /usr/share/cmake-3.28/Modules/CMakeDetermineCompiler.cmake /usr/share/cmake-3.28/Modules/CMakeDetermineCompilerABI.cmake /usr/share/cmake-3.28/Modules/CMakeDetermineCompilerId.cmake /usr/share/cmake-3.28/Modules/CMakeDetermineSystem.cmake /usr/share/cmake-3.28/Modules/CMakeFindBinUtils.cmake /usr/share/cmake-3.28/Modules/CMakeFindDependencyMacro.cmake /usr/share/cmake-3.28/Modules/CMakeGenericSystem.cmake /usr/share/cmake-3.28/Modules/CMakeInitializeConfigs.cmake /usr/share/cmake-3.28/Modules/CMakeLanguageInformation.cmake /usr/share/cmake-3.28/Modules/CMakeNinjaFindMake.cmake /usr/share/cmake-3.28/Modules/CMakeParseImplicitIncludeInfo.cmake /usr/share/cmake-3.28/Modules/CMakeParseImplicitLinkInfo.cmake /usr/share/cmake-3.28/Modules/CMakeParseLibraryArchitecture.cmake /usr/share/cmake-3.28/Modules/CMakeSystem.cmake.in /usr/share/cmake-3.28/Modules/CMakeSystemSpecificInformation.cmake /usr/share/cmake-3.28/Modules/CMakeSystemSpecificInitialize.cmake /usr/share/cmake-3.28/Modules/CMakeTestCXXCompiler.cmake /usr/share/cmake-3.28/Modules/CMakeTestCompilerCommon.cmake /usr/share/cmake-3.28/Modules/CheckCXXSourceCompiles.cmake /usr/share/cmake-3.28/Modules/CheckIncludeFileCXX.cmake /usr/share/cmake-3.28/Modules/CheckLibraryExists.cmake /usr/share/cmake-3.28/Modules/Compiler/ADSP-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/ARMCC-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/ARMClang-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/AppleClang-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/Borland-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/CMakeCommonCompilerMacros.cmake /usr/share/cmake-3.28/Modules/Compiler/Clang-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/Clang-DetermineCompilerInternal.cmake /usr/share/cmake-3.28/Modules/Compiler/Comeau-CXX-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/Compaq-CXX-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/Cray-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/CrayClang-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/Embarcadero-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/Fujitsu-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/FujitsuClang-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/GHS-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/GNU-CXX-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/GNU-CXX.cmake /usr/share/cmake-3.28/Modules/Compiler/GNU-FindBinUtils.cmake /usr/share/cmake-3.28/Modules/Compiler/GNU.cmake /usr/share/cmake-3.28/Modules/Compiler/HP-CXX-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/IAR-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/IBMCPP-CXX-DetermineVersionInternal.cmake /usr/share/cmake-3.28/Modules/Compiler/IBMClang-CXX-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/Intel-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/IntelLLVM-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/LCC-CXX-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/MSVC-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/NVHPC-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/NVIDIA-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/OpenWatcom-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/OrangeC-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/PGI-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/PathScale-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/SCO-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/SunPro-CXX-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/TI-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/Tasking-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/VisualAge-CXX-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/Watcom-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/XL-CXX-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/XLClang-CXX-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/Compiler/zOS-CXX-DetermineCompiler.cmake /usr/share/cmake-3.28/Modules/FindGTest.cmake /usr/share/cmake-3.28/Modules/FindPackageHandleStandardArgs.cmake /usr/share/cmake-3.28/Modules/FindPackageMessage.cmake /usr/share/cmake-3.28/Modules/FindPkgConfig.cmake /usr/share/cmake-3.28/Modules/FindThreads.cmake /usr/share/cmake-3.28/Modules/GoogleTest.cmake /usr/share/cmake-3.28/Modules/Internal/CheckSourceCompiles.cmake /usr/share/cmake-3.28/Modules/Internal/FeatureTesting.cmake /usr/share/cmake-3.28/Modules/Platform/Linux-Determine-CXX.cmake /usr/share/cmake-3.28/Modules/Platform/Linux-GNU-CXX.cmake /usr/share/cmake-3.28/Modules/Platform/Linux-GNU.cmake /usr/share/cmake-3.28/Modules/Platform/Linux-Initialize.cmake /usr/share/cmake-3.28/Modules/Platform/Linux.cmake /usr/share/cmake-3.28/Modules/Platform/UnixPaths.cmake /workspace/CMakeLists.txt /workspace/modules/blockchain/CMakeLists.txt CMakeCache.txt CMakeFiles/3.28.3/CMakeCXXCompiler.cmake CMakeFiles/3.28.3/CMakeSystem.cmake: phony
+build /usr/lib/x86_64-linux-gnu/cmake/GTest/GMockTargets-none.cmake /usr/lib/x86_64-linux-gnu/cmake/GTest/GMockTargets.cmake /usr/lib/x86_64-linux-gnu/cmake/GTest/GTestConfig.cmake /usr/lib/x86_64-linux-gnu/cmake/GTest/GTestConfigVersion.cmake /usr/lib/x86_64-linux-gnu/cmake/GTest/GTestTargets-none.cmake /usr/lib/x86_64-linux-gnu/cmake/GTest/GTestTargets.cmake /usr/share/cmake-3.28/Modules/CMakeCXXInformation.cmake /usr/share/cmake-3.28/Modules/CMakeCommonLanguageInclude.cmake /usr/share/cmake-3.28/Modules/CMakeFindDependencyMacro.cmake /usr/share/cmake-3.28/Modules/CMakeGenericSystem.cmake /usr/share/cmake-3.28/Modules/CMakeInitializeConfigs.cmake /usr/share/cmake-3.28/Modules/CMakeLanguageInformation.cmake /usr/share/cmake-3.28/Modules/CMakeSystemSpecificInformation.cmake /usr/share/cmake-3.28/Modules/CMakeSystemSpecificInitialize.cmake /usr/share/cmake-3.28/Modules/CheckCXXSourceCompiles.cmake /usr/share/cmake-3.28/Modules/CheckIncludeFileCXX.cmake /usr/share/cmake-3.28/Modules/CheckLibraryExists.cmake /usr/share/cmake-3.28/Modules/Compiler/CMakeCommonCompilerMacros.cmake /usr/share/cmake-3.28/Modules/Compiler/GNU-CXX.cmake /usr/share/cmake-3.28/Modules/Compiler/GNU.cmake /usr/share/cmake-3.28/Modules/FindGTest.cmake /usr/share/cmake-3.28/Modules/FindPackageHandleStandardArgs.cmake /usr/share/cmake-3.28/Modules/FindPackageMessage.cmake /usr/share/cmake-3.28/Modules/FindPkgConfig.cmake /usr/share/cmake-3.28/Modules/FindThreads.cmake /usr/share/cmake-3.28/Modules/GoogleTest.cmake /usr/share/cmake-3.28/Modules/Internal/CheckSourceCompiles.cmake /usr/share/cmake-3.28/Modules/Platform/Linux-GNU-CXX.cmake /usr/share/cmake-3.28/Modules/Platform/Linux-GNU.cmake /usr/share/cmake-3.28/Modules/Platform/Linux-Initialize.cmake /usr/share/cmake-3.28/Modules/Platform/Linux.cmake /usr/share/cmake-3.28/Modules/Platform/UnixPaths.cmake /workspace/CMakeLists.txt /workspace/modules/blockchain/CMakeLists.txt CMakeCache.txt CMakeFiles/3.28.3/CMakeCXXCompiler.cmake CMakeFiles/3.28.3/CMakeSystem.cmake: phony
 
 
 #############################################

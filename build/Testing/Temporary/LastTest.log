@@ -1,14 +1,14 @@
-Start testing: Apr 25 12:43 UTC
+Start testing: Apr 25 13:04 UTC
 ----------------------------------------------------------
 1/1 Testing: blockchain_tests
 1/1 Test: blockchain_tests
 Command: "/workspace/build/modules/blockchain/blockchain_tests"
 Directory: /workspace/build/modules/blockchain
-"blockchain_tests" start time: Apr 25 12:43 UTC
+"blockchain_tests" start time: Apr 25 13:04 UTC
 Output:
 ----------------------------------------------------------
 Running main() from ./googletest/src/gtest_main.cc
-[==========] Running 44 tests from 8 test suites.
+[==========] Running 69 tests from 9 test suites.
 [----------] Global test environment set-up.
 [----------] 2 tests from Hash
 [ RUN      ] Hash.ZeroIsAllZeros
@@ -122,15 +122,68 @@ Running main() from ./googletest/src/gtest_main.cc
 [       OK ] Serializer.DecodeBlockWrongType (0 ms)
 [----------] 20 tests from Serializer (0 ms total)
 
+[----------] 25 tests from StorageTest
+[ RUN      ] StorageTest.PutAndGetNode
+[       OK ] StorageTest.PutAndGetNode (2 ms)
+[ RUN      ] StorageTest.HasNodeTrue
+[       OK ] StorageTest.HasNodeTrue (1 ms)
+[ RUN      ] StorageTest.HasNodeFalse
+[       OK ] StorageTest.HasNodeFalse (1 ms)
+[ RUN      ] StorageTest.GetNodeNotFound
+[       OK ] StorageTest.GetNodeNotFound (0 ms)
+[ RUN      ] StorageTest.PutNodeDuplicateThrows
+[       OK ] StorageTest.PutNodeDuplicateThrows (1 ms)
+[ RUN      ] StorageTest.MultipleNodesDifferentIndex
+[       OK ] StorageTest.MultipleNodesDifferentIndex (1 ms)
+[ RUN      ] StorageTest.NodeIsolatedByUser
+[       OK ] StorageTest.NodeIsolatedByUser (1 ms)
+[ RUN      ] StorageTest.PutAndGetBlock
+[       OK ] StorageTest.PutAndGetBlock (1 ms)
+[ RUN      ] StorageTest.HasBlockTrue
+[       OK ] StorageTest.HasBlockTrue (1 ms)
+[ RUN      ] StorageTest.HasBlockFalse
+[       OK ] StorageTest.HasBlockFalse (0 ms)
+[ RUN      ] StorageTest.GetBlockNotFound
+[       OK ] StorageTest.GetBlockNotFound (0 ms)
+[ RUN      ] StorageTest.PutBlockDuplicateThrows
+[       OK ] StorageTest.PutBlockDuplicateThrows (1 ms)
+[ RUN      ] StorageTest.BranchTipEmptyBranch
+[       OK ] StorageTest.BranchTipEmptyBranch (0 ms)
+[ RUN      ] StorageTest.BranchTipSingleBlock
+[       OK ] StorageTest.BranchTipSingleBlock (1 ms)
+[ RUN      ] StorageTest.BranchTipMultipleBlocks
+[       OK ] StorageTest.BranchTipMultipleBlocks (2 ms)
+[ RUN      ] StorageTest.BranchTipIsolatedByNode
+[       OK ] StorageTest.BranchTipIsolatedByNode (1 ms)
+[ RUN      ] StorageTest.BranchTipIsolatedByUser
+[       OK ] StorageTest.BranchTipIsolatedByUser (1 ms)
+[ RUN      ] StorageTest.GetSealsEmpty
+[       OK ] StorageTest.GetSealsEmpty (0 ms)
+[ RUN      ] StorageTest.PutAndGetSingleSeal
+[       OK ] StorageTest.PutAndGetSingleSeal (1 ms)
+[ RUN      ] StorageTest.PutMultipleSeals
+[       OK ] StorageTest.PutMultipleSeals (2 ms)
+[ RUN      ] StorageTest.SealsIsolatedByHash
+[       OK ] StorageTest.SealsIsolatedByHash (1 ms)
+[ RUN      ] StorageTest.PutAndGetExternalBlock
+[       OK ] StorageTest.PutAndGetExternalBlock (1 ms)
+[ RUN      ] StorageTest.ExternalBlockNotFound
+[       OK ] StorageTest.ExternalBlockNotFound (0 ms)
+[ RUN      ] StorageTest.ExternalBlockDuplicateThrows
+[       OK ] StorageTest.ExternalBlockDuplicateThrows (1 ms)
+[ RUN      ] StorageTest.PersistenceAcrossReopen
+[       OK ] StorageTest.PersistenceAcrossReopen (1 ms)
+[----------] 25 tests from StorageTest (33 ms total)
+
 [----------] Global test environment tear-down
-[==========] 44 tests from 8 test suites ran. (0 ms total)
-[  PASSED  ] 44 tests.
+[==========] 69 tests from 9 test suites ran. (34 ms total)
+[  PASSED  ] 69 tests.
 <end of output>
-Test time =   0.00 sec
+Test time =   0.04 sec
 ----------------------------------------------------------
 Test Passed.
-"blockchain_tests" end time: Apr 25 12:43 UTC
+"blockchain_tests" end time: Apr 25 13:04 UTC
 "blockchain_tests" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-End testing: Apr 25 12:43 UTC
+End testing: Apr 25 13:04 UTC
