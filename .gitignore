@@ -1,0 +1,31 @@
+# ── Build directories ─────────────────────────────────────────────────────────
+build/
+out/
+cmake-build-*/
+
+# ── CMake user files ──────────────────────────────────────────────────────────
+CMakeUserPresets.json
+
+# ── Compiled objects and libraries ───────────────────────────────────────────
+*.o
+*.obj
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+
+# ── Test output ───────────────────────────────────────────────────────────────
+Testing/
+
+# ── Claude Code local settings (personal, not project-wide) ──────────────────
+.claude/settings.local.json
+
+# ── Editor / IDE ──────────────────────────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
