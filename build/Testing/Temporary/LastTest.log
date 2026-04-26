@@ -1,10 +1,10 @@
-Start testing: Apr 25 16:22 UTC
+Start testing: Apr 25 18:58 UTC
 ----------------------------------------------------------
-1/1 Testing: blockchain_tests
-1/1 Test: blockchain_tests
+1/2 Testing: blockchain_tests
+1/2 Test: blockchain_tests
 Command: "/workspace/build/modules/blockchain/blockchain_tests"
 Directory: /workspace/build/modules/blockchain
-"blockchain_tests" start time: Apr 25 16:22 UTC
+"blockchain_tests" start time: Apr 25 18:58 UTC
 Output:
 ----------------------------------------------------------
 Running main() from ./googletest/src/gtest_main.cc
@@ -173,7 +173,7 @@ Running main() from ./googletest/src/gtest_main.cc
 [       OK ] StorageTest.ExternalBlockDuplicateThrows (1 ms)
 [ RUN      ] StorageTest.PersistenceAcrossReopen
 [       OK ] StorageTest.PersistenceAcrossReopen (1 ms)
-[----------] 25 tests from StorageTest (31 ms total)
+[----------] 25 tests from StorageTest (32 ms total)
 
 [----------] 27 tests from ValidatorTest
 [ RUN      ] ValidatorTest.ValidateRootOk
@@ -187,11 +187,11 @@ Running main() from ./googletest/src/gtest_main.cc
 [ RUN      ] ValidatorTest.ValidateChildBadSig
 [       OK ] ValidatorTest.ValidateChildBadSig (2 ms)
 [ RUN      ] ValidatorTest.ValidateRootNonZeroParentHash
-[       OK ] ValidatorTest.ValidateRootNonZeroParentHash (1 ms)
+[       OK ] ValidatorTest.ValidateRootNonZeroParentHash (2 ms)
 [ RUN      ] ValidatorTest.ValidateChildWrongParentHash
 [       OK ] ValidatorTest.ValidateChildWrongParentHash (2 ms)
 [ RUN      ] ValidatorTest.ValidateChildParentMissing
-[       OK ] ValidatorTest.ValidateChildParentMissing (1 ms)
+[       OK ] ValidatorTest.ValidateChildParentMissing (2 ms)
 [ RUN      ] ValidatorTest.ValidatePathOk
 [       OK ] ValidatorTest.ValidatePathOk (2 ms)
 [ RUN      ] ValidatorTest.ValidatePathMissingNode
@@ -209,11 +209,11 @@ Running main() from ./googletest/src/gtest_main.cc
 [ RUN      ] ValidatorTest.ValidateBranchSingleBlock
 [       OK ] ValidatorTest.ValidateBranchSingleBlock (2 ms)
 [ RUN      ] ValidatorTest.ValidateBranchMultipleBlocks
-[       OK ] ValidatorTest.ValidateBranchMultipleBlocks (3 ms)
+[       OK ] ValidatorTest.ValidateBranchMultipleBlocks (2 ms)
 [ RUN      ] ValidatorTest.ValidateBranchBadBlockSig
 [       OK ] ValidatorTest.ValidateBranchBadBlockSig (2 ms)
 [ RUN      ] ValidatorTest.ValidateBranchTimestampViolation
-[       OK ] ValidatorTest.ValidateBranchTimestampViolation (3 ms)
+[       OK ] ValidatorTest.ValidateBranchTimestampViolation (10 ms)
 [ RUN      ] ValidatorTest.ValidateBranchKeyRotation
 [       OK ] ValidatorTest.ValidateBranchKeyRotation (3 ms)
 [ RUN      ] ValidatorTest.ValidateBranchKeyRotationWrongSubsequentKey
@@ -230,7 +230,7 @@ Running main() from ./googletest/src/gtest_main.cc
 [       OK ] ValidatorTest.ValidateCoSigMissing (2 ms)
 [ RUN      ] ValidatorTest.ValidateCoSigBadSig
 [       OK ] ValidatorTest.ValidateCoSigBadSig (2 ms)
-[----------] 27 tests from ValidatorTest (61 ms total)
+[----------] 27 tests from ValidatorTest (69 ms total)
 
 [----------] 21 tests from BlockchainTest
 [ RUN      ] BlockchainTest.CreateIdentityStoresRoot
@@ -240,11 +240,11 @@ Running main() from ./googletest/src/gtest_main.cc
 [ RUN      ] BlockchainTest.CreateIdentityDuplicateThrows
 [       OK ] BlockchainTest.CreateIdentityDuplicateThrows (1 ms)
 [ RUN      ] BlockchainTest.EnsurePathCreatesAllNodes
-[       OK ] BlockchainTest.EnsurePathCreatesAllNodes (13 ms)
+[       OK ] BlockchainTest.EnsurePathCreatesAllNodes (14 ms)
 [ RUN      ] BlockchainTest.EnsurePathSignaturesValid
 [       OK ] BlockchainTest.EnsurePathSignaturesValid (15 ms)
 [ RUN      ] BlockchainTest.EnsurePathIdempotent
-[       OK ] BlockchainTest.EnsurePathIdempotent (13 ms)
+[       OK ] BlockchainTest.EnsurePathIdempotent (14 ms)
 [ RUN      ] BlockchainTest.EnsurePathNonLeafThrows
 [       OK ] BlockchainTest.EnsurePathNonLeafThrows (1 ms)
 [ RUN      ] BlockchainTest.EnsurePathNoRootThrows
@@ -254,15 +254,15 @@ Running main() from ./googletest/src/gtest_main.cc
 [ RUN      ] BlockchainTest.GetPathMissingNodeThrows
 [       OK ] BlockchainTest.GetPathMissingNodeThrows (1 ms)
 [ RUN      ] BlockchainTest.BranchTipHashEmptyBranchEqualsNodeHash
-[       OK ] BlockchainTest.BranchTipHashEmptyBranchEqualsNodeHash (19 ms)
+[       OK ] BlockchainTest.BranchTipHashEmptyBranchEqualsNodeHash (13 ms)
 [ RUN      ] BlockchainTest.BranchTipHashAfterBlock
 [       OK ] BlockchainTest.BranchTipHashAfterBlock (14 ms)
 [ RUN      ] BlockchainTest.AppendDataBlockFirstBlock
-[       OK ] BlockchainTest.AppendDataBlockFirstBlock (14 ms)
+[       OK ] BlockchainTest.AppendDataBlockFirstBlock (15 ms)
 [ RUN      ] BlockchainTest.AppendDataBlockSequentialIndex
-[       OK ] BlockchainTest.AppendDataBlockSequentialIndex (14 ms)
+[       OK ] BlockchainTest.AppendDataBlockSequentialIndex (15 ms)
 [ RUN      ] BlockchainTest.AppendDataBlockPrevHashLinked
-[       OK ] BlockchainTest.AppendDataBlockPrevHashLinked (14 ms)
+[       OK ] BlockchainTest.AppendDataBlockPrevHashLinked (15 ms)
 [ RUN      ] BlockchainTest.AppendDataBlockNonLeafThrows
 [       OK ] BlockchainTest.AppendDataBlockNonLeafThrows (1 ms)
 [ RUN      ] BlockchainTest.AppendDataBlockSignatureValid
@@ -274,12 +274,12 @@ Running main() from ./googletest/src/gtest_main.cc
 [ RUN      ] BlockchainTest.RotateKeyAndContinue
 [       OK ] BlockchainTest.RotateKeyAndContinue (15 ms)
 [ RUN      ] BlockchainTest.ValidateBranchFullPathAndBlocks
-[       OK ] BlockchainTest.ValidateBranchFullPathAndBlocks (17 ms)
-[----------] 21 tests from BlockchainTest (220 ms total)
+[       OK ] BlockchainTest.ValidateBranchFullPathAndBlocks (18 ms)
+[----------] 21 tests from BlockchainTest (218 ms total)
 
 [----------] 7 tests from SealManagerTest
 [ RUN      ] SealManagerTest.CreateBlindSealStoredAndRetrievable
-[       OK ] SealManagerTest.CreateBlindSealStoredAndRetrievable (1 ms)
+[       OK ] SealManagerTest.CreateBlindSealStoredAndRetrievable (2 ms)
 [ RUN      ] SealManagerTest.CreateOpenSealStoredAndRetrievable
 [       OK ] SealManagerTest.CreateOpenSealStoredAndRetrievable (1 ms)
 [ RUN      ] SealManagerTest.BlindSealSignatureValid
@@ -292,7 +292,7 @@ Running main() from ./googletest/src/gtest_main.cc
 [       OK ] SealManagerTest.GetSealsEmptyHash (0 ms)
 [ RUN      ] SealManagerTest.ComputeWitnessedTimeMvpReturnsNullopt
 [       OK ] SealManagerTest.ComputeWitnessedTimeMvpReturnsNullopt (0 ms)
-[----------] 7 tests from SealManagerTest (8 ms total)
+[----------] 7 tests from SealManagerTest (9 ms total)
 
 [----------] 8 tests from MergeSessionTest
 [ RUN      ] MergeSessionTest.PrepareTipEmptyBranch
@@ -308,20 +308,78 @@ Running main() from ./googletest/src/gtest_main.cc
 [ RUN      ] MergeSessionTest.VerifyPartnerTipEmptyPathThrows
 [       OK ] MergeSessionTest.VerifyPartnerTipEmptyPathThrows (2 ms)
 [ RUN      ] MergeSessionTest.FullMergeProtocol
-[       OK ] MergeSessionTest.FullMergeProtocol (32 ms)
+[       OK ] MergeSessionTest.FullMergeProtocol (34 ms)
 [ RUN      ] MergeSessionTest.FinalizeWrongCoSigThrows
 [       OK ] MergeSessionTest.FinalizeWrongCoSigThrows (29 ms)
-[----------] 8 tests from MergeSessionTest (143 ms total)
+[----------] 8 tests from MergeSessionTest (145 ms total)
 
 [----------] Global test environment tear-down
-[==========] 132 tests from 13 test suites ran. (466 ms total)
+[==========] 132 tests from 13 test suites ran. (476 ms total)
 [  PASSED  ] 132 tests.
 <end of output>
-Test time =   0.47 sec
+Test time =   0.48 sec
 ----------------------------------------------------------
 Test Passed.
-"blockchain_tests" end time: Apr 25 16:22 UTC
+"blockchain_tests" end time: Apr 25 18:58 UTC
 "blockchain_tests" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-End testing: Apr 25 16:22 UTC
+2/2 Testing: aggregator_tests
+2/2 Test: aggregator_tests
+Command: "/workspace/build/modules/aggregator/aggregator_tests"
+Directory: /workspace/build/modules/aggregator
+"aggregator_tests" start time: Apr 25 18:58 UTC
+Output:
+----------------------------------------------------------
+Running main() from ./googletest/src/gtest_main.cc
+[==========] Running 17 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 17 tests from AggregatorStorageTest
+[ RUN      ] AggregatorStorageTest.AddBlockNew
+[       OK ] AggregatorStorageTest.AddBlockNew (1 ms)
+[ RUN      ] AggregatorStorageTest.AddBlockDuplicateReturnsFalse
+[       OK ] AggregatorStorageTest.AddBlockDuplicateReturnsFalse (1 ms)
+[ RUN      ] AggregatorStorageTest.AddMultipleBlocks
+[       OK ] AggregatorStorageTest.AddMultipleBlocks (2 ms)
+[ RUN      ] AggregatorStorageTest.HasBlockTrue
+[       OK ] AggregatorStorageTest.HasBlockTrue (1 ms)
+[ RUN      ] AggregatorStorageTest.HasBlockFalse
+[       OK ] AggregatorStorageTest.HasBlockFalse (0 ms)
+[ RUN      ] AggregatorStorageTest.GetBlockFound
+[       OK ] AggregatorStorageTest.GetBlockFound (1 ms)
+[ RUN      ] AggregatorStorageTest.GetBlockNotFound
+[       OK ] AggregatorStorageTest.GetBlockNotFound (0 ms)
+[ RUN      ] AggregatorStorageTest.HasBlockHashTrue
+[       OK ] AggregatorStorageTest.HasBlockHashTrue (1 ms)
+[ RUN      ] AggregatorStorageTest.HasBlockHashFalse
+[       OK ] AggregatorStorageTest.HasBlockHashFalse (0 ms)
+[ RUN      ] AggregatorStorageTest.GetBlockByHash
+[       OK ] AggregatorStorageTest.GetBlockByHash (1 ms)
+[ RUN      ] AggregatorStorageTest.SamePayloadCountedOnce
+[       OK ] AggregatorStorageTest.SamePayloadCountedOnce (1 ms)
+[ RUN      ] AggregatorStorageTest.DifferentPayloadsDifferentIdeas
+[       OK ] AggregatorStorageTest.DifferentPayloadsDifferentIdeas (2 ms)
+[ RUN      ] AggregatorStorageTest.AllIdeasReturnAll
+[       OK ] AggregatorStorageTest.AllIdeasReturnAll (2 ms)
+[ RUN      ] AggregatorStorageTest.GetIdeaNotFound
+[       OK ] AggregatorStorageTest.GetIdeaNotFound (0 ms)
+[ RUN      ] AggregatorStorageTest.AllBlockHashesCount
+[       OK ] AggregatorStorageTest.AllBlockHashesCount (2 ms)
+[ RUN      ] AggregatorStorageTest.AllBlockHashesEmpty
+[       OK ] AggregatorStorageTest.AllBlockHashesEmpty (0 ms)
+[ RUN      ] AggregatorStorageTest.PersistenceAcrossReopen
+[       OK ] AggregatorStorageTest.PersistenceAcrossReopen (1 ms)
+[----------] 17 tests from AggregatorStorageTest (24 ms total)
+
+[----------] Global test environment tear-down
+[==========] 17 tests from 1 test suite ran. (24 ms total)
+[  PASSED  ] 17 tests.
+<end of output>
+Test time =   0.03 sec
+----------------------------------------------------------
+Test Passed.
+"aggregator_tests" end time: Apr 25 18:58 UTC
+"aggregator_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Apr 25 18:58 UTC

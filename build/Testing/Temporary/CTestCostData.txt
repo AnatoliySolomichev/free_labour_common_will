@@ -1,2 +1,3 @@
-blockchain_tests 3 0.156404
+blockchain_tests 5 0.0957012
+aggregator_tests 2 0.0130802
 ---
