@@ -1,0 +1,39 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug blockchain_tests",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/modules/blockchain/blockchain_tests",
+      "args": ["--gtest_filter=${input:gtestFilter}"],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "externalConsole": false,
+      "MIMode": "gdb",
+      "preLaunchTask": "cmake-build"
+    },
+    {
+      "name": "Debug aggregator_tests",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/modules/aggregator/aggregator_tests",
+      "args": ["--gtest_filter=${input:gtestFilter}"],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "externalConsole": false,
+      "MIMode": "gdb",
+      "preLaunchTask": "cmake-build"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "gtestFilter",
+      "type": "promptString",
+      "description": "GTest filter (например: BlockchainTest.* или оставь пустым для всех тестов)",
+      "default": "*"
+    }
+  ]
+}

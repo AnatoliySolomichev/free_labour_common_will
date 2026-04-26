@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     ninja-build \
     pkg-config \
     git \
+    gdb \
     libsodium-dev \
     liblmdb-dev \
     libgtest-dev \

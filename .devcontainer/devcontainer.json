@@ -1,0 +1,20 @@
+{
+  "name": "free_labour_common_will",
+  "dockerComposeFile": "../docker/docker-compose.yml",
+  "service": "dev",
+  "workspaceFolder": "/workspace",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools",
+        "ms-vscode.cmake-tools"
+      ],
+      "settings": {
+        "cmake.buildDirectory": "${workspaceFolder}/build",
+        "cmake.generator": "Ninja",
+        "cmake.buildType": "Debug",
+        "cmake.configureOnOpen": true
+      }
+    }
+  }
+}
