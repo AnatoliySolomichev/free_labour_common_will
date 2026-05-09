@@ -238,6 +238,7 @@ TEST(Serializer, BranchTipInfoRoundTrip) {
     ASSERT_EQ(d.path.size(), 2u);
     EXPECT_EQ(d.path[0], t.path[0]);
     EXPECT_EQ(d.path[1], t.path[1]);
+    EXPECT_FALSE(d.tip_block.has_value());
 }
 
 TEST(Serializer, BranchTipInfoEmptyPath) {
@@ -249,6 +250,42 @@ TEST(Serializer, BranchTipInfoEmptyPath) {
     BranchTipInfo d = Serializer::decode_tip(enc.data(), enc.size());
     EXPECT_TRUE(d.path.empty());
     EXPECT_EQ(d.tip_address.block_index, EMPTY_BRANCH_INDEX);
+    EXPECT_FALSE(d.tip_block.has_value());
+}
+
+TEST(Serializer, BranchTipInfoWithTipBlockRoundTrip) {
+    Block blk = make_data_block(5, 3);
+
+    BranchTipInfo t{};
+    t.tip_address = blk.address;
+    t.tip_hash    = make_hash(0xAB);
+    t.path.push_back(make_node(0, 0x10));
+    t.tip_block   = blk;
+
+    auto enc = Serializer::encode(t);
+    BranchTipInfo d = Serializer::decode_tip(enc.data(), enc.size());
+
+    EXPECT_EQ(d.tip_address, t.tip_address);
+    ASSERT_TRUE(d.tip_block.has_value());
+    EXPECT_EQ(d.tip_block->address,           blk.address);
+    EXPECT_EQ(d.tip_block->timestamp_claimed, blk.timestamp_claimed);
+    EXPECT_EQ(d.tip_block->payload,           blk.payload);
+}
+
+// ── MergePayload round-trip ───────────────────────────────────────────────────
+
+TEST(Serializer, MergePayloadRoundTrip) {
+    MergePayload mp{};
+    mp.partner_last_address = make_addr(7, 42);
+    mp.partner_last_hash    = make_hash(0xCC);
+    mp.merge_timestamp      = 1'700'000'999LL;
+
+    auto enc = Serializer::encode(mp);
+    MergePayload d = Serializer::decode_merge_payload(enc.data(), enc.size());
+
+    EXPECT_EQ(d.partner_last_address, mp.partner_last_address);
+    EXPECT_EQ(d.partner_last_hash,    mp.partner_last_hash);
+    EXPECT_EQ(d.merge_timestamp,      mp.merge_timestamp);
 }
 
 // ── Error cases ───────────────────────────────────────────────────────────────

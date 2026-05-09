@@ -46,10 +46,19 @@ public:
     Signature co_sign(const Hash& partner_draft_hash, const KeyPair& own_working_keypair);
 
     // Step 4: attach partner's co_signature to own pending block and finalize.
+    // Verifies co_sig, stores it as a Seal (SealMode::OPEN) in the seals table,
+    // and returns the block with co_signature set in memory.
     // Throws: SignatureError (invalid co_sig), StorageError.
     Block finalize(const PendingMergeBlock& pending,
                    const Signature&         partner_co_sig,
                    const PublicKey&         partner_pubkey);
+
+    // Step 5 (optional): import partner's path nodes and tip block into local storage.
+    // Path nodes are stored in the nodes table under the partner's user_id.
+    // The tip block (if present in partner_tip) is stored in external_blocks.
+    // Safe to call multiple times with the same partner (idempotent).
+    // Throws: StorageError.
+    void import_partner_data(const BranchTipInfo& partner_tip);
 
 private:
     IStorage&  storage_;

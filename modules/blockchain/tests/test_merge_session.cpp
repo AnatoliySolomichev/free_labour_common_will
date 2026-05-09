@@ -83,6 +83,7 @@ TEST_F(MergeSessionTest, PrepareTipEmptyBranch) {
     ASSERT_FALSE(tip.path.empty());
     EXPECT_EQ(tip.path.front().index, 0u);
     EXPECT_EQ(tip.path.back().index,  LEAF);
+    EXPECT_FALSE(tip.tip_block.has_value());
 
     // tip_hash for empty branch == hash of leaf node
     Node leaf     = alice_->storage->get_node(alice_->root_kp.pub, LEAF);
@@ -100,6 +101,8 @@ TEST_F(MergeSessionTest, PrepareTipWithBlocks) {
     BranchTipInfo tip = alice_->ms->prepare_tip(alice_->root_kp.pub, LEAF);
     EXPECT_EQ(tip.tip_address.block_index, 1u);
     EXPECT_EQ(tip.tip_hash, Crypto::hash_block(b1));
+    ASSERT_TRUE(tip.tip_block.has_value());
+    EXPECT_EQ(tip.tip_block->address, b1.address);
 }
 
 // ── verify_partner_tip ────────────────────────────────────────────────────────
@@ -177,6 +180,72 @@ TEST_F(MergeSessionTest, FullMergeProtocol) {
     // Validate co-signatures
     EXPECT_NO_THROW(alice_->validator->validate_co_signature(alice_final, bob_leaf.pub));
     EXPECT_NO_THROW(bob_->validator->validate_co_signature(  bob_final, alice_leaf.pub));
+
+    // co_sig stored as Seal in seals table
+    auto alice_seals = alice_->storage->get_seals(alice_pending.draft_hash);
+    ASSERT_EQ(alice_seals.size(), 1u);
+    EXPECT_EQ(alice_seals[0].signer_id, bob_leaf.pub);
+    EXPECT_EQ(alice_seals[0].mode, SealMode::OPEN);
+
+    auto bob_seals = bob_->storage->get_seals(bob_pending.draft_hash);
+    ASSERT_EQ(bob_seals.size(), 1u);
+    EXPECT_EQ(bob_seals[0].signer_id, alice_leaf.pub);
+}
+
+// ── import_partner_data ───────────────────────────────────────────────────────
+
+TEST_F(MergeSessionTest, ImportPartnerDataEmptyBranch) {
+    alice_->setup_leaf();
+    bob_->setup_leaf();
+
+    BranchTipInfo alice_tip = alice_->ms->prepare_tip(alice_->root_kp.pub, LEAF);
+
+    // Bob imports Alice's path nodes (branch is empty, no tip_block)
+    EXPECT_NO_THROW(bob_->ms->import_partner_data(alice_tip));
+
+    // Alice's path nodes are now in Bob's storage under Alice's user_id
+    for (const Node& node : alice_tip.path)
+        EXPECT_TRUE(bob_->storage->has_node(alice_->root_kp.pub, node.index));
+
+    // No external block stored (empty branch)
+    EXPECT_FALSE(bob_->storage->has_external_block(
+        {alice_->root_kp.pub, LEAF, 0}));
+}
+
+TEST_F(MergeSessionTest, ImportPartnerDataWithBlock) {
+    KeyPair alice_leaf = alice_->setup_leaf();
+    bob_->setup_leaf();
+
+    alice_->bc->append_data_block(
+        alice_->root_kp.pub, LEAF, {0xCA, 0xFE}, alice_leaf, 1'000LL);
+
+    BranchTipInfo alice_tip = alice_->ms->prepare_tip(alice_->root_kp.pub, LEAF);
+    ASSERT_TRUE(alice_tip.tip_block.has_value());
+
+    bob_->ms->import_partner_data(alice_tip);
+
+    // Path nodes imported
+    for (const Node& node : alice_tip.path)
+        EXPECT_TRUE(bob_->storage->has_node(alice_->root_kp.pub, node.index));
+
+    // Tip block stored in external_blocks
+    EXPECT_TRUE(bob_->storage->has_external_block(alice_tip.tip_address));
+    Block stored = bob_->storage->get_external_block(alice_tip.tip_address);
+    EXPECT_EQ(stored.address, alice_tip.tip_address);
+}
+
+TEST_F(MergeSessionTest, ImportPartnerDataIdempotent) {
+    KeyPair alice_leaf = alice_->setup_leaf();
+    bob_->setup_leaf();
+
+    alice_->bc->append_data_block(
+        alice_->root_kp.pub, LEAF, {0x42}, alice_leaf, 1'000LL);
+
+    BranchTipInfo alice_tip = alice_->ms->prepare_tip(alice_->root_kp.pub, LEAF);
+
+    // Calling twice must not throw
+    EXPECT_NO_THROW(bob_->ms->import_partner_data(alice_tip));
+    EXPECT_NO_THROW(bob_->ms->import_partner_data(alice_tip));
 }
 
 TEST_F(MergeSessionTest, FinalizeWrongCoSigThrows) {

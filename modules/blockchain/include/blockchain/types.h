@@ -202,9 +202,10 @@ struct Seal {
 // ── Branch tip info (used in merge protocol §6.4) ─────────────────────────────
 
 struct BranchTipInfo {
-    BlockAddress      tip_address;  // block_index == EMPTY_BRANCH_INDEX if branch is empty
-    Hash              tip_hash;     // hash of last block, or hash of leaf node if empty
-    std::vector<Node> path;         // nodes from root to leaf (inclusive)
+    BlockAddress         tip_address;  // block_index == EMPTY_BRANCH_INDEX if branch is empty
+    Hash                 tip_hash;     // hash of last block, or hash of leaf node if empty
+    std::vector<Node>    path;         // nodes from root to leaf (inclusive)
+    std::optional<Block> tip_block;    // last block; nullopt when branch is empty
 };
 
 // ── Pending merge block (intermediate state in MergeSession) ──────────────────

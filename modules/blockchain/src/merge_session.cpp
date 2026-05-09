@@ -22,9 +22,10 @@ BranchTipInfo MergeSession::prepare_tip(const UserId& user_id,
         info.tip_address = {user_id, leaf_index, EMPTY_BRANCH_INDEX};
         info.tip_hash    = Crypto::hash_node(info.path.back());
     } else {
-        info.tip_address = {user_id, leaf_index, *tip_opt};
-        Block tip_block  = storage_.get_block(info.tip_address);
-        info.tip_hash    = Crypto::hash_block(tip_block);
+        info.tip_address  = {user_id, leaf_index, *tip_opt};
+        Block tip_block   = storage_.get_block(info.tip_address);
+        info.tip_hash     = Crypto::hash_block(tip_block);
+        info.tip_block    = std::move(tip_block);
     }
 
     return info;
@@ -64,6 +65,14 @@ void MergeSession::verify_partner_tip(const BranchTipInfo& partner_tip) const {
         if (!Crypto::verify(cb.data(), cb.size(), child.parent_sig, parent.working_pubkey))
             throw SignatureError("partner path: node signature invalid");
     }
+
+    // If partner included their tip block, verify its hash matches tip_hash.
+    if (partner_tip.tip_block.has_value()) {
+        if (Crypto::hash_block(*partner_tip.tip_block) != partner_tip.tip_hash)
+            throw ChainIntegrityError("partner tip_block hash does not match tip_hash");
+        if (!(partner_tip.tip_block->address == partner_tip.tip_address))
+            throw ChainIntegrityError("partner tip_block address does not match tip_address");
+    }
 }
 
 // ── Step 2 ────────────────────────────────────────────────────────────────────
@@ -75,24 +84,8 @@ PendingMergeBlock MergeSession::create_pending(
     const KeyPair&       own_working_keypair,
     Timestamp            merge_timestamp)
 {
-    // MergePayload serialised as raw bytes (80 B):
-    //   partner user_id (32) | node_index BE (4) | block_index BE (4)
-    //   | tip_hash (32) | merge_timestamp BE (8)
-    const BlockAddress& pa = partner_tip.tip_address;
-    std::vector<uint8_t> payload(80);
-    std::copy(pa.user_id.bytes.begin(), pa.user_id.bytes.end(), payload.begin());
-    payload[32] = (pa.node_index  >> 24) & 0xFF;
-    payload[33] = (pa.node_index  >> 16) & 0xFF;
-    payload[34] = (pa.node_index  >>  8) & 0xFF;
-    payload[35] =  pa.node_index         & 0xFF;
-    payload[36] = (pa.block_index >> 24) & 0xFF;
-    payload[37] = (pa.block_index >> 16) & 0xFF;
-    payload[38] = (pa.block_index >>  8) & 0xFF;
-    payload[39] =  pa.block_index        & 0xFF;
-    std::copy(partner_tip.tip_hash.bytes.begin(), partner_tip.tip_hash.bytes.end(),
-              payload.begin() + 40);
-    uint64_t ts = static_cast<uint64_t>(merge_timestamp);
-    for (int i = 0; i < 8; ++i) payload[72 + i] = (ts >> (56 - 8 * i)) & 0xFF;
+    MergePayload mp{partner_tip.tip_address, partner_tip.tip_hash, merge_timestamp};
+    std::vector<uint8_t> payload = Serializer::encode(mp);
 
     // Determine prev_hash and next block index.
     auto tip_opt = storage_.branch_tip_index(user_id, leaf_index);
@@ -142,11 +135,38 @@ Block MergeSession::finalize(const PendingMergeBlock& pending,
                         partner_co_sig, partner_pubkey))
         throw SignatureError("partner co_signature is invalid");
 
-    // co_signature is excluded from CBOR encoding and therefore not stored in LMDB.
+    Seal seal{};
+    seal.signer_id  = {partner_pubkey.bytes};
+    seal.block_hash = pending.draft_hash;
+    seal.signature  = partner_co_sig;
+    seal.mode       = SealMode::OPEN;
+    seal.sealed_at  = pending.draft.timestamp_claimed;
+    storage_.put_seal(seal);
+
+    // co_signature is excluded from canonical CBOR encoding (not in LMDB block bytes).
     // The returned block carries it in memory for immediate use by the caller.
-    Block finalized      = pending.draft;
+    Block finalized        = pending.draft;
     finalized.co_signature = partner_co_sig;
     return finalized;
+}
+
+// ── Step 5 (optional) ─────────────────────────────────────────────────────────
+
+void MergeSession::import_partner_data(const BranchTipInfo& partner_tip) {
+    if (partner_tip.path.empty()) return;
+
+    const UserId partner_id = partner_tip.path.front().structural_pubkey;
+
+    for (const Node& node : partner_tip.path) {
+        if (!storage_.has_node(partner_id, node.index))
+            storage_.put_node(partner_id, node);
+    }
+
+    if (partner_tip.tip_block.has_value()) {
+        const Block& block = *partner_tip.tip_block;
+        if (!storage_.has_external_block(block.address))
+            storage_.put_external_block(block);
+    }
 }
 
 } // namespace blockchain

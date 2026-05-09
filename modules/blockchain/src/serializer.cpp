@@ -112,13 +112,28 @@ void enc_seal(Buf& out, const Seal& s) {
     w_uint(out, 4); w_int64(out, s.sealed_at);
 }
 
-void enc_tip(Buf& out, const BranchTipInfo& t) {
+void enc_merge_payload(Buf& out, const MergePayload& mp) {
     w_map(out, 3);
+    w_uint(out, 0); enc_address(out, mp.partner_last_address);
+    w_uint(out, 1); w_fixed(out, mp.partner_last_hash.bytes);
+    w_uint(out, 2); w_int64(out, mp.merge_timestamp);
+}
+
+void enc_tip(Buf& out, const BranchTipInfo& t) {
+    w_map(out, 4);
     w_uint(out, 0); enc_address(out, t.tip_address);
     w_uint(out, 1); w_fixed(out, t.tip_hash.bytes);
     w_uint(out, 2);
     w_arr(out, t.path.size());
     for (const auto& n : t.path) enc_node(out, n);
+    w_uint(out, 3);
+    if (t.tip_block.has_value()) {
+        Buf block_bytes;
+        enc_block(block_bytes, *t.tip_block);
+        w_bytes(out, block_bytes.data(), block_bytes.size());
+    } else {
+        w_bytes(out, nullptr, 0);
+    }
 }
 
 // ── CBOR reader ───────────────────────────────────────────────────────────────
@@ -291,8 +306,17 @@ Seal dec_seal(CborReader& r) {
     return s;
 }
 
+MergePayload dec_merge_payload(CborReader& r) {
+    if (r.r_map() != 3) throw SerializationError("MergePayload: expected 3 fields");
+    MergePayload mp{};
+    expect_key(r, 0); mp.partner_last_address = dec_address(r);
+    expect_key(r, 1); r.r_fixed(mp.partner_last_hash.bytes);
+    expect_key(r, 2); mp.merge_timestamp = r.r_int();
+    return mp;
+}
+
 BranchTipInfo dec_tip(CborReader& r) {
-    if (r.r_map() != 3) throw SerializationError("BranchTipInfo: expected 3 fields");
+    if (r.r_map() != 4) throw SerializationError("BranchTipInfo: expected 4 fields");
     BranchTipInfo t{};
     expect_key(r, 0); t.tip_address = dec_address(r);
     expect_key(r, 1); r.r_fixed(t.tip_hash.bytes);
@@ -301,6 +325,12 @@ BranchTipInfo dec_tip(CborReader& r) {
     t.path.reserve(static_cast<size_t>(path_count));
     for (uint64_t i = 0; i < path_count; ++i)
         t.path.push_back(dec_node(r));
+    expect_key(r, 3);
+    std::vector<uint8_t> block_bytes = r.r_bytes();
+    if (!block_bytes.empty()) {
+        CborReader br(block_bytes.data(), block_bytes.size());
+        t.tip_block = dec_block(br);
+    }
     return t;
 }
 
@@ -338,6 +368,14 @@ Seal Serializer::decode_seal(const uint8_t* data, size_t len) {
 
 BranchTipInfo Serializer::decode_tip(const uint8_t* data, size_t len) {
     CborReader r(data, len); return dec_tip(r);
+}
+
+std::vector<uint8_t> Serializer::encode(const MergePayload& payload) {
+    Buf out; enc_merge_payload(out, payload); return out;
+}
+
+MergePayload Serializer::decode_merge_payload(const uint8_t* data, size_t len) {
+    CborReader r(data, len); return dec_merge_payload(r);
 }
 
 } // namespace blockchain
