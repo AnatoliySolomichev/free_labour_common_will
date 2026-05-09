@@ -10,9 +10,9 @@ using namespace blockchain;
 
 // ── Fixture ───────────────────────────────────────────────────────────────────
 
-// Leftmost leaf at depth 32: the first index with node_depth == 32.
-// Depth d starts at index 2^d - 1.  For d=32: 2^32 - 1 = UINT32_MAX.
-static constexpr NodeIndex LEAF = 0xFFFF'FFFFu;
+// Leftmost leaf at depth 31: the first index with node_depth == 31.
+// Depth d starts at index 2^d - 1.  For d=31: 2^31 - 1 = 0x7FFFFFFF.
+static constexpr NodeIndex LEAF = 0x7FFF'FFFFu;
 
 class BlockchainTest : public ::testing::Test {
 protected:

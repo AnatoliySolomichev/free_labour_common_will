@@ -35,7 +35,7 @@ public:
     // then creates and stores the node.
     // Returns only the newly created nodes in root→leaf order.
     // Throws: CryptoError, StorageError, NodeNotFoundError (root absent),
-    //         InvalidArgumentError (leaf_index is not a leaf, i.e. depth != 32).
+    //         InvalidArgumentError (leaf_index is not a leaf, i.e. depth != 31).
     std::vector<Node> ensure_path(
         const UserId&                      user_id,
         NodeIndex                          leaf_index,

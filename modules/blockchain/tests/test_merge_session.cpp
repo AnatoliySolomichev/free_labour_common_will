@@ -10,7 +10,7 @@
 
 using namespace blockchain;
 
-static constexpr NodeIndex LEAF = 0xFFFF'FFFFu; // leftmost depth-32 leaf
+static constexpr NodeIndex LEAF = 0x7FFF'FFFFu; // leftmost depth-31 leaf
 
 // ── Per-user helper ───────────────────────────────────────────────────────────
 

@@ -25,8 +25,8 @@ using namespace records;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-// First leaf (depth 32): all user writes go to this branch by default.
-static constexpr NodeIndex DEFAULT_LEAF = 0xFFFF'FFFFu;   // 2^32 − 1
+// First leaf (depth 31): all user writes go to this branch by default.
+static constexpr NodeIndex DEFAULT_LEAF = 0x7FFF'FFFFu;   // 2^31 − 1
 
 // ── Hex utilities ─────────────────────────────────────────────────────────────
 

@@ -42,17 +42,21 @@ TEST(NodeDepth, Level2) {
 }
 
 TEST(NodeDepth, MaxUint32) {
-    // 2^32 - 1 is at depth 32 (first leaf at that level)
+    // 2^32 - 1 is at depth 32 (not a leaf; leaves are at depth 31)
     EXPECT_EQ(node_depth(0xFFFFFFFFu), 32u);
+    // 2^31 - 1 is the first (leftmost) leaf at depth 31
+    EXPECT_EQ(node_depth(0x7FFFFFFFu), 31u);
 }
 
 TEST(IsLeafNode, Leaf) {
-    EXPECT_TRUE(is_leaf_node(0xFFFFFFFFu));
+    EXPECT_TRUE(is_leaf_node(0x7FFFFFFFu));  // leftmost depth-31 leaf
+    EXPECT_TRUE(is_leaf_node(0xFFFFFFFEu));  // rightmost depth-31 leaf
 }
 
 TEST(IsLeafNode, NonLeaf) {
     EXPECT_FALSE(is_leaf_node(0));
     EXPECT_FALSE(is_leaf_node(1));
+    EXPECT_FALSE(is_leaf_node(0xFFFFFFFFu));  // depth 32, beyond leaves
 }
 
 TEST(PathIndices, Root) {

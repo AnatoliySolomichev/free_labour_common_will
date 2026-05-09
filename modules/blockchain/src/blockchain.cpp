@@ -65,7 +65,7 @@ std::vector<Node> Blockchain::ensure_path(
     std::function<KeyPair(NodeIndex)> key_for)
 {
     if (!is_leaf_node(leaf_index))
-        throw InvalidArgumentError("ensure_path: node is not a leaf (depth != 32)");
+        throw InvalidArgumentError("ensure_path: node is not a leaf (depth != 31)");
     if (!storage_.has_node(user_id, 0))
         throw NodeNotFoundError(0);
 
@@ -125,7 +125,7 @@ Block Blockchain::append_data_block(
     Timestamp            timestamp)
 {
     if (!is_leaf_node(leaf_index))
-        throw InvalidArgumentError("append_data_block: node is not a leaf (depth != 32)");
+        throw InvalidArgumentError("append_data_block: node is not a leaf (depth != 31)");
 
     Hash prev_hash = branch_tip_hash(user_id, leaf_index);
     auto tip_opt   = storage_.branch_tip_index(user_id, leaf_index);

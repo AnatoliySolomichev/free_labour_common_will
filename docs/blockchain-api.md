@@ -160,7 +160,7 @@ struct Node {
     // Вычисляемые свойства (не хранятся отдельно)
     uint32_t  depth()             const noexcept;  // ⌊log₂(index + 1)⌋
     bool      is_root()           const noexcept;  // index == 0
-    bool      is_leaf()           const noexcept;  // depth() == 32
+    bool      is_leaf()           const noexcept;  // depth() == 31
     bool      is_left_child()     const noexcept;
     NodeIndex parent_index()      const noexcept;  // (index − 1) / 2
     NodeIndex left_child_index()  const noexcept;  // 2*index + 1
@@ -648,7 +648,7 @@ public:
     // Для отсутствующих узлов вызывает key_for(node_index) → KeyPair, создаёт и сохраняет узел.
     // Возвращает только вновь созданные узлы в порядке корень→лист.
     // Бросает: CryptoError, StorageError, NodeNotFoundError (корень не найден),
-    //          InvalidArgumentError (leaf_index не является листом, т.е. depth != 32)
+    //          InvalidArgumentError (leaf_index не является листом, т.е. depth != 31)
     std::vector<Node> ensure_path(
         const UserId&                          user_id,
         NodeIndex                              leaf_index,
@@ -748,7 +748,7 @@ std::vector<NodeIndex> path_indices(NodeIndex target_index) noexcept;
 // Глубина узла: ⌊log₂(index + 1)⌋
 uint32_t node_depth(NodeIndex index) noexcept;
 
-// Является ли узел листовым (depth == 32)
+// Является ли узел листовым (depth == 31)
 bool is_leaf_node(NodeIndex index) noexcept;
 
 } // namespace blockchain

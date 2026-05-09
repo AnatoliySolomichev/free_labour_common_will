@@ -35,7 +35,7 @@ protected:
     static Block make_dummy_block() {
         KeyPair kp = Crypto::generate_keypair();
         Block b{};
-        b.address           = {kp.pub, 0xFFFF'FFFFu, 0};
+        b.address           = {kp.pub, 0x7FFF'FFFFu, 0};
         b.prev_hash         = Hash::zero();
         b.timestamp_claimed = 1'000'000LL;
         b.type              = BlockType::DATA;

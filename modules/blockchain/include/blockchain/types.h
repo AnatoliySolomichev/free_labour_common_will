@@ -73,7 +73,7 @@ enum class SealMode : uint8_t {
 
 // ── Free tree utilities ───────────────────────────────────────────────────────
 
-// ⌊log₂(index + 1)⌋  (root depth = 0, leaves at depth 32)
+// ⌊log₂(index + 1)⌋  (root depth = 0, leaves at depth 31)
 inline uint32_t node_depth(NodeIndex index) noexcept {
     if (index == 0) return 0;
     // using 64-bit to avoid overflow when index == UINT32_MAX
@@ -81,7 +81,7 @@ inline uint32_t node_depth(NodeIndex index) noexcept {
 }
 
 inline bool is_leaf_node(NodeIndex index) noexcept {
-    return node_depth(index) == 32;
+    return node_depth(index) == 31;
 }
 
 // Returns heap indices [0, ..., target] from root to target (inclusive).
@@ -132,7 +132,7 @@ struct Node {
 
     uint32_t  depth()             const noexcept { return node_depth(index); }
     bool      is_root()           const noexcept { return index == 0; }
-    bool      is_leaf()           const noexcept { return node_depth(index) == 32; }
+    bool      is_leaf()           const noexcept { return node_depth(index) == 31; }
     bool      is_left_child()     const noexcept { return index > 0 && (index % 2 == 1); }
     NodeIndex parent_index()      const noexcept { return (index - 1) / 2; }
     NodeIndex left_child_index()  const noexcept { return 2 * index + 1; }
