@@ -94,7 +94,7 @@ static UserId load_user_id(const fs::path& data_dir) {
 
 // All flags that consume a following value (used by get_positionals to skip them).
 static const std::set<std::string> VALUE_FLAGS = {
-    "--data-dir", "--tag", "--kind", "--part",
+    "--data-dir", "--leaf", "--tag", "--kind", "--part",
     "--value", "--chain",
     "--agent", "--action", "--hours", "--start", "--input", "--output",
     "--work", "--quality", "--hours-raw", "--labor-units",
@@ -128,6 +128,20 @@ static std::vector<std::string> flag_all(int argc, char** argv,
     for (int i = 1; i < argc - 1; ++i)
         if (std::string(argv[i]) == flag) result.push_back(argv[i + 1]);
     return result;
+}
+
+// ── Leaf index parser ─────────────────────────────────────────────────────────
+
+static NodeIndex parse_leaf_index(int argc, char** argv) {
+    const auto s = flag_val(argc, argv, "--leaf");
+    if (s.empty()) return DEFAULT_LEAF;
+    unsigned long long v = 0;
+    try { v = std::stoull(s, nullptr, 0); }
+    catch (...) { throw std::runtime_error("--leaf: invalid index: " + s); }
+    if (v > 0xFFFF'FFFEu || !is_leaf_node(static_cast<NodeIndex>(v)))
+        throw std::runtime_error(
+            "--leaf " + s + " is not a valid leaf (depth must be 31, range 0x7FFFFFFF..0xFFFFFFFE)");
+    return static_cast<NodeIndex>(v);
 }
 
 // ── Ref parser ("<chain_64hex>/<hash_64hex>") ─────────────────────────────────
@@ -207,24 +221,26 @@ struct Context {
     Blockchain  bc;
     UserId      user_id;
     KeyPair     working_kp;
+    NodeIndex   leaf;
 
-    explicit Context(const fs::path& data_dir)
-        : storage  (data_dir / "db")
-        , validator(storage)
-        , bc       (storage, validator)
-        , user_id  (load_user_id(data_dir))
-        , working_kp(load_keypair(data_dir, DEFAULT_LEAF))
+    Context(const fs::path& data_dir, NodeIndex leaf_index)
+        : storage   (data_dir / "db")
+        , validator (storage)
+        , bc        (storage, validator)
+        , user_id   (load_user_id(data_dir))
+        , working_kp(load_keypair(data_dir, leaf_index))
+        , leaf      (leaf_index)
     {}
 };
 
 // ── Write helper: encode + append DATA block ──────────────────────────────────
 
-static int cmd_write(const fs::path& data_dir, const Record& rec) {
-    Context ctx(data_dir);
+static int cmd_write(const fs::path& data_dir, NodeIndex leaf, const Record& rec) {
+    Context ctx(data_dir, leaf);
     const auto payload = Codec::encode(rec);
     const auto now     = static_cast<Timestamp>(std::time(nullptr));
     const auto block   = ctx.bc.append_data_block(
-        ctx.user_id, DEFAULT_LEAF, payload, ctx.working_kp, now);
+        ctx.user_id, leaf, payload, ctx.working_kp, now);
     const auto hash    = Crypto::hash_block(block);
     std::cout << "block #" << block.address.block_index
               << "  hash: " << to_hex(hash.bytes) << "\n";
@@ -240,9 +256,9 @@ static int cmd_identity_create(const fs::path& data_dir) {
         return 1;
     }
 
-    std::cerr << "Generating keys for 33 nodes (root → default branch)...\n";
+    std::cerr << "Generating keys for 32 nodes (root → default branch)...\n";
 
-    const auto path_idxs = path_indices(DEFAULT_LEAF);  // 33 indices: root to leaf
+    const auto path_idxs = path_indices(DEFAULT_LEAF);  // 32 indices: root to leaf
     std::unordered_map<NodeIndex, KeyPair> key_map;
     key_map.reserve(path_idxs.size());
     for (NodeIndex idx : path_idxs) {
@@ -277,6 +293,62 @@ static int cmd_identity_show(const fs::path& data_dir) {
     return 0;
 }
 
+static int cmd_branch_init(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);  // [branch, init, <leaf>]
+    if (pos.size() < 3) {
+        std::cerr << "Usage: bc branch init <leaf_index>\n"
+                     "  leaf_index: decimal or hex (0x...), range 0x7FFFFFFF..0xFFFFFFFE\n";
+        return 1;
+    }
+
+    NodeIndex leaf = 0;
+    try {
+        unsigned long long v = std::stoull(pos[2], nullptr, 0);
+        if (v > 0xFFFF'FFFEu || !is_leaf_node(static_cast<NodeIndex>(v)))
+            throw std::runtime_error("not a leaf");
+        leaf = static_cast<NodeIndex>(v);
+    } catch (...) {
+        std::cerr << "Invalid leaf index: " << pos[2]
+                  << " (must be at depth 31, range 0x7FFFFFFF..0xFFFFFFFE)\n";
+        return 1;
+    }
+
+    if (!fs::exists(key_path(data_dir, 0))) {
+        std::cerr << "Identity not found — run: bc identity create\n";
+        return 1;
+    }
+
+    if (fs::exists(key_path(data_dir, leaf))) {
+        std::cout << "Branch " << leaf << " already initialized.\n";
+        return 0;
+    }
+
+    // Generate keypairs only for nodes that don't have keys yet.
+    const auto path_idxs = path_indices(leaf);
+    std::unordered_map<NodeIndex, KeyPair> new_keys;
+    for (NodeIndex idx : path_idxs) {
+        if (!fs::exists(key_path(data_dir, idx))) {
+            auto kp = Crypto::generate_keypair();
+            save_keypair(data_dir, idx, kp);
+            new_keys[idx] = kp;
+        }
+    }
+
+    LmdbStorage storage(data_dir / "db");
+    Validator   validator(storage);
+    Blockchain  bc(storage, validator);
+    const UserId uid = load_user_id(data_dir);
+
+    bc.ensure_path(uid, leaf, [&](NodeIndex n) -> KeyPair {
+        auto it = new_keys.find(n);
+        if (it != new_keys.end()) return it->second;
+        return load_keypair(data_dir, n);
+    });
+
+    std::cout << "Branch " << leaf << " initialized.\n";
+    return 0;
+}
+
 static int cmd_concept_add(const fs::path& data_dir, int argc, char** argv) {
     const auto pos = get_positionals(argc, argv);  // [concept, add, <text>]
     if (pos.size() < 3) {
@@ -286,7 +358,7 @@ static int cmd_concept_add(const fs::path& data_dir, int argc, char** argv) {
     Concept c;
     c.text = pos[2];
     c.tags = flag_all(argc, argv, "--tag");
-    return cmd_write(data_dir, c);
+    return cmd_write(data_dir, parse_leaf_index(argc, argv), c);
 }
 
 static int cmd_concept_link(const fs::path& data_dir, int argc, char** argv) {
@@ -299,7 +371,7 @@ static int cmd_concept_link(const fs::path& data_dir, int argc, char** argv) {
     cl.from = parse_ref(pos[2]);
     cl.to   = parse_ref(pos[3]);
     cl.kind = flag_val(argc, argv, "--kind", "связь");
-    return cmd_write(data_dir, cl);
+    return cmd_write(data_dir, parse_leaf_index(argc, argv), cl);
 }
 
 static int cmd_composite_add(const fs::path& data_dir, int argc, char** argv) {
@@ -312,7 +384,7 @@ static int cmd_composite_add(const fs::path& data_dir, int argc, char** argv) {
     c.title = pos[2];
     for (const auto& s : flag_all(argc, argv, "--part"))
         c.parts.push_back(parse_ref(s));
-    return cmd_write(data_dir, c);
+    return cmd_write(data_dir, parse_leaf_index(argc, argv), c);
 }
 
 static int cmd_copy(const fs::path& data_dir, int argc, char** argv) {
@@ -323,7 +395,7 @@ static int cmd_copy(const fs::path& data_dir, int argc, char** argv) {
     }
     Copy c;
     c.source = parse_ref(pos[1]);
-    return cmd_write(data_dir, c);
+    return cmd_write(data_dir, parse_leaf_index(argc, argv), c);
 }
 
 static int cmd_react(const fs::path& data_dir, int argc, char** argv) {
@@ -357,7 +429,7 @@ static int cmd_react(const fs::path& data_dir, int argc, char** argv) {
         std::cerr << "Invalid hash hex\n";
         return 1;
     }
-    return cmd_write(data_dir, r);
+    return cmd_write(data_dir, parse_leaf_index(argc, argv), r);
 }
 
 static int cmd_specialty_add(const fs::path& data_dir, int argc, char** argv) {
@@ -366,7 +438,7 @@ static int cmd_specialty_add(const fs::path& data_dir, int argc, char** argv) {
         std::cerr << "Usage: bc specialty add <name>\n";
         return 1;
     }
-    return cmd_write(data_dir, Specialty{ pos[2] });
+    return cmd_write(data_dir, parse_leaf_index(argc, argv), Specialty{ pos[2] });
 }
 
 static int cmd_grade_add(const fs::path& data_dir, int argc, char** argv) {
@@ -383,7 +455,7 @@ static int cmd_grade_add(const fs::path& data_dir, int argc, char** argv) {
     Grade g;
     g.specialty = parse_ref(pos[2]);
     g.level     = static_cast<uint8_t>(level);
-    return cmd_write(data_dir, g);
+    return cmd_write(data_dir, parse_leaf_index(argc, argv), g);
 }
 
 static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
@@ -410,7 +482,7 @@ static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
                   : static_cast<int64_t>(std::stoll(start_s));
     for (const auto& s : flag_all(argc, argv, "--input"))  wr.inputs.push_back(parse_rq(s));
     for (const auto& s : flag_all(argc, argv, "--output")) wr.outputs.push_back(parse_rq(s));
-    return cmd_write(data_dir, wr);
+    return cmd_write(data_dir, parse_leaf_index(argc, argv), wr);
 }
 
 static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
@@ -433,21 +505,25 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     a.labor_units = std::stod(lu_s);
     a.timestamp   = static_cast<int64_t>(std::time(nullptr));
     a.receiver    = load_user_id(data_dir).bytes;
-    return cmd_write(data_dir, a);
+    return cmd_write(data_dir, parse_leaf_index(argc, argv), a);
 }
 
-static int cmd_list(const fs::path& data_dir) {
-    Context ctx(data_dir);
+static int cmd_list(const fs::path& data_dir, int argc, char** argv) {
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
 
     std::vector<Block> blocks;
     try {
-        blocks = ctx.bc.get_branch(ctx.user_id, DEFAULT_LEAF);
+        blocks = ctx.bc.get_branch(ctx.user_id, leaf);
     } catch (const BlockchainError&) {
         // branch may be empty
     }
 
     if (blocks.empty()) {
-        std::cout << "(no records yet — add one with: bc concept add \"text\")\n";
+        std::ostringstream hint;
+        hint << "bc concept add \"text\"";
+        if (leaf != DEFAULT_LEAF) hint << " --leaf " << leaf;
+        std::cout << "(no records yet — add one with: " << hint.str() << ")\n";
         return 0;
     }
 
@@ -481,11 +557,14 @@ static int cmd_list(const fs::path& data_dir) {
 
 static void print_usage() {
     std::cerr <<
-R"(Usage: bc [--data-dir PATH] <command>
+R"(Usage: bc [--data-dir PATH] <command> [--leaf INDEX]
 
 Identity:
   identity create                  Generate keys and create default branch
   identity show                    Show your User ID
+
+Branches:
+  branch init <leaf_index>         Init a new branch (decimal or 0x hex)
 
 Knowledge graph:
   concept add <text>               Add an idea
@@ -516,7 +595,11 @@ Labor:
     --labor-units FLOAT
 
 Other:
-  list                             List all records in default branch
+  list                             List all records in a branch
+
+--leaf INDEX  Target branch leaf index (decimal or 0x hex).
+              Default: 0x7FFFFFFF. Valid range: 0x7FFFFFFF..0xFFFFFFFE.
+              Run 'branch init <index>' before first use of a new branch.
 
 REF format: <chain_id_64hex>/<block_hash_64hex>
 Default --data-dir: ~/.blockchain
@@ -554,7 +637,8 @@ int main(int argc, char** argv) {
         else if (cmd == "grade"     && subcmd == "add")    return cmd_grade_add(data_dir, argc, argv);
         else if (cmd == "work"      && subcmd == "log")    return cmd_work_log(data_dir, argc, argv);
         else if (cmd == "accept")                          return cmd_accept(data_dir, argc, argv);
-        else if (cmd == "list")                            return cmd_list(data_dir);
+        else if (cmd == "branch"    && subcmd == "init")   return cmd_branch_init(data_dir, argc, argv);
+        else if (cmd == "list")                            return cmd_list(data_dir, argc, argv);
         else {
             std::cerr << "Unknown command: " << cmd;
             if (!subcmd.empty()) std::cerr << " " << subcmd;
