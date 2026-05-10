@@ -2,6 +2,7 @@
 
 #include "types.h"
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -51,6 +52,11 @@ public:
     virtual Block get_external_block(const BlockAddress& address) const = 0;
     virtual bool  has_external_block(const BlockAddress& address) const noexcept = 0;
 
+    // Scan all external blocks, calling visitor(block) for each.
+    // Return false from visitor to stop early. Throws: StorageError.
+    virtual void for_each_external_block(
+        std::function<bool(const Block&)> visitor) const = 0;
+
     // ── Transactions ──────────────────────────────────────────────────────────
 
     // RAII transaction: commits on commit(), rolls back on destruction without commit().
@@ -94,6 +100,8 @@ public:
     void  put_external_block(const Block& block) override;
     Block get_external_block(const BlockAddress& address) const override;
     bool  has_external_block(const BlockAddress& address) const noexcept override;
+    void  for_each_external_block(
+        std::function<bool(const Block&)> visitor) const override;
 
     std::unique_ptr<Transaction> begin_write() override;
 

@@ -1,6 +1,7 @@
 #include "blockchain/seal_manager.h"
 #include "blockchain/crypto.h"
 #include "blockchain/errors.h"
+#include "blockchain/serializer.h"
 
 namespace blockchain {
 
@@ -39,11 +40,30 @@ std::vector<Seal> SealManager::get_seals(const Hash& block_hash) const {
 }
 
 std::optional<Timestamp> SealManager::compute_witnessed_time(
-    const BlockAddress&) const
+    const BlockAddress& address) const
 {
-    // [MVP] Requires a block-reference index to scan MERGE blocks efficiently.
-    // Not implemented until such an index exists in storage.
-    return std::nullopt;
+    // Scan external blocks (other users' blocks imported during merges) for MERGE
+    // blocks that reference our branch at index >= address.block_index.
+    // The earliest such timestamp is an upper bound: our block existed before it.
+    std::optional<Timestamp> best;
+
+    storage_.for_each_external_block([&](const Block& b) -> bool {
+        if (b.type != BlockType::MERGE) return true;
+        try {
+            const MergePayload mp = Serializer::decode_merge_payload(
+                b.payload.data(), b.payload.size());
+            if (mp.partner_last_address.user_id    == address.user_id   &&
+                mp.partner_last_address.node_index == address.node_index &&
+                mp.partner_last_address.block_index >= address.block_index)
+            {
+                if (!best || b.timestamp_claimed < *best)
+                    best = b.timestamp_claimed;
+            }
+        } catch (const SerializationError&) {}
+        return true;
+    });
+
+    return best;
 }
 
 } // namespace blockchain

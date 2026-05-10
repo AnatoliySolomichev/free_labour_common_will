@@ -1,5 +1,8 @@
 #include <blockchain/blockchain.h>
 #include <blockchain/crypto.h>
+#include <blockchain/merge_session.h>
+#include <blockchain/seal_manager.h>
+#include <blockchain/serializer.h>
 #include <blockchain/storage.h>
 #include <blockchain/validator.h>
 #include <records/codec.h>
@@ -59,6 +62,15 @@ static std::string short_hex(const std::array<uint8_t, 32>& a, size_t n = 8) {
     return to_hex(a.data(), n) + "...";
 }
 
+static std::vector<uint8_t> from_hex_vec(const std::string& s) {
+    if (s.size() % 2 != 0)
+        throw std::runtime_error("odd-length hex string");
+    std::vector<uint8_t> result(s.size() / 2);
+    if (!result.empty() && !from_hex(s, result.data(), result.size()))
+        throw std::runtime_error("invalid hex characters");
+    return result;
+}
+
 // ── Key store ─────────────────────────────────────────────────────────────────
 // Each .key file: 32-byte PublicKey || 64-byte SecretKey = 96 bytes.
 
@@ -98,6 +110,7 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--value", "--chain",
     "--agent", "--action", "--hours", "--start", "--input", "--output",
     "--work", "--quality", "--hours-raw", "--labor-units",
+    "--peer-tip", "--draft", "--co-sig", "--mode", "--user", "--idx",
 };
 
 // Returns all non-flag arguments in order.
@@ -245,6 +258,66 @@ static int cmd_write(const fs::path& data_dir, NodeIndex leaf, const Record& rec
     std::cout << "block #" << block.address.block_index
               << "  hash: " << to_hex(hash.bytes) << "\n";
     return 0;
+}
+
+// ── Merge state persistence ───────────────────────────────────────────────────
+// Saved between 'merge create' and 'merge finalize' in data_dir/merge/<leaf>.state.
+// Format (all LE): partner_pubkey(32) | draft_block_index(4) | tip_len(4) | peer_tip_cbor(N)
+
+struct MergeState {
+    PublicKey            partner_pubkey;
+    BlockIndex           draft_block_index;
+    std::vector<uint8_t> peer_tip_cbor;
+};
+
+static fs::path merge_state_path(const fs::path& data_dir, NodeIndex leaf) {
+    return data_dir / "merge" / (std::to_string(leaf) + ".state");
+}
+
+static void save_merge_state(const fs::path& data_dir, NodeIndex leaf,
+                              const MergeState& state) {
+    const auto path = merge_state_path(data_dir, leaf);
+    fs::create_directories(path.parent_path());
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f) throw std::runtime_error("cannot write merge state: " + path.string());
+
+    f.write(reinterpret_cast<const char*>(state.partner_pubkey.bytes.data()), 32);
+
+    auto le32 = [](uint32_t v, std::ofstream& out) {
+        uint8_t b[4] = { uint8_t(v), uint8_t(v>>8), uint8_t(v>>16), uint8_t(v>>24) };
+        out.write(reinterpret_cast<const char*>(b), 4);
+    };
+    le32(state.draft_block_index, f);
+    le32(static_cast<uint32_t>(state.peer_tip_cbor.size()), f);
+    if (!state.peer_tip_cbor.empty())
+        f.write(reinterpret_cast<const char*>(state.peer_tip_cbor.data()),
+                static_cast<std::streamsize>(state.peer_tip_cbor.size()));
+
+    if (!f) throw std::runtime_error("write error for merge state: " + path.string());
+}
+
+static MergeState load_merge_state(const fs::path& data_dir, NodeIndex leaf) {
+    const auto path = merge_state_path(data_dir, leaf);
+    std::ifstream f(path, std::ios::binary);
+    if (!f) throw std::runtime_error(
+        "merge state not found — run 'bc merge create --peer-tip HEX' first");
+
+    MergeState state{};
+    f.read(reinterpret_cast<char*>(state.partner_pubkey.bytes.data()), 32);
+
+    auto read_le32 = [](std::ifstream& in) -> uint32_t {
+        uint8_t b[4];
+        in.read(reinterpret_cast<char*>(b), 4);
+        return b[0] | (uint32_t(b[1])<<8) | (uint32_t(b[2])<<16) | (uint32_t(b[3])<<24);
+    };
+    state.draft_block_index = read_le32(f);
+    const uint32_t tip_len  = read_le32(f);
+    if (tip_len > 0) {
+        state.peer_tip_cbor.resize(tip_len);
+        f.read(reinterpret_cast<char*>(state.peer_tip_cbor.data()), tip_len);
+    }
+    if (!f) throw std::runtime_error("merge state file truncated");
+    return state;
 }
 
 // ── Commands ──────────────────────────────────────────────────────────────────
@@ -508,6 +581,212 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     return cmd_write(data_dir, parse_leaf_index(argc, argv), a);
 }
 
+// bc merge prepare [--leaf L]
+// Builds and prints your BranchTipInfo as a hex blob — send to your merge partner.
+static int cmd_merge_prepare(const fs::path& data_dir, int argc, char** argv) {
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+    MergeSession session(ctx.storage, ctx.validator);
+
+    const auto tip   = session.prepare_tip(ctx.user_id, leaf);
+    const auto bytes = Serializer::encode(tip);
+    std::cout << to_hex(bytes.data(), bytes.size()) << "\n";
+    std::cerr << "(send this hex blob to your merge partner)\n";
+    std::cerr << "Next: bc merge create --peer-tip <THEIR_BLOB>\n";
+    return 0;
+}
+
+// bc merge create --peer-tip HEX [--leaf L]
+// Verifies partner's tip, creates own MERGE draft, saves state for finalize.
+// Prints draft_hash to send to partner.
+static int cmd_merge_create(const fs::path& data_dir, int argc, char** argv) {
+    const auto peer_hex = flag_val(argc, argv, "--peer-tip");
+    if (peer_hex.empty()) {
+        std::cerr << "Usage: bc merge create --peer-tip HEX [--leaf L]\n";
+        return 1;
+    }
+
+    const auto peer_cbor    = from_hex_vec(peer_hex);
+    const auto partner_tip  = Serializer::decode_tip(peer_cbor.data(), peer_cbor.size());
+
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+    MergeSession session(ctx.storage, ctx.validator);
+
+    session.verify_partner_tip(partner_tip);
+
+    const auto now     = static_cast<Timestamp>(std::time(nullptr));
+    const auto pending = session.create_pending(
+        ctx.user_id, leaf, partner_tip, ctx.working_kp, now);
+
+    MergeState state{};
+    state.partner_pubkey    = partner_tip.path.back().working_pubkey;
+    state.draft_block_index = pending.draft.address.block_index;
+    state.peer_tip_cbor     = peer_cbor;
+    save_merge_state(data_dir, leaf, state);
+
+    const auto pid = to_hex(partner_tip.path.front().structural_pubkey.bytes);
+    std::cerr << "Partner verified: " << pid.substr(0, 16) << "...\n";
+    std::cerr << "Draft MERGE block #" << pending.draft.address.block_index << " saved.\n";
+    std::cout << "draft_hash: " << to_hex(pending.draft_hash.bytes) << "\n";
+    std::cerr << "(send draft_hash to partner; they run: bc merge cosign --draft <HASH>)\n";
+    std::cerr << "Next (after receiving partner's co_sig): bc merge finalize --co-sig <SIG>\n";
+    return 0;
+}
+
+// bc merge cosign --draft DRAFT_HASH_HEX [--leaf L]
+// Co-signs the partner's draft hash with own working key. Prints the signature to send back.
+static int cmd_merge_cosign(const fs::path& data_dir, int argc, char** argv) {
+    const auto draft_hex = flag_val(argc, argv, "--draft");
+    if (draft_hex.empty()) {
+        std::cerr << "Usage: bc merge cosign --draft DRAFT_HASH_HEX [--leaf L]\n";
+        return 1;
+    }
+
+    Hash draft_hash{};
+    if (!from_hex(draft_hex, draft_hash.bytes.data(), 32)) {
+        std::cerr << "Invalid --draft hex (expected 64 hex chars)\n";
+        return 1;
+    }
+
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+    MergeSession session(ctx.storage, ctx.validator);
+
+    const Signature co_sig = session.co_sign(draft_hash, ctx.working_kp);
+    std::cout << "co_signature: " << to_hex(co_sig.bytes) << "\n";
+    std::cerr << "(send co_signature to partner; they run: bc merge finalize --co-sig <SIG>)\n";
+    return 0;
+}
+
+// bc merge finalize --co-sig HEX [--leaf L]
+// Attaches partner's co-signature to own pending MERGE block and completes the merge.
+static int cmd_merge_finalize(const fs::path& data_dir, int argc, char** argv) {
+    const auto cosig_hex = flag_val(argc, argv, "--co-sig");
+    if (cosig_hex.empty()) {
+        std::cerr << "Usage: bc merge finalize --co-sig HEX [--leaf L]\n";
+        return 1;
+    }
+
+    Signature co_sig{};
+    if (!from_hex(cosig_hex, co_sig.bytes.data(), 64)) {
+        std::cerr << "Invalid --co-sig hex (expected 128 hex chars)\n";
+        return 1;
+    }
+
+    const NodeIndex leaf  = parse_leaf_index(argc, argv);
+    const auto state      = load_merge_state(data_dir, leaf);
+    Context ctx(data_dir, leaf);
+
+    const Block draft = ctx.storage.get_block({ctx.user_id, leaf, state.draft_block_index});
+    const PendingMergeBlock pending{draft, Crypto::hash_block(draft)};
+
+    MergeSession session(ctx.storage, ctx.validator);
+    const Block finalized = session.finalize(pending, co_sig, state.partner_pubkey);
+
+    if (!state.peer_tip_cbor.empty()) {
+        const auto partner_tip = Serializer::decode_tip(
+            state.peer_tip_cbor.data(), state.peer_tip_cbor.size());
+        session.import_partner_data(partner_tip);
+    }
+
+    fs::remove(merge_state_path(data_dir, leaf));
+
+    const Hash merge_hash = Crypto::hash_block(finalized);
+    std::cout << "merge block #" << finalized.address.block_index
+              << "  hash: " << to_hex(merge_hash.bytes) << "\n";
+    std::cerr << "Merge complete. Co-signature stored as seal.\n";
+    std::cerr << "Seals: bc seal list " << to_hex(merge_hash.bytes) << "\n";
+    return 0;
+}
+
+// ── Seal commands ─────────────────────────────────────────────────────────────
+
+// bc seal add BLOCK_HASH_HEX [--leaf L]
+// bc seal add --mode open --idx BLOCK_IDX [--leaf L] [--user UID_HEX]
+static int cmd_seal_add(const fs::path& data_dir, int argc, char** argv) {
+    const bool open_mode = (flag_val(argc, argv, "--mode") == "open");
+    const NodeIndex leaf  = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+    SealManager sm(ctx.storage);
+
+    Seal seal;
+    if (open_mode) {
+        const auto idx_s = flag_val(argc, argv, "--idx");
+        if (idx_s.empty()) {
+            std::cerr << "Usage: bc seal add --mode open --idx BLOCK_IDX [--leaf L] [--user UID_HEX]\n";
+            return 1;
+        }
+        BlockIndex block_idx;
+        try { block_idx = static_cast<BlockIndex>(std::stoul(idx_s)); }
+        catch (...) { std::cerr << "Invalid --idx value\n"; return 1; }
+
+        const auto user_s = flag_val(argc, argv, "--user");
+        UserId target_user = ctx.user_id;
+        if (!user_s.empty() && !from_hex(user_s, target_user.bytes.data(), 32)) {
+            std::cerr << "Invalid --user hex\n";
+            return 1;
+        }
+
+        BlockAddress addr{target_user, leaf, block_idx};
+        const Block block = (target_user == ctx.user_id)
+            ? ctx.storage.get_block(addr)
+            : ctx.storage.get_external_block(addr);
+        seal = sm.create_open_seal(block, ctx.working_kp);
+    } else {
+        const auto pos = get_positionals(argc, argv);  // [seal, add, <hash>]
+        if (pos.size() < 3) {
+            std::cerr << "Usage: bc seal add BLOCK_HASH_HEX [--leaf L]\n"
+                         "       bc seal add --mode open --idx N [--leaf L] [--user UID]\n";
+            return 1;
+        }
+        Hash block_hash{};
+        if (!from_hex(pos[2], block_hash.bytes.data(), 32)) {
+            std::cerr << "Invalid block hash hex (expected 64 hex chars)\n";
+            return 1;
+        }
+        seal = sm.create_seal(block_hash, ctx.working_kp, SealMode::BLIND);
+    }
+
+    std::cout << "sealed:  " << to_hex(seal.block_hash.bytes) << "\n"
+              << "signer:  " << to_hex(seal.signer_id.bytes)  << "\n"
+              << "mode:    " << (seal.mode == SealMode::BLIND ? "BLIND" : "OPEN") << "\n";
+    return 0;
+}
+
+// bc seal list BLOCK_HASH_HEX
+static int cmd_seal_list(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);  // [seal, list, <hash>]
+    if (pos.size() < 3) {
+        std::cerr << "Usage: bc seal list BLOCK_HASH_HEX\n";
+        return 1;
+    }
+    Hash block_hash{};
+    if (!from_hex(pos[2], block_hash.bytes.data(), 32)) {
+        std::cerr << "Invalid block hash hex (expected 64 hex chars)\n";
+        return 1;
+    }
+
+    LmdbStorage storage(data_dir / "db");
+    SealManager  sm(storage);
+    const auto   seals = sm.get_seals(block_hash);
+
+    if (seals.empty()) {
+        std::cout << "(no seals for this block)\n";
+        return 0;
+    }
+
+    std::cout << seals.size() << " seal(s) for " << short_hex(block_hash.bytes) << ":\n\n";
+    for (size_t i = 0; i < seals.size(); ++i) {
+        const auto& s = seals[i];
+        std::cout << "#" << i << "\n"
+                  << "  signer: " << to_hex(s.signer_id.bytes) << "\n"
+                  << "  mode:   " << (s.mode == SealMode::BLIND ? "BLIND" : "OPEN") << "\n"
+                  << "  sig:    " << to_hex(s.signature.bytes) << "\n\n";
+    }
+    return 0;
+}
+
 static int cmd_list(const fs::path& data_dir, int argc, char** argv) {
     const NodeIndex leaf = parse_leaf_index(argc, argv);
     Context ctx(data_dir, leaf);
@@ -594,6 +873,19 @@ Labor:
     --hours-raw   FLOAT
     --labor-units FLOAT
 
+Merge (§6.4 bilateral two-round protocol):
+  merge prepare                    Step 1: print own BranchTipInfo blob (send to partner)
+  merge create --peer-tip HEX      Step 2: verify partner tip, create draft, print draft_hash
+  merge cosign --draft HASH        Step 3: co-sign partner's draft_hash, print co_signature
+  merge finalize --co-sig HEX      Step 4: attach partner co_sig, complete merge block
+
+Seals (§7):
+  seal add BLOCK_HASH_HEX          Create a BLIND seal on a block hash
+  seal add --mode open             Create an OPEN seal (loads block from storage)
+           --idx BLOCK_IDX
+           [--user UID_HEX]
+  seal list BLOCK_HASH_HEX         List all seals for a block
+
 Other:
   list                             List all records in a branch
 
@@ -626,19 +918,25 @@ int main(int argc, char** argv) {
     const auto  subcmd = pos.size() > 1 ? pos[1] : std::string{};
 
     try {
-        if      (cmd == "identity"  && subcmd == "create") return cmd_identity_create(data_dir);
-        else if (cmd == "identity"  && subcmd == "show")   return cmd_identity_show(data_dir);
-        else if (cmd == "concept"   && subcmd == "add")    return cmd_concept_add(data_dir, argc, argv);
-        else if (cmd == "concept"   && subcmd == "link")   return cmd_concept_link(data_dir, argc, argv);
-        else if (cmd == "composite" && subcmd == "add")    return cmd_composite_add(data_dir, argc, argv);
-        else if (cmd == "copy")                            return cmd_copy(data_dir, argc, argv);
-        else if (cmd == "react")                           return cmd_react(data_dir, argc, argv);
-        else if (cmd == "specialty" && subcmd == "add")    return cmd_specialty_add(data_dir, argc, argv);
-        else if (cmd == "grade"     && subcmd == "add")    return cmd_grade_add(data_dir, argc, argv);
-        else if (cmd == "work"      && subcmd == "log")    return cmd_work_log(data_dir, argc, argv);
-        else if (cmd == "accept")                          return cmd_accept(data_dir, argc, argv);
-        else if (cmd == "branch"    && subcmd == "init")   return cmd_branch_init(data_dir, argc, argv);
-        else if (cmd == "list")                            return cmd_list(data_dir, argc, argv);
+        if      (cmd == "identity"  && subcmd == "create")  return cmd_identity_create(data_dir);
+        else if (cmd == "identity"  && subcmd == "show")    return cmd_identity_show(data_dir);
+        else if (cmd == "concept"   && subcmd == "add")     return cmd_concept_add(data_dir, argc, argv);
+        else if (cmd == "concept"   && subcmd == "link")    return cmd_concept_link(data_dir, argc, argv);
+        else if (cmd == "composite" && subcmd == "add")     return cmd_composite_add(data_dir, argc, argv);
+        else if (cmd == "copy")                             return cmd_copy(data_dir, argc, argv);
+        else if (cmd == "react")                            return cmd_react(data_dir, argc, argv);
+        else if (cmd == "specialty" && subcmd == "add")     return cmd_specialty_add(data_dir, argc, argv);
+        else if (cmd == "grade"     && subcmd == "add")     return cmd_grade_add(data_dir, argc, argv);
+        else if (cmd == "work"      && subcmd == "log")     return cmd_work_log(data_dir, argc, argv);
+        else if (cmd == "accept")                           return cmd_accept(data_dir, argc, argv);
+        else if (cmd == "branch"    && subcmd == "init")    return cmd_branch_init(data_dir, argc, argv);
+        else if (cmd == "list")                             return cmd_list(data_dir, argc, argv);
+        else if (cmd == "merge"     && subcmd == "prepare") return cmd_merge_prepare(data_dir, argc, argv);
+        else if (cmd == "merge"     && subcmd == "create")  return cmd_merge_create(data_dir, argc, argv);
+        else if (cmd == "merge"     && subcmd == "cosign")  return cmd_merge_cosign(data_dir, argc, argv);
+        else if (cmd == "merge"     && subcmd == "finalize")return cmd_merge_finalize(data_dir, argc, argv);
+        else if (cmd == "seal"      && subcmd == "add")     return cmd_seal_add(data_dir, argc, argv);
+        else if (cmd == "seal"      && subcmd == "list")    return cmd_seal_list(data_dir, argc, argv);
         else {
             std::cerr << "Unknown command: " << cmd;
             if (!subcmd.empty()) std::cerr << " " << subcmd;

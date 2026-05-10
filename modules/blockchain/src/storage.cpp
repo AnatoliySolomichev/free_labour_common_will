@@ -424,6 +424,36 @@ bool LmdbStorage::has_external_block(const BlockAddress& address) const noexcept
     } catch (...) { return false; }
 }
 
+void LmdbStorage::for_each_external_block(
+    std::function<bool(const Block&)> visitor) const
+{
+    MDB_txn* txn;
+    lcheck(mdb_txn_begin(impl_->env, nullptr, MDB_RDONLY, &txn),
+           "for_each_external_block: begin");
+
+    MDB_cursor* cur;
+    if (mdb_cursor_open(txn, impl_->dbi_ext, &cur) != MDB_SUCCESS) {
+        mdb_txn_abort(txn);
+        throw StorageError("for_each_external_block: cursor_open failed");
+    }
+
+    MDB_val mk{}, mv{};
+    int rc = mdb_cursor_get(cur, &mk, &mv, MDB_FIRST);
+    while (rc == MDB_SUCCESS) {
+        try {
+            Block b = Serializer::decode_block(
+                static_cast<const uint8_t*>(mv.mv_data), mv.mv_size);
+            if (!visitor(b)) break;
+        } catch (const SerializationError&) {
+            // skip malformed entries
+        }
+        rc = mdb_cursor_get(cur, &mk, &mv, MDB_NEXT);
+    }
+
+    mdb_cursor_close(cur);
+    mdb_txn_abort(txn);
+}
+
 // ── Transactions ──────────────────────────────────────────────────────────────
 
 std::unique_ptr<IStorage::Transaction> LmdbStorage::begin_write() {
