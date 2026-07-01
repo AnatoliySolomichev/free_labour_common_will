@@ -18,6 +18,7 @@ public:
     static std::vector<uint8_t> encode(const Seal& seal);
     static std::vector<uint8_t> encode(const BranchTipInfo& tip);
     static std::vector<uint8_t> encode(const MergePayload& payload);
+    static std::vector<uint8_t> encode(const ExternalRef& ref);
 
     // Deserialize from CBOR. Throws: SerializationError on malformed input.
     static Node          decode_node         (const uint8_t* data, size_t len);

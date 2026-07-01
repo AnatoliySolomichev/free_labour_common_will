@@ -378,4 +378,8 @@ MergePayload Serializer::decode_merge_payload(const uint8_t* data, size_t len) {
     CborReader r(data, len); return dec_merge_payload(r);
 }
 
+std::vector<uint8_t> Serializer::encode(const ExternalRef& ref) {
+    Buf out; enc_ext_ref(out, ref); return out;
+}
+
 } // namespace blockchain

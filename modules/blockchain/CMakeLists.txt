@@ -11,6 +11,7 @@ add_library(blockchain
     src/crypto.cpp
     src/errors.cpp
     src/serializer.cpp
+    src/merkle.cpp
     src/storage.cpp
     src/validator.cpp
     src/seal_manager.cpp
@@ -45,6 +46,7 @@ add_executable(blockchain_tests
     tests/test_types.cpp
     tests/test_crypto.cpp
     tests/test_serializer.cpp
+    tests/test_merkle.cpp
     tests/test_storage.cpp
     tests/test_validator.cpp
     tests/test_blockchain.cpp
