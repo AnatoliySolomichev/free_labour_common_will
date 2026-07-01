@@ -12,6 +12,8 @@ using namespace blockchain;
 
 static constexpr NodeIndex LEAF = 0x7FFF'FFFFu; // leftmost depth-31 leaf
 
+static Hash filled_hash(uint8_t v) { Hash h; h.bytes.fill(v); return h; }
+
 // ── Per-user helper ───────────────────────────────────────────────────────────
 
 struct UserCtx {
@@ -158,9 +160,11 @@ TEST_F(MergeSessionTest, FullMergeProtocol) {
     // Step 2: create pending merge blocks
     Timestamp ts = 2'000LL;
     PendingMergeBlock alice_pending = alice_->ms->create_pending(
-        alice_->root_kp.pub, LEAF, bob_tip, alice_leaf, ts);
+        alice_->root_kp.pub, LEAF, bob_tip, alice_leaf, ts,
+        filled_hash(0x11), filled_hash(0x22), 1u);
     PendingMergeBlock bob_pending = bob_->ms->create_pending(
-        bob_->root_kp.pub, LEAF, alice_tip, bob_leaf, ts);
+        bob_->root_kp.pub, LEAF, alice_tip, bob_leaf, ts,
+        filled_hash(0x33), filled_hash(0x44), 1u);
 
     // Drafts are persisted
     EXPECT_TRUE(alice_->storage->has_block(alice_pending.draft.address));
@@ -256,7 +260,8 @@ TEST_F(MergeSessionTest, FinalizeWrongCoSigThrows) {
     alice_->ms->verify_partner_tip(bob_tip);
 
     PendingMergeBlock pending = alice_->ms->create_pending(
-        alice_->root_kp.pub, LEAF, bob_tip, alice_leaf, 1'000LL);
+        alice_->root_kp.pub, LEAF, bob_tip, alice_leaf, 1'000LL,
+        filled_hash(0x11), filled_hash(0x22), 1u);
 
     // Bad co-signature: corrupted
     Signature bad_co = Crypto::sign(

@@ -113,10 +113,13 @@ void enc_seal(Buf& out, const Seal& s) {
 }
 
 void enc_merge_payload(Buf& out, const MergePayload& mp) {
-    w_map(out, 3);
+    w_map(out, 6);
     w_uint(out, 0); enc_address(out, mp.partner_last_address);
     w_uint(out, 1); w_fixed(out, mp.partner_last_hash.bytes);
     w_uint(out, 2); w_int64(out, mp.merge_timestamp);
+    w_uint(out, 3); w_fixed(out, mp.merkle_root.bytes);
+    w_uint(out, 4); w_fixed(out, mp.hll_hash.bytes);
+    w_uint(out, 5); w_uint(out, mp.validated_depth);
 }
 
 void enc_tip(Buf& out, const BranchTipInfo& t) {
@@ -307,11 +310,14 @@ Seal dec_seal(CborReader& r) {
 }
 
 MergePayload dec_merge_payload(CborReader& r) {
-    if (r.r_map() != 3) throw SerializationError("MergePayload: expected 3 fields");
+    if (r.r_map() != 6) throw SerializationError("MergePayload: expected 6 fields");
     MergePayload mp{};
     expect_key(r, 0); mp.partner_last_address = dec_address(r);
     expect_key(r, 1); r.r_fixed(mp.partner_last_hash.bytes);
     expect_key(r, 2); mp.merge_timestamp = r.r_int();
+    expect_key(r, 3); r.r_fixed(mp.merkle_root.bytes);
+    expect_key(r, 4); r.r_fixed(mp.hll_hash.bytes);
+    expect_key(r, 5); mp.validated_depth = static_cast<uint32_t>(r.r_uint());
     return mp;
 }
 

@@ -168,6 +168,10 @@ struct MergePayload {
     BlockAddress partner_last_address;
     Hash         partner_last_hash;
     Timestamp    merge_timestamp;
+    // Snapshot commitments (blockchain.md §6.5.1). All part of the signed block.
+    Hash         merkle_root;      // hierarchical Merkle root over the participant set
+    Hash         hll_hash;         // BLAKE2b of the HLL register array (unique-count commitment)
+    uint32_t     validated_depth;  // self-declared full-validation depth (§6.5.5)
 };
 
 struct KeyRotationPayload {

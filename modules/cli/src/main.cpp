@@ -1,6 +1,8 @@
 #include <blockchain/blockchain.h>
 #include <blockchain/crypto.h>
+#include <blockchain/hll.h>
 #include <blockchain/merge_session.h>
+#include <blockchain/merkle.h>
 #include <blockchain/seal_manager.h>
 #include <blockchain/serializer.h>
 #include <blockchain/storage.h>
@@ -615,9 +617,31 @@ static int cmd_merge_create(const fs::path& data_dir, int argc, char** argv) {
 
     session.verify_partner_tip(partner_tip);
 
-    const auto now     = static_cast<Timestamp>(std::time(nullptr));
+    const auto now = static_cast<Timestamp>(std::time(nullptr));
+
+    // Order-1 bilateral snapshot over the two participants (blockchain.md §6.5.1).
+    // Leaf order is canonicalised by user_id so both sides commit to the same set.
+    // Full DAG snapshot accumulation across higher orders is a separate step.
+    const auto own_tip = session.prepare_tip(ctx.user_id, leaf);
+    const ExternalRef own_ref{own_tip.tip_address, own_tip.tip_hash};
+    const ExternalRef peer_ref{partner_tip.tip_address, partner_tip.tip_hash};
+
+    std::vector<Hash> leaves =
+        (own_ref.address.user_id < peer_ref.address.user_id)
+            ? std::vector<Hash>{MerkleTree::leaf_hash(own_ref), MerkleTree::leaf_hash(peer_ref)}
+            : std::vector<Hash>{MerkleTree::leaf_hash(peer_ref), MerkleTree::leaf_hash(own_ref)};
+    const Hash merkle_root = MerkleTree::root(leaves);
+
+    HllSketch hll;
+    hll.add(own_ref.address.user_id);
+    hll.add(peer_ref.address.user_id);
+    const Hash hll_hash = hll.sketch_hash();
+
+    const uint32_t validated_depth = 1;  // verify_partner_tip covered one level
+
     const auto pending = session.create_pending(
-        ctx.user_id, leaf, partner_tip, ctx.working_kp, now);
+        ctx.user_id, leaf, partner_tip, ctx.working_kp, now,
+        merkle_root, hll_hash, validated_depth);
 
     MergeState state{};
     state.partner_pubkey    = partner_tip.path.back().working_pubkey;

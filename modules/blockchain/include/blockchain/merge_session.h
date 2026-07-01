@@ -31,13 +31,20 @@ public:
     // Step 2: create a MERGE block draft (own signature; co_signature absent).
     // The draft is saved to storage immediately (without co_signature).
     // Call finalize() once the partner's co-signature is received.
+    //
+    // The snapshot commitments (merkle_root, hll_hash) and the self-declared
+    // validated_depth (blockchain.md §6.5.1/§6.5.5) are supplied by the caller,
+    // which owns the snapshot accumulation across the merge DAG.
     // Throws: CryptoError, StorageError, NodeNotFoundError.
     PendingMergeBlock create_pending(
         const UserId&        user_id,
         NodeIndex            leaf_index,
         const BranchTipInfo& partner_tip,
         const KeyPair&       own_working_keypair,
-        Timestamp            merge_timestamp
+        Timestamp            merge_timestamp,
+        const Hash&          merkle_root,
+        const Hash&          hll_hash,
+        uint32_t             validated_depth
     );
 
     // Step 3: co-sign the partner's draft hash with own key.

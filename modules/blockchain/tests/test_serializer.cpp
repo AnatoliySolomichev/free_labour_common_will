@@ -279,6 +279,9 @@ TEST(Serializer, MergePayloadRoundTrip) {
     mp.partner_last_address = make_addr(7, 42);
     mp.partner_last_hash    = make_hash(0xCC);
     mp.merge_timestamp      = 1'700'000'999LL;
+    mp.merkle_root          = make_hash(0xA1);
+    mp.hll_hash             = make_hash(0xB2);
+    mp.validated_depth      = 7;
 
     auto enc = Serializer::encode(mp);
     MergePayload d = Serializer::decode_merge_payload(enc.data(), enc.size());
@@ -286,6 +289,9 @@ TEST(Serializer, MergePayloadRoundTrip) {
     EXPECT_EQ(d.partner_last_address, mp.partner_last_address);
     EXPECT_EQ(d.partner_last_hash,    mp.partner_last_hash);
     EXPECT_EQ(d.merge_timestamp,      mp.merge_timestamp);
+    EXPECT_EQ(d.merkle_root,          mp.merkle_root);
+    EXPECT_EQ(d.hll_hash,             mp.hll_hash);
+    EXPECT_EQ(d.validated_depth,      mp.validated_depth);
 }
 
 // ── Error cases ───────────────────────────────────────────────────────────────

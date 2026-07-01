@@ -82,9 +82,18 @@ PendingMergeBlock MergeSession::create_pending(
     NodeIndex            leaf_index,
     const BranchTipInfo& partner_tip,
     const KeyPair&       own_working_keypair,
-    Timestamp            merge_timestamp)
+    Timestamp            merge_timestamp,
+    const Hash&          merkle_root,
+    const Hash&          hll_hash,
+    uint32_t             validated_depth)
 {
-    MergePayload mp{partner_tip.tip_address, partner_tip.tip_hash, merge_timestamp};
+    MergePayload mp{};
+    mp.partner_last_address = partner_tip.tip_address;
+    mp.partner_last_hash    = partner_tip.tip_hash;
+    mp.merge_timestamp      = merge_timestamp;
+    mp.merkle_root          = merkle_root;
+    mp.hll_hash             = hll_hash;
+    mp.validated_depth      = validated_depth;
     std::vector<uint8_t> payload = Serializer::encode(mp);
 
     // Determine prev_hash and next block index.
