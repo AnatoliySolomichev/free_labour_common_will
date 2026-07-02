@@ -138,6 +138,17 @@ Block Blockchain::append_data_block(
     return b;
 }
 
+Block Blockchain::append_stub_block(
+    const UserId&  user_id,
+    NodeIndex      leaf_index,
+    const KeyPair& working_keypair,
+    Timestamp      timestamp)
+{
+    // Empty CBOR array (0x80) = "zero records" (records.md §2): valid CBOR that
+    // carries no user data. The block exists only for its structural / timing role.
+    return append_data_block(user_id, leaf_index, {0x80}, working_keypair, timestamp);
+}
+
 Block Blockchain::rotate_key(
     const UserId&  user_id,
     NodeIndex      leaf_index,

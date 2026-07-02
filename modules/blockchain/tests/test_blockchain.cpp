@@ -148,6 +148,30 @@ TEST_F(BlockchainTest, AppendDataBlockFirstBlock) {
     EXPECT_EQ(b.payload, std::vector<uint8_t>({0xAB}));
 }
 
+TEST_F(BlockchainTest, AppendStubBlockBootstrapsBranch) {
+    KeyPair leaf_kp = setup_leaf_path();
+    // Empty branch: no tip yet.
+    EXPECT_FALSE(storage_->branch_tip_index(root_kp_.pub, LEAF).has_value());
+
+    Block b = bc_->append_stub_block(root_kp_.pub, LEAF, leaf_kp, 1'000LL);
+    EXPECT_EQ(b.address.block_index, 0u);
+    EXPECT_EQ(b.type, BlockType::DATA);
+    EXPECT_EQ(b.payload, std::vector<uint8_t>({0x80}));  // empty CBOR array
+
+    // Branch is now non-empty and validates.
+    EXPECT_TRUE(storage_->branch_tip_index(root_kp_.pub, LEAF).has_value());
+    EXPECT_NO_THROW(bc_->validate_branch(root_kp_.pub, LEAF));
+}
+
+TEST_F(BlockchainTest, AppendStubBlockAsTimeAnchorTip) {
+    KeyPair leaf_kp = setup_leaf_path();
+    bc_->append_data_block(root_kp_.pub, LEAF, {0x01}, leaf_kp, 1'000LL);
+    // A stub appended after existing work becomes the new tip (fresh anchor).
+    Block anchor = bc_->append_stub_block(root_kp_.pub, LEAF, leaf_kp, 2'000LL);
+    EXPECT_EQ(anchor.address.block_index, 1u);
+    EXPECT_NO_THROW(bc_->validate_branch(root_kp_.pub, LEAF));
+}
+
 TEST_F(BlockchainTest, AppendDataBlockSequentialIndex) {
     KeyPair leaf_kp = setup_leaf_path();
     Block b0 = bc_->append_data_block(root_kp_.pub, LEAF, {0x01}, leaf_kp, 1'000LL);

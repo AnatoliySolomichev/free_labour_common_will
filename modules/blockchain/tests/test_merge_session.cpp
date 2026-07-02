@@ -252,9 +252,43 @@ TEST_F(MergeSessionTest, ImportPartnerDataIdempotent) {
     EXPECT_NO_THROW(bob_->ms->import_partner_data(alice_tip));
 }
 
+// ── merge precondition: both branches must be non-empty (§6.4) ─────────────────
+
+TEST_F(MergeSessionTest, CreatePendingEmptyOwnBranchThrows) {
+    KeyPair alice_leaf = alice_->setup_leaf();
+    KeyPair bob_leaf   = bob_->setup_leaf();
+    bob_->bc->append_data_block(bob_->root_kp.pub, LEAF, {0x02}, bob_leaf, 1'000LL);
+
+    BranchTipInfo bob_tip = bob_->ms->prepare_tip(bob_->root_kp.pub, LEAF);
+    alice_->ms->verify_partner_tip(bob_tip);
+
+    // Alice's branch is empty → cannot merge.
+    EXPECT_THROW(
+        alice_->ms->create_pending(alice_->root_kp.pub, LEAF, bob_tip, alice_leaf,
+                                   1'000LL, filled_hash(0x11), filled_hash(0x22), 1u),
+        InvalidArgumentError);
+}
+
+TEST_F(MergeSessionTest, CreatePendingEmptyPartnerThrows) {
+    KeyPair alice_leaf = alice_->setup_leaf();
+    bob_->setup_leaf();
+    alice_->bc->append_data_block(alice_->root_kp.pub, LEAF, {0x01}, alice_leaf, 1'000LL);
+
+    // Bob's branch is empty.
+    BranchTipInfo bob_tip = bob_->ms->prepare_tip(bob_->root_kp.pub, LEAF);
+    alice_->ms->verify_partner_tip(bob_tip);
+
+    EXPECT_THROW(
+        alice_->ms->create_pending(alice_->root_kp.pub, LEAF, bob_tip, alice_leaf,
+                                   1'000LL, filled_hash(0x11), filled_hash(0x22), 1u),
+        InvalidArgumentError);
+}
+
 TEST_F(MergeSessionTest, FinalizeWrongCoSigThrows) {
     KeyPair alice_leaf = alice_->setup_leaf();
     KeyPair bob_leaf   = bob_->setup_leaf();
+    alice_->bc->append_data_block(alice_->root_kp.pub, LEAF, {0x01}, alice_leaf, 1'000LL);
+    bob_->bc->append_data_block(bob_->root_kp.pub, LEAF, {0x02}, bob_leaf, 1'000LL);
 
     BranchTipInfo bob_tip = bob_->ms->prepare_tip(bob_->root_kp.pub, LEAF);
     alice_->ms->verify_partner_tip(bob_tip);

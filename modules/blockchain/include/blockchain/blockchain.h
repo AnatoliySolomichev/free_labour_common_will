@@ -66,6 +66,19 @@ public:
         Timestamp            timestamp
     );
 
+    // Append a "stub" DATA block: empty CBOR array payload, no user records.
+    // Two uses (§5.4): (1) bootstrap an empty branch so it can take part in a
+    // merge (§6.4 requires a block-0); (2) create a fresh tip to anchor time after
+    // a long idle period — once witnessed via merge, subsequent work is provably
+    // later.
+    // Throws: CryptoError, StorageError, NodeNotFoundError, InvalidArgumentError.
+    Block append_stub_block(
+        const UserId&  user_id,
+        NodeIndex      leaf_index,
+        const KeyPair& working_keypair,
+        Timestamp      timestamp
+    );
+
     // Append a KEY_ROTATION block (§6.6). Signs with old_working_keypair.
     // Throws: CryptoError, StorageError, NodeNotFoundError.
     Block rotate_key(

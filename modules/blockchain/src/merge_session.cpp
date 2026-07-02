@@ -96,17 +96,21 @@ PendingMergeBlock MergeSession::create_pending(
     mp.validated_depth      = validated_depth;
     std::vector<uint8_t> payload = Serializer::encode(mp);
 
-    // Determine prev_hash and next block index.
+    // A merge participant must have at least one block (§6.4): both the own branch
+    // and the partner branch need a block-0 to appear as snapshot leaves. An empty
+    // branch must append a stub block first (§5.4).
     auto tip_opt = storage_.branch_tip_index(user_id, leaf_index);
-    Hash prev_hash;
-    if (!tip_opt.has_value()) {
-        Node leaf = storage_.get_node(user_id, leaf_index);
-        prev_hash = Crypto::hash_node(leaf);
-    } else {
-        prev_hash = Crypto::hash_block(
-            storage_.get_block({user_id, leaf_index, *tip_opt}));
-    }
-    BlockIndex new_idx = tip_opt.has_value() ? (*tip_opt + 1) : 0;
+    if (!tip_opt.has_value())
+        throw InvalidArgumentError(
+            "cannot merge from an empty branch; append a block first (§6.4)");
+    if (partner_tip.tip_address.block_index == EMPTY_BRANCH_INDEX)
+        throw InvalidArgumentError(
+            "cannot merge with an empty-branch partner (§6.4)");
+
+    // Determine prev_hash and next block index (branch is non-empty).
+    Hash prev_hash = Crypto::hash_block(
+        storage_.get_block({user_id, leaf_index, *tip_opt}));
+    BlockIndex new_idx = *tip_opt + 1;
 
     Block draft{};
     draft.address           = {user_id, leaf_index, new_idx};

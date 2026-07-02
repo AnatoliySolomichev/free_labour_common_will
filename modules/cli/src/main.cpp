@@ -262,6 +262,19 @@ static int cmd_write(const fs::path& data_dir, NodeIndex leaf, const Record& rec
     return 0;
 }
 
+// bc block stub [--leaf L]
+// Appends an empty stub DATA block: bootstrap for merge (§6.4) or time anchor (§5.4).
+static int cmd_block_stub(const fs::path& data_dir, int argc, char** argv) {
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+    const auto now   = static_cast<Timestamp>(std::time(nullptr));
+    const auto block = ctx.bc.append_stub_block(ctx.user_id, leaf, ctx.working_kp, now);
+    const auto hash  = Crypto::hash_block(block);
+    std::cout << "stub block #" << block.address.block_index
+              << "  hash: " << to_hex(hash.bytes) << "\n";
+    return 0;
+}
+
 // ── Merge state persistence ───────────────────────────────────────────────────
 // Saved between 'merge create' and 'merge finalize' in data_dir/merge/<leaf>.state.
 // Format (all LE): partner_pubkey(32) | draft_block_index(4) | tip_len(4) | peer_tip_cbor(N)
@@ -868,6 +881,7 @@ Identity:
 
 Branches:
   branch init <leaf_index>         Init a new branch (decimal or 0x hex)
+  block stub                       Append an empty stub block (bootstrap merge / time anchor)
 
 Knowledge graph:
   concept add <text>               Add an idea
@@ -954,6 +968,7 @@ int main(int argc, char** argv) {
         else if (cmd == "work"      && subcmd == "log")     return cmd_work_log(data_dir, argc, argv);
         else if (cmd == "accept")                           return cmd_accept(data_dir, argc, argv);
         else if (cmd == "branch"    && subcmd == "init")    return cmd_branch_init(data_dir, argc, argv);
+        else if (cmd == "block"     && subcmd == "stub")    return cmd_block_stub(data_dir, argc, argv);
         else if (cmd == "list")                             return cmd_list(data_dir, argc, argv);
         else if (cmd == "merge"     && subcmd == "prepare") return cmd_merge_prepare(data_dir, argc, argv);
         else if (cmd == "merge"     && subcmd == "create")  return cmd_merge_create(data_dir, argc, argv);
