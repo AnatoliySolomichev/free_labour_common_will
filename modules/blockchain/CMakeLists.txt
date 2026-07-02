@@ -14,6 +14,7 @@ add_library(blockchain
     src/merkle.cpp
     src/hll.cpp
     src/merge_snapshot.cpp
+    src/fraud.cpp
     src/storage.cpp
     src/validator.cpp
     src/seal_manager.cpp
@@ -51,6 +52,7 @@ add_executable(blockchain_tests
     tests/test_merkle.cpp
     tests/test_hll.cpp
     tests/test_merge_snapshot.cpp
+    tests/test_fraud.cpp
     tests/test_storage.cpp
     tests/test_validator.cpp
     tests/test_blockchain.cpp
