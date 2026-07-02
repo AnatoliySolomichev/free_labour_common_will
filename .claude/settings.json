@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./modules/blockchain/blockchain_tests --gtest_filter='MergeSnapshot.*:Merkle.CombineEqualsPairRoot')"
+    ]
+  }
+}

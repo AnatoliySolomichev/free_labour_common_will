@@ -59,6 +59,12 @@ TEST(Merkle, DifferentLeafOrderDifferentRoot) {
     EXPECT_NE(MerkleTree::root({a, b}), MerkleTree::root({b, a}));
 }
 
+TEST(Merkle, CombineEqualsPairRoot) {
+    Hash a = make_hash(0x01), b = make_hash(0x02);
+    EXPECT_EQ(MerkleTree::combine(a, b), MerkleTree::root({a, b}));
+    EXPECT_NE(MerkleTree::combine(a, b), MerkleTree::combine(b, a));
+}
+
 // ── proofs (single leaf) ──────────────────────────────────────────────────────
 
 TEST(Merkle, SingleLeafProofIsEmpty) {

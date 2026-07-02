@@ -49,6 +49,10 @@ Hash MerkleTree::root(const std::vector<Hash>& leaves) noexcept {
     return level.front();
 }
 
+Hash MerkleTree::combine(const Hash& left, const Hash& right) noexcept {
+    return node_hash(left, right);
+}
+
 MerkleTree::Proof MerkleTree::make_proof(const std::vector<Hash>& leaves,
                                          size_t leaf_index) {
     if (leaf_index >= leaves.size())
