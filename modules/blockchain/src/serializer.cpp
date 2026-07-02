@@ -124,6 +124,26 @@ void enc_merge_payload(Buf& out, const MergePayload& mp) {
     w_uint(out, 5); w_uint(out, mp.validated_depth);
 }
 
+void enc_merkle_proof(Buf& out, const MerkleTree::Proof& p) {
+    w_map(out, 2);
+    w_uint(out, 0);
+    w_arr(out, p.path.size());
+    for (const auto& h : p.path) w_fixed(out, h.bytes);
+    w_uint(out, 1);
+    w_arr(out, p.sibling_is_right.size());
+    for (bool b : p.sibling_is_right) w_uint(out, b ? 1u : 0u);
+}
+
+void enc_fraud_proof(Buf& out, const FraudProofData& d) {
+    w_map(out, 4);
+    w_uint(out, 0); enc_ext_ref(out, d.leaf);
+    w_uint(out, 1); enc_merkle_proof(out, d.merkle_path);
+    w_uint(out, 2);
+    w_arr(out, d.node_path.size());
+    for (const auto& n : d.node_path) enc_node(out, n);
+    w_uint(out, 3); enc_block(out, d.evidence);
+}
+
 void enc_snapshot(Buf& out, const MergeSnapshot& s) {
     w_map(out, 2);
     w_uint(out, 0); w_fixed(out, s.merkle_root.bytes);
@@ -329,6 +349,33 @@ MergePayload dec_merge_payload(CborReader& r) {
     return mp;
 }
 
+MerkleTree::Proof dec_merkle_proof(CborReader& r) {
+    if (r.r_map() != 2) throw SerializationError("MerkleProof: expected 2 fields");
+    MerkleTree::Proof p{};
+    expect_key(r, 0);
+    const uint64_t np = r.r_arr();
+    p.path.reserve(static_cast<size_t>(np));
+    for (uint64_t i = 0; i < np; ++i) { Hash h{}; r.r_fixed(h.bytes); p.path.push_back(h); }
+    expect_key(r, 1);
+    const uint64_t nd = r.r_arr();
+    p.sibling_is_right.reserve(static_cast<size_t>(nd));
+    for (uint64_t i = 0; i < nd; ++i) p.sibling_is_right.push_back(r.r_uint() != 0);
+    return p;
+}
+
+FraudProofData dec_fraud_proof(CborReader& r) {
+    if (r.r_map() != 4) throw SerializationError("FraudProofData: expected 4 fields");
+    FraudProofData d{};
+    expect_key(r, 0); d.leaf        = dec_ext_ref(r);
+    expect_key(r, 1); d.merkle_path = dec_merkle_proof(r);
+    expect_key(r, 2);
+    const uint64_t nn = r.r_arr();
+    d.node_path.reserve(static_cast<size_t>(nn));
+    for (uint64_t i = 0; i < nn; ++i) d.node_path.push_back(dec_node(r));
+    expect_key(r, 3); d.evidence = dec_block(r);
+    return d;
+}
+
 MergeSnapshot dec_snapshot(CborReader& r) {
     if (r.r_map() != 2) throw SerializationError("MergeSnapshot: expected 2 fields");
     MergeSnapshot s{};
@@ -413,6 +460,14 @@ std::vector<uint8_t> Serializer::encode(const MergeSnapshot& snapshot) {
 
 MergeSnapshot Serializer::decode_snapshot(const uint8_t* data, size_t len) {
     CborReader r(data, len); return dec_snapshot(r);
+}
+
+std::vector<uint8_t> Serializer::encode(const FraudProofData& proof) {
+    Buf out; enc_fraud_proof(out, proof); return out;
+}
+
+FraudProofData Serializer::decode_fraud_proof(const uint8_t* data, size_t len) {
+    CborReader r(data, len); return dec_fraud_proof(r);
 }
 
 } // namespace blockchain

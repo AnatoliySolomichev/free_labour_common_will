@@ -2,6 +2,7 @@
 #include "blockchain/blockchain.h"
 #include "blockchain/crypto.h"
 #include "blockchain/merkle.h"
+#include "blockchain/serializer.h"
 #include <gtest/gtest.h>
 #include <filesystem>
 #include <map>
@@ -136,4 +137,47 @@ TEST_F(FraudTest, HashMismatchFabricatedWhenCounterUnsigned) {
     FraudProofData d{leaf, MerkleTree::Proof{}, path_, bad_counter};
     EXPECT_EQ(FraudProof::verify_hash_mismatch(single_root(leaf), d),
               FraudVerdict::REFUTED_FABRICATED);
+}
+
+// ── proof serialization + verify-by-kind (records connector) ──────────────────
+
+TEST_F(FraudTest, ProofDataSerializationRoundTrip) {
+    Block bad = corrupt_sig(block_);
+    ExternalRef leaf = ref_with_hash(Crypto::hash_block(bad));
+
+    Hash lh    = MerkleTree::leaf_hash(leaf);
+    Hash other = MerkleTree::leaf_hash(ref_with_hash(make_hash(0x99)));
+    std::vector<Hash> leaves{lh, other};
+    auto proof = MerkleTree::make_proof(leaves, 0);
+
+    FraudProofData d{leaf, proof, path_, bad};
+    auto enc = Serializer::encode(d);
+    FraudProofData d2 = Serializer::decode_fraud_proof(enc.data(), enc.size());
+
+    EXPECT_EQ(d2.leaf,        d.leaf);
+    EXPECT_EQ(d2.merkle_path, d.merkle_path);
+    ASSERT_EQ(d2.node_path.size(), d.node_path.size());
+    EXPECT_EQ(d2.evidence.address,   d.evidence.address);
+    EXPECT_EQ(d2.evidence.signature, d.evidence.signature);
+
+    // The decoded proof yields the same verdict as the original.
+    EXPECT_EQ(FraudProof::verify_bad_sig(MerkleTree::root(leaves), d2),
+              FraudVerdict::CONFIRMED);
+}
+
+TEST_F(FraudTest, VerifyByKindDispatch) {
+    Block bad = corrupt_sig(block_);
+    ExternalRef leaf = ref_with_hash(Crypto::hash_block(bad));
+    FraudProofData d{leaf, MerkleTree::Proof{}, path_, bad};
+    auto bytes = Serializer::encode(d);
+    Hash root  = single_root(leaf);
+
+    EXPECT_EQ(FraudProof::verify("bad_sig", bytes.data(), bytes.size(), root),
+              FraudVerdict::CONFIRMED);
+    EXPECT_EQ(FraudProof::verify("nonsense", bytes.data(), bytes.size(), root),
+              FraudVerdict::REFUTED_FABRICATED);   // unknown kind
+
+    const std::vector<uint8_t> junk{0x00, 0x01, 0x02};
+    EXPECT_EQ(FraudProof::verify("bad_sig", junk.data(), junk.size(), root),
+              FraudVerdict::REFUTED_FABRICATED);    // malformed bytes
 }

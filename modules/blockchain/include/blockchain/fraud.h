@@ -2,6 +2,7 @@
 
 #include "types.h"
 #include "merkle.h"
+#include <string>
 #include <vector>
 
 namespace blockchain {
@@ -38,6 +39,13 @@ public:
     // real, validly-signed block at the same address (carried in evidence).
     static FraudVerdict verify_hash_mismatch(const Hash& merkle_root,
                                              const FraudProofData& data) noexcept;
+
+    // End-to-end entry: decode a serialized proof (the opaque `proof` bytes of a
+    // records::FraudClaim) and dispatch on `kind`. Unknown kind or malformed bytes
+    // → REFUTED_FABRICATED. `merkle_root` is the accused merge block's commitment.
+    static FraudVerdict verify(const std::string& kind,
+                               const uint8_t* proof, size_t len,
+                               const Hash& merkle_root) noexcept;
 };
 
 } // namespace blockchain

@@ -29,6 +29,34 @@ TEST(RecordsCodec, RefRoundtrip) {
     EXPECT_EQ(decoded.source, r);
 }
 
+// ── FraudClaim (structural, records.md §3A) ───────────────────────────────────
+
+TEST(RecordsCodec, FraudClaimRoundtrip) {
+    FraudClaim f{};
+    f.target = make_ref(0x11, 0x22);
+    f.kind   = "bad_sig";
+    f.proof  = {0xDE, 0xAD, 0xBE, 0xEF};   // opaque blob (blockchain FraudProofData)
+    f.reason = "signature does not verify";
+
+    const auto decoded = std::get<FraudClaim>(roundtrip(f));
+    EXPECT_EQ(decoded.target, f.target);
+    EXPECT_EQ(decoded.kind,   f.kind);
+    EXPECT_EQ(decoded.proof,  f.proof);
+    EXPECT_EQ(decoded.reason, f.reason);
+}
+
+TEST(RecordsCodec, FraudClaimEmptyReasonAndProof) {
+    FraudClaim f{};
+    f.target = make_ref(0x01, 0x02);
+    f.kind   = "hash_mismatch";
+    // proof and reason left empty
+
+    const auto decoded = std::get<FraudClaim>(roundtrip(f));
+    EXPECT_EQ(decoded.kind, "hash_mismatch");
+    EXPECT_TRUE(decoded.proof.empty());
+    EXPECT_TRUE(decoded.reason.empty());
+}
+
 // ── Concept ───────────────────────────────────────────────────────────────────
 
 TEST(RecordsCodec, ConceptNoTags) {

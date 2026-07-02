@@ -11,6 +11,8 @@ namespace records {
 // ── Discriminator values (records.md §3) ─────────────────────────────────────
 
 enum class RecordType : uint8_t {
+    // Structural / protocol
+    FraudClaim   = 0x01,
     // Knowledge graph
     Concept      = 0x40,
     ConceptLink  = 0x41,
@@ -38,6 +40,21 @@ struct Ref {
         return chain == o.chain && hash == o.hash;
     }
     bool operator!=(const Ref& o) const noexcept { return !(*this == o); }
+};
+
+// ── Structural / protocol (records.md §3A) ───────────────────────────────────
+
+// Accusation that a merge block's committed snapshot is cryptographically bogus.
+// The proof is an opaque blob defined by the blockchain layer (a serialized
+// FraudProofData); records carries it without interpreting it. Verification is
+// done by blockchain::FraudProof::verify(kind, proof, merkle_root_of(target)).
+struct FraudClaim {
+    static constexpr RecordType TYPE = RecordType::FraudClaim;
+
+    Ref                  target;   // accused merge block (chain + block hash)
+    std::string          kind;     // "bad_sig" | "hash_mismatch"
+    std::vector<uint8_t> proof;    // opaque proof blob (blockchain FraudProofData)
+    std::string          reason;   // human-readable note (may be empty)
 };
 
 // ── Knowledge graph (records.md §8) ──────────────────────────────────────────
@@ -137,6 +154,7 @@ struct Acceptance {
 // ── Record variant ────────────────────────────────────────────────────────────
 
 using Record = std::variant<
+    FraudClaim,
     Concept,
     ConceptLink,
     Composite,

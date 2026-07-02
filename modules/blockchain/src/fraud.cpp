@@ -100,4 +100,17 @@ FraudVerdict FraudProof::verify_hash_mismatch(const Hash& merkle_root,
     }
 }
 
+FraudVerdict FraudProof::verify(const std::string& kind,
+                                const uint8_t* proof, size_t len,
+                                const Hash& merkle_root) noexcept {
+    try {
+        FraudProofData d = Serializer::decode_fraud_proof(proof, len);
+        if (kind == "bad_sig")       return verify_bad_sig(merkle_root, d);
+        if (kind == "hash_mismatch") return verify_hash_mismatch(merkle_root, d);
+        return FraudVerdict::REFUTED_FABRICATED;   // unknown kind
+    } catch (...) {
+        return FraudVerdict::REFUTED_FABRICATED;
+    }
+}
+
 } // namespace blockchain

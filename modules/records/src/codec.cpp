@@ -85,6 +85,15 @@ void w_resource_qty(Buf& out, const ResourceQty& rq) {
 
 // ── Per-type encoders ─────────────────────────────────────────────────────────
 
+void enc_fraud_claim(Buf& out, const FraudClaim& f) {
+    w_map(out, 5);
+    w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::FraudClaim));
+    w_uint(out, 1); w_ref(out, f.target);
+    w_uint(out, 2); w_text(out, f.kind);
+    w_uint(out, 3); w_bytes(out, f.proof.data(), f.proof.size());
+    w_uint(out, 4); w_text(out, f.reason);
+}
+
 void enc_concept(Buf& out, const Concept& c) {
     w_map(out, 3);
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Concept));
@@ -253,6 +262,15 @@ public:
         pos_ += static_cast<size_t>(len);
     }
 
+    std::vector<uint8_t> r_bytes() {
+        const auto [m, len] = read_head();
+        if (m != 2) throw CodecError("CBOR: expected byte string");
+        need(static_cast<size_t>(len));
+        std::vector<uint8_t> v(data_ + pos_, data_ + pos_ + len);
+        pos_ += static_cast<size_t>(len);
+        return v;
+    }
+
     template<size_t N>
     void r_fixed(std::array<uint8_t, N>& arr) { r_bytes_exact(arr.data(), N); }
 
@@ -312,6 +330,15 @@ ResourceQty dec_resource_qty(CborReader& r) {
     expect_key(r, 1); rq.qty      = r.r_float64();
     expect_key(r, 2); rq.unit     = r.r_text();
     return rq;
+}
+
+FraudClaim dec_fraud_claim_fields(CborReader& r) {
+    FraudClaim f{};
+    expect_key(r, 1); f.target = dec_ref(r);
+    expect_key(r, 2); f.kind   = r.r_text();
+    expect_key(r, 3); f.proof  = r.r_bytes();
+    expect_key(r, 4); f.reason = r.r_text();
+    return f;
 }
 
 Concept dec_concept_fields(CborReader& r) {
@@ -415,7 +442,8 @@ std::vector<uint8_t> Codec::encode(const Record& rec) {
     Buf out;
     std::visit([&out](const auto& r) {
         using T = std::decay_t<decltype(r)>;
-        if      constexpr (std::is_same_v<T, Concept>)     enc_concept(out, r);
+        if      constexpr (std::is_same_v<T, FraudClaim>)  enc_fraud_claim(out, r);
+        else if constexpr (std::is_same_v<T, Concept>)     enc_concept(out, r);
         else if constexpr (std::is_same_v<T, ConceptLink>) enc_concept_link(out, r);
         else if constexpr (std::is_same_v<T, Composite>)   enc_composite(out, r);
         else if constexpr (std::is_same_v<T, Copy>)        enc_copy(out, r);
@@ -436,6 +464,7 @@ Record Codec::decode(const uint8_t* data, size_t len) {
     const uint8_t disc = r.r_uint8();
 
     switch (static_cast<RecordType>(disc)) {
+        case RecordType::FraudClaim:  return dec_fraud_claim_fields(r);
         case RecordType::Concept:     return dec_concept_fields(r);
         case RecordType::ConceptLink: return dec_concept_link_fields(r);
         case RecordType::Composite:   return dec_composite_fields(r);
