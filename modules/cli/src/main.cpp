@@ -1,5 +1,6 @@
 #include <blockchain/blockchain.h>
 #include <blockchain/crypto.h>
+#include <blockchain/fraud.h>
 #include <blockchain/merge_session.h>
 #include <blockchain/seal_manager.h>
 #include <blockchain/serializer.h>
@@ -863,6 +864,42 @@ static int cmd_list(const fs::path& data_dir, int argc, char** argv) {
 
 // ── Usage ─────────────────────────────────────────────────────────────────────
 
+// bc fraud verify --kind (bad_sig|hash_mismatch) --proof HEX --merkle-root HEX
+// Checks a serialized FraudClaim proof against the accused block's committed root.
+// Pure computation — needs no identity/branch. Prints the verdict.
+static int cmd_fraud_verify(int argc, char** argv) {
+    const auto kind    = flag_val(argc, argv, "--kind");
+    const auto proof_s = flag_val(argc, argv, "--proof");
+    const auto root_s  = flag_val(argc, argv, "--merkle-root");
+    if (kind.empty() || proof_s.empty() || root_s.empty()) {
+        std::cerr << "Usage: bc fraud verify --kind (bad_sig|hash_mismatch) "
+                     "--proof HEX --merkle-root HEX\n";
+        return 1;
+    }
+
+    const auto proof = from_hex_vec(proof_s);
+    Hash merkle_root{};
+    if (!from_hex(root_s, merkle_root.bytes.data(), 32)) {
+        std::cerr << "Invalid --merkle-root (expected 64 hex chars)\n";
+        return 1;
+    }
+
+    const FraudVerdict v =
+        FraudProof::verify(kind, proof.data(), proof.size(), merkle_root);
+    switch (v) {
+        case FraudVerdict::CONFIRMED:
+            std::cout << "verdict: CONFIRMED (fraud proven → strong negative on the accused)\n";
+            break;
+        case FraudVerdict::REFUTED_HONEST:
+            std::cout << "verdict: REFUTED_HONEST (no defect; zero weight, no penalty)\n";
+            break;
+        case FraudVerdict::REFUTED_FABRICATED:
+            std::cout << "verdict: REFUTED_FABRICATED (bogus proof; penalty to the accuser)\n";
+            break;
+    }
+    return 0;
+}
+
 static void print_usage() {
     std::cerr <<
 R"(Usage: bc [--data-dir PATH] <command> [--leaf INDEX]
@@ -917,6 +954,11 @@ Seals (§7):
            [--user UID_HEX]
   seal list BLOCK_HASH_HEX         List all seals for a block
 
+Fraud (records.md §3A, blockchain.md §6.5.6):
+  fraud verify --kind KIND         Verify a FraudClaim proof against a committed root
+               --proof HEX                 KIND = bad_sig | hash_mismatch
+               --merkle-root HEX           (claim construction needs the sync cache; §11.9)
+
 Other:
   list                             List all records in a branch
 
@@ -969,6 +1011,7 @@ int main(int argc, char** argv) {
         else if (cmd == "merge"     && subcmd == "finalize")return cmd_merge_finalize(data_dir, argc, argv);
         else if (cmd == "seal"      && subcmd == "add")     return cmd_seal_add(data_dir, argc, argv);
         else if (cmd == "seal"      && subcmd == "list")    return cmd_seal_list(data_dir, argc, argv);
+        else if (cmd == "fraud"     && subcmd == "verify")  return cmd_fraud_verify(argc, argv);
         else {
             std::cerr << "Unknown command: " << cmd;
             if (!subcmd.empty()) std::cerr << " " << subcmd;
