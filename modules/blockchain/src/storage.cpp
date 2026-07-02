@@ -111,11 +111,12 @@ std::vector<Seal> decode_seal_list(const uint8_t* data, size_t len) {
 // ── LmdbStorage::Impl ─────────────────────────────────────────────────────────
 
 struct LmdbStorage::Impl {
-    MDB_env* env        = nullptr;
-    MDB_dbi  dbi_nodes  = 0;
-    MDB_dbi  dbi_blocks = 0;
-    MDB_dbi  dbi_seals  = 0;
-    MDB_dbi  dbi_ext    = 0;
+    MDB_env* env           = nullptr;
+    MDB_dbi  dbi_nodes     = 0;
+    MDB_dbi  dbi_blocks    = 0;
+    MDB_dbi  dbi_seals     = 0;
+    MDB_dbi  dbi_ext       = 0;
+    MDB_dbi  dbi_snapshots = 0;
 };
 
 // ── Transaction ───────────────────────────────────────────────────────────────
@@ -143,17 +144,18 @@ LmdbStorage::LmdbStorage(std::filesystem::path db_path)
     std::filesystem::create_directories(db_path);
 
     lcheck(mdb_env_create(&impl_->env),             "mdb_env_create");
-    lcheck(mdb_env_set_maxdbs(impl_->env, 4),       "mdb_env_set_maxdbs");
+    lcheck(mdb_env_set_maxdbs(impl_->env, 5),       "mdb_env_set_maxdbs");
     lcheck(mdb_env_set_mapsize(impl_->env, 1u << 30),"mdb_env_set_mapsize"); // 1 GiB
     lcheck(mdb_env_open(impl_->env, db_path.c_str(), 0, 0600), "mdb_env_open");
 
     MDB_txn* txn;
     lcheck(mdb_txn_begin(impl_->env, nullptr, 0, &txn), "open: txn_begin");
     int rc = 0;
-    if ((rc = mdb_dbi_open(txn, "nodes",    MDB_CREATE, &impl_->dbi_nodes))  != MDB_SUCCESS ||
-        (rc = mdb_dbi_open(txn, "blocks",   MDB_CREATE, &impl_->dbi_blocks)) != MDB_SUCCESS ||
-        (rc = mdb_dbi_open(txn, "seals",    MDB_CREATE, &impl_->dbi_seals))  != MDB_SUCCESS ||
-        (rc = mdb_dbi_open(txn, "external", MDB_CREATE, &impl_->dbi_ext))    != MDB_SUCCESS) {
+    if ((rc = mdb_dbi_open(txn, "nodes",     MDB_CREATE, &impl_->dbi_nodes))     != MDB_SUCCESS ||
+        (rc = mdb_dbi_open(txn, "blocks",    MDB_CREATE, &impl_->dbi_blocks))    != MDB_SUCCESS ||
+        (rc = mdb_dbi_open(txn, "seals",     MDB_CREATE, &impl_->dbi_seals))     != MDB_SUCCESS ||
+        (rc = mdb_dbi_open(txn, "external",  MDB_CREATE, &impl_->dbi_ext))       != MDB_SUCCESS ||
+        (rc = mdb_dbi_open(txn, "snapshots", MDB_CREATE, &impl_->dbi_snapshots)) != MDB_SUCCESS) {
         mdb_txn_abort(txn);
         throw StorageError(std::string("mdb_dbi_open: ") + mdb_strerror(rc));
     }
@@ -452,6 +454,44 @@ void LmdbStorage::for_each_external_block(
 
     mdb_cursor_close(cur);
     mdb_txn_abort(txn);
+}
+
+// ── Merge snapshots ───────────────────────────────────────────────────────────
+
+void LmdbStorage::put_snapshot(
+    const UserId& user_id, NodeIndex leaf_index, const MergeSnapshot& snapshot)
+{
+    auto k = node_key(user_id, leaf_index);   // (user_id, leaf_index) — one per branch
+    auto v = Serializer::encode(snapshot);
+    MDB_val mk{k.size(), k.data()};
+    MDB_val mv{v.size(), v.data()};
+
+    MDB_txn* txn;
+    lcheck(mdb_txn_begin(impl_->env, nullptr, 0, &txn), "put_snapshot: begin");
+    // Overwrite allowed: a branch's snapshot grows with each merge.
+    int rc = mdb_put(txn, impl_->dbi_snapshots, &mk, &mv, 0);
+    if (rc != MDB_SUCCESS) { mdb_txn_abort(txn); lcheck(rc, "put_snapshot: mdb_put"); }
+    lcheck(mdb_txn_commit(txn), "put_snapshot: commit");
+}
+
+std::optional<MergeSnapshot> LmdbStorage::get_snapshot(
+    const UserId& user_id, NodeIndex leaf_index) const
+{
+    auto k = node_key(user_id, leaf_index);
+    MDB_val mk{k.size(), k.data()};
+    MDB_val mv{};
+
+    MDB_txn* txn;
+    lcheck(mdb_txn_begin(impl_->env, nullptr, MDB_RDONLY, &txn), "get_snapshot: begin");
+    int rc = mdb_get(txn, impl_->dbi_snapshots, &mk, &mv);
+    if (rc == MDB_NOTFOUND) { mdb_txn_abort(txn); return std::nullopt; }
+    if (rc != MDB_SUCCESS)  { mdb_txn_abort(txn); lcheck(rc, "get_snapshot: mdb_get"); }
+    try {
+        MergeSnapshot s = Serializer::decode_snapshot(
+            static_cast<const uint8_t*>(mv.mv_data), mv.mv_size);
+        mdb_txn_abort(txn);
+        return s;
+    } catch (...) { mdb_txn_abort(txn); throw; }
 }
 
 // ── Transactions ──────────────────────────────────────────────────────────────

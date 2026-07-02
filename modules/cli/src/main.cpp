@@ -1,8 +1,6 @@
 #include <blockchain/blockchain.h>
 #include <blockchain/crypto.h>
-#include <blockchain/hll.h>
 #include <blockchain/merge_session.h>
-#include <blockchain/merkle.h>
 #include <blockchain/seal_manager.h>
 #include <blockchain/serializer.h>
 #include <blockchain/storage.h>
@@ -603,26 +601,38 @@ static int cmd_merge_prepare(const fs::path& data_dir, int argc, char** argv) {
     Context ctx(data_dir, leaf);
     MergeSession session(ctx.storage, ctx.validator);
 
-    const auto tip   = session.prepare_tip(ctx.user_id, leaf);
-    const auto bytes = Serializer::encode(tip);
-    std::cout << to_hex(bytes.data(), bytes.size()) << "\n";
-    std::cerr << "(send this hex blob to your merge partner)\n";
-    std::cerr << "Next: bc merge create --peer-tip <THEIR_BLOB>\n";
+    const auto tip = session.prepare_tip(ctx.user_id, leaf);
+    if (tip.tip_address.block_index == EMPTY_BRANCH_INDEX) {
+        std::cerr << "Branch is empty — append a stub block first: bc block stub\n";
+        return 1;
+    }
+    const auto snapshot = session.snapshot_for(ctx.user_id, leaf);
+
+    const auto tip_bytes  = Serializer::encode(tip);
+    const auto snap_bytes = Serializer::encode(snapshot);
+    std::cout << "tip:      " << to_hex(tip_bytes.data(),  tip_bytes.size())  << "\n";
+    std::cout << "snapshot: " << to_hex(snap_bytes.data(), snap_bytes.size()) << "\n";
+    std::cerr << "(send both blobs to your merge partner)\n";
+    std::cerr << "Next: bc merge create --peer-tip <TIP> --peer-snapshot <SNAP>\n";
     return 0;
 }
 
-// bc merge create --peer-tip HEX [--leaf L]
-// Verifies partner's tip, creates own MERGE draft, saves state for finalize.
+// bc merge create --peer-tip HEX --peer-snapshot HEX [--leaf L] [--depth N]
+// Verifies partner's tip, unions snapshots, creates own MERGE draft, saves state.
 // Prints draft_hash to send to partner.
 static int cmd_merge_create(const fs::path& data_dir, int argc, char** argv) {
     const auto peer_hex = flag_val(argc, argv, "--peer-tip");
-    if (peer_hex.empty()) {
-        std::cerr << "Usage: bc merge create --peer-tip HEX [--leaf L]\n";
+    const auto snap_hex = flag_val(argc, argv, "--peer-snapshot");
+    if (peer_hex.empty() || snap_hex.empty()) {
+        std::cerr << "Usage: bc merge create --peer-tip HEX --peer-snapshot HEX "
+                     "[--leaf L] [--depth N]\n";
         return 1;
     }
 
-    const auto peer_cbor    = from_hex_vec(peer_hex);
-    const auto partner_tip  = Serializer::decode_tip(peer_cbor.data(), peer_cbor.size());
+    const auto peer_cbor     = from_hex_vec(peer_hex);
+    const auto partner_tip   = Serializer::decode_tip(peer_cbor.data(), peer_cbor.size());
+    const auto snap_cbor     = from_hex_vec(snap_hex);
+    const auto partner_snap  = Serializer::decode_snapshot(snap_cbor.data(), snap_cbor.size());
 
     const NodeIndex leaf = parse_leaf_index(argc, argv);
     Context ctx(data_dir, leaf);
@@ -630,31 +640,13 @@ static int cmd_merge_create(const fs::path& data_dir, int argc, char** argv) {
 
     session.verify_partner_tip(partner_tip);
 
-    const auto now = static_cast<Timestamp>(std::time(nullptr));
-
-    // Order-1 bilateral snapshot over the two participants (blockchain.md §6.5.1).
-    // Leaf order is canonicalised by user_id so both sides commit to the same set.
-    // Full DAG snapshot accumulation across higher orders is a separate step.
-    const auto own_tip = session.prepare_tip(ctx.user_id, leaf);
-    const ExternalRef own_ref{own_tip.tip_address, own_tip.tip_hash};
-    const ExternalRef peer_ref{partner_tip.tip_address, partner_tip.tip_hash};
-
-    std::vector<Hash> leaves =
-        (own_ref.address.user_id < peer_ref.address.user_id)
-            ? std::vector<Hash>{MerkleTree::leaf_hash(own_ref), MerkleTree::leaf_hash(peer_ref)}
-            : std::vector<Hash>{MerkleTree::leaf_hash(peer_ref), MerkleTree::leaf_hash(own_ref)};
-    const Hash merkle_root = MerkleTree::root(leaves);
-
-    HllSketch hll;
-    hll.add(own_ref.address.user_id);
-    hll.add(peer_ref.address.user_id);
-    const Hash hll_hash = hll.sketch_hash();
-
-    const uint32_t validated_depth = 1;  // verify_partner_tip covered one level
+    const auto     now   = static_cast<Timestamp>(std::time(nullptr));
+    const auto     dep_s = flag_val(argc, argv, "--depth");
+    const uint32_t validated_depth =
+        dep_s.empty() ? 1u : static_cast<uint32_t>(std::stoul(dep_s));
 
     const auto pending = session.create_pending(
-        ctx.user_id, leaf, partner_tip, ctx.working_kp, now,
-        merkle_root, hll_hash, validated_depth);
+        ctx.user_id, leaf, partner_tip, partner_snap, ctx.working_kp, now, validated_depth);
 
     MergeState state{};
     state.partner_pubkey    = partner_tip.path.back().working_pubkey;
@@ -912,8 +904,9 @@ Labor:
     --labor-units FLOAT
 
 Merge (§6.4 bilateral two-round protocol):
-  merge prepare                    Step 1: print own BranchTipInfo blob (send to partner)
-  merge create --peer-tip HEX      Step 2: verify partner tip, create draft, print draft_hash
+  merge prepare                    Step 1: print own tip + snapshot blobs (send to partner)
+  merge create --peer-tip HEX      Step 2: verify tip, union snapshots, create draft
+               --peer-snapshot HEX          print draft_hash [--depth N: declared depth]
   merge cosign --draft HASH        Step 3: co-sign partner's draft_hash, print co_signature
   merge finalize --co-sig HEX      Step 4: attach partner co_sig, complete merge block
 

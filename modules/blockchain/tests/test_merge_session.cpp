@@ -12,8 +12,6 @@ using namespace blockchain;
 
 static constexpr NodeIndex LEAF = 0x7FFF'FFFFu; // leftmost depth-31 leaf
 
-static Hash filled_hash(uint8_t v) { Hash h; h.bytes.fill(v); return h; }
-
 // ── Per-user helper ───────────────────────────────────────────────────────────
 
 struct UserCtx {
@@ -157,14 +155,23 @@ TEST_F(MergeSessionTest, FullMergeProtocol) {
     EXPECT_NO_THROW(alice_->ms->verify_partner_tip(bob_tip));
     EXPECT_NO_THROW(bob_->ms->verify_partner_tip(alice_tip));
 
-    // Step 2: create pending merge blocks
+    // Step 2: create pending merge blocks (exchange snapshots first)
     Timestamp ts = 2'000LL;
+    MergeSnapshot alice_snap = alice_->ms->snapshot_for(alice_->root_kp.pub, LEAF);
+    MergeSnapshot bob_snap   = bob_->ms->snapshot_for(bob_->root_kp.pub, LEAF);
+
     PendingMergeBlock alice_pending = alice_->ms->create_pending(
-        alice_->root_kp.pub, LEAF, bob_tip, alice_leaf, ts,
-        filled_hash(0x11), filled_hash(0x22), 1u);
+        alice_->root_kp.pub, LEAF, bob_tip, bob_snap, alice_leaf, ts, 1u);
     PendingMergeBlock bob_pending = bob_->ms->create_pending(
-        bob_->root_kp.pub, LEAF, alice_tip, bob_leaf, ts,
-        filled_hash(0x33), filled_hash(0x44), 1u);
+        bob_->root_kp.pub, LEAF, alice_tip, alice_snap, bob_leaf, ts, 1u);
+
+    // Both sides committed the same union snapshot (commutative merge).
+    MergePayload alice_mp = Serializer::decode_merge_payload(
+        alice_pending.draft.payload.data(), alice_pending.draft.payload.size());
+    MergePayload bob_mp = Serializer::decode_merge_payload(
+        bob_pending.draft.payload.data(), bob_pending.draft.payload.size());
+    EXPECT_EQ(alice_mp.merkle_root, bob_mp.merkle_root);
+    EXPECT_EQ(alice_mp.hll_hash,    bob_mp.hll_hash);
 
     // Drafts are persisted
     EXPECT_TRUE(alice_->storage->has_block(alice_pending.draft.address));
@@ -252,6 +259,37 @@ TEST_F(MergeSessionTest, ImportPartnerDataIdempotent) {
     EXPECT_NO_THROW(bob_->ms->import_partner_data(alice_tip));
 }
 
+// ── DAG snapshot accumulation across merges (§6.5) ────────────────────────────
+
+TEST_F(MergeSessionTest, DagSnapshotAccumulatesUniqueParticipants) {
+    auto carol = std::make_unique<UserCtx>(base_dir_, 3);
+
+    KeyPair alice_leaf = alice_->setup_leaf();
+    KeyPair bob_leaf   = bob_->setup_leaf();
+    KeyPair carol_leaf = carol->setup_leaf();
+    alice_->bc->append_data_block(alice_->root_kp.pub, LEAF, {0xAA}, alice_leaf, 1'000LL);
+    bob_->bc->append_data_block(  bob_->root_kp.pub,   LEAF, {0xBB}, bob_leaf,   1'000LL);
+    carol->bc->append_data_block( carol->root_kp.pub,  LEAF, {0xCC}, carol_leaf, 1'000LL);
+
+    // Alice ⋈ Bob → Alice's snapshot covers {A, B}
+    BranchTipInfo bob_tip = bob_->ms->prepare_tip(bob_->root_kp.pub, LEAF);
+    alice_->ms->verify_partner_tip(bob_tip);
+    MergeSnapshot bob_snap = bob_->ms->snapshot_for(bob_->root_kp.pub, LEAF);
+    alice_->ms->create_pending(alice_->root_kp.pub, LEAF, bob_tip, bob_snap,
+                               alice_leaf, 2'000LL, 1u);
+    EXPECT_EQ(alice_->ms->snapshot_for(alice_->root_kp.pub, LEAF).estimate(), 2u);
+
+    // Alice ⋈ Carol → Alice's snapshot grows to {A, B, C}
+    BranchTipInfo carol_tip = carol->ms->prepare_tip(carol->root_kp.pub, LEAF);
+    alice_->ms->verify_partner_tip(carol_tip);
+    MergeSnapshot carol_snap = carol->ms->snapshot_for(carol->root_kp.pub, LEAF);
+    alice_->ms->create_pending(alice_->root_kp.pub, LEAF, carol_tip, carol_snap,
+                               alice_leaf, 3'000LL, 1u);
+    EXPECT_EQ(alice_->ms->snapshot_for(alice_->root_kp.pub, LEAF).estimate(), 3u);
+
+    carol.reset();
+}
+
 // ── merge precondition: both branches must be non-empty (§6.4) ─────────────────
 
 TEST_F(MergeSessionTest, CreatePendingEmptyOwnBranchThrows) {
@@ -261,11 +299,12 @@ TEST_F(MergeSessionTest, CreatePendingEmptyOwnBranchThrows) {
 
     BranchTipInfo bob_tip = bob_->ms->prepare_tip(bob_->root_kp.pub, LEAF);
     alice_->ms->verify_partner_tip(bob_tip);
+    MergeSnapshot bob_snap = bob_->ms->snapshot_for(bob_->root_kp.pub, LEAF);
 
     // Alice's branch is empty → cannot merge.
     EXPECT_THROW(
-        alice_->ms->create_pending(alice_->root_kp.pub, LEAF, bob_tip, alice_leaf,
-                                   1'000LL, filled_hash(0x11), filled_hash(0x22), 1u),
+        alice_->ms->create_pending(alice_->root_kp.pub, LEAF, bob_tip, bob_snap,
+                                   alice_leaf, 1'000LL, 1u),
         InvalidArgumentError);
 }
 
@@ -278,9 +317,10 @@ TEST_F(MergeSessionTest, CreatePendingEmptyPartnerThrows) {
     BranchTipInfo bob_tip = bob_->ms->prepare_tip(bob_->root_kp.pub, LEAF);
     alice_->ms->verify_partner_tip(bob_tip);
 
+    // Empty partner → thrown before partner_snapshot is used (pass a default).
     EXPECT_THROW(
-        alice_->ms->create_pending(alice_->root_kp.pub, LEAF, bob_tip, alice_leaf,
-                                   1'000LL, filled_hash(0x11), filled_hash(0x22), 1u),
+        alice_->ms->create_pending(alice_->root_kp.pub, LEAF, bob_tip, MergeSnapshot{},
+                                   alice_leaf, 1'000LL, 1u),
         InvalidArgumentError);
 }
 
@@ -292,10 +332,10 @@ TEST_F(MergeSessionTest, FinalizeWrongCoSigThrows) {
 
     BranchTipInfo bob_tip = bob_->ms->prepare_tip(bob_->root_kp.pub, LEAF);
     alice_->ms->verify_partner_tip(bob_tip);
+    MergeSnapshot bob_snap = bob_->ms->snapshot_for(bob_->root_kp.pub, LEAF);
 
     PendingMergeBlock pending = alice_->ms->create_pending(
-        alice_->root_kp.pub, LEAF, bob_tip, alice_leaf, 1'000LL,
-        filled_hash(0x11), filled_hash(0x22), 1u);
+        alice_->root_kp.pub, LEAF, bob_tip, bob_snap, alice_leaf, 1'000LL, 1u);
 
     // Bad co-signature: corrupted
     Signature bad_co = Crypto::sign(

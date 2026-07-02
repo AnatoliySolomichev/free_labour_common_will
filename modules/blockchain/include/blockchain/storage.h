@@ -1,6 +1,7 @@
 #pragma once
 
 #include "types.h"
+#include "merge_snapshot.h"
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -57,6 +58,17 @@ public:
     virtual void for_each_external_block(
         std::function<bool(const Block&)> visitor) const = 0;
 
+    // ── Merge snapshots (one per branch, §6.5) ────────────────────────────────
+
+    // Store/replace the accumulated snapshot of a branch (overwrite allowed).
+    // Throws: StorageError.
+    virtual void put_snapshot(
+        const UserId& user_id, NodeIndex leaf_index, const MergeSnapshot& snapshot) = 0;
+
+    // Current snapshot of a branch, or nullopt if none stored yet.
+    virtual std::optional<MergeSnapshot> get_snapshot(
+        const UserId& user_id, NodeIndex leaf_index) const = 0;
+
     // ── Transactions ──────────────────────────────────────────────────────────
 
     // RAII transaction: commits on commit(), rolls back on destruction without commit().
@@ -102,6 +114,11 @@ public:
     bool  has_external_block(const BlockAddress& address) const noexcept override;
     void  for_each_external_block(
         std::function<bool(const Block&)> visitor) const override;
+
+    void put_snapshot(
+        const UserId& user_id, NodeIndex leaf_index, const MergeSnapshot& snapshot) override;
+    std::optional<MergeSnapshot> get_snapshot(
+        const UserId& user_id, NodeIndex leaf_index) const override;
 
     std::unique_ptr<Transaction> begin_write() override;
 

@@ -268,6 +268,36 @@ TEST_F(StorageTest, ExternalBlockDuplicateThrows) {
     EXPECT_THROW(storage_->put_external_block(b), InvalidArgumentError);
 }
 
+// ── Merge snapshots ───────────────────────────────────────────────────────────
+
+TEST_F(StorageTest, SnapshotAbsentReturnsNullopt) {
+    EXPECT_FALSE(storage_->get_snapshot(make_uid(0x01), 0x7FFF'FFFFu).has_value());
+}
+
+TEST_F(StorageTest, SnapshotRoundTripAndOverwrite) {
+    auto uid = make_uid(0x01);
+    const NodeIndex leaf = 0x7FFF'FFFFu;
+
+    ExternalRef ra{BlockAddress{uid, leaf, 0}, make_hash(0x10)};
+    MergeSnapshot s1 = MergeSnapshot::leaf(ra);
+    storage_->put_snapshot(uid, leaf, s1);
+
+    auto got = storage_->get_snapshot(uid, leaf);
+    ASSERT_TRUE(got.has_value());
+    EXPECT_EQ(*got, s1);
+    EXPECT_EQ(got->estimate(), 1u);
+
+    // Overwrite with a grown snapshot.
+    ExternalRef rb{BlockAddress{make_uid(0x02), leaf, 0}, make_hash(0x20)};
+    MergeSnapshot s2 = MergeSnapshot::merge(s1, MergeSnapshot::leaf(rb));
+    storage_->put_snapshot(uid, leaf, s2);
+
+    auto got2 = storage_->get_snapshot(uid, leaf);
+    ASSERT_TRUE(got2.has_value());
+    EXPECT_EQ(*got2, s2);
+    EXPECT_EQ(got2->estimate(), 2u);
+}
+
 // ── Persistence ───────────────────────────────────────────────────────────────
 
 TEST_F(StorageTest, PersistenceAcrossReopen) {

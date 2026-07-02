@@ -1,5 +1,7 @@
 #include "blockchain/serializer.h"
 #include "blockchain/errors.h"
+#include "blockchain/hll.h"
+#include <array>
 #include <cstring>
 #include <limits>
 
@@ -120,6 +122,12 @@ void enc_merge_payload(Buf& out, const MergePayload& mp) {
     w_uint(out, 3); w_fixed(out, mp.merkle_root.bytes);
     w_uint(out, 4); w_fixed(out, mp.hll_hash.bytes);
     w_uint(out, 5); w_uint(out, mp.validated_depth);
+}
+
+void enc_snapshot(Buf& out, const MergeSnapshot& s) {
+    w_map(out, 2);
+    w_uint(out, 0); w_fixed(out, s.merkle_root.bytes);
+    w_uint(out, 1); w_bytes(out, s.hll.registers().data(), HllSketch::REGISTERS);
 }
 
 void enc_tip(Buf& out, const BranchTipInfo& t) {
@@ -321,6 +329,17 @@ MergePayload dec_merge_payload(CborReader& r) {
     return mp;
 }
 
+MergeSnapshot dec_snapshot(CborReader& r) {
+    if (r.r_map() != 2) throw SerializationError("MergeSnapshot: expected 2 fields");
+    MergeSnapshot s{};
+    expect_key(r, 0); r.r_fixed(s.merkle_root.bytes);
+    expect_key(r, 1);
+    std::array<uint8_t, HllSketch::REGISTERS> regs{};
+    r.r_bytes_exact(regs.data(), HllSketch::REGISTERS);
+    s.hll = HllSketch::from_registers(regs);
+    return s;
+}
+
 BranchTipInfo dec_tip(CborReader& r) {
     if (r.r_map() != 4) throw SerializationError("BranchTipInfo: expected 4 fields");
     BranchTipInfo t{};
@@ -386,6 +405,14 @@ MergePayload Serializer::decode_merge_payload(const uint8_t* data, size_t len) {
 
 std::vector<uint8_t> Serializer::encode(const ExternalRef& ref) {
     Buf out; enc_ext_ref(out, ref); return out;
+}
+
+std::vector<uint8_t> Serializer::encode(const MergeSnapshot& snapshot) {
+    Buf out; enc_snapshot(out, snapshot); return out;
+}
+
+MergeSnapshot Serializer::decode_snapshot(const uint8_t* data, size_t len) {
+    CborReader r(data, len); return dec_snapshot(r);
 }
 
 } // namespace blockchain

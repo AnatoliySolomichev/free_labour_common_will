@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(./modules/blockchain/blockchain_tests --gtest_filter='MergeSnapshot.*:Merkle.CombineEqualsPairRoot')",
-      "Bash(./modules/blockchain/blockchain_tests --gtest_filter='*Stub*:MergeSessionTest.CreatePending*:MergeSessionTest.Finalize*:MergeSessionTest.FullMergeProtocol')"
+      "Bash(./modules/blockchain/blockchain_tests --gtest_filter='*Stub*:MergeSessionTest.CreatePending*:MergeSessionTest.Finalize*:MergeSessionTest.FullMergeProtocol')",
+      "Bash(./modules/blockchain/blockchain_tests --gtest_filter='*Snapshot*:*Dag*:MergeSessionTest.FullMergeProtocol')"
     ]
   }
 }

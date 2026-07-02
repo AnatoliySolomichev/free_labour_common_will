@@ -294,6 +294,22 @@ TEST(Serializer, MergePayloadRoundTrip) {
     EXPECT_EQ(d.validated_depth,      mp.validated_depth);
 }
 
+// ── MergeSnapshot round-trip ──────────────────────────────────────────────────
+
+TEST(Serializer, MergeSnapshotRoundTrip) {
+    ExternalRef a{make_addr(1, 0), make_hash(0x10)};
+    ExternalRef b{make_addr(2, 0), make_hash(0x20)};
+    MergeSnapshot s = MergeSnapshot::merge(MergeSnapshot::leaf(a),
+                                           MergeSnapshot::leaf(b));
+
+    auto enc = Serializer::encode(s);
+    MergeSnapshot d = Serializer::decode_snapshot(enc.data(), enc.size());
+
+    EXPECT_EQ(d.merkle_root, s.merkle_root);
+    EXPECT_EQ(d, s);                       // includes HLL register equality
+    EXPECT_EQ(d.estimate(), s.estimate());
+}
+
 // ── Error cases ───────────────────────────────────────────────────────────────
 
 TEST(Serializer, DecodeNodeEmptyData) {

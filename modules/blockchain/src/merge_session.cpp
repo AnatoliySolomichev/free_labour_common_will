@@ -75,27 +75,34 @@ void MergeSession::verify_partner_tip(const BranchTipInfo& partner_tip) const {
     }
 }
 
+// ── Snapshot accessor ─────────────────────────────────────────────────────────
+
+MergeSnapshot MergeSession::snapshot_for(const UserId& user_id,
+                                          NodeIndex leaf_index) const {
+    if (auto stored = storage_.get_snapshot(user_id, leaf_index))
+        return *stored;
+
+    // No merges yet → single-leaf snapshot over the current tip.
+    auto tip_opt = storage_.branch_tip_index(user_id, leaf_index);
+    if (!tip_opt.has_value())
+        throw InvalidArgumentError(
+            "snapshot_for: empty branch has no snapshot; append a block first (§6.4)");
+    Block tip = storage_.get_block({user_id, leaf_index, *tip_opt});
+    ExternalRef ref{{user_id, leaf_index, *tip_opt}, Crypto::hash_block(tip)};
+    return MergeSnapshot::leaf(ref);
+}
+
 // ── Step 2 ────────────────────────────────────────────────────────────────────
 
 PendingMergeBlock MergeSession::create_pending(
     const UserId&        user_id,
     NodeIndex            leaf_index,
     const BranchTipInfo& partner_tip,
+    const MergeSnapshot& partner_snapshot,
     const KeyPair&       own_working_keypair,
     Timestamp            merge_timestamp,
-    const Hash&          merkle_root,
-    const Hash&          hll_hash,
     uint32_t             validated_depth)
 {
-    MergePayload mp{};
-    mp.partner_last_address = partner_tip.tip_address;
-    mp.partner_last_hash    = partner_tip.tip_hash;
-    mp.merge_timestamp      = merge_timestamp;
-    mp.merkle_root          = merkle_root;
-    mp.hll_hash             = hll_hash;
-    mp.validated_depth      = validated_depth;
-    std::vector<uint8_t> payload = Serializer::encode(mp);
-
     // A merge participant must have at least one block (§6.4): both the own branch
     // and the partner branch need a block-0 to appear as snapshot leaves. An empty
     // branch must append a stub block first (§5.4).
@@ -107,7 +114,21 @@ PendingMergeBlock MergeSession::create_pending(
         throw InvalidArgumentError(
             "cannot merge with an empty-branch partner (§6.4)");
 
-    // Determine prev_hash and next block index (branch is non-empty).
+    // Union own snapshot with the partner's → the packet's new snapshot and the
+    // in-block commitments (§6.5.1).
+    MergeSnapshot own_snapshot = snapshot_for(user_id, leaf_index);
+    MergeSnapshot merged       = MergeSnapshot::merge(own_snapshot, partner_snapshot);
+
+    MergePayload mp{};
+    mp.partner_last_address = partner_tip.tip_address;
+    mp.partner_last_hash    = partner_tip.tip_hash;
+    mp.merge_timestamp      = merge_timestamp;
+    mp.merkle_root          = merged.merkle_root;
+    mp.hll_hash             = merged.sketch_hash();
+    mp.validated_depth      = validated_depth;
+    std::vector<uint8_t> payload = Serializer::encode(mp);
+
+    // prev_hash / next index (branch is non-empty).
     Hash prev_hash = Crypto::hash_block(
         storage_.get_block({user_id, leaf_index, *tip_opt}));
     BlockIndex new_idx = *tip_opt + 1;
@@ -123,8 +144,10 @@ PendingMergeBlock MergeSession::create_pending(
     auto bytes      = Serializer::encode(draft);
     draft.signature = Crypto::sign(bytes.data(), bytes.size(), own_working_keypair.sec);
 
-    // Persist the draft immediately (without co_signature) for crash-safety.
+    // Persist the draft and the grown snapshot immediately (mirrors the early draft
+    // persistence; both roll back together if a merge is later abandoned).
     storage_.put_block(draft);
+    storage_.put_snapshot(user_id, leaf_index, merged);
 
     return PendingMergeBlock{draft, Crypto::hash_block(draft)};
 }

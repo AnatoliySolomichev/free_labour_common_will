@@ -28,22 +28,27 @@ public:
     // Throws: SignatureError, ChainIntegrityError, NodeNotFoundError.
     void verify_partner_tip(const BranchTipInfo& partner_tip) const;
 
+    // Current accumulated snapshot of a branch (blockchain.md §6.5.1): the stored
+    // snapshot if the branch has merged before, otherwise a fresh single-leaf
+    // snapshot over the current tip. Send this to the partner during a merge.
+    // Throws: InvalidArgumentError (empty branch), StorageError, BlockNotFoundError.
+    MergeSnapshot snapshot_for(const UserId& user_id, NodeIndex leaf_index) const;
+
     // Step 2: create a MERGE block draft (own signature; co_signature absent).
-    // The draft is saved to storage immediately (without co_signature).
-    // Call finalize() once the partner's co-signature is received.
-    //
-    // The snapshot commitments (merkle_root, hll_hash) and the self-declared
-    // validated_depth (blockchain.md §6.5.1/§6.5.5) are supplied by the caller,
-    // which owns the snapshot accumulation across the merge DAG.
-    // Throws: CryptoError, StorageError, NodeNotFoundError.
+    // Unions the own snapshot with the partner's, commits the resulting
+    // merkle_root + hll_hash into the block, and retains the grown snapshot for
+    // the branch. validated_depth is the author's self-declared verification
+    // depth (§6.5.5). The draft is saved to storage immediately (without
+    // co_signature); call finalize() once the partner's co-signature arrives.
+    // Throws: CryptoError, StorageError, NodeNotFoundError,
+    //         InvalidArgumentError (own or partner branch empty, §6.4).
     PendingMergeBlock create_pending(
         const UserId&        user_id,
         NodeIndex            leaf_index,
         const BranchTipInfo& partner_tip,
+        const MergeSnapshot& partner_snapshot,
         const KeyPair&       own_working_keypair,
         Timestamp            merge_timestamp,
-        const Hash&          merkle_root,
-        const Hash&          hll_hash,
         uint32_t             validated_depth
     );
 
