@@ -4,6 +4,7 @@ cmake_minimum_required(VERSION 3.16)
 
 add_library(sync
     src/participant_cache.cpp
+    src/merge_dialogue.cpp
 )
 
 target_include_directories(sync PUBLIC include)
@@ -19,6 +20,7 @@ find_package(GTest REQUIRED)
 
 add_executable(sync_tests
     tests/test_participant_cache.cpp
+    tests/test_merge_dialogue.cpp
 )
 
 target_link_libraries(sync_tests PRIVATE
