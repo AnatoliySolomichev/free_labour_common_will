@@ -9,6 +9,7 @@ add_executable(bc src/main.cpp)
 target_link_libraries(bc PRIVATE
     blockchain
     records
+    sync
     ${LIBSODIUM_LIBRARIES}
     ${LMDB_LIBRARIES}
 )

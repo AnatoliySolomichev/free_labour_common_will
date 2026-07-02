@@ -8,6 +8,7 @@
 #include <blockchain/validator.h>
 #include <records/codec.h>
 #include <records/types.h>
+#include <sync/participant_cache.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -111,7 +112,9 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--value", "--chain",
     "--agent", "--action", "--hours", "--start", "--input", "--output",
     "--work", "--quality", "--hours-raw", "--labor-units",
-    "--peer-tip", "--draft", "--co-sig", "--mode", "--user", "--idx",
+    "--peer-tip", "--peer-snapshot", "--draft", "--co-sig", "--mode", "--user",
+    "--idx", "--depth", "--proof", "--merkle-root", "--target", "--leaf-hash",
+    "--reason",
 };
 
 // Returns all non-flag arguments in order.
@@ -276,12 +279,21 @@ static int cmd_block_stub(const fs::path& data_dir, int argc, char** argv) {
 
 // ── Merge state persistence ───────────────────────────────────────────────────
 // Saved between 'merge create' and 'merge finalize' in data_dir/merge/<leaf>.state.
-// Format (all LE): partner_pubkey(32) | draft_block_index(4) | tip_len(4) | peer_tip_cbor(N)
+// Format (all LE): partner_pubkey(32) | draft_block_index(4)
+//                  | tip_len(4)      | peer_tip_cbor(N)
+//                  | own_tip_len(4)  | own_tip_cbor(N)     ┐ pre-merge data for
+//                  | own_snap_len(4) | own_snap_cbor(N)    │ the participant
+//                  | peer_snap_len(4)| peer_snap_cbor(N)   ┘ cache (sync.md §5.2)
+// The three trailing blobs may be absent (older state files) — the cache fill
+// is then skipped.
 
 struct MergeState {
     PublicKey            partner_pubkey;
     BlockIndex           draft_block_index;
     std::vector<uint8_t> peer_tip_cbor;
+    std::vector<uint8_t> own_tip_cbor;    // BranchTipInfo as of 'merge create'
+    std::vector<uint8_t> own_snap_cbor;   // own PRE-merge MergeSnapshot
+    std::vector<uint8_t> peer_snap_cbor;  // partner's PRE-merge MergeSnapshot
 };
 
 static fs::path merge_state_path(const fs::path& data_dir, NodeIndex leaf) {
@@ -301,11 +313,17 @@ static void save_merge_state(const fs::path& data_dir, NodeIndex leaf,
         uint8_t b[4] = { uint8_t(v), uint8_t(v>>8), uint8_t(v>>16), uint8_t(v>>24) };
         out.write(reinterpret_cast<const char*>(b), 4);
     };
+    auto blob = [&le32](const std::vector<uint8_t>& bytes, std::ofstream& out) {
+        le32(static_cast<uint32_t>(bytes.size()), out);
+        if (!bytes.empty())
+            out.write(reinterpret_cast<const char*>(bytes.data()),
+                      static_cast<std::streamsize>(bytes.size()));
+    };
     le32(state.draft_block_index, f);
-    le32(static_cast<uint32_t>(state.peer_tip_cbor.size()), f);
-    if (!state.peer_tip_cbor.empty())
-        f.write(reinterpret_cast<const char*>(state.peer_tip_cbor.data()),
-                static_cast<std::streamsize>(state.peer_tip_cbor.size()));
+    blob(state.peer_tip_cbor, f);
+    blob(state.own_tip_cbor, f);
+    blob(state.own_snap_cbor, f);
+    blob(state.peer_snap_cbor, f);
 
     if (!f) throw std::runtime_error("write error for merge state: " + path.string());
 }
@@ -325,12 +343,23 @@ static MergeState load_merge_state(const fs::path& data_dir, NodeIndex leaf) {
         return b[0] | (uint32_t(b[1])<<8) | (uint32_t(b[2])<<16) | (uint32_t(b[3])<<24);
     };
     state.draft_block_index = read_le32(f);
-    const uint32_t tip_len  = read_le32(f);
-    if (tip_len > 0) {
-        state.peer_tip_cbor.resize(tip_len);
-        f.read(reinterpret_cast<char*>(state.peer_tip_cbor.data()), tip_len);
-    }
+
+    auto read_blob = [&read_le32](std::ifstream& in, std::vector<uint8_t>& out) {
+        const uint32_t len = read_le32(in);
+        if (!in) return;
+        out.resize(len);
+        if (len > 0) in.read(reinterpret_cast<char*>(out.data()), len);
+    };
+    read_blob(f, state.peer_tip_cbor);
     if (!f) throw std::runtime_error("merge state file truncated");
+
+    // Trailing cache blobs are optional (older state files).
+    if (f.peek() != EOF) {
+        read_blob(f, state.own_tip_cbor);
+        read_blob(f, state.own_snap_cbor);
+        read_blob(f, state.peer_snap_cbor);
+        if (!f) throw std::runtime_error("merge state file truncated");
+    }
     return state;
 }
 
@@ -646,6 +675,11 @@ static int cmd_merge_create(const fs::path& data_dir, int argc, char** argv) {
     const uint32_t validated_depth =
         dep_s.empty() ? 1u : static_cast<uint32_t>(std::stoul(dep_s));
 
+    // Pre-merge view of the own branch — create_pending replaces the stored
+    // snapshot with the union, so capture both for the cache fill (§5.2).
+    const auto own_tip  = session.prepare_tip(ctx.user_id, leaf);
+    const auto own_snap = session.snapshot_for(ctx.user_id, leaf);
+
     const auto pending = session.create_pending(
         ctx.user_id, leaf, partner_tip, partner_snap, ctx.working_kp, now, validated_depth);
 
@@ -653,6 +687,9 @@ static int cmd_merge_create(const fs::path& data_dir, int argc, char** argv) {
     state.partner_pubkey    = partner_tip.path.back().working_pubkey;
     state.draft_block_index = pending.draft.address.block_index;
     state.peer_tip_cbor     = peer_cbor;
+    state.own_tip_cbor      = Serializer::encode(own_tip);
+    state.own_snap_cbor     = Serializer::encode(own_snap);
+    state.peer_snap_cbor    = snap_cbor;
     save_merge_state(data_dir, leaf, state);
 
     const auto pid = to_hex(partner_tip.path.front().structural_pubkey.bytes);
@@ -718,6 +755,22 @@ static int cmd_merge_finalize(const fs::path& data_dir, int argc, char** argv) {
         const auto partner_tip = Serializer::decode_tip(
             state.peer_tip_cbor.data(), state.peer_tip_cbor.size());
         session.import_partner_data(partner_tip);
+
+        // Feed the completed merge into the persistent participant cache
+        // (sync.md §5.2) — the raw material for fraud claims (§11.9).
+        if (!state.own_tip_cbor.empty()) {
+            chainsync::ParticipantCache cache(data_dir / "sync_cache");
+            const auto own_tip = Serializer::decode_tip(
+                state.own_tip_cbor.data(), state.own_tip_cbor.size());
+            const auto own_snap = Serializer::decode_snapshot(
+                state.own_snap_cbor.data(), state.own_snap_cbor.size());
+            const auto peer_snap = Serializer::decode_snapshot(
+                state.peer_snap_cbor.data(), state.peer_snap_cbor.size());
+            const Hash union_root = chainsync::record_merge(
+                cache, own_tip, own_snap, partner_tip, peer_snap);
+            std::cerr << "Participant cache updated: union root "
+                      << to_hex(union_root.bytes) << "\n";
+        }
     }
 
     fs::remove(merge_state_path(data_dir, leaf));
@@ -862,6 +915,89 @@ static int cmd_list(const fs::path& data_dir, int argc, char** argv) {
     return 0;
 }
 
+// ── Fraud / cache commands ────────────────────────────────────────────────────
+
+// bc cache list
+// Shows the persistent participant cache (sync.md §5): leaves and compositions.
+static int cmd_cache_list(const fs::path& data_dir) {
+    chainsync::ParticipantCache cache(data_dir / "sync_cache");
+
+    const auto leaves = cache.leaves();
+    std::cout << "leaves (" << leaves.size() << "):\n";
+    for (const auto& entry : leaves) {
+        const auto& rec = entry.second;
+        std::cout << "  " << to_hex(entry.first.bytes) << "\n"
+                  << "    chain: " << to_hex(rec.ref.address.user_id.bytes) << "\n"
+                  << "    node: 0x" << std::hex << rec.ref.address.node_index
+                  << std::dec << "  block: #" << rec.ref.address.block_index
+                  << "\n    committed hash: " << to_hex(rec.ref.block_hash.bytes) << "\n";
+    }
+    const auto comps = cache.compositions();
+    std::cout << "compositions (" << comps.size() << "):\n";
+    for (const auto& entry : comps)
+        std::cout << "  " << to_hex(entry.first.bytes) << "\n"
+                  << "    = " << to_hex(entry.second.left_child.bytes) << "\n"
+                  << "    + " << to_hex(entry.second.right_child.bytes) << "\n";
+    return 0;
+}
+
+// bc fraud claim --kind (bad_sig|hash_mismatch) --target CHAIN/BLOCKHASH
+//                --merkle-root HEX --leaf-hash HEX [--reason TEXT] [--leaf L]
+// Builds a FraudClaim proof from the participant cache (sync.md §5.3, closes
+// blockchain.md §11.9), checks it locally, and writes the claim record into the
+// own chain (records.md §3A.1) only when the verdict is CONFIRMED — a refuted
+// claim carries zero weight, a fabricated one penalizes the accuser.
+// --target is the accused MERGE block, --merkle-root the root committed in its
+// payload, --leaf-hash the accused participant leaf (see 'bc cache list').
+static int cmd_fraud_claim(const fs::path& data_dir, int argc, char** argv) {
+    const auto kind     = flag_val(argc, argv, "--kind");
+    const auto target_s = flag_val(argc, argv, "--target");
+    const auto root_s   = flag_val(argc, argv, "--merkle-root");
+    const auto leaf_s   = flag_val(argc, argv, "--leaf-hash");
+    if ((kind != "bad_sig" && kind != "hash_mismatch") ||
+        target_s.empty() || root_s.empty() || leaf_s.empty()) {
+        std::cerr << "Usage: bc fraud claim --kind (bad_sig|hash_mismatch) "
+                     "--target CHAIN_HEX/BLOCKHASH_HEX --merkle-root HEX "
+                     "--leaf-hash HEX [--reason TEXT] [--leaf L]\n";
+        return 1;
+    }
+    Hash root{}, leaf_hash{};
+    if (!from_hex(root_s, root.bytes.data(), 32)) {
+        std::cerr << "Invalid --merkle-root (expected 64 hex chars)\n";
+        return 1;
+    }
+    if (!from_hex(leaf_s, leaf_hash.bytes.data(), 32)) {
+        std::cerr << "Invalid --leaf-hash (expected 64 hex chars)\n";
+        return 1;
+    }
+    const Ref target = parse_ref(target_s);
+
+    chainsync::ParticipantCache cache(data_dir / "sync_cache");
+    const auto proof = cache.build_proof_bytes(root, leaf_hash);
+    if (!proof) {
+        std::cerr << "No proof material: the leaf is not cached, or no composition "
+                     "chain links it\nto this root (see 'bc cache list').\n";
+        return 1;
+    }
+    std::cout << "proof: " << to_hex(proof->data(), proof->size()) << "\n";
+
+    const FraudVerdict v = FraudProof::verify(kind, proof->data(), proof->size(), root);
+    if (v == FraudVerdict::REFUTED_HONEST) {
+        std::cerr << "verdict: REFUTED_HONEST — the committed data shows no such defect.\n"
+                     "Claim NOT written (it would carry zero weight).\n";
+        return 1;
+    }
+    if (v == FraudVerdict::REFUTED_FABRICATED) {
+        std::cerr << "verdict: REFUTED_FABRICATED — the proof does not hold up.\n"
+                     "Claim NOT written (publishing it would penalize you as the accuser).\n";
+        return 1;
+    }
+    std::cerr << "verdict: CONFIRMED — writing FraudClaim to own chain.\n";
+
+    FraudClaim claim{target, kind, *proof, flag_val(argc, argv, "--reason")};
+    return cmd_write(data_dir, parse_leaf_index(argc, argv), claim);
+}
+
 // ── Usage ─────────────────────────────────────────────────────────────────────
 
 // bc fraud verify --kind (bad_sig|hash_mismatch) --proof HEX --merkle-root HEX
@@ -955,9 +1091,17 @@ Seals (§7):
   seal list BLOCK_HASH_HEX         List all seals for a block
 
 Fraud (records.md §3A, blockchain.md §6.5.6):
+  fraud claim --kind KIND          Build a proof from the sync cache and write a
+              --target REF                FraudClaim record (only when CONFIRMED)
+              --merkle-root HEX           KIND = bad_sig | hash_mismatch
+              --leaf-hash HEX             REF = accused merge block <chain>/<hash>
+              [--reason TEXT]             (leaf hashes: bc cache list)
   fraud verify --kind KIND         Verify a FraudClaim proof against a committed root
                --proof HEX                 KIND = bad_sig | hash_mismatch
-               --merkle-root HEX           (claim construction needs the sync cache; §11.9)
+               --merkle-root HEX
+
+Sync cache (sync.md §5, filled by merge finalize):
+  cache list                       List cached participant leaves and compositions
 
 Other:
   list                             List all records in a branch
@@ -1012,6 +1156,8 @@ int main(int argc, char** argv) {
         else if (cmd == "seal"      && subcmd == "add")     return cmd_seal_add(data_dir, argc, argv);
         else if (cmd == "seal"      && subcmd == "list")    return cmd_seal_list(data_dir, argc, argv);
         else if (cmd == "fraud"     && subcmd == "verify")  return cmd_fraud_verify(argc, argv);
+        else if (cmd == "fraud"     && subcmd == "claim")   return cmd_fraud_claim(data_dir, argc, argv);
+        else if (cmd == "cache"     && subcmd == "list")    return cmd_cache_list(data_dir);
         else {
             std::cerr << "Unknown command: " << cmd;
             if (!subcmd.empty()) std::cerr << " " << subcmd;

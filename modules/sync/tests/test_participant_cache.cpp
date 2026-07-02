@@ -258,3 +258,67 @@ TEST_F(ParticipantCacheTest, SelfTargetNeedsNoCompositions) {
     EXPECT_TRUE(path->path.empty());
     EXPECT_TRUE(path->sibling_is_right.empty());
 }
+
+// ── Persistence (LMDB write-through) ──────────────────────────────────────────
+
+TEST_F(ParticipantCacheTest, PersistentCacheSurvivesReopen) {
+    Participant good = make_participant(16);
+    Participant bad  = make_participant(17);   // committed a bad-signature block
+    auto dir = db_.parent_path() / (db_.filename().string() + "_cache");
+    std::filesystem::remove_all(dir);
+
+    Hash lg, lb, parent;
+    {
+        ParticipantCache persistent(dir);
+        lg = persistent.put_leaf(LeafRecord{good.honest_ref(), good.path, good.block0});
+        lb = persistent.put_leaf(LeafRecord{bad.bad_ref(), bad.path, bad.bad_block()});
+        parent = persistent.put_composition(lg, lb);
+    }   // closed
+
+    ParticipantCache reopened(dir);
+    EXPECT_EQ(reopened.leaf_count(), 2u);
+    EXPECT_EQ(reopened.composition_count(), 1u);
+
+    // Full round-trip: the reloaded record still yields a verifiable proof.
+    auto proof = reopened.build_proof(parent, lb);
+    ASSERT_TRUE(proof.has_value());
+    EXPECT_EQ(FraudProof::verify_bad_sig(parent, *proof), FraudVerdict::CONFIRMED);
+    auto honest = reopened.build_proof(parent, lg);
+    ASSERT_TRUE(honest.has_value());
+    EXPECT_EQ(FraudProof::verify_bad_sig(parent, *honest), FraudVerdict::REFUTED_HONEST);
+
+    std::filesystem::remove_all(dir);
+}
+
+// ── record_merge (§5.2 fill rule) ─────────────────────────────────────────────
+
+TEST_F(ParticipantCacheTest, RecordMergeCachesFreshLeavesAndComposition) {
+    Participant a = make_participant(18);
+    Participant b = make_participant(19);
+
+    const auto tip_of = [](const Participant& p) {
+        return BranchTipInfo{p.block0.address, Crypto::hash_block(p.block0),
+                             p.path, p.block0};
+    };
+    MergeSnapshot snap_a = MergeSnapshot::leaf(a.honest_ref());
+    MergeSnapshot snap_b = MergeSnapshot::leaf(b.honest_ref());
+
+    Hash root = chainsync::record_merge(cache_, tip_of(a), snap_a, tip_of(b), snap_b);
+    EXPECT_EQ(root, MergeSnapshot::merge(snap_a, snap_b).merkle_root);
+    EXPECT_EQ(cache_.leaf_count(), 2u);
+    EXPECT_EQ(cache_.composition_count(), 1u);
+
+    // A composite partner snapshot reveals no leaf: only the composition lands.
+    Participant c = make_participant(20);
+    MergeSnapshot composite = MergeSnapshot::merge(snap_a, snap_b);
+    Hash top = chainsync::record_merge(cache_, tip_of(c),
+                                       MergeSnapshot::leaf(c.honest_ref()),
+                                       tip_of(a), composite);
+    EXPECT_EQ(cache_.leaf_count(), 3u);          // + only C's own leaf
+    EXPECT_EQ(cache_.composition_count(), 2u);
+    // ...but the DAG stays connected: A is provable against the new top.
+    auto proof = cache_.build_proof(top, MerkleTree::leaf_hash(a.honest_ref()));
+    ASSERT_TRUE(proof.has_value());
+    EXPECT_EQ(proof->merkle_path.path.size(), 2u);
+    EXPECT_EQ(FraudProof::verify_bad_sig(top, *proof), FraudVerdict::REFUTED_HONEST);
+}

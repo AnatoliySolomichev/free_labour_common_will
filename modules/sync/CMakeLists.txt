@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LMDB REQUIRED lmdb)
+
 # ── Library ───────────────────────────────────────────────────────────────────
 
 add_library(sync
@@ -7,9 +10,15 @@ add_library(sync
     src/merge_dialogue.cpp
 )
 
-target_include_directories(sync PUBLIC include)
+target_include_directories(sync
+    PUBLIC  include
+    PRIVATE ${LMDB_INCLUDE_DIRS}
+)
 
-target_link_libraries(sync PUBLIC blockchain)
+target_link_libraries(sync
+    PUBLIC  blockchain
+    PRIVATE ${LMDB_LIBRARIES}
+)
 
 target_compile_options(sync PRIVATE -Wall -Wextra -Wpedantic)
 

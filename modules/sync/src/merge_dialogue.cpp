@@ -1,17 +1,13 @@
 #include "sync/merge_dialogue.h"
 
 #include <blockchain/errors.h>
-#include <blockchain/merkle.h>
 #include <blockchain/serializer.h>
 
 namespace chainsync {
 
-using blockchain::Block;
 using blockchain::BranchTipInfo;
-using blockchain::ExternalRef;
 using blockchain::Hash;
 using blockchain::MergeSnapshot;
-using blockchain::MerkleTree;
 using blockchain::PublicKey;
 using blockchain::SerializationError;
 using blockchain::Serializer;
@@ -270,20 +266,7 @@ void MergeDialogue::fill_cache() noexcept {
     // Best-effort (§5.2): a cache hiccup must not invalidate a finalized merge —
     // a missing entry only means build_proof returns nullopt later.
     try {
-        // A side's tip yields its single-leaf record only while its snapshot is
-        // still that leaf (first merge). Composite snapshots carry leaves we
-        // cannot see here; those arrive via gossip (§7).
-        const auto put_leaf_if_fresh = [this](const BranchTipInfo& tip,
-                                              const MergeSnapshot& snapshot) {
-            if (!tip.tip_block.has_value()) return;
-            const ExternalRef ref{tip.tip_address, tip.tip_hash};
-            if (MerkleTree::leaf_hash(ref) == snapshot.merkle_root)
-                cache_.put_leaf(LeafRecord{ref, tip.path, *tip.tip_block});
-        };
-        put_leaf_if_fresh(own_tip_, own_snapshot_);
-        put_leaf_if_fresh(partner_tip_, partner_snapshot_);
-        cache_.put_composition(own_snapshot_.merkle_root,
-                               partner_snapshot_.merkle_root);
+        record_merge(cache_, own_tip_, own_snapshot_, partner_tip_, partner_snapshot_);
     } catch (...) {
     }
 }

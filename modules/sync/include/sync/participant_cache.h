@@ -1,14 +1,18 @@
 #pragma once
 
 #include <blockchain/fraud.h>
+#include <blockchain/merge_snapshot.h>
 #include <blockchain/merkle.h>
 #include <blockchain/types.h>
 
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <memory>
 #include <optional>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 // The sync module lives in namespace `chainsync`: plain `sync` collides with
@@ -49,6 +53,19 @@ struct Composition {
 
 class ParticipantCache {
 public:
+    // In-memory cache (tests, ephemeral use).
+    ParticipantCache();
+
+    // Persistent cache backed by LMDB at `dir` (created if missing): existing
+    // entries are loaded eagerly, every put is written through. Everything is
+    // retained — eviction policy is the open question §10.1.
+    // Throws: StorageError, SerializationError (corrupt store).
+    explicit ParticipantCache(const std::filesystem::path& dir);
+
+    ~ParticipantCache();
+    ParticipantCache(ParticipantCache&&) noexcept;
+    ParticipantCache& operator=(ParticipantCache&&) noexcept;
+
     // Store `record` under leaf_hash(record.ref); overwrites an existing entry
     // with the same key. Returns the key.
     // Throws: SerializationError (from leaf_hash).
@@ -92,7 +109,14 @@ public:
     std::size_t leaf_count()        const noexcept { return leaves_.size(); }
     std::size_t composition_count() const noexcept { return compositions_.size(); }
 
+    // Full snapshots of the tables (CLI listing); order unspecified.
+    std::vector<std::pair<blockchain::Hash, LeafRecord>>  leaves() const;
+    std::vector<std::pair<blockchain::Hash, Composition>> compositions() const;
+
 private:
+    struct Persistence;   // LMDB write-through backend; null → in-memory only
+    std::unique_ptr<Persistence> persist_;
+
     // Hash is uniform crypto output — its first bytes are already a good key.
     struct HashKey {
         std::size_t operator()(const blockchain::Hash& h) const noexcept {
@@ -105,5 +129,18 @@ private:
     std::unordered_map<blockchain::Hash, LeafRecord, HashKey>  leaves_;
     std::unordered_map<blockchain::Hash, Composition, HashKey> compositions_;
 };
+
+// Feed one completed bilateral merge into the cache (§5.2): both single-leaf
+// records — when a side merges for the first time its snapshot is still that
+// leaf and the exchanged tip carries everything; a composite snapshot does not
+// reveal its leaves (they arrive via gossip, §7) — plus the composition
+// own_root × partner_root. Snapshots must be the PRE-merge ones the sides
+// exchanged. Returns the union root (== the committed merkle_root).
+// Throws: SerializationError, StorageError (persistent cache).
+blockchain::Hash record_merge(ParticipantCache&                cache,
+                              const blockchain::BranchTipInfo& own_tip,
+                              const blockchain::MergeSnapshot& own_snapshot,
+                              const blockchain::BranchTipInfo& partner_tip,
+                              const blockchain::MergeSnapshot& partner_snapshot);
 
 } // namespace chainsync
