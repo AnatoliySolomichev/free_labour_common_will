@@ -195,6 +195,75 @@ TEST_F(MergeDialogueTest, SecondMergeGrowsDagAndDeepensProofs) {
     EXPECT_FALSE(carol->cache.build_proof(top, bob_leaf).has_value());
 }
 
+TEST_F(MergeDialogueTest, FourChainsPairwiseMergeLinkIntoOneDag) {
+    auto carol = std::make_unique<UserCtx>(base_dir_, 3);
+    auto dave  = std::make_unique<UserCtx>(base_dir_, 4);
+    alice_->append_block(0xAA, 1'000LL);
+    bob_->append_block(0xBB, 1'000LL);
+    carol->append_block(0xCC, 1'000LL);
+    dave->append_block(0xDD, 1'000LL);
+    Block alice_b0 = alice_->bc->get_block({alice_->root_kp.pub, LEAF, 0});
+    Block bob_b0   = bob_->bc->get_block({bob_->root_kp.pub, LEAF, 0});
+    Block carol_b0 = carol->bc->get_block({carol->root_kp.pub, LEAF, 0});
+    Block dave_b0  = dave->bc->get_block({dave->root_kp.pub, LEAF, 0});
+
+    // Round 1: two independent pairs.
+    MergeDialogue a1 = alice_->dialogue(2'000LL);
+    MergeDialogue b1 = bob_->dialogue(2'000LL);
+    pump(a1, b1);
+    ASSERT_TRUE(a1.done()) << a1.error();
+    Hash r_ab = alice_->committed_root(*a1.merge_block());
+
+    MergeDialogue c1 = carol->dialogue(2'000LL);
+    MergeDialogue d1 = dave->dialogue(2'000LL);
+    pump(c1, d1);
+    ASSERT_TRUE(c1.done()) << c1.error();
+    Hash r_cd = carol->committed_root(*c1.merge_block());
+
+    // Round 2: both sides now hold composite snapshots.
+    MergeDialogue a2 = alice_->dialogue(3'000LL);
+    MergeDialogue c2 = carol->dialogue(3'000LL);
+    pump(a2, c2);
+    ASSERT_TRUE(a2.done()) << a2.error();
+    ASSERT_TRUE(c2.done()) << c2.error();
+    Hash top = alice_->committed_root(*a2.merge_block());
+    EXPECT_EQ(top, carol->committed_root(*c2.merge_block()));
+
+    // The top root composes the two round-1 roots: all four chains are now
+    // linked into one DAG by hashes.
+    auto comp = alice_->cache.get_composition(top);
+    ASSERT_TRUE(comp.has_value());
+    EXPECT_TRUE((comp->left_child == r_ab && comp->right_child == r_cd) ||
+                (comp->left_child == r_cd && comp->right_child == r_ab));
+
+    // Each side of round 1 cached both leaves of its pair; round 2 added only
+    // the composition — a composite snapshot does not reveal its leaves (§5.2).
+    EXPECT_EQ(alice_->cache.leaf_count(), 2u);
+    EXPECT_EQ(alice_->cache.composition_count(), 2u);
+    EXPECT_EQ(bob_->cache.leaf_count(), 2u);
+    EXPECT_EQ(bob_->cache.composition_count(), 1u);
+    EXPECT_EQ(carol->cache.leaf_count(), 2u);
+    EXPECT_EQ(carol->cache.composition_count(), 2u);
+    EXPECT_EQ(dave->cache.leaf_count(), 2u);
+    EXPECT_EQ(dave->cache.composition_count(), 1u);
+
+    // Alice proves her own pair against the top root; Carol's half must
+    // arrive via gossip (§7) before she can prove those leaves.
+    for (const Block* b0 : {&alice_b0, &bob_b0}) {
+        Hash leaf = MerkleTree::leaf_hash(alice_->leaf_ref_of(*b0));
+        auto proof = alice_->cache.build_proof(top, leaf);
+        ASSERT_TRUE(proof.has_value());
+        EXPECT_EQ(proof->merkle_path.path.size(), 2u);
+        EXPECT_TRUE(MerkleTree::verify(leaf, proof->merkle_path, top));
+        EXPECT_EQ(FraudProof::verify_bad_sig(top, *proof),
+                  FraudVerdict::REFUTED_HONEST);
+    }
+    for (const Block* b0 : {&carol_b0, &dave_b0}) {
+        Hash leaf = MerkleTree::leaf_hash(alice_->leaf_ref_of(*b0));
+        EXPECT_FALSE(alice_->cache.build_proof(top, leaf).has_value());
+    }
+}
+
 // ── Message flow shape (documents the wire sequence) ──────────────────────────
 
 TEST_F(MergeDialogueTest, MessageFlowSequence) {

@@ -5,7 +5,8 @@
       "Bash(./modules/blockchain/blockchain_tests --gtest_filter='*Stub*:MergeSessionTest.CreatePending*:MergeSessionTest.Finalize*:MergeSessionTest.FullMergeProtocol')",
       "Bash(./modules/blockchain/blockchain_tests --gtest_filter='FraudTest.*')",
       "Bash(./modules/blockchain/blockchain_tests --gtest_filter='FraudTest.ProofDataSerializationRoundTrip:FraudTest.VerifyByKindDispatch')",
-      "Bash(./modules/records/records_tests --gtest_filter='RecordsCodec.FraudClaim*')"
+      "Bash(./modules/records/records_tests --gtest_filter='RecordsCodec.FraudClaim*')",
+      "Bash(ctest -R sync_tests --output-on-failure)"
     ]
   }
 }
