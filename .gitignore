@@ -21,6 +21,7 @@ Testing/
 
 # ── Claude Code local settings (personal, not project-wide) ──────────────────
 .claude/settings.local.json
+.claude/settings.json
 
 # ── Editor / IDE ──────────────────────────────────────────────────────────────
 .vscode/settings.json
@@ -29,3 +30,4 @@ Testing/
 *.swo
 *~
 .DS_Store
+.claude/settings.json
