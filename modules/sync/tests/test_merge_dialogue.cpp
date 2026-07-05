@@ -1,96 +1,12 @@
-#include "sync/merge_dialogue.h"
-#include "sync/participant_cache.h"
-
-#include <blockchain/blockchain.h>
-#include <blockchain/crypto.h>
-#include <blockchain/serializer.h>
+#include "user_ctx.h"
 
 #include <gtest/gtest.h>
-#include <deque>
-#include <filesystem>
-#include <map>
 
 using namespace blockchain;
-using chainsync::MergeConfig;
 using chainsync::MergeDialogue;
-using chainsync::ParticipantCache;
-
-static constexpr NodeIndex LEAF = 0x7FFF'FFFFu;
-
-// ── Per-user context: chain + cache + dialogue factory ────────────────────────
-
-struct UserCtx {
-    std::filesystem::path         db_path;
-    std::unique_ptr<LmdbStorage>  storage;
-    std::unique_ptr<Validator>    validator;
-    std::unique_ptr<Blockchain>   bc;
-    std::unique_ptr<MergeSession> ms;
-    ParticipantCache              cache;
-
-    KeyPair                      root_kp;
-    KeyPair                      leaf_kp;
-    std::map<NodeIndex, KeyPair> path_keys;
-
-    UserCtx(const std::filesystem::path& base, int id) {
-        db_path = base / ("user_" + std::to_string(id));
-        std::filesystem::remove_all(db_path);
-        storage   = std::make_unique<LmdbStorage>(db_path);
-        validator = std::make_unique<Validator>(*storage);
-        bc        = std::make_unique<Blockchain>(*storage, *validator);
-        ms        = std::make_unique<MergeSession>(*storage, *validator);
-
-        root_kp      = Crypto::generate_keypair();
-        path_keys[0] = root_kp;
-        bc->create_identity(root_kp);
-        for (NodeIndex idx : path_indices(LEAF))
-            if (path_keys.find(idx) == path_keys.end())
-                path_keys[idx] = Crypto::generate_keypair();
-        bc->ensure_path(root_kp.pub, LEAF,
-                        [&](NodeIndex i) { return path_keys.at(i); });
-        leaf_kp = path_keys.at(LEAF);
-    }
-
-    ~UserCtx() { ms.reset(); bc.reset(); validator.reset(); storage.reset(); }
-
-    void append_block(uint8_t seed, Timestamp ts) {
-        bc->append_data_block(root_kp.pub, LEAF, {seed}, leaf_kp, ts);
-    }
-
-    MergeDialogue dialogue(Timestamp ts) {
-        return MergeDialogue(*ms, cache,
-                             MergeConfig{root_kp.pub, LEAF, leaf_kp, ts, 1u});
-    }
-
-    // Committed root of the branch's latest MERGE block payload.
-    Hash committed_root(const Block& merge_block) const {
-        MergePayload mp = Serializer::decode_merge_payload(
-            merge_block.payload.data(), merge_block.payload.size());
-        return mp.merkle_root;
-    }
-
-    ExternalRef leaf_ref_of(const Block& block) const {
-        return ExternalRef{block.address, Crypto::hash_block(block)};
-    }
-};
-
-// Delivers all pending messages between the two dialogues until both go quiet.
-static void pump(MergeDialogue& initiator, MergeDialogue& responder) {
-    std::deque<std::vector<uint8_t>> to_responder, to_initiator;
-    for (auto& m : initiator.start()) to_responder.push_back(std::move(m));
-    while (!to_responder.empty() || !to_initiator.empty()) {
-        if (!to_responder.empty()) {
-            auto msg = std::move(to_responder.front());
-            to_responder.pop_front();
-            for (auto& r : responder.on_message(msg.data(), msg.size()))
-                to_initiator.push_back(std::move(r));
-        } else {
-            auto msg = std::move(to_initiator.front());
-            to_initiator.pop_front();
-            for (auto& r : initiator.on_message(msg.data(), msg.size()))
-                to_responder.push_back(std::move(r));
-        }
-    }
-}
+using sync_tests::LEAF;
+using sync_tests::UserCtx;
+using sync_tests::pump;
 
 class MergeDialogueTest : public ::testing::Test {
 protected:

@@ -8,11 +8,13 @@ pkg_check_modules(LMDB REQUIRED lmdb)
 add_library(sync
     src/participant_cache.cpp
     src/merge_dialogue.cpp
+    src/dialogue_channel.cpp
 )
 
 target_include_directories(sync
     PUBLIC  include
     PRIVATE ${LMDB_INCLUDE_DIRS}
+            ${CMAKE_SOURCE_DIR}/third_party/httplib
 )
 
 target_link_libraries(sync
@@ -30,10 +32,17 @@ find_package(GTest REQUIRED)
 add_executable(sync_tests
     tests/test_participant_cache.cpp
     tests/test_merge_dialogue.cpp
+    tests/test_dialogue_channel.cpp
+)
+
+# aggregator + httplib: only for the live-relay end-to-end test.
+target_include_directories(sync_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/httplib
 )
 
 target_link_libraries(sync_tests PRIVATE
     sync
+    aggregator
     GTest::gtest_main
 )
 

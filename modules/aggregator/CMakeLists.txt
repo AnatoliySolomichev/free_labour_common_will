@@ -36,6 +36,7 @@ find_package(GTest REQUIRED)
 
 add_executable(aggregator_tests
     tests/test_aggregator.cpp
+    tests/test_relay.cpp
 )
 
 target_include_directories(aggregator_tests PRIVATE

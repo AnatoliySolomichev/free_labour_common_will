@@ -8,19 +8,24 @@
 #include <blockchain/validator.h>
 #include <records/codec.h>
 #include <records/types.h>
+#include <sync/dialogue_channel.h>
 #include <sync/participant_cache.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -114,8 +119,15 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--work", "--quality", "--hours-raw", "--labor-units",
     "--peer-tip", "--peer-snapshot", "--draft", "--co-sig", "--mode", "--user",
     "--idx", "--depth", "--proof", "--merkle-root", "--target", "--leaf-hash",
-    "--reason",
+    "--reason", "--peer", "--via", "--timeout",
 };
+
+// True when a standalone flag (no value) is present.
+static bool flag_present(int argc, char** argv, const std::string& flag) {
+    for (int i = 1; i < argc; ++i)
+        if (std::string(argv[i]) == flag) return true;
+    return false;
+}
 
 // Returns all non-flag arguments in order.
 static std::vector<std::string> get_positionals(int argc, char** argv) {
@@ -783,6 +795,161 @@ static int cmd_merge_finalize(const fs::path& data_dir, int argc, char** argv) {
     return 0;
 }
 
+// ── Networked merge over the aggregator relay (sync.md §4.1) ──────────────────
+
+static void print_merge_result(const Block& blk) {
+    const Hash merge_hash = Crypto::hash_block(blk);
+    std::cout << "merge block #" << blk.address.block_index
+              << "  hash: " << to_hex(merge_hash.bytes) << "\n";
+    std::cerr << "Merge complete. Participant cache updated.\n";
+}
+
+// bc merge run --peer UID_HEX --via URL [--leaf L] [--depth N] [--timeout SEC]
+// Initiates one merge dialogue and drives it to completion over the relay.
+static int cmd_merge_run(const fs::path& data_dir, int argc, char** argv) {
+    const auto peer_hex = flag_val(argc, argv, "--peer");
+    const auto via      = flag_val(argc, argv, "--via");
+    if (peer_hex.empty() || via.empty()) {
+        std::cerr << "Usage: bc merge run --peer UID_HEX --via URL "
+                     "[--leaf L] [--depth N] [--timeout SEC]\n";
+        return 1;
+    }
+    UserId peer{};
+    if (!from_hex(peer_hex, peer.bytes.data(), 32)) {
+        std::cerr << "Invalid --peer hex (expected 64 hex chars)\n";
+        return 1;
+    }
+
+    const NodeIndex leaf    = parse_leaf_index(argc, argv);
+    const long      timeout = std::stol(flag_val(argc, argv, "--timeout", "60"));
+    const auto      dep_s   = flag_val(argc, argv, "--depth");
+    const uint32_t  depth   = dep_s.empty() ? 1u
+                            : static_cast<uint32_t>(std::stoul(dep_s));
+
+    Context ctx(data_dir, leaf);
+    MergeSession session(ctx.storage, ctx.validator);
+    chainsync::ParticipantCache cache(data_dir / "sync_cache");
+    const auto now = static_cast<Timestamp>(std::time(nullptr));
+    chainsync::MergeDialogue dialogue(
+        session, cache,
+        chainsync::MergeConfig{ctx.user_id, leaf, ctx.working_kp, now, depth});
+    chainsync::HttpDialogueChannel channel(via, ctx.user_id);
+    chainsync::DialoguePump pump(dialogue, channel, ctx.user_id, peer,
+                                 chainsync::make_session_id());
+
+    if (!pump.begin()) {
+        if (dialogue.failed())
+            std::cerr << "merge failed: " << dialogue.error() << "\n";
+        else
+            std::cerr << "relay unreachable: " << via << "\n";
+        return 1;
+    }
+    std::cerr << "OFFER sent to " << peer_hex.substr(0, 16) << "... via " << via
+              << " (partner must be running: bc merge serve)\n";
+
+    const auto deadline = std::chrono::steady_clock::now()
+                        + std::chrono::seconds(timeout);
+    while (!pump.finished() && std::chrono::steady_clock::now() < deadline) {
+        for (auto& env : channel.poll())
+            if (!pump.feed(env)) { std::cerr << "relay send failed\n"; return 1; }
+        if (!pump.finished())
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }
+
+    if (dialogue.done())   { print_merge_result(*dialogue.merge_block()); return 0; }
+    if (dialogue.failed()) { std::cerr << "merge failed: " << dialogue.error() << "\n"; return 1; }
+    std::cerr << "no answer within " << timeout
+              << "s — dialogue stalled and abandoned (safe to retry)\n";
+    return 1;
+}
+
+// bc merge serve --via URL [--leaf L] [--depth N] [--timeout SEC] [--once]
+// Responder loop: picks up OFFERs from the own mailbox and answers each with
+// the given branch. --once exits after the first completed merge.
+static int cmd_merge_serve(const fs::path& data_dir, int argc, char** argv) {
+    const auto via = flag_val(argc, argv, "--via");
+    if (via.empty()) {
+        std::cerr << "Usage: bc merge serve --via URL "
+                     "[--leaf L] [--depth N] [--timeout SEC] [--once]\n";
+        return 1;
+    }
+
+    const NodeIndex leaf    = parse_leaf_index(argc, argv);
+    const bool      once    = flag_present(argc, argv, "--once");
+    const long      timeout = std::stol(flag_val(argc, argv, "--timeout", "0"));
+    const auto      dep_s   = flag_val(argc, argv, "--depth");
+    const uint32_t  depth   = dep_s.empty() ? 1u
+                            : static_cast<uint32_t>(std::stoul(dep_s));
+
+    Context ctx(data_dir, leaf);
+    chainsync::ParticipantCache cache(data_dir / "sync_cache");
+    chainsync::HttpDialogueChannel channel(via, ctx.user_id);
+
+    // One dialogue per (session, sender). Concurrent dialogues on the same
+    // branch resolve themselves: the second create_pending fails its dialogue.
+    struct Serving {
+        MergeSession             session;
+        chainsync::MergeDialogue dialogue;
+        chainsync::DialoguePump  pump;
+
+        Serving(Context& ctx, chainsync::ParticipantCache& cache, NodeIndex leaf,
+                uint32_t depth, chainsync::IDialogueChannel& ch,
+                const chainsync::RelayEnvelope& env)
+            : session(ctx.storage, ctx.validator)
+            , dialogue(session, cache,
+                       chainsync::MergeConfig{
+                           ctx.user_id, leaf, ctx.working_kp,
+                           static_cast<Timestamp>(std::time(nullptr)), depth})
+            , pump(dialogue, ch, ctx.user_id, env.from, env.session) {}
+    };
+    std::map<std::string, std::unique_ptr<Serving>> serving;
+
+    std::cerr << "Serving merges via " << via
+              << (once ? " (first merge, then exit)" : " (Ctrl+C to stop)") << "\n";
+
+    const auto deadline = std::chrono::steady_clock::now()
+                        + std::chrono::seconds(timeout);
+    for (;;) {
+        for (const auto& env : channel.poll()) {
+            const std::string key =
+                to_hex(env.session.data(), env.session.size())
+                + to_hex(env.from.bytes.data(), env.from.bytes.size());
+            auto it = serving.find(key);
+            if (it == serving.end()) {
+                it = serving.emplace(key, std::make_unique<Serving>(
+                         ctx, cache, leaf, depth, channel, env)).first;
+                std::cerr << "Dialogue opened by "
+                          << to_hex(env.from.bytes.data(), 8) << "...\n";
+            }
+            if (!it->second->pump.feed(env)) {
+                std::cerr << "relay send failed — dropping dialogue\n";
+                it->second = nullptr;
+            }
+        }
+
+        for (auto it = serving.begin(); it != serving.end();) {
+            if (!it->second) { it = serving.erase(it); continue; }
+            auto& d = it->second->dialogue;
+            if (d.done()) {
+                print_merge_result(*d.merge_block());
+                if (once) return 0;
+                it = serving.erase(it);
+            } else if (d.failed()) {
+                std::cerr << "dialogue failed: " << d.error() << "\n";
+                it = serving.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        if (timeout > 0 && std::chrono::steady_clock::now() >= deadline) {
+            std::cerr << "timeout after " << timeout << "s\n";
+            return once ? 1 : 0;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }
+}
+
 // ── Seal commands ─────────────────────────────────────────────────────────────
 
 // bc seal add BLOCK_HASH_HEX [--leaf L]
@@ -1076,7 +1243,16 @@ Labor:
     --hours-raw   FLOAT
     --labor-units FLOAT
 
-Merge (§6.4 bilateral two-round protocol):
+Merge over a relay (sync.md §4.1):
+  merge run                        Initiate a merge and drive it to completion
+    --peer UID_HEX                     partner's User ID
+    --via  URL                         aggregator relay, e.g. http://host:8080
+    [--depth N] [--timeout SEC]        declared depth (1) / give-up time (60)
+  merge serve --via URL            Respond to incoming merge OFFERs in a loop
+    [--depth N] [--timeout SEC]        SEC=0: run forever
+    [--once]                           exit after the first completed merge
+
+Merge, manual relay (§6.4 bilateral two-round protocol):
   merge prepare                    Step 1: print own tip + snapshot blobs (send to partner)
   merge create --peer-tip HEX      Step 2: verify tip, union snapshots, create draft
                --peer-snapshot HEX          print draft_hash [--depth N: declared depth]
@@ -1153,6 +1329,8 @@ int main(int argc, char** argv) {
         else if (cmd == "merge"     && subcmd == "create")  return cmd_merge_create(data_dir, argc, argv);
         else if (cmd == "merge"     && subcmd == "cosign")  return cmd_merge_cosign(data_dir, argc, argv);
         else if (cmd == "merge"     && subcmd == "finalize")return cmd_merge_finalize(data_dir, argc, argv);
+        else if (cmd == "merge"     && subcmd == "run")     return cmd_merge_run(data_dir, argc, argv);
+        else if (cmd == "merge"     && subcmd == "serve")   return cmd_merge_serve(data_dir, argc, argv);
         else if (cmd == "seal"      && subcmd == "add")     return cmd_seal_add(data_dir, argc, argv);
         else if (cmd == "seal"      && subcmd == "list")    return cmd_seal_list(data_dir, argc, argv);
         else if (cmd == "fraud"     && subcmd == "verify")  return cmd_fraud_verify(argc, argv);

@@ -2,6 +2,7 @@
 #include "blockchain/serializer.h"
 #include "blockchain/errors.h"
 #include <httplib.h>
+#include <algorithm>
 #include <sstream>
 #include <iomanip>
 #include <iostream>
@@ -65,6 +66,24 @@ std::string idea_to_json(const IdeaInfo& idea) {
     return s;
 }
 
+// Deterministic-CBOR heads for the inbox response (array of byte strings).
+void cbor_head(std::string& out, uint8_t major, uint64_t v) {
+    const char m = static_cast<char>(major << 5);
+    if (v < 24) { out.push_back(static_cast<char>(m | v)); return; }
+    int extra = v <= 0xFF ? 1 : v <= 0xFFFF ? 2 : v <= 0xFFFF'FFFFull ? 4 : 8;
+    out.push_back(static_cast<char>(m | (extra == 1 ? 24 : extra == 2 ? 25
+                                       : extra == 4 ? 26 : 27)));
+    for (int i = extra - 1; i >= 0; --i)
+        out.push_back(static_cast<char>(v >> (8 * i)));
+}
+
+void cbor_array_head(std::string& out, uint64_t n) { cbor_head(out, 4, n); }
+
+void cbor_bstr(std::string& out, const std::string& bytes) {
+    cbor_head(out, 2, bytes.size());
+    out += bytes;
+}
+
 } // anonymous namespace
 
 // ── Impl (holds httplib::Server) ──────────────────────────────────────────────
@@ -78,11 +97,13 @@ struct AggregatorServer::Impl {
 AggregatorServer::AggregatorServer(AggregatorStorage& storage,
                                    uint16_t port,
                                    std::vector<std::string> peers,
-                                   std::chrono::seconds sync_interval)
+                                   std::chrono::seconds sync_interval,
+                                   std::chrono::seconds mailbox_ttl)
     : storage_(storage)
     , port_(port)
     , peers_(std::move(peers))
     , sync_interval_(sync_interval)
+    , mailbox_ttl_(mailbox_ttl)
     , impl_(std::make_unique<Impl>())
 {
     setup_routes();
@@ -186,6 +207,73 @@ void AggregatorServer::setup_routes() {
         auto cbor = Serializer::encode(*blk);
         res.set_content(std::string(reinterpret_cast<const char*>(cbor.data()), cbor.size()),
                         "application/octet-stream");
+    });
+
+    // ── Dialogue mailbox relay (sync.md §4.1) ─────────────────────────────────
+    //
+    // A dumb pipe for merge-dialogue envelopes: bytes in, bytes out, nothing
+    // parsed or signed. Expired entries are pruned lazily on access.
+
+    auto prune_mailbox = [&](std::vector<MailboxEntry>& box) {
+        const auto now = std::chrono::steady_clock::now();
+        box.erase(std::remove_if(box.begin(), box.end(),
+                                 [&](const MailboxEntry& e) {
+                                     return now - e.queued_at >= mailbox_ttl_;
+                                 }),
+                  box.end());
+    };
+
+    // POST /dialogue/:uid — queue one envelope for :uid. Duplicate bodies are
+    // accepted but stored once (idempotent retry).
+    svr.Post("/dialogue/:uid", [&, prune_mailbox](const httplib::Request& req,
+                                                  httplib::Response& res) {
+        const std::string uid = req.path_params.at("uid");
+        if (!hex_to_hash(uid)) {
+            res.status = 400;
+            res.set_content("{\"error\":\"invalid uid\"}", "application/json");
+            return;
+        }
+        std::lock_guard<std::mutex> lock(mailbox_mutex_);
+        auto& box = mailboxes_[uid];
+        prune_mailbox(box);
+        for (const auto& e : box)
+            if (e.bytes == req.body) {
+                res.set_content("{\"status\":\"duplicate\"}", "application/json");
+                return;
+            }
+        if (box.size() >= kMailboxCap) {
+            res.status = 429;
+            res.set_content("{\"error\":\"mailbox full\"}", "application/json");
+            return;
+        }
+        box.push_back({req.body, std::chrono::steady_clock::now()});
+        res.set_content("{\"status\":\"queued\"}", "application/json");
+    });
+
+    // GET /dialogue/:uid/inbox — drain the mailbox in arrival order.
+    // Body: CBOR array of byte strings, one per envelope.
+    svr.Get("/dialogue/:uid/inbox", [&, prune_mailbox](const httplib::Request& req,
+                                                       httplib::Response& res) {
+        const std::string uid = req.path_params.at("uid");
+        if (!hex_to_hash(uid)) {
+            res.status = 400;
+            res.set_content("{\"error\":\"invalid uid\"}", "application/json");
+            return;
+        }
+        std::vector<MailboxEntry> box;
+        {
+            std::lock_guard<std::mutex> lock(mailbox_mutex_);
+            auto it = mailboxes_.find(uid);
+            if (it != mailboxes_.end()) {
+                prune_mailbox(it->second);
+                box = std::move(it->second);
+                mailboxes_.erase(it);
+            }
+        }
+        std::string body;
+        cbor_array_head(body, box.size());
+        for (const auto& e : box) cbor_bstr(body, e.bytes);
+        res.set_content(body, "application/cbor");
     });
 
     // ── GET /stats ────────────────────────────────────────────────────────────
