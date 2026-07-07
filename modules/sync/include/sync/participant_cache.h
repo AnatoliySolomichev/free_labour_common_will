@@ -51,6 +51,13 @@ struct Composition {
     blockchain::Hash right_child;
 };
 
+// LeafRecord wire/persistence codec: a FraudProofData with an empty Merkle
+// path (reuses the blockchain Serializer). Shared by the persistent cache and
+// the snapshot exchange (§7.1).
+// Throws: SerializationError.
+std::vector<uint8_t> encode_leaf_record(const LeafRecord& record);
+LeafRecord decode_leaf_record(const uint8_t* data, std::size_t len);
+
 class ParticipantCache {
 public:
     // In-memory cache (tests, ephemeral use).

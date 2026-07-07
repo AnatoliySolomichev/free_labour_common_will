@@ -62,10 +62,12 @@ std::vector<BlockAddress> decode_witnesses(const uint8_t* data, std::size_t len)
 // ── Impl ──────────────────────────────────────────────────────────────────────
 
 struct AggregatorStorage::Impl {
-    MDB_env* env      = nullptr;
-    MDB_dbi  dbi_blk  = 0; // blocks:  block_key  → CBOR(Block)
-    MDB_dbi  dbi_hash = 0; // hashes:  block_hash → block_key
-    MDB_dbi  dbi_idea = 0; // ideas:   payload_hash → N×40B witness list
+    MDB_env* env       = nullptr;
+    MDB_dbi  dbi_blk   = 0; // blocks:      block_key  → CBOR(Block)
+    MDB_dbi  dbi_hash  = 0; // hashes:      block_hash → block_key
+    MDB_dbi  dbi_idea  = 0; // ideas:       payload_hash → N×40B witness list
+    MDB_dbi  dbi_leaf  = 0; // snap_leaves: leaf_hash → opaque LeafRecord bytes
+    MDB_dbi  dbi_comp  = 0; // snap_comps:  parent_root → left‖right (64B)
 };
 
 // ── Constructor / Destructor ──────────────────────────────────────────────────
@@ -75,16 +77,18 @@ AggregatorStorage::AggregatorStorage(std::filesystem::path db_path)
 {
     std::filesystem::create_directories(db_path);
     lcheck(mdb_env_create(&impl_->env),              "mdb_env_create");
-    lcheck(mdb_env_set_maxdbs(impl_->env, 3),        "mdb_env_set_maxdbs");
+    lcheck(mdb_env_set_maxdbs(impl_->env, 5),        "mdb_env_set_maxdbs");
     lcheck(mdb_env_set_mapsize(impl_->env, 1u<<30),  "mdb_env_set_mapsize");
     lcheck(mdb_env_open(impl_->env, db_path.c_str(), 0, 0600), "mdb_env_open");
 
     MDB_txn* txn;
     lcheck(mdb_txn_begin(impl_->env, nullptr, 0, &txn), "open txn");
     int rc = 0;
-    if ((rc = mdb_dbi_open(txn, "blocks", MDB_CREATE, &impl_->dbi_blk))  != MDB_SUCCESS ||
-        (rc = mdb_dbi_open(txn, "hashes", MDB_CREATE, &impl_->dbi_hash)) != MDB_SUCCESS ||
-        (rc = mdb_dbi_open(txn, "ideas",  MDB_CREATE, &impl_->dbi_idea)) != MDB_SUCCESS) {
+    if ((rc = mdb_dbi_open(txn, "blocks",      MDB_CREATE, &impl_->dbi_blk))  != MDB_SUCCESS ||
+        (rc = mdb_dbi_open(txn, "hashes",      MDB_CREATE, &impl_->dbi_hash)) != MDB_SUCCESS ||
+        (rc = mdb_dbi_open(txn, "ideas",       MDB_CREATE, &impl_->dbi_idea)) != MDB_SUCCESS ||
+        (rc = mdb_dbi_open(txn, "snap_leaves", MDB_CREATE, &impl_->dbi_leaf)) != MDB_SUCCESS ||
+        (rc = mdb_dbi_open(txn, "snap_comps",  MDB_CREATE, &impl_->dbi_comp)) != MDB_SUCCESS) {
         mdb_txn_abort(txn);
         throw StorageError(std::string("mdb_dbi_open: ") + mdb_strerror(rc));
     }
@@ -276,6 +280,91 @@ std::optional<IdeaInfo> AggregatorStorage::get_idea(const Hash& ph) const {
         if (blk) info.payload = blk->payload;
     }
     return info;
+}
+
+// ── Snapshot warehouse (sync.md §7.1) ─────────────────────────────────────────
+//
+// Generic 32-byte-key → opaque-bytes access shared by both tables.
+
+namespace {
+
+bool put_opaque(MDB_env* env, MDB_dbi dbi, const Hash& key,
+                const std::vector<uint8_t>& bytes, const char* op) {
+    MDB_val mk{key.bytes.size(), const_cast<uint8_t*>(key.bytes.data())};
+    MDB_val mv{bytes.size(),     const_cast<uint8_t*>(bytes.data())};
+    MDB_txn* txn;
+    lcheck(mdb_txn_begin(env, nullptr, 0, &txn), op);
+    int rc = mdb_put(txn, dbi, &mk, &mv, MDB_NOOVERWRITE);
+    if (rc == MDB_KEYEXIST) { mdb_txn_abort(txn); return false; }   // first write wins
+    if (rc != MDB_SUCCESS)  { mdb_txn_abort(txn); lcheck(rc, op); }
+    lcheck(mdb_txn_commit(txn), op);
+    return true;
+}
+
+std::optional<std::vector<uint8_t>> get_opaque(MDB_env* env, MDB_dbi dbi,
+                                               const Hash& key, const char* op) {
+    MDB_val mk{key.bytes.size(), const_cast<uint8_t*>(key.bytes.data())};
+    MDB_val mv{};
+    MDB_txn* txn;
+    lcheck(mdb_txn_begin(env, nullptr, MDB_RDONLY, &txn), op);
+    int rc = mdb_get(txn, dbi, &mk, &mv);
+    if (rc == MDB_NOTFOUND) { mdb_txn_abort(txn); return std::nullopt; }
+    if (rc != MDB_SUCCESS)  { mdb_txn_abort(txn); lcheck(rc, op); }
+    std::vector<uint8_t> out(static_cast<const uint8_t*>(mv.mv_data),
+                             static_cast<const uint8_t*>(mv.mv_data) + mv.mv_size);
+    mdb_txn_abort(txn);
+    return out;
+}
+
+std::vector<Hash> all_keys(MDB_env* env, MDB_dbi dbi, const char* op) {
+    std::vector<Hash> result;
+    MDB_txn* txn;
+    lcheck(mdb_txn_begin(env, nullptr, MDB_RDONLY, &txn), op);
+    MDB_cursor* cur;
+    if (mdb_cursor_open(txn, dbi, &cur) != MDB_SUCCESS) {
+        mdb_txn_abort(txn); return {};
+    }
+    MDB_val mk{}, mv{};
+    while (mdb_cursor_get(cur, &mk, &mv, MDB_NEXT) == MDB_SUCCESS) {
+        if (mk.mv_size == 32) {
+            Hash h;
+            std::memcpy(h.bytes.data(), mk.mv_data, 32);
+            result.push_back(h);
+        }
+    }
+    mdb_cursor_close(cur);
+    mdb_txn_abort(txn);
+    return result;
+}
+
+} // anonymous namespace
+
+bool AggregatorStorage::put_snapshot_leaf(const Hash& leaf_hash,
+                                          const std::vector<uint8_t>& bytes) {
+    return put_opaque(impl_->env, impl_->dbi_leaf, leaf_hash, bytes, "put_snap_leaf");
+}
+
+bool AggregatorStorage::put_snapshot_composition(const Hash& parent_root,
+                                                 const std::vector<uint8_t>& bytes) {
+    return put_opaque(impl_->env, impl_->dbi_comp, parent_root, bytes, "put_snap_comp");
+}
+
+std::optional<std::vector<uint8_t>>
+AggregatorStorage::get_snapshot_leaf(const Hash& leaf_hash) const {
+    return get_opaque(impl_->env, impl_->dbi_leaf, leaf_hash, "get_snap_leaf");
+}
+
+std::optional<std::vector<uint8_t>>
+AggregatorStorage::get_snapshot_composition(const Hash& parent_root) const {
+    return get_opaque(impl_->env, impl_->dbi_comp, parent_root, "get_snap_comp");
+}
+
+std::vector<Hash> AggregatorStorage::all_snapshot_leaf_hashes() const {
+    return all_keys(impl_->env, impl_->dbi_leaf, "snap_leaf_manifest");
+}
+
+std::vector<Hash> AggregatorStorage::all_snapshot_composition_roots() const {
+    return all_keys(impl_->env, impl_->dbi_comp, "snap_comp_manifest");
 }
 
 std::size_t AggregatorStorage::block_count() const noexcept {

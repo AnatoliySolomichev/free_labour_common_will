@@ -9,6 +9,7 @@ add_library(sync
     src/participant_cache.cpp
     src/merge_dialogue.cpp
     src/dialogue_channel.cpp
+    src/snapshot_exchange.cpp
 )
 
 target_include_directories(sync
@@ -33,6 +34,7 @@ add_executable(sync_tests
     tests/test_participant_cache.cpp
     tests/test_merge_dialogue.cpp
     tests/test_dialogue_channel.cpp
+    tests/test_snapshot_exchange.cpp
 )
 
 # aggregator + httplib: only for the live-relay end-to-end test.

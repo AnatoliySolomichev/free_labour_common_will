@@ -10,6 +10,7 @@
 #include <records/types.h>
 #include <sync/dialogue_channel.h>
 #include <sync/participant_cache.h>
+#include <sync/snapshot_exchange.h>
 
 #include <algorithm>
 #include <chrono>
@@ -799,9 +800,26 @@ static int cmd_merge_finalize(const fs::path& data_dir, int argc, char** argv) {
 
 static void print_merge_result(const Block& blk) {
     const Hash merge_hash = Crypto::hash_block(blk);
+    const MergePayload mp = Serializer::decode_merge_payload(
+        blk.payload.data(), blk.payload.size());
     std::cout << "merge block #" << blk.address.block_index
               << "  hash: " << to_hex(merge_hash.bytes) << "\n";
+    std::cout << "union root: " << to_hex(mp.merkle_root.bytes) << "\n";
     std::cerr << "Merge complete. Participant cache updated.\n";
+}
+
+// Best-effort push of the local cache to the aggregator's snapshot warehouse
+// (sync.md §7.1) — gossip must not fail a completed merge.
+static void publish_cache_via(const std::string& via,
+                              const chainsync::ParticipantCache& cache) {
+    try {
+        chainsync::HttpSnapshotStore store(via);
+        const std::size_t n = chainsync::publish_cache(store, cache);
+        if (n > 0)
+            std::cerr << "Published " << n << " snapshot entr(ies) to " << via << "\n";
+    } catch (const std::exception& e) {
+        std::cerr << "snapshot publish skipped: " << e.what() << "\n";
+    }
 }
 
 // bc merge run --peer UID_HEX --via URL [--leaf L] [--depth N] [--timeout SEC]
@@ -856,7 +874,11 @@ static int cmd_merge_run(const fs::path& data_dir, int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(300));
     }
 
-    if (dialogue.done())   { print_merge_result(*dialogue.merge_block()); return 0; }
+    if (dialogue.done()) {
+        print_merge_result(*dialogue.merge_block());
+        publish_cache_via(via, cache);
+        return 0;
+    }
     if (dialogue.failed()) { std::cerr << "merge failed: " << dialogue.error() << "\n"; return 1; }
     std::cerr << "no answer within " << timeout
               << "s — dialogue stalled and abandoned (safe to retry)\n";
@@ -932,6 +954,7 @@ static int cmd_merge_serve(const fs::path& data_dir, int argc, char** argv) {
             auto& d = it->second->dialogue;
             if (d.done()) {
                 print_merge_result(*d.merge_block());
+                publish_cache_via(via, cache);
                 if (once) return 0;
                 it = serving.erase(it);
             } else if (d.failed()) {
@@ -1108,6 +1131,57 @@ static int cmd_cache_list(const fs::path& data_dir) {
     return 0;
 }
 
+// bc cache publish --via URL
+// Pushes the local participant cache to an aggregator warehouse (sync.md §7.1).
+static int cmd_cache_publish(const fs::path& data_dir, int argc, char** argv) {
+    const auto via = flag_val(argc, argv, "--via");
+    if (via.empty()) {
+        std::cerr << "Usage: bc cache publish --via URL\n";
+        return 1;
+    }
+    chainsync::ParticipantCache cache(data_dir / "sync_cache");
+    chainsync::HttpSnapshotStore store(via);
+    const std::size_t n = chainsync::publish_cache(store, cache);
+    std::cout << "published " << n << " new entr(ies) of "
+              << (cache.leaf_count() + cache.composition_count())
+              << " to " << via << "\n";
+    return 0;
+}
+
+// bc cache complete --via URL [--root HEX] [--leaf L]
+// Pulls everything missing under a snapshot root from the warehouse into the
+// local cache (sync.md §7.1). Default root: own branch's current snapshot.
+static int cmd_cache_complete(const fs::path& data_dir, int argc, char** argv) {
+    const auto via = flag_val(argc, argv, "--via");
+    if (via.empty()) {
+        std::cerr << "Usage: bc cache complete --via URL [--root HEX] [--leaf L]\n";
+        return 1;
+    }
+
+    Hash root{};
+    const auto root_hex = flag_val(argc, argv, "--root");
+    if (!root_hex.empty()) {
+        if (!from_hex(root_hex, root.bytes.data(), 32)) {
+            std::cerr << "Invalid --root hex (expected 64 hex chars)\n";
+            return 1;
+        }
+    } else {
+        const NodeIndex leaf = parse_leaf_index(argc, argv);
+        Context ctx(data_dir, leaf);
+        MergeSession session(ctx.storage, ctx.validator);
+        root = session.snapshot_for(ctx.user_id, leaf).merkle_root;
+    }
+
+    chainsync::ParticipantCache cache(data_dir / "sync_cache");
+    chainsync::HttpSnapshotStore store(via);
+    const std::size_t added = chainsync::complete_cache(store, cache, root);
+    std::cout << "root:  " << to_hex(root.bytes) << "\n"
+              << "added: " << added << " entr(ies)  (cache now "
+              << cache.leaf_count() << " leaves / "
+              << cache.composition_count() << " compositions)\n";
+    return 0;
+}
+
 // bc fraud claim --kind (bad_sig|hash_mismatch) --target CHAIN/BLOCKHASH
 //                --merkle-root HEX --leaf-hash HEX [--reason TEXT] [--leaf L]
 // Builds a FraudClaim proof from the participant cache (sync.md §5.3, closes
@@ -1276,8 +1350,11 @@ Fraud (records.md §3A, blockchain.md §6.5.6):
                --proof HEX                 KIND = bad_sig | hash_mismatch
                --merkle-root HEX
 
-Sync cache (sync.md §5, filled by merge finalize):
+Sync cache (sync.md §5; gossip §7.1):
   cache list                       List cached participant leaves and compositions
+  cache publish --via URL          Push the local cache to an aggregator warehouse
+  cache complete --via URL         Pull everything missing under a snapshot root
+                 [--root HEX]          (default: own branch's current snapshot)
 
 Other:
   list                             List all records in a branch
@@ -1336,6 +1413,8 @@ int main(int argc, char** argv) {
         else if (cmd == "fraud"     && subcmd == "verify")  return cmd_fraud_verify(argc, argv);
         else if (cmd == "fraud"     && subcmd == "claim")   return cmd_fraud_claim(data_dir, argc, argv);
         else if (cmd == "cache"     && subcmd == "list")    return cmd_cache_list(data_dir);
+        else if (cmd == "cache"     && subcmd == "publish") return cmd_cache_publish(data_dir, argc, argv);
+        else if (cmd == "cache"     && subcmd == "complete")return cmd_cache_complete(data_dir, argc, argv);
         else {
             std::cerr << "Unknown command: " << cmd;
             if (!subcmd.empty()) std::cerr << " " << subcmd;

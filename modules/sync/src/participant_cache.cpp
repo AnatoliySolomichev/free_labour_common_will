@@ -29,6 +29,8 @@ void lcheck(int rc, const char* op) {
         throw StorageError(std::string(op) + ": " + mdb_strerror(rc));
 }
 
+} // namespace (anonymous)
+
 std::vector<uint8_t> encode_leaf_record(const LeafRecord& r) {
     return Serializer::encode(
         FraudProofData{r.ref, MerkleTree::Proof{}, r.node_path, r.evidence});
@@ -38,8 +40,6 @@ LeafRecord decode_leaf_record(const uint8_t* data, size_t len) {
     FraudProofData p = Serializer::decode_fraud_proof(data, len);
     return LeafRecord{p.leaf, std::move(p.node_path), std::move(p.evidence)};
 }
-
-} // namespace (anonymous)
 
 struct ParticipantCache::Persistence {
     MDB_env* env        = nullptr;

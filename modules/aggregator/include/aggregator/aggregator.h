@@ -25,10 +25,18 @@ struct IdeaInfo {
 
 // ── AggregatorStorage ─────────────────────────────────────────────────────────
 //
-// LMDB-backed store with three tables:
-//   "blocks"  — block_key(40B) → CBOR(Block)
-//   "hashes"  — block_hash(32B) → block_key(40B)   (for sync dedup)
-//   "ideas"   — payload_hash(32B) → N×40B witness list
+// LMDB-backed store with five tables:
+//   "blocks"      — block_key(40B) → CBOR(Block)
+//   "hashes"      — block_hash(32B) → block_key(40B)   (for sync dedup)
+//   "ideas"       — payload_hash(32B) → N×40B witness list
+//   "snap_leaves" — leaf_hash(32B) → opaque LeafRecord bytes (sync.md §7.1)
+//   "snap_comps"  — parent_root(32B) → left‖right (64B)
+//
+// The snapshot tables are a dumb warehouse: values are stored verbatim and
+// never parsed — the *fetching* node verifies an entry against its own key
+// (sync.md §7.1). First write wins: overwriting is refused, so a later
+// attacker cannot displace an honest entry; a bogus first write is useless —
+// clients discard it on verification.
 
 class AggregatorStorage {
 public:
@@ -58,6 +66,16 @@ public:
 
     std::size_t block_count() const noexcept;
     std::size_t idea_count() const noexcept;
+
+    // Snapshot warehouse (sync.md §7.1). Values are opaque bytes.
+    // put_* return false when the key already exists (first write wins).
+    // Throws: StorageError on LMDB failure.
+    bool put_snapshot_leaf(const Hash& leaf_hash, const std::vector<uint8_t>& bytes);
+    bool put_snapshot_composition(const Hash& parent_root, const std::vector<uint8_t>& bytes);
+    std::optional<std::vector<uint8_t>> get_snapshot_leaf(const Hash& leaf_hash) const;
+    std::optional<std::vector<uint8_t>> get_snapshot_composition(const Hash& parent_root) const;
+    std::vector<Hash> all_snapshot_leaf_hashes() const;
+    std::vector<Hash> all_snapshot_composition_roots() const;
 
 private:
     struct Impl;

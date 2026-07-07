@@ -133,6 +133,87 @@ TEST_F(RelayTest, ExpiredEnvelopesArePruned) {
     EXPECT_EQ(drain(cli, kUidA), std::string(1, static_cast<char>(0x80)));
 }
 
+// ── Snapshot warehouse (sync.md §7.1) ─────────────────────────────────────────
+
+TEST_F(RelayTest, WarehouseRoundtripFirstWriteWins) {
+    start_server(std::chrono::seconds(3600));
+    httplib::Client cli(host());
+
+    const std::string key(64, 'a');
+    const std::string leaf_bytes = "opaque-leaf-bytes";
+
+    auto post = cli.Post("/snapshot/leaf/" + key, leaf_bytes, "application/octet-stream");
+    ASSERT_TRUE(post && post->status == 200);
+    EXPECT_NE(post->body.find("stored"), std::string::npos);
+
+    // Second write for the same key is refused (first write wins).
+    auto post2 = cli.Post("/snapshot/leaf/" + key, "displacement attempt",
+                          "application/octet-stream");
+    ASSERT_TRUE(post2 && post2->status == 200);
+    EXPECT_NE(post2->body.find("duplicate"), std::string::npos);
+
+    auto got = cli.Get("/snapshot/leaf/" + key);
+    ASSERT_TRUE(got && got->status == 200);
+    EXPECT_EQ(got->body, leaf_bytes);                       // verbatim, original
+
+    // Compositions must be exactly 64 bytes.
+    const std::string ckey(64, 'b');
+    auto bad = cli.Post("/snapshot/composition/" + ckey, "short",
+                        "application/octet-stream");
+    ASSERT_TRUE(bad);
+    EXPECT_EQ(bad->status, 400);
+    auto ok = cli.Post("/snapshot/composition/" + ckey, std::string(64, '\x07'),
+                       "application/octet-stream");
+    ASSERT_TRUE(ok && ok->status == 200);
+
+    // Manifests list the stored keys.
+    auto lm = cli.Get("/snapshot/leaves/manifest");
+    ASSERT_TRUE(lm && lm->status == 200);
+    EXPECT_NE(lm->body.find(key), std::string::npos);
+    auto cm = cli.Get("/snapshot/compositions/manifest");
+    ASSERT_TRUE(cm && cm->status == 200);
+    EXPECT_NE(cm->body.find(ckey), std::string::npos);
+
+    auto missing = cli.Get("/snapshot/leaf/" + std::string(64, 'f'));
+    ASSERT_TRUE(missing);
+    EXPECT_EQ(missing->status, 404);
+}
+
+TEST_F(RelayTest, AggregatorsGossipWarehouseEntries) {
+    start_server(std::chrono::seconds(3600));   // server A (this->server_)
+    httplib::Client cli_a(host());
+
+    const std::string lkey(64, 'c');
+    const std::string ckey(64, 'd');
+    ASSERT_TRUE(cli_a.Post("/snapshot/leaf/" + lkey, "gossiped-leaf",
+                           "application/octet-stream"));
+    ASSERT_TRUE(cli_a.Post("/snapshot/composition/" + ckey, std::string(64, '\x09'),
+                           "application/octet-stream"));
+
+    // Server B peers with A and pulls on a 1s interval.
+    const uint16_t port_b = port_ + 100;
+    auto db_b = db_path_;
+    db_b += "_b";
+    AggregatorStorage storage_b(db_b);
+    AggregatorServer  server_b(storage_b, port_b,
+                               {"http://127.0.0.1:" + std::to_string(port_)},
+                               std::chrono::seconds(1));
+    std::thread thread_b([&] { server_b.run(); });
+
+    httplib::Client cli_b("127.0.0.1:" + std::to_string(port_b));
+    bool arrived = false;
+    for (int i = 0; i < 100 && !arrived; ++i) {
+        auto res = cli_b.Get("/snapshot/leaf/" + lkey);
+        if (res && res->status == 200 && res->body == "gossiped-leaf") arrived = true;
+        else std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    server_b.stop();
+    thread_b.join();
+    std::filesystem::remove_all(db_b);
+
+    EXPECT_TRUE(arrived) << "warehouse entry did not gossip within 10s";
+}
+
 TEST_F(RelayTest, FullMailboxAnswers429) {
     start_server(std::chrono::seconds(3600));
     httplib::Client cli(host());

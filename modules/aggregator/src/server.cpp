@@ -276,6 +276,89 @@ void AggregatorServer::setup_routes() {
         res.set_content(body, "application/cbor");
     });
 
+    // ── Snapshot warehouse (sync.md §7.1) ─────────────────────────────────────
+    //
+    // Opaque leaf/composition bytes; the fetching node verifies entries
+    // against their keys, the warehouse only stores. First write wins.
+
+    auto snapshot_put = [&](const httplib::Request& req, httplib::Response& res,
+                            bool is_leaf) {
+        auto key = hex_to_hash(req.path_params.at("hash"));
+        if (!key) {
+            res.status = 400;
+            res.set_content("{\"error\":\"invalid key\"}", "application/json");
+            return;
+        }
+        if (req.body.empty() || (!is_leaf && req.body.size() != 64)) {
+            res.status = 400;
+            res.set_content("{\"error\":\"bad size\"}", "application/json");
+            return;
+        }
+        try {
+            const std::vector<uint8_t> bytes(req.body.begin(), req.body.end());
+            const bool stored = is_leaf
+                ? storage_.put_snapshot_leaf(*key, bytes)
+                : storage_.put_snapshot_composition(*key, bytes);
+            res.set_content(stored ? "{\"status\":\"stored\"}"
+                                   : "{\"status\":\"duplicate\"}",
+                            "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
+                            "application/json");
+        }
+    };
+
+    auto snapshot_get = [&](const httplib::Request& req, httplib::Response& res,
+                            bool is_leaf) {
+        auto key = hex_to_hash(req.path_params.at("hash"));
+        if (!key) { res.status = 400; return; }
+        const auto bytes = is_leaf ? storage_.get_snapshot_leaf(*key)
+                                   : storage_.get_snapshot_composition(*key);
+        if (!bytes) { res.status = 404; return; }
+        res.set_content(std::string(bytes->begin(), bytes->end()),
+                        "application/octet-stream");
+    };
+
+    auto snapshot_manifest = [&](httplib::Response& res, bool is_leaf) {
+        const auto hashes = is_leaf ? storage_.all_snapshot_leaf_hashes()
+                                    : storage_.all_snapshot_composition_roots();
+        std::string body = "{\"hashes\":[";
+        for (std::size_t i = 0; i < hashes.size(); ++i) {
+            if (i) body += ',';
+            body += '"';
+            body += to_hex(hashes[i].bytes);
+            body += '"';
+        }
+        body += "]}";
+        res.set_content(body, "application/json");
+    };
+
+    svr.Post("/snapshot/leaf/:hash", [&, snapshot_put](const httplib::Request& req,
+                                                       httplib::Response& res) {
+        snapshot_put(req, res, true);
+    });
+    svr.Get("/snapshot/leaf/:hash", [&, snapshot_get](const httplib::Request& req,
+                                                      httplib::Response& res) {
+        snapshot_get(req, res, true);
+    });
+    svr.Post("/snapshot/composition/:hash", [&, snapshot_put](const httplib::Request& req,
+                                                              httplib::Response& res) {
+        snapshot_put(req, res, false);
+    });
+    svr.Get("/snapshot/composition/:hash", [&, snapshot_get](const httplib::Request& req,
+                                                             httplib::Response& res) {
+        snapshot_get(req, res, false);
+    });
+    svr.Get("/snapshot/leaves/manifest",
+            [&, snapshot_manifest](const httplib::Request&, httplib::Response& res) {
+        snapshot_manifest(res, true);
+    });
+    svr.Get("/snapshot/compositions/manifest",
+            [&, snapshot_manifest](const httplib::Request&, httplib::Response& res) {
+        snapshot_manifest(res, false);
+    });
+
     // ── GET /stats ────────────────────────────────────────────────────────────
     svr.Get("/stats", [&](const httplib::Request&, httplib::Response& res) {
         std::string body = "{\"blocks\":"  + std::to_string(storage_.block_count())
@@ -297,27 +380,28 @@ void AggregatorServer::sync_with_peer(const std::string& peer_url) {
     cli.set_connection_timeout(5);
     cli.set_read_timeout(10);
 
-    // 1. Get manifest.
-    auto manifest_res = cli.Get("/sync/manifest");
-    if (!manifest_res || manifest_res->status != 200) return;
-
-    // Parse JSON array of hex strings (hand-written).
-    const std::string& body = manifest_res->body;
-    std::vector<Hash> remote_hashes;
-    std::size_t pos = 0;
-    while ((pos = body.find('"', pos)) != std::string::npos) {
-        std::size_t end = body.find('"', pos + 1);
-        if (end == std::string::npos) break;
-        std::string hex_str = body.substr(pos + 1, end - pos - 1);
-        if (hex_str.size() == 64) {
-            if (auto h = hex_to_hash(hex_str)) remote_hashes.push_back(*h);
+    // Parse a JSON body for quoted 64-char hex strings (hand-written).
+    auto manifest_hashes = [&cli](const std::string& path) {
+        std::vector<Hash> hashes;
+        auto res = cli.Get(path);
+        if (!res || res->status != 200) return hashes;
+        const std::string& body = res->body;
+        std::size_t pos = 0;
+        while ((pos = body.find('"', pos)) != std::string::npos) {
+            std::size_t end = body.find('"', pos + 1);
+            if (end == std::string::npos) break;
+            std::string hex_str = body.substr(pos + 1, end - pos - 1);
+            if (hex_str.size() == 64) {
+                if (auto h = hex_to_hash(hex_str)) hashes.push_back(*h);
+            }
+            pos = end + 1;
         }
-        pos = end + 1;
-    }
+        return hashes;
+    };
 
-    // 2. Pull blocks we don't have.
+    // 1. Pull blocks we don't have (manifest + fetch).
     int pulled = 0;
-    for (const Hash& bh : remote_hashes) {
+    for (const Hash& bh : manifest_hashes("/sync/manifest")) {
         if (storage_.has_block_hash(bh)) continue;
 
         auto blk_res = cli.Get("/sync/block/" + to_hex(bh.bytes));
@@ -331,8 +415,31 @@ void AggregatorServer::sync_with_peer(const std::string& peer_url) {
         } catch (...) {}
     }
 
-    if (pulled > 0)
-        std::cout << "[sync] pulled " << pulled << " block(s) from " << peer_url << "\n";
+    // 2. Pull snapshot leaves/compositions the same way (sync.md §7.1).
+    // Bytes travel verbatim — the warehouse never interprets them.
+    int gossiped = 0;
+    for (const Hash& lh : manifest_hashes("/snapshot/leaves/manifest")) {
+        if (storage_.get_snapshot_leaf(lh)) continue;
+        auto res = cli.Get("/snapshot/leaf/" + to_hex(lh.bytes));
+        if (!res || res->status != 200 || res->body.empty()) continue;
+        try {
+            if (storage_.put_snapshot_leaf(
+                    lh, {res->body.begin(), res->body.end()})) ++gossiped;
+        } catch (...) {}
+    }
+    for (const Hash& cr : manifest_hashes("/snapshot/compositions/manifest")) {
+        if (storage_.get_snapshot_composition(cr)) continue;
+        auto res = cli.Get("/snapshot/composition/" + to_hex(cr.bytes));
+        if (!res || res->status != 200 || res->body.size() != 64) continue;
+        try {
+            if (storage_.put_snapshot_composition(
+                    cr, {res->body.begin(), res->body.end()})) ++gossiped;
+        } catch (...) {}
+    }
+
+    if (pulled > 0 || gossiped > 0)
+        std::cout << "[sync] pulled " << pulled << " block(s), " << gossiped
+                  << " snapshot entr(ies) from " << peer_url << "\n";
 }
 
 void AggregatorServer::sync_loop() {
