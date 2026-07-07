@@ -17,6 +17,7 @@ target_link_libraries(bc PRIVATE
 target_include_directories(bc PRIVATE
     ${LIBSODIUM_INCLUDE_DIRS}
     ${LMDB_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/third_party/httplib
 )
 
 target_compile_options(bc PRIVATE -Wall -Wextra)

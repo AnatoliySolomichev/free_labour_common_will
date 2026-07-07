@@ -12,8 +12,11 @@
 #include <sync/participant_cache.h>
 #include <sync/snapshot_exchange.h>
 
+#include <httplib.h>
+
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
@@ -121,6 +124,7 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--peer-tip", "--peer-snapshot", "--draft", "--co-sig", "--mode", "--user",
     "--idx", "--depth", "--proof", "--merkle-root", "--target", "--leaf-hash",
     "--reason", "--peer", "--via", "--timeout",
+    "--to", "--units", "--origin", "--pledge", "--executor", "--expires",
 };
 
 // True when a standalone flag (no value) is present.
@@ -238,6 +242,19 @@ static std::string record_summary(const Record& rec) {
             ss << "[Acceptance]  work:" << short_hex(r.work.hash)
                << "  " << r.labor_units << " labor-h"
                << "  quality:" << r.quality;
+        } else if constexpr (std::is_same_v<T, records::Transfer>) {
+            double total = 0;
+            for (const auto& o : r.origins) total += o.units;
+            ss << "[Transfer]    to:" << short_hex(r.to)
+               << "  " << total << "h  (" << r.origins.size() << " portion(s))";
+            if (r.reason) ss << "  reason:" << short_hex(r.reason->hash);
+        } else if constexpr (std::is_same_v<T, Pledge>) {
+            ss << "[Pledge]      target:" << short_hex(r.target.hash)
+               << "  " << r.units << "h";
+            if (r.executor) ss << "  exec:" << short_hex(*r.executor);
+            if (r.expires)  ss << "  expires:" << *r.expires;
+        } else if constexpr (std::is_same_v<T, PledgeRevoke>) {
+            ss << "[PledgeRevoke] pledge:" << short_hex(r.pledge.hash);
         }
         return ss.str();
     }, rec);
@@ -973,6 +990,356 @@ static int cmd_merge_serve(const fs::path& data_dir, int argc, char** argv) {
     }
 }
 
+// ── Economy: named labor-hours (records.md §11, §12.7) ────────────────────────
+
+static std::array<uint8_t, 32> uid_from_hex(const std::string& s) {
+    std::array<uint8_t, 32> a{};
+    if (!from_hex(s, a.data(), 32))
+        throw std::runtime_error("invalid UserId hex (expected 64 hex chars): " + s);
+    return a;
+}
+
+// Analytic wallet view — no protocol enforcement (records.md §12.7): own
+// outgoing transfers come from the branch, incoming ones from the external
+// store (fetched by 'bc transfer recv').
+struct WalletView {
+    std::map<std::string, double> holdings;   // issuer hex → held units of their paper
+    double issued   = 0;                      // own paper put into circulation
+    double redeemed = 0;                      // own paper returned (annihilated)
+    double debt() const { return issued - redeemed; }
+};
+
+static WalletView compute_wallet(Context& ctx) {
+    WalletView w;
+    const auto& me = ctx.user_id.bytes;
+
+    std::vector<Block> blocks;
+    try { blocks = ctx.bc.get_branch(ctx.user_id, ctx.leaf); }
+    catch (const BlockchainError&) {}
+    for (const auto& b : blocks) {
+        if (b.type != BlockType::DATA) continue;
+        try {
+            const auto rec = Codec::decode(b.payload.data(), b.payload.size());
+            const auto* t  = std::get_if<records::Transfer>(&rec);
+            if (!t || t->from != me) continue;
+            for (const auto& o : t->origins) {
+                if (o.issuer == me) w.issued += o.units;              // self-issue
+                else w.holdings[to_hex(o.issuer.data(), 32)] -= o.units;
+            }
+        } catch (const CodecError&) {}
+    }
+
+    ctx.storage.for_each_external_block([&](const Block& b) {
+        if (b.type != BlockType::DATA) return true;
+        try {
+            const auto rec = Codec::decode(b.payload.data(), b.payload.size());
+            const auto* t  = std::get_if<records::Transfer>(&rec);
+            if (!t || t->to != me) return true;
+            if (b.address.user_id.bytes != t->from) return true;      // spoofed sender
+            for (const auto& o : t->origins) {
+                if (o.issuer == me) w.redeemed += o.units;            // redemption
+                else w.holdings[to_hex(o.issuer.data(), 32)] += o.units;
+            }
+        } catch (const CodecError&) {}
+        return true;
+    });
+
+    for (auto it = w.holdings.begin(); it != w.holdings.end();)
+        it = std::abs(it->second) < 1e-9 ? w.holdings.erase(it) : std::next(it);
+    return w;
+}
+
+static Block append_record(Context& ctx, const Record& rec) {
+    const auto payload = Codec::encode(rec);
+    const auto now     = static_cast<Timestamp>(std::time(nullptr));
+    return ctx.bc.append_data_block(ctx.user_id, ctx.leaf, payload,
+                                    ctx.working_kp, now);
+}
+
+// bc wallet [--leaf L]
+static int cmd_wallet(const fs::path& data_dir, int argc, char** argv) {
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+    const auto w = compute_wallet(ctx);
+
+    double held = 0;
+    std::cout << "holdings (paper of others):\n";
+    if (w.holdings.empty()) std::cout << "  (none)\n";
+    for (const auto& [issuer, units] : w.holdings) {
+        std::cout << "  " << issuer.substr(0, 16) << "...  " << units << "h\n";
+        held += units;
+    }
+    std::cout << "total held: " << held << "h\n"
+              << "own debt in circulation: " << w.debt()
+              << "h  (issued " << w.issued << ", redeemed " << w.redeemed << ")\n";
+    return 0;
+}
+
+// bc transfer send --to UID --units N [--origin ISSUER_HEX:UNITS]...
+//                  [--reason REF] [--via URL] [--leaf L]
+static int cmd_transfer_send(const fs::path& data_dir, int argc, char** argv) {
+    const auto to_s      = flag_val(argc, argv, "--to");
+    const auto units_s   = flag_val(argc, argv, "--units");
+    const auto origins_s = flag_all(argc, argv, "--origin");
+    if (to_s.empty() || (units_s.empty() && origins_s.empty())) {
+        std::cerr << "Usage: bc transfer send --to UID_HEX --units N "
+                     "[--origin ISSUER_HEX:UNITS]... [--reason REF] [--via URL] [--leaf L]\n";
+        return 1;
+    }
+
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+    const std::string me_hex = to_hex(ctx.user_id.bytes);
+
+    records::Transfer t{};
+    t.from      = ctx.user_id.bytes;
+    t.to        = uid_from_hex(to_s);
+    t.timestamp = static_cast<int64_t>(std::time(nullptr));
+    const auto reason_s = flag_val(argc, argv, "--reason");
+    if (!reason_s.empty()) t.reason = parse_ref(reason_s);
+
+    if (!origins_s.empty()) {
+        // Manual portions.
+        double total = 0;
+        for (const auto& s : origins_s) {
+            const auto colon = s.find(':');
+            if (colon == std::string::npos)
+                throw std::runtime_error("--origin expects ISSUER_HEX:UNITS, got: " + s);
+            records::OriginQty o{};
+            o.issuer = uid_from_hex(s.substr(0, colon));
+            o.units  = std::stod(s.substr(colon + 1));
+            if (o.units <= 0) throw std::runtime_error("--origin units must be positive");
+            total += o.units;
+            t.origins.push_back(o);
+        }
+        if (!units_s.empty() && std::abs(std::stod(units_s) - total) > 1e-9)
+            throw std::runtime_error("--units disagrees with the sum of --origin portions");
+    } else {
+        // Auto-selection (records.md §11.1): receiver's own paper first (it
+        // will annihilate), then other held paper, self-issue the remainder.
+        double remaining = std::stod(units_s);
+        if (remaining <= 0) throw std::runtime_error("--units must be positive");
+        auto wallet = compute_wallet(ctx);
+        auto spend = [&](const std::string& issuer_hex) {
+            auto it = wallet.holdings.find(issuer_hex);
+            if (it == wallet.holdings.end() || it->second <= 0 || remaining <= 1e-9)
+                return;
+            const double take = std::min(it->second, remaining);
+            t.origins.push_back({uid_from_hex(issuer_hex), take});
+            remaining -= take;
+            it->second = 0;
+        };
+        spend(to_s);                                       // redemption first
+        for (const auto& [issuer, units] : wallet.holdings) {
+            (void)units;
+            spend(issuer);
+        }
+        if (remaining > 1e-9)
+            t.origins.push_back({ctx.user_id.bytes, remaining});   // self-issue
+    }
+
+    const Block block = append_record(ctx, Record{t});
+    const Hash  hash  = Crypto::hash_block(block);
+
+    for (const auto& o : t.origins) {
+        const std::string issuer = to_hex(o.issuer.data(), 32);
+        const char* kind = issuer == me_hex ? "self-issued"
+                         : issuer == to_s   ? "returned to issuer"
+                                            : "endorsed";
+        std::cerr << "  " << o.units << "h  " << kind
+                  << "  (issuer " << issuer.substr(0, 16) << "...)\n";
+    }
+    std::cout << "transfer ref: " << me_hex << "/" << to_hex(hash.bytes) << "\n";
+
+    const auto via = flag_val(argc, argv, "--via");
+    if (!via.empty()) {
+        std::string host = via;
+        if (host.rfind("http://", 0) == 0) host = host.substr(7);
+        httplib::Client cli(host);
+        cli.set_connection_timeout(5);
+        const auto cbor = Serializer::encode(block);
+        const auto res  = cli.Post("/blocks",
+            std::string(reinterpret_cast<const char*>(cbor.data()), cbor.size()),
+            "application/cbor");
+        if (res && res->status == 200)
+            std::cerr << "Uploaded to " << via << ". Receiver runs: bc transfer recv "
+                      << me_hex.substr(0, 8) << ".../" << to_hex(hash.bytes).substr(0, 8)
+                      << "... --via " << via << "\n";
+        else
+            std::cerr << "upload to " << via << " failed — receiver can't fetch it yet\n";
+    }
+    return 0;
+}
+
+// bc transfer recv <chain>/<hash> --via URL [--leaf L]
+static int cmd_transfer_recv(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);
+    const auto via = flag_val(argc, argv, "--via");
+    if (pos.size() < 3 || via.empty()) {
+        std::cerr << "Usage: bc transfer recv <chain_hex>/<hash_hex> --via URL [--leaf L]\n";
+        return 1;
+    }
+    const Ref src = parse_ref(pos[2]);
+
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+
+    std::string host = via;
+    if (host.rfind("http://", 0) == 0) host = host.substr(7);
+    httplib::Client cli(host);
+    cli.set_connection_timeout(5);
+    const auto res = cli.Get("/sync/block/" + to_hex(src.hash.data(), 32));
+    if (!res || res->status != 200) {
+        std::cerr << "block not found on " << via << "\n";
+        return 1;
+    }
+
+    const Block block = Serializer::decode_block(
+        reinterpret_cast<const uint8_t*>(res->body.data()), res->body.size());
+    if (Crypto::hash_block(block).bytes != src.hash)
+        throw std::runtime_error("aggregator returned a block with a different hash");
+    if (block.address.user_id.bytes != src.chain)
+        throw std::runtime_error("block belongs to a different chain than the ref says");
+    if (block.type != BlockType::DATA)
+        throw std::runtime_error("referenced block is not a DATA block");
+
+    const auto rec = Codec::decode(block.payload.data(), block.payload.size());
+    const auto* t  = std::get_if<records::Transfer>(&rec);
+    if (!t) throw std::runtime_error("referenced record is not a Transfer");
+    if (t->to != ctx.user_id.bytes)
+        throw std::runtime_error("transfer is not addressed to this identity");
+    if (t->from != block.address.user_id.bytes)
+        throw std::runtime_error("transfer 'from' does not match the authoring chain");
+
+    if (ctx.storage.has_external_block(block.address)) {
+        std::cerr << "already received — wallet unchanged\n";
+        return 0;
+    }
+    ctx.storage.put_external_block(block);
+    append_record(ctx, Record{Copy{src}});   // on-chain acknowledgment (двусторонность)
+
+    double total = 0;
+    for (const auto& o : t->origins) total += o.units;
+    std::cout << "received " << total << "h in " << t->origins.size()
+              << " portion(s) from " << to_hex(t->from.data(), 32).substr(0, 16) << "...\n";
+    const auto w = compute_wallet(ctx);
+    std::cerr << "wallet: " << w.holdings.size() << " issuer(s) held, own debt "
+              << w.debt() << "h\n";
+    return 0;
+}
+
+// bc pledge add --target REF --units N [--executor UID] [--expires TS] [--leaf L]
+static int cmd_pledge_add(const fs::path& data_dir, int argc, char** argv) {
+    const auto target_s = flag_val(argc, argv, "--target");
+    const auto units_s  = flag_val(argc, argv, "--units");
+    if (target_s.empty() || units_s.empty()) {
+        std::cerr << "Usage: bc pledge add --target REF --units N "
+                     "[--executor UID_HEX] [--expires UNIX_TS] [--leaf L]\n";
+        return 1;
+    }
+
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+
+    Pledge p{};
+    p.target    = parse_ref(target_s);
+    p.units     = std::stod(units_s);
+    p.timestamp = static_cast<int64_t>(std::time(nullptr));
+    if (p.units <= 0) throw std::runtime_error("--units must be positive");
+    const auto exec_s = flag_val(argc, argv, "--executor");
+    if (!exec_s.empty()) p.executor = uid_from_hex(exec_s);
+    const auto exp_s = flag_val(argc, argv, "--expires");
+    if (!exp_s.empty()) p.expires = static_cast<int64_t>(std::stoll(exp_s));
+
+    const Block block = append_record(ctx, Record{p});
+    std::cout << "pledge ref: " << to_hex(ctx.user_id.bytes) << "/"
+              << to_hex(Crypto::hash_block(block).bytes) << "\n";
+    std::cerr << "(settle with: bc transfer send --reason <pledge ref>; "
+                 "revoke with: bc pledge revoke)\n";
+    return 0;
+}
+
+// bc pledge revoke --pledge REF [--leaf L]
+static int cmd_pledge_revoke(const fs::path& data_dir, int argc, char** argv) {
+    const auto pledge_s = flag_val(argc, argv, "--pledge");
+    if (pledge_s.empty()) {
+        std::cerr << "Usage: bc pledge revoke --pledge REF [--leaf L]\n";
+        return 1;
+    }
+
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+
+    PledgeRevoke pr{};
+    pr.pledge    = parse_ref(pledge_s);
+    pr.timestamp = static_cast<int64_t>(std::time(nullptr));
+    if (pr.pledge.chain != ctx.user_id.bytes)
+        throw std::runtime_error("can only revoke an own pledge (records.md §11.4)");
+
+    const Block block = append_record(ctx, Record{pr});
+    std::cout << "revoke block #" << block.address.block_index << "  hash: "
+              << to_hex(Crypto::hash_block(block).bytes) << "\n";
+    return 0;
+}
+
+// bc pledge list [--leaf L]
+// Own pledges with settlement status, computed from the own branch.
+static int cmd_pledge_list(const fs::path& data_dir, int argc, char** argv) {
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+
+    struct PledgeInfo {
+        Pledge p;
+        double settled = 0;
+        bool   revoked = false;
+    };
+    std::map<std::string, PledgeInfo> pledges;   // own pledge block hash → info
+
+    std::vector<Block> blocks;
+    try { blocks = ctx.bc.get_branch(ctx.user_id, leaf); }
+    catch (const BlockchainError&) {}
+    for (const auto& b : blocks) {
+        if (b.type != BlockType::DATA) continue;
+        Record rec;
+        try { rec = Codec::decode(b.payload.data(), b.payload.size()); }
+        catch (const CodecError&) { continue; }
+
+        if (const auto* p = std::get_if<Pledge>(&rec)) {
+            pledges[to_hex(Crypto::hash_block(b).bytes)] = PledgeInfo{*p, 0, false};
+        } else if (const auto* pr = std::get_if<PledgeRevoke>(&rec)) {
+            auto it = pledges.find(to_hex(pr->pledge.hash.data(), 32));
+            if (it != pledges.end()) it->second.revoked = true;
+        } else if (const auto* t = std::get_if<records::Transfer>(&rec)) {
+            if (!t->reason || t->reason->chain != ctx.user_id.bytes) continue;
+            auto it = pledges.find(to_hex(t->reason->hash.data(), 32));
+            if (it == pledges.end()) continue;
+            for (const auto& o : t->origins) it->second.settled += o.units;
+        }
+    }
+
+    if (pledges.empty()) {
+        std::cout << "(no pledges)\n";
+        return 0;
+    }
+    const auto now = static_cast<int64_t>(std::time(nullptr));
+    for (const auto& [hash_hex, info] : pledges) {
+        const auto& p = info.p;
+        std::string status;
+        if (info.settled + 1e-9 >= p.units) status = "SETTLED";
+        else if (info.revoked)              status = "REVOKED";
+        else if (p.expires && *p.expires < now) status = "EXPIRED";
+        else                                status = "ACTIVE";
+
+        std::cout << hash_hex.substr(0, 16) << "...  " << status
+                  << "  " << info.settled << "/" << p.units << "h"
+                  << "  target:" << to_hex(p.target.hash.data(), 32).substr(0, 16) << "...";
+        if (p.executor) std::cout << "  exec:" << to_hex(p.executor->data(), 32).substr(0, 16) << "...";
+        if (p.expires)  std::cout << "  expires:" << *p.expires;
+        std::cout << "\n";
+    }
+    return 0;
+}
+
 // ── Seal commands ─────────────────────────────────────────────────────────────
 
 // bc seal add BLOCK_HASH_HEX [--leaf L]
@@ -1350,6 +1717,19 @@ Fraud (records.md §3A, blockchain.md §6.5.6):
                --proof HEX                 KIND = bad_sig | hash_mismatch
                --merkle-root HEX
 
+Economy (records.md §11 — именные трудочасы, §12.7):
+  wallet                           Holdings per issuer + own debt in circulation
+  transfer send                    Move labor-hours; auto-picks portions:
+    --to UID_HEX --units N             receiver's paper first (redemption), then
+    [--origin ISSUER_HEX:UNITS]...     other held paper, self-issue for the rest
+    [--reason REF] [--via URL]         (--via also uploads the block for the receiver)
+  transfer recv <chain>/<hash>     Fetch an incoming transfer from an aggregator,
+    --via URL                          store it and acknowledge on-chain (Copy)
+  pledge add --target REF          Promise labor-hours for a work/idea
+    --units N [--executor UID_HEX] [--expires UNIX_TS]
+  pledge revoke --pledge REF       Revoke the unsettled remainder of an own pledge
+  pledge list                      Own pledges with settlement status
+
 Sync cache (sync.md §5; gossip §7.1):
   cache list                       List cached participant leaves and compositions
   cache publish --via URL          Push the local cache to an aggregator warehouse
@@ -1415,6 +1795,12 @@ int main(int argc, char** argv) {
         else if (cmd == "cache"     && subcmd == "list")    return cmd_cache_list(data_dir);
         else if (cmd == "cache"     && subcmd == "publish") return cmd_cache_publish(data_dir, argc, argv);
         else if (cmd == "cache"     && subcmd == "complete")return cmd_cache_complete(data_dir, argc, argv);
+        else if (cmd == "wallet")                           return cmd_wallet(data_dir, argc, argv);
+        else if (cmd == "transfer"  && subcmd == "send")    return cmd_transfer_send(data_dir, argc, argv);
+        else if (cmd == "transfer"  && subcmd == "recv")    return cmd_transfer_recv(data_dir, argc, argv);
+        else if (cmd == "pledge"    && subcmd == "add")     return cmd_pledge_add(data_dir, argc, argv);
+        else if (cmd == "pledge"    && subcmd == "revoke")  return cmd_pledge_revoke(data_dir, argc, argv);
+        else if (cmd == "pledge"    && subcmd == "list")    return cmd_pledge_list(data_dir, argc, argv);
         else {
             std::cerr << "Unknown command: " << cmd;
             if (!subcmd.empty()) std::cerr << " " << subcmd;

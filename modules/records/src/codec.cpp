@@ -70,6 +70,10 @@ void w_float64(Buf& out, double v) {
         out.push_back(static_cast<uint8_t>(bits >> (8 * i)));
 }
 
+// CBOR null (0xF6) marks an absent optional field; the map key stays present
+// so the layout is deterministic.
+void w_null(Buf& out) { out.push_back(0xf6u); }
+
 void w_ref(Buf& out, const Ref& r) {
     w_map(out, 2);
     w_uint(out, 0); w_fixed(out, r.chain);
@@ -172,6 +176,41 @@ void enc_acceptance(Buf& out, const Acceptance& a) {
     w_uint(out, 4); w_float64(out, a.hours_raw);
     w_uint(out, 5); w_float64(out, a.labor_units);
     w_uint(out, 6); w_int64(out, a.timestamp);
+}
+
+void enc_transfer(Buf& out, const Transfer& t) {
+    w_map(out, 6);
+    w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Transfer));
+    w_uint(out, 1); w_fixed(out, t.from);
+    w_uint(out, 2); w_fixed(out, t.to);
+    w_uint(out, 3); w_arr(out, t.origins.size());
+    for (const auto& o : t.origins) {
+        w_map(out, 2);
+        w_uint(out, 0); w_fixed(out, o.issuer);
+        w_uint(out, 1); w_float64(out, o.units);
+    }
+    w_uint(out, 4);
+    if (t.reason) w_ref(out, *t.reason); else w_null(out);
+    w_uint(out, 5); w_int64(out, t.timestamp);
+}
+
+void enc_pledge(Buf& out, const Pledge& p) {
+    w_map(out, 6);
+    w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Pledge));
+    w_uint(out, 1); w_ref(out, p.target);
+    w_uint(out, 2); w_float64(out, p.units);
+    w_uint(out, 3);
+    if (p.executor) w_fixed(out, *p.executor); else w_null(out);
+    w_uint(out, 4);
+    if (p.expires) w_int64(out, *p.expires); else w_null(out);
+    w_uint(out, 5); w_int64(out, p.timestamp);
+}
+
+void enc_pledge_revoke(Buf& out, const PledgeRevoke& pr) {
+    w_map(out, 3);
+    w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::PledgeRevoke));
+    w_uint(out, 1); w_ref(out, pr.pledge);
+    w_uint(out, 2); w_int64(out, pr.timestamp);
 }
 
 // ── CBOR reader ───────────────────────────────────────────────────────────────
@@ -289,6 +328,13 @@ public:
         return n;
     }
 
+    // Raw payload bytes following an already-consumed head.
+    void r_raw(uint8_t* out, size_t n) {
+        need(n);
+        std::memcpy(out, data_ + pos_, n);
+        pos_ += n;
+    }
+
     uint64_t r_arr() {
         const auto [m, n] = read_head();
         if (m != 4) throw CodecError("CBOR: expected array");
@@ -321,6 +367,49 @@ Ref dec_ref(CborReader& r) {
     expect_key(r, 0); r.r_fixed(ref.chain);
     expect_key(r, 1); r.r_fixed(ref.hash);
     return ref;
+}
+
+// ── Optional fields: CBOR null (major 7, info 22) or the value itself ─────────
+
+bool is_null_head(const std::pair<uint8_t, uint64_t>& h) {
+    return h.first == 7 && h.second == 22;
+}
+
+std::optional<Ref> dec_opt_ref(CborReader& r) {
+    const auto h = r.read_head();
+    if (is_null_head(h)) return std::nullopt;
+    if (h.first != 5 || h.second != 2)
+        throw CodecError("Ref?: expected map(2) or null");
+    Ref ref{};
+    expect_key(r, 0); r.r_fixed(ref.chain);
+    expect_key(r, 1); r.r_fixed(ref.hash);
+    return ref;
+}
+
+std::optional<std::array<uint8_t, 32>> dec_opt_bytes32(CborReader& r) {
+    const auto h = r.read_head();
+    if (is_null_head(h)) return std::nullopt;
+    if (h.first != 2 || h.second != 32)
+        throw CodecError("Bytes(32)?: expected 32-byte string or null");
+    std::array<uint8_t, 32> a{};
+    r.r_raw(a.data(), 32);
+    return a;
+}
+
+std::optional<int64_t> dec_opt_int(CborReader& r) {
+    const auto h = r.read_head();
+    if (is_null_head(h)) return std::nullopt;
+    if (h.first == 0) {
+        if (h.second > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+            throw CodecError("Int?: uint overflows int64_t");
+        return static_cast<int64_t>(h.second);
+    }
+    if (h.first == 1) {
+        if (h.second > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+            throw CodecError("Int?: negint underflows int64_t");
+        return -1LL - static_cast<int64_t>(h.second);
+    }
+    throw CodecError("Int?: expected integer or null");
 }
 
 ResourceQty dec_resource_qty(CborReader& r) {
@@ -434,6 +523,44 @@ Acceptance dec_acceptance_fields(CborReader& r) {
     return a;
 }
 
+Transfer dec_transfer_fields(CborReader& r) {
+    Transfer t{};
+    expect_key(r, 1); r.r_fixed(t.from);
+    expect_key(r, 2); r.r_fixed(t.to);
+    expect_key(r, 3);
+    {
+        const uint64_t n = r.r_arr();
+        t.origins.reserve(static_cast<size_t>(n));
+        for (uint64_t i = 0; i < n; ++i) {
+            if (r.r_map() != 2) throw CodecError("OriginQty: expected 2 fields");
+            OriginQty o{};
+            expect_key(r, 0); r.r_fixed(o.issuer);
+            expect_key(r, 1); o.units = r.r_float64();
+            t.origins.push_back(o);
+        }
+    }
+    expect_key(r, 4); t.reason    = dec_opt_ref(r);
+    expect_key(r, 5); t.timestamp = r.r_int();
+    return t;
+}
+
+Pledge dec_pledge_fields(CborReader& r) {
+    Pledge p{};
+    expect_key(r, 1); p.target    = dec_ref(r);
+    expect_key(r, 2); p.units     = r.r_float64();
+    expect_key(r, 3); p.executor  = dec_opt_bytes32(r);
+    expect_key(r, 4); p.expires   = dec_opt_int(r);
+    expect_key(r, 5); p.timestamp = r.r_int();
+    return p;
+}
+
+PledgeRevoke dec_pledge_revoke_fields(CborReader& r) {
+    PledgeRevoke pr{};
+    expect_key(r, 1); pr.pledge    = dec_ref(r);
+    expect_key(r, 2); pr.timestamp = r.r_int();
+    return pr;
+}
+
 } // namespace (anonymous)
 
 // ── Codec public methods ──────────────────────────────────────────────────────
@@ -453,6 +580,9 @@ std::vector<uint8_t> Codec::encode(const Record& rec) {
         else if constexpr (std::is_same_v<T, Worker>)      enc_worker(out, r);
         else if constexpr (std::is_same_v<T, WorkRecord>)  enc_work_record(out, r);
         else if constexpr (std::is_same_v<T, Acceptance>)  enc_acceptance(out, r);
+        else if constexpr (std::is_same_v<T, Transfer>)    enc_transfer(out, r);
+        else if constexpr (std::is_same_v<T, Pledge>)      enc_pledge(out, r);
+        else if constexpr (std::is_same_v<T, PledgeRevoke>) enc_pledge_revoke(out, r);
     }, rec);
     return out;
 }
@@ -475,6 +605,9 @@ Record Codec::decode(const uint8_t* data, size_t len) {
         case RecordType::Worker:      return dec_worker_fields(r);
         case RecordType::WorkRecord:  return dec_work_record_fields(r);
         case RecordType::Acceptance:  return dec_acceptance_fields(r);
+        case RecordType::Transfer:    return dec_transfer_fields(r);
+        case RecordType::Pledge:      return dec_pledge_fields(r);
+        case RecordType::PledgeRevoke: return dec_pledge_revoke_fields(r);
         default:
             throw CodecError("CBOR: unknown record type discriminator");
     }

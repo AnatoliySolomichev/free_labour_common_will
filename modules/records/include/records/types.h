@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
@@ -25,6 +26,10 @@ enum class RecordType : uint8_t {
     Worker       = 0x52,
     WorkRecord   = 0x53,
     Acceptance   = 0x54,
+    // Economy
+    Transfer     = 0x70,
+    Pledge       = 0x72,
+    PledgeRevoke = 0x73,
 };
 
 // ── Cross-chain reference (records.md §4) ────────────────────────────────────
@@ -151,6 +156,54 @@ struct Acceptance {
     int64_t                 timestamp;    // Unix timestamp UTC
 };
 
+// ── Economy records (records.md §11) ─────────────────────────────────────────
+
+// Named portion of labor-hours: `units` hours backed by the debt of `issuer`
+// (records.md §12.7). Portions of different issuers never mix.
+struct OriginQty {
+    std::array<uint8_t, 32> issuer;  // debtor chain (UserId)
+    double                  units;
+
+    bool operator==(const OriginQty& o) const noexcept {
+        return issuer == o.issuer && units == o.units;
+    }
+};
+
+// The only way value moves (records.md §11.1). Lives in the sender's chain.
+// issuer == from → self-issue: a new debt/claim pair is born (§12.2);
+// issuer == to   → redemption: the paper returns to its debtor and annihilates;
+// otherwise      → endorsement: someone else's paper passed along.
+struct Transfer {
+    static constexpr RecordType TYPE = RecordType::Transfer;
+
+    std::array<uint8_t, 32> from;      // sender (= owner of this record)
+    std::array<uint8_t, 32> to;        // receiver
+    std::vector<OriginQty>  origins;   // named portions; total = transfer amount
+    std::optional<Ref>      reason;    // Acceptance, Pledge, ProductionChain, ...
+    int64_t                 timestamp; // Unix timestamp UTC
+};
+
+// Public promise to pay (part of) the cost of future work (records.md §11.3).
+// Transfers nothing by itself: only settlement Transfers (reason → this
+// pledge) carry weight. Revocable until settled; auto-expires.
+struct Pledge {
+    static constexpr RecordType TYPE = RecordType::Pledge;
+
+    Ref                                    target;    // funded work/idea
+    double                                 units;     // promised labor-hours
+    std::optional<std::array<uint8_t, 32>> executor;  // specific chain, if any
+    std::optional<int64_t>                 expires;   // after this — auto-revoked
+    int64_t                                timestamp; // Unix timestamp UTC
+};
+
+// Revokes the unsettled remainder of an own pledge (records.md §11.4).
+struct PledgeRevoke {
+    static constexpr RecordType TYPE = RecordType::PledgeRevoke;
+
+    Ref     pledge;     // own Pledge record
+    int64_t timestamp;  // Unix timestamp UTC
+};
+
 // ── Record variant ────────────────────────────────────────────────────────────
 
 using Record = std::variant<
@@ -164,7 +217,10 @@ using Record = std::variant<
     Grade,
     Worker,
     WorkRecord,
-    Acceptance
+    Acceptance,
+    Transfer,
+    Pledge,
+    PledgeRevoke
 >;
 
 } // namespace records

@@ -224,6 +224,95 @@ TEST(RecordsCodec, Acceptance) {
     EXPECT_EQ(decoded.timestamp, a.timestamp);
 }
 
+// ── Economy (records.md §11) ──────────────────────────────────────────────────
+
+static std::array<uint8_t, 32> make_uid(uint8_t fill) {
+    std::array<uint8_t, 32> a{};
+    a.fill(fill);
+    return a;
+}
+
+TEST(RecordsCodec, TransferRoundtripAllOriginKinds) {
+    Transfer t{};
+    t.from      = make_uid(0xA1);
+    t.to        = make_uid(0xB2);
+    t.origins   = { {make_uid(0xA1), 1.5},    // self-issue (issuer == from)
+                    {make_uid(0xB2), 0.25},   // redemption (issuer == to)
+                    {make_uid(0xC3), 2.0} };  // endorsement
+    t.reason    = make_ref(0x11, 0x22);
+    t.timestamp = 1'700'000'000LL;
+
+    const auto decoded = std::get<Transfer>(roundtrip(t));
+    EXPECT_EQ(decoded.from,      t.from);
+    EXPECT_EQ(decoded.to,        t.to);
+    EXPECT_EQ(decoded.origins,   t.origins);
+    ASSERT_TRUE(decoded.reason.has_value());
+    EXPECT_EQ(*decoded.reason,   *t.reason);
+    EXPECT_EQ(decoded.timestamp, t.timestamp);
+}
+
+TEST(RecordsCodec, TransferWithoutReason) {
+    Transfer t{};
+    t.from      = make_uid(0x01);
+    t.to        = make_uid(0x02);
+    t.origins   = { {make_uid(0x01), 3.0} };
+    t.timestamp = 1LL;
+
+    const auto decoded = std::get<Transfer>(roundtrip(t));
+    EXPECT_FALSE(decoded.reason.has_value());
+    ASSERT_EQ(decoded.origins.size(), 1u);
+    EXPECT_DOUBLE_EQ(decoded.origins[0].units, 3.0);
+}
+
+TEST(RecordsCodec, PledgeRoundtripWithAndWithoutOptionals) {
+    Pledge full{};
+    full.target    = make_ref(0x33, 0x44);
+    full.units     = 12.5;
+    full.executor  = make_uid(0xEE);
+    full.expires   = 1'800'000'000LL;
+    full.timestamp = 1'700'000'000LL;
+
+    const auto d1 = std::get<Pledge>(roundtrip(full));
+    EXPECT_EQ(d1.target, full.target);
+    EXPECT_DOUBLE_EQ(d1.units, full.units);
+    ASSERT_TRUE(d1.executor.has_value());
+    EXPECT_EQ(*d1.executor, *full.executor);
+    ASSERT_TRUE(d1.expires.has_value());
+    EXPECT_EQ(*d1.expires, *full.expires);
+
+    Pledge bare{};
+    bare.target    = make_ref(0x55, 0x66);
+    bare.units     = 1.0;
+    bare.timestamp = 2LL;
+
+    const auto d2 = std::get<Pledge>(roundtrip(bare));
+    EXPECT_FALSE(d2.executor.has_value());
+    EXPECT_FALSE(d2.expires.has_value());
+}
+
+TEST(RecordsCodec, PledgeRevokeRoundtrip) {
+    PledgeRevoke pr{};
+    pr.pledge    = make_ref(0x77, 0x88);
+    pr.timestamp = 3LL;
+
+    const auto decoded = std::get<PledgeRevoke>(roundtrip(pr));
+    EXPECT_EQ(decoded.pledge,    pr.pledge);
+    EXPECT_EQ(decoded.timestamp, pr.timestamp);
+}
+
+TEST(RecordsCodec, EconomyDeterminism) {
+    Transfer t{};
+    t.from    = make_uid(0x01);
+    t.to      = make_uid(0x02);
+    t.origins = { {make_uid(0x01), 0.1} };
+    EXPECT_EQ(Codec::encode(t), Codec::encode(t));
+
+    Pledge p{};
+    p.target = make_ref(0x03, 0x04);
+    p.units  = 5.0;
+    EXPECT_EQ(Codec::encode(p), Codec::encode(p));
+}
+
 // ── Error handling ────────────────────────────────────────────────────────────
 
 TEST(RecordsCodec, EmptyDataThrows) {
