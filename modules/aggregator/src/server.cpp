@@ -379,6 +379,66 @@ void AggregatorServer::setup_routes() {
         snapshot_manifest(res, false);
     });
 
+    // ── Seal warehouse (sync.md §7.2) ─────────────────────────────────────────
+    //
+    // Many seals per block; bytes in, bytes out — signatures are checked by
+    // the fetching node, never here. Content-addressed dedupe in storage.
+
+    // Registered before /seals/:hash — httplib matches in registration order.
+    svr.Get("/seals/manifest", [&](const httplib::Request&, httplib::Response& res) {
+        const auto hashes = storage_.all_sealed_block_hashes();
+        std::string body = "{\"hashes\":[";
+        for (std::size_t i = 0; i < hashes.size(); ++i) {
+            if (i) body += ',';
+            body += '"';
+            body += to_hex(hashes[i].bytes);
+            body += '"';
+        }
+        body += "]}";
+        res.set_content(body, "application/json");
+    });
+
+    svr.Post("/seals/:hash", [&](const httplib::Request& req, httplib::Response& res) {
+        auto bh = hex_to_hash(req.path_params.at("hash"));
+        if (!bh) {
+            res.status = 400;
+            res.set_content("{\"error\":\"invalid block hash\"}", "application/json");
+            return;
+        }
+        if (req.body.empty() || req.body.size() > 4096) {
+            res.status = 400;
+            res.set_content("{\"error\":\"bad size\"}", "application/json");
+            return;
+        }
+        try {
+            if (storage_.get_seal_bytes(*bh).size() >= kSealsPerBlockCap) {
+                res.status = 429;
+                res.set_content("{\"error\":\"seal list full\"}", "application/json");
+                return;
+            }
+            const bool stored = storage_.put_seal_bytes(
+                *bh, {req.body.begin(), req.body.end()});
+            res.set_content(stored ? "{\"status\":\"stored\"}"
+                                   : "{\"status\":\"duplicate\"}",
+                            "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
+                            "application/json");
+        }
+    });
+
+    svr.Get("/seals/:hash", [&](const httplib::Request& req, httplib::Response& res) {
+        auto bh = hex_to_hash(req.path_params.at("hash"));
+        if (!bh) { res.status = 400; return; }
+        std::string body;
+        const auto seals = storage_.get_seal_bytes(*bh);
+        cbor_array_head(body, seals.size());
+        for (const auto& s : seals)
+            cbor_bstr(body, std::string(s.begin(), s.end()));
+        res.set_content(body, "application/cbor");
+    });
+
     // ── Economy view (records.md §13) ─────────────────────────────────────────
     //
     // Derived data, recomputed per request by scanning known blocks. Every
@@ -530,9 +590,42 @@ void AggregatorServer::sync_with_peer(const std::string& peer_url) {
         } catch (...) {}
     }
 
+    // 3. Pull seal lists the same way (sync.md §7.2): fetch each listed
+    // block's seals and merge — content-addressed storage dedupes.
+    for (const Hash& bh : manifest_hashes("/seals/manifest")) {
+        auto res = cli.Get("/seals/" + to_hex(bh.bytes));
+        if (!res || res->status != 200) continue;
+        // CBOR array(bstr) — minimal parse mirroring the response encoder.
+        const auto& body = res->body;
+        std::size_t pos = 0;
+        auto head = [&](uint8_t expect_major) -> long long {
+            if (pos >= body.size()) return -1;
+            const uint8_t b = static_cast<uint8_t>(body[pos++]);
+            if ((b >> 5) != expect_major) return -1;
+            const uint8_t ai = b & 0x1F;
+            if (ai < 24) return ai;
+            int extra = ai == 24 ? 1 : ai == 25 ? 2 : ai == 26 ? 4 : ai == 27 ? 8 : -1;
+            if (extra < 0 || pos + extra > body.size()) return -1;
+            long long v = 0;
+            for (int i = 0; i < extra; ++i) v = (v << 8) | static_cast<uint8_t>(body[pos++]);
+            return v;
+        };
+        const long long n = head(4);
+        for (long long i = 0; i < n; ++i) {
+            const long long len = head(2);
+            if (len < 0 || pos + len > body.size()) break;
+            try {
+                if (storage_.put_seal_bytes(
+                        bh, {body.begin() + pos, body.begin() + pos + len}))
+                    ++gossiped;
+            } catch (...) {}
+            pos += static_cast<std::size_t>(len);
+        }
+    }
+
     if (pulled > 0 || gossiped > 0)
         std::cout << "[sync] pulled " << pulled << " block(s), " << gossiped
-                  << " snapshot entr(ies) from " << peer_url << "\n";
+                  << " warehouse entr(ies) from " << peer_url << "\n";
 }
 
 void AggregatorServer::sync_loop() {

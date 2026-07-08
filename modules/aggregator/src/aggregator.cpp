@@ -68,6 +68,7 @@ struct AggregatorStorage::Impl {
     MDB_dbi  dbi_idea  = 0; // ideas:       payload_hash → N×40B witness list
     MDB_dbi  dbi_leaf  = 0; // snap_leaves: leaf_hash → opaque LeafRecord bytes
     MDB_dbi  dbi_comp  = 0; // snap_comps:  parent_root → left‖right (64B)
+    MDB_dbi  dbi_seal  = 0; // seals: block_hash(32)‖blake2b(bytes)(32) → seal bytes
 };
 
 // ── Constructor / Destructor ──────────────────────────────────────────────────
@@ -77,7 +78,7 @@ AggregatorStorage::AggregatorStorage(std::filesystem::path db_path)
 {
     std::filesystem::create_directories(db_path);
     lcheck(mdb_env_create(&impl_->env),              "mdb_env_create");
-    lcheck(mdb_env_set_maxdbs(impl_->env, 5),        "mdb_env_set_maxdbs");
+    lcheck(mdb_env_set_maxdbs(impl_->env, 6),        "mdb_env_set_maxdbs");
     lcheck(mdb_env_set_mapsize(impl_->env, 1u<<30),  "mdb_env_set_mapsize");
     lcheck(mdb_env_open(impl_->env, db_path.c_str(), 0, 0600), "mdb_env_open");
 
@@ -88,7 +89,8 @@ AggregatorStorage::AggregatorStorage(std::filesystem::path db_path)
         (rc = mdb_dbi_open(txn, "hashes",      MDB_CREATE, &impl_->dbi_hash)) != MDB_SUCCESS ||
         (rc = mdb_dbi_open(txn, "ideas",       MDB_CREATE, &impl_->dbi_idea)) != MDB_SUCCESS ||
         (rc = mdb_dbi_open(txn, "snap_leaves", MDB_CREATE, &impl_->dbi_leaf)) != MDB_SUCCESS ||
-        (rc = mdb_dbi_open(txn, "snap_comps",  MDB_CREATE, &impl_->dbi_comp)) != MDB_SUCCESS) {
+        (rc = mdb_dbi_open(txn, "snap_comps",  MDB_CREATE, &impl_->dbi_comp)) != MDB_SUCCESS ||
+        (rc = mdb_dbi_open(txn, "seals",       MDB_CREATE, &impl_->dbi_seal)) != MDB_SUCCESS) {
         mdb_txn_abort(txn);
         throw StorageError(std::string("mdb_dbi_open: ") + mdb_strerror(rc));
     }
@@ -365,6 +367,71 @@ std::vector<Hash> AggregatorStorage::all_snapshot_leaf_hashes() const {
 
 std::vector<Hash> AggregatorStorage::all_snapshot_composition_roots() const {
     return all_keys(impl_->env, impl_->dbi_comp, "snap_comp_manifest");
+}
+
+// ── Seal warehouse (sync.md §7.2) ─────────────────────────────────────────────
+
+bool AggregatorStorage::put_seal_bytes(const Hash& block_hash,
+                                       const std::vector<uint8_t>& bytes) {
+    const Hash content = Crypto::hash(bytes.data(), bytes.size());
+    std::array<uint8_t, 64> key{};
+    std::memcpy(key.data(),      block_hash.bytes.data(), 32);
+    std::memcpy(key.data() + 32, content.bytes.data(),    32);
+
+    MDB_val mk{key.size(),   key.data()};
+    MDB_val mv{bytes.size(), const_cast<uint8_t*>(bytes.data())};
+    MDB_txn* txn;
+    lcheck(mdb_txn_begin(impl_->env, nullptr, 0, &txn), "put_seal: begin");
+    int rc = mdb_put(txn, impl_->dbi_seal, &mk, &mv, MDB_NOOVERWRITE);
+    if (rc == MDB_KEYEXIST) { mdb_txn_abort(txn); return false; }
+    if (rc != MDB_SUCCESS)  { mdb_txn_abort(txn); lcheck(rc, "put_seal"); }
+    lcheck(mdb_txn_commit(txn), "put_seal: commit");
+    return true;
+}
+
+std::vector<std::vector<uint8_t>>
+AggregatorStorage::get_seal_bytes(const Hash& block_hash) const {
+    std::vector<std::vector<uint8_t>> result;
+    MDB_txn* txn;
+    lcheck(mdb_txn_begin(impl_->env, nullptr, MDB_RDONLY, &txn), "get_seals: begin");
+    MDB_cursor* cur;
+    if (mdb_cursor_open(txn, impl_->dbi_seal, &cur) != MDB_SUCCESS) {
+        mdb_txn_abort(txn); return {};
+    }
+    std::array<uint8_t, 64> prefix{};
+    std::memcpy(prefix.data(), block_hash.bytes.data(), 32);
+    MDB_val mk{prefix.size(), prefix.data()}, mv{};
+    int rc = mdb_cursor_get(cur, &mk, &mv, MDB_SET_RANGE);
+    while (rc == MDB_SUCCESS && mk.mv_size == 64 &&
+           std::memcmp(mk.mv_data, block_hash.bytes.data(), 32) == 0) {
+        result.emplace_back(static_cast<const uint8_t*>(mv.mv_data),
+                            static_cast<const uint8_t*>(mv.mv_data) + mv.mv_size);
+        rc = mdb_cursor_get(cur, &mk, &mv, MDB_NEXT);
+    }
+    mdb_cursor_close(cur);
+    mdb_txn_abort(txn);
+    return result;
+}
+
+std::vector<Hash> AggregatorStorage::all_sealed_block_hashes() const {
+    std::vector<Hash> result;
+    MDB_txn* txn;
+    lcheck(mdb_txn_begin(impl_->env, nullptr, MDB_RDONLY, &txn), "seal_manifest: begin");
+    MDB_cursor* cur;
+    if (mdb_cursor_open(txn, impl_->dbi_seal, &cur) != MDB_SUCCESS) {
+        mdb_txn_abort(txn); return {};
+    }
+    MDB_val mk{}, mv{};
+    while (mdb_cursor_get(cur, &mk, &mv, MDB_NEXT) == MDB_SUCCESS) {
+        if (mk.mv_size != 64) continue;
+        Hash h;
+        std::memcpy(h.bytes.data(), mk.mv_data, 32);
+        if (result.empty() || !(result.back() == h))   // keys sorted: dedupe run
+            result.push_back(h);
+    }
+    mdb_cursor_close(cur);
+    mdb_txn_abort(txn);
+    return result;
 }
 
 std::size_t AggregatorStorage::block_count() const noexcept {

@@ -44,7 +44,8 @@ public:
                      std::chrono::seconds     sync_interval,
                      std::chrono::seconds     mailbox_ttl = std::chrono::seconds(3600));
 
-    static constexpr std::size_t kMailboxCap = 1024;   // envelopes per recipient
+    static constexpr std::size_t kMailboxCap       = 1024;  // envelopes per recipient
+    static constexpr std::size_t kSealsPerBlockCap = 4096;  // seals per block
 
     ~AggregatorServer();
 

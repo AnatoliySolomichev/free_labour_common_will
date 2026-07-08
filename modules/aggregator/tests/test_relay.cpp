@@ -214,6 +214,69 @@ TEST_F(RelayTest, AggregatorsGossipWarehouseEntries) {
     EXPECT_TRUE(arrived) << "warehouse entry did not gossip within 10s";
 }
 
+// ── Seal warehouse (sync.md §7.2) ─────────────────────────────────────────────
+
+TEST_F(RelayTest, SealWarehouseStoresManyDedupesAndLists) {
+    start_server(std::chrono::seconds(3600));
+    httplib::Client cli(host());
+
+    const std::string bh(64, 'e');
+    auto post = [&](const std::string& body) {
+        auto res = cli.Post("/seals/" + bh, body, "application/cbor");
+        return res ? res->body : "";
+    };
+
+    EXPECT_NE(post("seal-one").find("stored"),    std::string::npos);
+    EXPECT_NE(post("seal-one").find("duplicate"), std::string::npos);  // content dedupe
+    EXPECT_NE(post("seal-two").find("stored"),    std::string::npos);
+
+    // GET returns CBOR array(2) with both blobs verbatim.
+    auto res = cli.Get("/seals/" + bh);
+    ASSERT_TRUE(res && res->status == 200);
+    EXPECT_EQ(static_cast<uint8_t>(res->body[0]), 0x82u);   // array(2)
+    EXPECT_NE(res->body.find("seal-one"), std::string::npos);
+    EXPECT_NE(res->body.find("seal-two"), std::string::npos);
+
+    // Manifest lists the block once; another block's list is empty.
+    auto man = cli.Get("/seals/manifest");
+    ASSERT_TRUE(man && man->status == 200);
+    EXPECT_NE(man->body.find(bh), std::string::npos);
+    auto other = cli.Get("/seals/" + std::string(64, 'f'));
+    ASSERT_TRUE(other && other->status == 200);
+    EXPECT_EQ(static_cast<uint8_t>(other->body[0]), 0x80u);  // array(0)
+}
+
+TEST_F(RelayTest, AggregatorsGossipSeals) {
+    start_server(std::chrono::seconds(3600));
+    httplib::Client cli_a(host());
+
+    const std::string bh(64, '9');
+    ASSERT_TRUE(cli_a.Post("/seals/" + bh, "gossiped-seal", "application/cbor"));
+
+    const uint16_t port_b = port_ + 200;
+    auto db_b = db_path_;
+    db_b += "_sealb";
+    AggregatorStorage storage_b(db_b);
+    AggregatorServer  server_b(storage_b, port_b,
+                               {"http://127.0.0.1:" + std::to_string(port_)},
+                               std::chrono::seconds(1));
+    std::thread thread_b([&] { server_b.run(); });
+
+    httplib::Client cli_b("127.0.0.1:" + std::to_string(port_b));
+    bool arrived = false;
+    for (int i = 0; i < 100 && !arrived; ++i) {
+        auto res = cli_b.Get("/seals/" + bh);
+        if (res && res->status == 200 &&
+            res->body.find("gossiped-seal") != std::string::npos) arrived = true;
+        else std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    server_b.stop();
+    thread_b.join();
+    std::filesystem::remove_all(db_b);
+
+    EXPECT_TRUE(arrived) << "seal did not gossip within 10s";
+}
+
 TEST_F(RelayTest, FullMailboxAnswers429) {
     start_server(std::chrono::seconds(3600));
     httplib::Client cli(host());

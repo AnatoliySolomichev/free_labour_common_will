@@ -77,6 +77,14 @@ public:
     std::vector<Hash> all_snapshot_leaf_hashes() const;
     std::vector<Hash> all_snapshot_composition_roots() const;
 
+    // Seal warehouse (sync.md §7.2). Many seals per block; entries are opaque
+    // bytes keyed block_hash‖BLAKE2b(bytes), so identical seals store once.
+    // The fetching node verifies signatures — the warehouse never does.
+    // Throws: StorageError.
+    bool put_seal_bytes(const Hash& block_hash, const std::vector<uint8_t>& bytes);
+    std::vector<std::vector<uint8_t>> get_seal_bytes(const Hash& block_hash) const;
+    std::vector<Hash> all_sealed_block_hashes() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

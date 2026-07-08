@@ -1612,6 +1612,22 @@ static int cmd_seal_add(const fs::path& data_dir, int argc, char** argv) {
     std::cout << "sealed:  " << to_hex(seal.block_hash.bytes) << "\n"
               << "signer:  " << to_hex(seal.signer_id.bytes)  << "\n"
               << "mode:    " << (seal.mode == SealMode::BLIND ? "BLIND" : "OPEN") << "\n";
+
+    // Publish to the seal warehouse (sync.md §7.2) — witnessing only carries
+    // weight when third parties can see it.
+    const auto via = flag_val(argc, argv, "--via");
+    if (!via.empty()) {
+        std::string host = via;
+        if (host.rfind("http://", 0) == 0) host = host.substr(7);
+        httplib::Client cli(host);
+        cli.set_connection_timeout(5);
+        const auto bytes = Serializer::encode(seal);
+        const auto res   = cli.Post("/seals/" + to_hex(seal.block_hash.bytes),
+            std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size()),
+            "application/cbor");
+        std::cerr << ((res && res->status == 200) ? "Published to " : "publish failed: ")
+                  << via << "\n";
+    }
     return 0;
 }
 
@@ -1630,7 +1646,66 @@ static int cmd_seal_list(const fs::path& data_dir, int argc, char** argv) {
 
     LmdbStorage storage(data_dir / "db");
     SealManager  sm(storage);
-    const auto   seals = sm.get_seals(block_hash);
+    auto         seals = sm.get_seals(block_hash);
+
+    // --via: pull remote seals from the warehouse, verify each signature
+    // (the warehouse is untrusted) and keep the new ones locally.
+    const auto via = flag_val(argc, argv, "--via");
+    if (!via.empty()) {
+        std::string host = via;
+        if (host.rfind("http://", 0) == 0) host = host.substr(7);
+        httplib::Client cli(host);
+        cli.set_connection_timeout(5);
+        const auto res = cli.Get("/seals/" + to_hex(block_hash.bytes));
+        if (res && res->status == 200) {
+            std::size_t imported = 0, rejected = 0;
+            const std::string& body = res->body;
+            std::size_t bpos = 0;
+            auto head = [&](uint8_t expect_major) -> long long {
+                if (bpos >= body.size()) return -1;
+                const uint8_t b = static_cast<uint8_t>(body[bpos++]);
+                if ((b >> 5) != expect_major) return -1;
+                const uint8_t ai = b & 0x1F;
+                if (ai < 24) return ai;
+                int extra = ai == 24 ? 1 : ai == 25 ? 2 : ai == 26 ? 4 : ai == 27 ? 8 : -1;
+                if (extra < 0 || bpos + extra > body.size()) return -1;
+                long long v = 0;
+                for (int i = 0; i < extra; ++i)
+                    v = (v << 8) | static_cast<uint8_t>(body[bpos++]);
+                return v;
+            };
+            const long long n = head(4);
+            for (long long i = 0; i < n; ++i) {
+                const long long len = head(2);
+                if (len < 0 || bpos + len > body.size()) break;
+                try {
+                    const Seal s = Serializer::decode_seal(
+                        reinterpret_cast<const uint8_t*>(body.data()) + bpos,
+                        static_cast<size_t>(len));
+                    const bool genuine =
+                        s.block_hash == block_hash &&
+                        Crypto::verify(s.block_hash.bytes.data(),
+                                       s.block_hash.bytes.size(),
+                                       s.signature, s.signer_id);
+                    const bool known =
+                        std::find(seals.begin(), seals.end(), s) != seals.end();
+                    if (!genuine) ++rejected;
+                    else if (!known) {
+                        storage.put_seal(s);
+                        seals.push_back(s);
+                        ++imported;
+                    }
+                } catch (const std::exception&) {
+                    ++rejected;
+                }
+                bpos += static_cast<std::size_t>(len);
+            }
+            std::cerr << "warehouse: " << imported << " new, " << rejected
+                      << " rejected\n";
+        } else {
+            std::cerr << "warehouse unreachable: " << via << "\n";
+        }
+    }
 
     if (seals.empty()) {
         std::cout << "(no seals for this block)\n";
@@ -1924,12 +1999,14 @@ Merge, manual relay (§6.4 bilateral two-round protocol):
   merge cosign --draft HASH        Step 3: co-sign partner's draft_hash, print co_signature
   merge finalize --co-sig HEX      Step 4: attach partner co_sig, complete merge block
 
-Seals (§7):
+Seals (§7; gossip sync.md §7.2):
   seal add BLOCK_HASH_HEX          Create a BLIND seal on a block hash
+    [--via URL]                        (--via publishes it to the warehouse)
   seal add --mode open             Create an OPEN seal (loads block from storage)
            --idx BLOCK_IDX
-           [--user UID_HEX]
-  seal list BLOCK_HASH_HEX         List all seals for a block
+           [--user UID_HEX] [--via URL]
+  seal list BLOCK_HASH_HEX         List seals for a block; --via pulls remote
+    [--via URL]                        ones, verifying every signature locally
 
 Fraud (records.md §3A, blockchain.md §6.5.6):
   fraud claim --kind KIND          Build a proof from the sync cache and write a
