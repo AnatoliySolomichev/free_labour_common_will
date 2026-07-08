@@ -1,4 +1,5 @@
 #include "aggregator/server.h"
+#include "aggregator/discovery_view.h"
 #include "aggregator/economy_view.h"
 #include "blockchain/serializer.h"
 #include "blockchain/errors.h"
@@ -504,6 +505,45 @@ void AggregatorServer::setup_routes() {
                 + ",\"works_accepted\":"    + std::to_string(chain->works_accepted)
                 + ",\"labor_appraised\":"   + std::to_string(chain->labor_appraised)
                 + "}";
+            res.set_content(body, "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
+                            "application/json");
+        }
+    });
+
+    // ── Discovery (sync.md §8) ────────────────────────────────────────────────
+    //
+    // Ranked merge-partner suggestions for a chain. Advisory only: the merge
+    // protocol protects itself, a biased index can merely skew suggestions.
+
+    svr.Get("/discovery/:uid", [&](const httplib::Request& req,
+                                   httplib::Response& res) {
+        auto uid_hash = hex_to_hash(req.path_params.at("uid"));
+        if (!uid_hash) {
+            res.status = 400;
+            res.set_content("{\"error\":\"invalid uid\"}", "application/json");
+            return;
+        }
+        try {
+            const auto view = DiscoveryView::build(storage_);
+            UserId uid{};
+            uid.bytes = uid_hash->bytes;
+            std::string body = "[";
+            bool first = true;
+            for (const auto& c : view.candidates_for(uid, 20)) {
+                if (!first) body += ',';
+                first = false;
+                body += "{\"chain\":\""     + to_hex(c.chain.bytes)
+                     + "\",\"score\":"      + std::to_string(c.score)
+                     + ",\"econ_volume\":"  + std::to_string(c.econ_volume)
+                     + ",\"neighbor\":"     + (c.neighbor ? "true" : "false")
+                     + ",\"merges_with\":"  + std::to_string(c.merges_with)
+                     + ",\"degree\":"       + std::to_string(c.degree)
+                     + "}";
+            }
+            body += "]";
             res.set_content(body, "application/json");
         } catch (const std::exception& e) {
             res.status = 500;

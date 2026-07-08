@@ -970,6 +970,7 @@ static int cmd_merge_run(const fs::path& data_dir, int argc, char** argv) {
     if (dialogue.done()) {
         print_merge_result(*dialogue.merge_block());
         publish_cache_via(via, cache);
+        upload_block(via, *dialogue.merge_block());   // feeds discovery (§8)
         return 0;
     }
     if (dialogue.failed()) { std::cerr << "merge failed: " << dialogue.error() << "\n"; return 1; }
@@ -1048,6 +1049,7 @@ static int cmd_merge_serve(const fs::path& data_dir, int argc, char** argv) {
             if (d.done()) {
                 print_merge_result(*d.merge_block());
                 publish_cache_via(via, cache);
+                upload_block(via, *d.merge_block());   // feeds discovery (§8)
                 if (once) return 0;
                 it = serving.erase(it);
             } else if (d.failed()) {
@@ -1443,6 +1445,18 @@ static int cmd_chain_info(int argc, char** argv) {
         return 1;
     }
     return economy_get(via, "/economy/chain/" + pos[2]);
+}
+
+// bc discover --via URL [--leaf L]
+// Ranked merge-partner suggestions for the own chain (sync.md §8).
+static int cmd_discover(const fs::path& data_dir, int argc, char** argv) {
+    const auto via = flag_val(argc, argv, "--via");
+    if (via.empty()) {
+        std::cerr << "Usage: bc discover --via URL\n";
+        return 1;
+    }
+    const UserId me = load_user_id(data_dir);
+    return economy_get(via, "/discovery/" + to_hex(me.bytes));
 }
 
 // bc pledge add --target REF --units N [--executor UID] [--expires TS] [--leaf L]
@@ -1988,6 +2002,7 @@ Merge over a relay (sync.md §4.1):
     --peer UID_HEX                     partner's User ID
     --via  URL                         aggregator relay, e.g. http://host:8080
     [--depth N] [--timeout SEC]        declared depth (1) / give-up time (60)
+  discover --via URL               Ranked merge-partner suggestions (sync.md §8)
   merge serve --via URL            Respond to incoming merge OFFERs in a loop
     [--depth N] [--timeout SEC]        SEC=0: run forever
     [--once]                           exit after the first completed merge
@@ -2100,6 +2115,7 @@ int main(int argc, char** argv) {
         else if (cmd == "cache"     && subcmd == "complete")return cmd_cache_complete(data_dir, argc, argv);
         else if (cmd == "wallet")                           return cmd_wallet(data_dir, argc, argv);
         else if (cmd == "ideas"     && subcmd == "top")     return cmd_ideas_top(argc, argv);
+        else if (cmd == "discover")                         return cmd_discover(data_dir, argc, argv);
         else if (cmd == "chain"     && subcmd == "info")    return cmd_chain_info(argc, argv);
         else if (cmd == "fetch")                            return cmd_fetch(data_dir, argc, argv);
         else if (cmd == "pay")                              return cmd_pay(data_dir, argc, argv);
