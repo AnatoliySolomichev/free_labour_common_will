@@ -1,8 +1,10 @@
 #include "aggregator/server.h"
+#include "aggregator/economy_view.h"
 #include "blockchain/serializer.h"
 #include "blockchain/errors.h"
 #include <httplib.h>
 #include <algorithm>
+#include <ctime>
 #include <sstream>
 #include <iomanip>
 #include <iostream>
@@ -82,6 +84,24 @@ void cbor_array_head(std::string& out, uint64_t n) { cbor_head(out, 4, n); }
 void cbor_bstr(std::string& out, const std::string& bytes) {
     cbor_head(out, 2, bytes.size());
     out += bytes;
+}
+
+std::string json_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) out += ' ';
+                else out += c;
+        }
+    }
+    return out;
 }
 
 } // anonymous namespace
@@ -357,6 +377,79 @@ void AggregatorServer::setup_routes() {
     svr.Get("/snapshot/compositions/manifest",
             [&, snapshot_manifest](const httplib::Request&, httplib::Response& res) {
         snapshot_manifest(res, false);
+    });
+
+    // ── Economy view (records.md §13) ─────────────────────────────────────────
+    //
+    // Derived data, recomputed per request by scanning known blocks. Every
+    // figure is re-checkable by any client against the signed chains.
+
+    svr.Get("/economy/ideas", [&](const httplib::Request&, httplib::Response& res) {
+        try {
+            const auto view = EconomyView::build(
+                storage_, static_cast<int64_t>(std::time(nullptr)));
+            std::string body = "[";
+            bool first = true;
+            for (const auto& idea : view.ideas()) {
+                if (!first) body += ',';
+                first = false;
+                body += "{\"idea\":\""        + to_hex(idea.idea_hash.bytes)
+                     + "\",\"text\":\""       + json_escape(idea.text)
+                     + "\",\"pledged_active\":"  + std::to_string(idea.pledged_active)
+                     + ",\"pledged_settled\":"   + std::to_string(idea.pledged_settled)
+                     + ",\"pledgers\":"          + std::to_string(idea.pledgers)
+                     + ",\"copies\":"            + std::to_string(idea.copies)
+                     + ",\"reactions\":"         + std::to_string(idea.reaction_sum)
+                     + "}";
+            }
+            body += "]";
+            res.set_content(body, "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
+                            "application/json");
+        }
+    });
+
+    svr.Get("/economy/chain/:uid", [&](const httplib::Request& req,
+                                       httplib::Response& res) {
+        auto uid_hash = hex_to_hash(req.path_params.at("uid"));
+        if (!uid_hash) {
+            res.status = 400;
+            res.set_content("{\"error\":\"invalid uid\"}", "application/json");
+            return;
+        }
+        try {
+            const auto view = EconomyView::build(
+                storage_, static_cast<int64_t>(std::time(nullptr)));
+            UserId uid{};
+            uid.bytes = uid_hash->bytes;
+            const auto chain = view.chain(uid);
+            if (!chain) {
+                res.status = 404;
+                res.set_content("{\"error\":\"chain has no economic records\"}",
+                                "application/json");
+                return;
+            }
+            const std::string body =
+                  "{\"debt\":"              + std::to_string(chain->debt())
+                + ",\"issued\":"            + std::to_string(chain->issued)
+                + ",\"redeemed\":"          + std::to_string(chain->redeemed)
+                + ",\"received\":"          + std::to_string(chain->received)
+                + ",\"spent\":"             + std::to_string(chain->spent)
+                + ",\"pledges_active\":"    + std::to_string(chain->pledges_active)
+                + ",\"pledges_settled\":"   + std::to_string(chain->pledges_settled)
+                + ",\"pledges_revoked\":"   + std::to_string(chain->pledges_revoked)
+                + ",\"pledges_expired\":"   + std::to_string(chain->pledges_expired)
+                + ",\"works_accepted\":"    + std::to_string(chain->works_accepted)
+                + ",\"labor_appraised\":"   + std::to_string(chain->labor_appraised)
+                + "}";
+            res.set_content(body, "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
+                            "application/json");
+        }
     });
 
     // ── GET /stats ────────────────────────────────────────────────────────────

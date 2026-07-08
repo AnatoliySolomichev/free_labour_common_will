@@ -725,6 +725,8 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
               << to_hex(Crypto::hash_block(block).bytes) << "\n";
     std::cerr << "appraised: " << a.labor_units << " labor-h  (raw " << a.hours_raw
               << "h)\n(pay with: bc pay --acceptance <ref>)\n";
+    const auto via = flag_val(argc, argv, "--via");
+    if (!via.empty()) upload_block(via, block);
     return 0;
 }
 
@@ -1406,6 +1408,43 @@ static int cmd_pay(const fs::path& data_dir, int argc, char** argv) {
     return 0;
 }
 
+// Shared GET for the aggregator economy view (records.md §13). Prints the
+// JSON body as-is — every figure is re-checkable against the chains.
+static int economy_get(const std::string& via, const std::string& path) {
+    std::string host = via;
+    if (host.rfind("http://", 0) == 0) host = host.substr(7);
+    httplib::Client cli(host);
+    cli.set_connection_timeout(5);
+    const auto res = cli.Get(path);
+    if (!res) {
+        std::cerr << "aggregator unreachable: " << via << "\n";
+        return 1;
+    }
+    std::cout << res->body << "\n";
+    return res->status == 200 ? 0 : 1;
+}
+
+// bc ideas top --via URL
+static int cmd_ideas_top(int argc, char** argv) {
+    const auto via = flag_val(argc, argv, "--via");
+    if (via.empty()) {
+        std::cerr << "Usage: bc ideas top --via URL\n";
+        return 1;
+    }
+    return economy_get(via, "/economy/ideas");
+}
+
+// bc chain info UID_HEX --via URL
+static int cmd_chain_info(int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);
+    const auto via = flag_val(argc, argv, "--via");
+    if (pos.size() < 3 || via.empty()) {
+        std::cerr << "Usage: bc chain info UID_HEX --via URL\n";
+        return 1;
+    }
+    return economy_get(via, "/economy/chain/" + pos[2]);
+}
+
 // bc pledge add --target REF --units N [--executor UID] [--expires TS] [--leaf L]
 static int cmd_pledge_add(const fs::path& data_dir, int argc, char** argv) {
     const auto target_s = flag_val(argc, argv, "--target");
@@ -1434,6 +1473,8 @@ static int cmd_pledge_add(const fs::path& data_dir, int argc, char** argv) {
               << to_hex(Crypto::hash_block(block).bytes) << "\n";
     std::cerr << "(settle with: bc transfer send --reason <pledge ref>; "
                  "revoke with: bc pledge revoke)\n";
+    const auto via = flag_val(argc, argv, "--via");
+    if (!via.empty()) upload_block(via, block);
     return 0;
 }
 
@@ -1457,6 +1498,8 @@ static int cmd_pledge_revoke(const fs::path& data_dir, int argc, char** argv) {
     const Block block = append_record(ctx, Record{pr});
     std::cout << "revoke block #" << block.address.block_index << "  hash: "
               << to_hex(Crypto::hash_block(block).bytes) << "\n";
+    const auto via = flag_val(argc, argv, "--via");
+    if (!via.empty()) upload_block(via, block);
     return 0;
 }
 
@@ -1910,6 +1953,8 @@ Economy (records.md §11 — именные трудочасы, §12.7):
     --units N [--executor UID_HEX] [--expires UNIX_TS]
   pledge revoke --pledge REF       Revoke the unsettled remainder of an own pledge
   pledge list                      Own pledges with settlement status
+  ideas top --via URL              Funding board: pledged labor per idea (JSON)
+  chain info UID_HEX --via URL     Economic dossier of a chain (JSON)
 
 Sync cache (sync.md §5; gossip §7.1):
   cache list                       List cached participant leaves and compositions
@@ -1977,6 +2022,8 @@ int main(int argc, char** argv) {
         else if (cmd == "cache"     && subcmd == "publish") return cmd_cache_publish(data_dir, argc, argv);
         else if (cmd == "cache"     && subcmd == "complete")return cmd_cache_complete(data_dir, argc, argv);
         else if (cmd == "wallet")                           return cmd_wallet(data_dir, argc, argv);
+        else if (cmd == "ideas"     && subcmd == "top")     return cmd_ideas_top(argc, argv);
+        else if (cmd == "chain"     && subcmd == "info")    return cmd_chain_info(argc, argv);
         else if (cmd == "fetch")                            return cmd_fetch(data_dir, argc, argv);
         else if (cmd == "pay")                              return cmd_pay(data_dir, argc, argv);
         else if (cmd == "transfer"  && subcmd == "send")    return cmd_transfer_send(data_dir, argc, argv);

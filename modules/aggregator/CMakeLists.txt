@@ -8,6 +8,7 @@ pkg_check_modules(LMDB REQUIRED lmdb)
 add_library(aggregator
     src/aggregator.cpp
     src/server.cpp
+    src/economy_view.cpp
 )
 
 target_include_directories(aggregator
@@ -18,7 +19,8 @@ target_include_directories(aggregator
 
 target_link_libraries(aggregator
     PUBLIC  blockchain
-    PRIVATE ${LMDB_LIBRARIES}
+    PRIVATE records
+            ${LMDB_LIBRARIES}
 )
 
 target_compile_options(aggregator PRIVATE -Wall -Wextra)
@@ -37,6 +39,7 @@ find_package(GTest REQUIRED)
 add_executable(aggregator_tests
     tests/test_aggregator.cpp
     tests/test_relay.cpp
+    tests/test_economy_view.cpp
 )
 
 target_include_directories(aggregator_tests PRIVATE
@@ -45,6 +48,7 @@ target_include_directories(aggregator_tests PRIVATE
 
 target_link_libraries(aggregator_tests PRIVATE
     aggregator
+    records
     GTest::gtest_main
 )
 
