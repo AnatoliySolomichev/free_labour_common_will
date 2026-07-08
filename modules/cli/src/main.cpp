@@ -125,6 +125,7 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--idx", "--depth", "--proof", "--merkle-root", "--target", "--leaf-hash",
     "--reason", "--peer", "--via", "--timeout",
     "--to", "--units", "--origin", "--pledge", "--executor", "--expires",
+    "--acceptance", "--coef",
 };
 
 // True when a standalone flag (no value) is present.
@@ -282,7 +283,13 @@ struct Context {
 
 // ── Write helper: encode + append DATA block ──────────────────────────────────
 
-static int cmd_write(const fs::path& data_dir, NodeIndex leaf, const Record& rec) {
+static void upload_block(const std::string& via, const Block& block);
+
+// Writes the record and, when --via is given, uploads the block to an
+// aggregator so others can 'bc fetch' it.
+static int cmd_write(const fs::path& data_dir, int argc, char** argv,
+                     const Record& rec) {
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
     Context ctx(data_dir, leaf);
     const auto payload = Codec::encode(rec);
     const auto now     = static_cast<Timestamp>(std::time(nullptr));
@@ -291,7 +298,47 @@ static int cmd_write(const fs::path& data_dir, NodeIndex leaf, const Record& rec
     const auto hash    = Crypto::hash_block(block);
     std::cout << "block #" << block.address.block_index
               << "  hash: " << to_hex(hash.bytes) << "\n";
+    const auto via = flag_val(argc, argv, "--via");
+    if (!via.empty()) upload_block(via, block);
     return 0;
+}
+
+static Block append_record(Context& ctx, const Record& rec) {
+    const auto payload = Codec::encode(rec);
+    const auto now     = static_cast<Timestamp>(std::time(nullptr));
+    return ctx.bc.append_data_block(ctx.user_id, ctx.leaf, payload,
+                                    ctx.working_kp, now);
+}
+
+// Locate a previously fetched foreign block by its hash (external store is
+// keyed by address, so this scans).
+static std::optional<Block> find_external_by_hash(
+        Context& ctx, const std::array<uint8_t, 32>& hash) {
+    std::optional<Block> found;
+    ctx.storage.for_each_external_block([&](const Block& b) {
+        if (Crypto::hash_block(b).bytes == hash) { found = b; return false; }
+        return true;
+    });
+    return found;
+}
+
+// Fetch a block by ref from an aggregator and verify it really is the
+// referenced one (hash and owning chain must match the ref).
+static Block fetch_block_from(const std::string& via, const Ref& src) {
+    std::string host = via;
+    if (host.rfind("http://", 0) == 0) host = host.substr(7);
+    httplib::Client cli(host);
+    cli.set_connection_timeout(5);
+    const auto res = cli.Get("/sync/block/" + to_hex(src.hash.data(), 32));
+    if (!res || res->status != 200)
+        throw std::runtime_error("block not found on " + via);
+    const Block block = Serializer::decode_block(
+        reinterpret_cast<const uint8_t*>(res->body.data()), res->body.size());
+    if (Crypto::hash_block(block).bytes != src.hash)
+        throw std::runtime_error("aggregator returned a block with a different hash");
+    if (block.address.user_id.bytes != src.chain)
+        throw std::runtime_error("block belongs to a different chain than the ref says");
+    return block;
 }
 
 // bc block stub [--leaf L]
@@ -504,7 +551,7 @@ static int cmd_concept_add(const fs::path& data_dir, int argc, char** argv) {
     Concept c;
     c.text = pos[2];
     c.tags = flag_all(argc, argv, "--tag");
-    return cmd_write(data_dir, parse_leaf_index(argc, argv), c);
+    return cmd_write(data_dir, argc, argv,c);
 }
 
 static int cmd_concept_link(const fs::path& data_dir, int argc, char** argv) {
@@ -517,7 +564,7 @@ static int cmd_concept_link(const fs::path& data_dir, int argc, char** argv) {
     cl.from = parse_ref(pos[2]);
     cl.to   = parse_ref(pos[3]);
     cl.kind = flag_val(argc, argv, "--kind", "связь");
-    return cmd_write(data_dir, parse_leaf_index(argc, argv), cl);
+    return cmd_write(data_dir, argc, argv,cl);
 }
 
 static int cmd_composite_add(const fs::path& data_dir, int argc, char** argv) {
@@ -530,7 +577,7 @@ static int cmd_composite_add(const fs::path& data_dir, int argc, char** argv) {
     c.title = pos[2];
     for (const auto& s : flag_all(argc, argv, "--part"))
         c.parts.push_back(parse_ref(s));
-    return cmd_write(data_dir, parse_leaf_index(argc, argv), c);
+    return cmd_write(data_dir, argc, argv,c);
 }
 
 static int cmd_copy(const fs::path& data_dir, int argc, char** argv) {
@@ -541,7 +588,7 @@ static int cmd_copy(const fs::path& data_dir, int argc, char** argv) {
     }
     Copy c;
     c.source = parse_ref(pos[1]);
-    return cmd_write(data_dir, parse_leaf_index(argc, argv), c);
+    return cmd_write(data_dir, argc, argv,c);
 }
 
 static int cmd_react(const fs::path& data_dir, int argc, char** argv) {
@@ -575,7 +622,7 @@ static int cmd_react(const fs::path& data_dir, int argc, char** argv) {
         std::cerr << "Invalid hash hex\n";
         return 1;
     }
-    return cmd_write(data_dir, parse_leaf_index(argc, argv), r);
+    return cmd_write(data_dir, argc, argv,r);
 }
 
 static int cmd_specialty_add(const fs::path& data_dir, int argc, char** argv) {
@@ -584,7 +631,7 @@ static int cmd_specialty_add(const fs::path& data_dir, int argc, char** argv) {
         std::cerr << "Usage: bc specialty add <name>\n";
         return 1;
     }
-    return cmd_write(data_dir, parse_leaf_index(argc, argv), Specialty{ pos[2] });
+    return cmd_write(data_dir, argc, argv,Specialty{ pos[2] });
 }
 
 static int cmd_grade_add(const fs::path& data_dir, int argc, char** argv) {
@@ -601,7 +648,7 @@ static int cmd_grade_add(const fs::path& data_dir, int argc, char** argv) {
     Grade g;
     g.specialty = parse_ref(pos[2]);
     g.level     = static_cast<uint8_t>(level);
-    return cmd_write(data_dir, parse_leaf_index(argc, argv), g);
+    return cmd_write(data_dir, argc, argv,g);
 }
 
 static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
@@ -628,7 +675,7 @@ static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
                   : static_cast<int64_t>(std::stoll(start_s));
     for (const auto& s : flag_all(argc, argv, "--input"))  wr.inputs.push_back(parse_rq(s));
     for (const auto& s : flag_all(argc, argv, "--output")) wr.outputs.push_back(parse_rq(s));
-    return cmd_write(data_dir, parse_leaf_index(argc, argv), wr);
+    return cmd_write(data_dir, argc, argv,wr);
 }
 
 static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
@@ -636,22 +683,49 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     const auto quality_s = flag_val(argc, argv, "--quality");
     const auto raw_s     = flag_val(argc, argv, "--hours-raw");
     const auto lu_s      = flag_val(argc, argv, "--labor-units");
-    if (work_s.empty() || quality_s.empty() || raw_s.empty() || lu_s.empty()) {
+    if (work_s.empty() || quality_s.empty()) {
         std::cerr << "Usage: bc accept\n"
                      "    --work         WORK_CHAIN/HASH\n"
                      "    --quality      TEXT\n"
-                     "    --hours-raw    FLOAT\n"
-                     "    --labor-units  FLOAT\n";
+                     "    [--hours-raw   FLOAT]   default: hours of the fetched WorkRecord\n"
+                     "    [--coef        FLOAT]   grade coefficient, default 1.0\n"
+                     "    [--labor-units FLOAT]   default: hours-raw * coef\n";
         return 1;
     }
+
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+
     Acceptance a;
-    a.work        = parse_ref(work_s);
-    a.quality     = quality_s;
-    a.hours_raw   = std::stod(raw_s);
-    a.labor_units = std::stod(lu_s);
-    a.timestamp   = static_cast<int64_t>(std::time(nullptr));
-    a.receiver    = load_user_id(data_dir).bytes;
-    return cmd_write(data_dir, parse_leaf_index(argc, argv), a);
+    a.work      = parse_ref(work_s);
+    a.quality   = quality_s;
+    a.timestamp = static_cast<int64_t>(std::time(nullptr));
+    a.receiver  = ctx.user_id.bytes;
+
+    if (raw_s.empty() || lu_s.empty()) {
+        // Derive the appraisal from the worker's record (records.md §9.5).
+        const auto block = find_external_by_hash(ctx, a.work.hash);
+        if (!block || block->type != BlockType::DATA)
+            throw std::runtime_error(
+                "work record not fetched — run 'bc fetch <ref> --via URL' first, "
+                "or pass --hours-raw and --labor-units");
+        const auto rec = Codec::decode(block->payload.data(), block->payload.size());
+        const auto* wr = std::get_if<WorkRecord>(&rec);
+        if (!wr) throw std::runtime_error("--work does not reference a WorkRecord");
+        const double coef = std::stod(flag_val(argc, argv, "--coef", "1.0"));
+        a.hours_raw   = raw_s.empty() ? wr->hours : std::stod(raw_s);
+        a.labor_units = lu_s.empty() ? a.hours_raw * coef : std::stod(lu_s);
+    } else {
+        a.hours_raw   = std::stod(raw_s);
+        a.labor_units = std::stod(lu_s);
+    }
+
+    const Block block = append_record(ctx, Record{a});
+    std::cout << "acceptance ref: " << to_hex(ctx.user_id.bytes) << "/"
+              << to_hex(Crypto::hash_block(block).bytes) << "\n";
+    std::cerr << "appraised: " << a.labor_units << " labor-h  (raw " << a.hours_raw
+              << "h)\n(pay with: bc pay --acceptance <ref>)\n";
+    return 0;
 }
 
 // bc merge prepare [--leaf L]
@@ -1049,11 +1123,60 @@ static WalletView compute_wallet(Context& ctx) {
     return w;
 }
 
-static Block append_record(Context& ctx, const Record& rec) {
-    const auto payload = Codec::encode(rec);
-    const auto now     = static_cast<Timestamp>(std::time(nullptr));
-    return ctx.bc.append_data_block(ctx.user_id, ctx.leaf, payload,
-                                    ctx.working_kp, now);
+// Auto-selection of portions (records.md §11.1): receiver's own paper first
+// (it will annihilate), then other held paper, self-issue for the remainder.
+static std::vector<records::OriginQty> pick_portions(Context& ctx,
+                                                     const std::string& to_hex_s,
+                                                     double units) {
+    if (units <= 0) throw std::runtime_error("units must be positive");
+    std::vector<records::OriginQty> portions;
+    double remaining = units;
+    auto wallet = compute_wallet(ctx);
+    auto spend = [&](const std::string& issuer_hex) {
+        auto it = wallet.holdings.find(issuer_hex);
+        if (it == wallet.holdings.end() || it->second <= 0 || remaining <= 1e-9)
+            return;
+        const double take = std::min(it->second, remaining);
+        portions.push_back({uid_from_hex(issuer_hex), take});
+        remaining -= take;
+        it->second = 0;
+    };
+    spend(to_hex_s);                                        // redemption first
+    for (const auto& [issuer, held] : wallet.holdings) {
+        (void)held;
+        spend(issuer);
+    }
+    if (remaining > 1e-9)
+        portions.push_back({ctx.user_id.bytes, remaining});  // self-issue
+    return portions;
+}
+
+// Best-effort upload so the receiver can fetch the block from the aggregator.
+static void upload_block(const std::string& via, const Block& block) {
+    std::string host = via;
+    if (host.rfind("http://", 0) == 0) host = host.substr(7);
+    httplib::Client cli(host);
+    cli.set_connection_timeout(5);
+    const auto cbor = Serializer::encode(block);
+    const auto res  = cli.Post("/blocks",
+        std::string(reinterpret_cast<const char*>(cbor.data()), cbor.size()),
+        "application/cbor");
+    if (res && res->status == 200)
+        std::cerr << "Uploaded to " << via << "\n";
+    else
+        std::cerr << "upload to " << via << " failed — receiver can't fetch it yet\n";
+}
+
+static void print_portions(const records::Transfer& t, const std::string& me_hex,
+                           const std::string& to_hex_s) {
+    for (const auto& o : t.origins) {
+        const std::string issuer = to_hex(o.issuer.data(), 32);
+        const char* kind = issuer == me_hex   ? "self-issued"
+                         : issuer == to_hex_s ? "returned to issuer"
+                                              : "endorsed";
+        std::cerr << "  " << o.units << "h  " << kind
+                  << "  (issuer " << issuer.substr(0, 16) << "...)\n";
+    }
 }
 
 // bc wallet [--leaf L]
@@ -1115,59 +1238,16 @@ static int cmd_transfer_send(const fs::path& data_dir, int argc, char** argv) {
         if (!units_s.empty() && std::abs(std::stod(units_s) - total) > 1e-9)
             throw std::runtime_error("--units disagrees with the sum of --origin portions");
     } else {
-        // Auto-selection (records.md §11.1): receiver's own paper first (it
-        // will annihilate), then other held paper, self-issue the remainder.
-        double remaining = std::stod(units_s);
-        if (remaining <= 0) throw std::runtime_error("--units must be positive");
-        auto wallet = compute_wallet(ctx);
-        auto spend = [&](const std::string& issuer_hex) {
-            auto it = wallet.holdings.find(issuer_hex);
-            if (it == wallet.holdings.end() || it->second <= 0 || remaining <= 1e-9)
-                return;
-            const double take = std::min(it->second, remaining);
-            t.origins.push_back({uid_from_hex(issuer_hex), take});
-            remaining -= take;
-            it->second = 0;
-        };
-        spend(to_s);                                       // redemption first
-        for (const auto& [issuer, units] : wallet.holdings) {
-            (void)units;
-            spend(issuer);
-        }
-        if (remaining > 1e-9)
-            t.origins.push_back({ctx.user_id.bytes, remaining});   // self-issue
+        t.origins = pick_portions(ctx, to_s, std::stod(units_s));
     }
 
     const Block block = append_record(ctx, Record{t});
-    const Hash  hash  = Crypto::hash_block(block);
-
-    for (const auto& o : t.origins) {
-        const std::string issuer = to_hex(o.issuer.data(), 32);
-        const char* kind = issuer == me_hex ? "self-issued"
-                         : issuer == to_s   ? "returned to issuer"
-                                            : "endorsed";
-        std::cerr << "  " << o.units << "h  " << kind
-                  << "  (issuer " << issuer.substr(0, 16) << "...)\n";
-    }
-    std::cout << "transfer ref: " << me_hex << "/" << to_hex(hash.bytes) << "\n";
+    print_portions(t, me_hex, to_s);
+    std::cout << "transfer ref: " << me_hex << "/"
+              << to_hex(Crypto::hash_block(block).bytes) << "\n";
 
     const auto via = flag_val(argc, argv, "--via");
-    if (!via.empty()) {
-        std::string host = via;
-        if (host.rfind("http://", 0) == 0) host = host.substr(7);
-        httplib::Client cli(host);
-        cli.set_connection_timeout(5);
-        const auto cbor = Serializer::encode(block);
-        const auto res  = cli.Post("/blocks",
-            std::string(reinterpret_cast<const char*>(cbor.data()), cbor.size()),
-            "application/cbor");
-        if (res && res->status == 200)
-            std::cerr << "Uploaded to " << via << ". Receiver runs: bc transfer recv "
-                      << me_hex.substr(0, 8) << ".../" << to_hex(hash.bytes).substr(0, 8)
-                      << "... --via " << via << "\n";
-        else
-            std::cerr << "upload to " << via << " failed — receiver can't fetch it yet\n";
-    }
+    if (!via.empty()) upload_block(via, block);
     return 0;
 }
 
@@ -1184,22 +1264,7 @@ static int cmd_transfer_recv(const fs::path& data_dir, int argc, char** argv) {
     const NodeIndex leaf = parse_leaf_index(argc, argv);
     Context ctx(data_dir, leaf);
 
-    std::string host = via;
-    if (host.rfind("http://", 0) == 0) host = host.substr(7);
-    httplib::Client cli(host);
-    cli.set_connection_timeout(5);
-    const auto res = cli.Get("/sync/block/" + to_hex(src.hash.data(), 32));
-    if (!res || res->status != 200) {
-        std::cerr << "block not found on " << via << "\n";
-        return 1;
-    }
-
-    const Block block = Serializer::decode_block(
-        reinterpret_cast<const uint8_t*>(res->body.data()), res->body.size());
-    if (Crypto::hash_block(block).bytes != src.hash)
-        throw std::runtime_error("aggregator returned a block with a different hash");
-    if (block.address.user_id.bytes != src.chain)
-        throw std::runtime_error("block belongs to a different chain than the ref says");
+    const Block block = fetch_block_from(via, src);
     if (block.type != BlockType::DATA)
         throw std::runtime_error("referenced block is not a DATA block");
 
@@ -1225,6 +1290,119 @@ static int cmd_transfer_recv(const fs::path& data_dir, int argc, char** argv) {
     const auto w = compute_wallet(ctx);
     std::cerr << "wallet: " << w.holdings.size() << " issuer(s) held, own debt "
               << w.debt() << "h\n";
+    return 0;
+}
+
+// bc fetch <chain>/<hash> --via URL [--leaf L]
+// Generic read access to another chain: fetches any block from an aggregator
+// into the local external store (work records, ideas, pledges, ...).
+static int cmd_fetch(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);
+    const auto via = flag_val(argc, argv, "--via");
+    if (pos.size() < 2 || via.empty()) {
+        std::cerr << "Usage: bc fetch <chain_hex>/<hash_hex> --via URL [--leaf L]\n";
+        return 1;
+    }
+    const Ref src = parse_ref(pos[1]);
+
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+
+    const Block block = fetch_block_from(via, src);
+    if (ctx.storage.has_external_block(block.address)) {
+        std::cerr << "already known\n";
+    } else {
+        ctx.storage.put_external_block(block);
+        std::cerr << "stored\n";
+    }
+
+    if (block.type == BlockType::DATA) {
+        try {
+            const auto rec = Codec::decode(block.payload.data(), block.payload.size());
+            std::cout << record_summary(rec) << "\n";
+        } catch (const CodecError&) {
+            std::cout << "[unknown payload]\n";
+        }
+    }
+    return 0;
+}
+
+// bc pay --acceptance REF [--units N] [--via URL] [--leaf L]
+// Pays (the remainder of) an own acceptance's appraisal to the worker
+// (records.md §9.5). Refuses to exceed the appraised value — payments for one
+// work never outgrow its labor_units (§12.8).
+static int cmd_pay(const fs::path& data_dir, int argc, char** argv) {
+    const auto acc_s = flag_val(argc, argv, "--acceptance");
+    if (acc_s.empty()) {
+        std::cerr << "Usage: bc pay --acceptance REF [--units N] [--via URL] [--leaf L]\n";
+        return 1;
+    }
+
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+
+    const Ref acc_ref = parse_ref(acc_s);
+    if (acc_ref.chain != ctx.user_id.bytes)
+        throw std::runtime_error("--acceptance must reference your own record "
+                                 "(the appraiser pays, records.md §9.5)");
+
+    // One branch scan: locate the acceptance and total prior payments for it.
+    std::optional<Acceptance> acceptance;
+    double paid = 0;
+    std::vector<Block> blocks;
+    try { blocks = ctx.bc.get_branch(ctx.user_id, leaf); }
+    catch (const BlockchainError&) {}
+    for (const auto& b : blocks) {
+        if (b.type != BlockType::DATA) continue;
+        Record rec;
+        try { rec = Codec::decode(b.payload.data(), b.payload.size()); }
+        catch (const CodecError&) { continue; }
+        if (Crypto::hash_block(b).bytes == acc_ref.hash) {
+            const auto* a = std::get_if<Acceptance>(&rec);
+            if (!a) throw std::runtime_error("--acceptance does not reference an Acceptance");
+            acceptance = *a;
+        } else if (const auto* t = std::get_if<records::Transfer>(&rec)) {
+            if (t->reason && *t->reason == acc_ref)
+                for (const auto& o : t->origins) paid += o.units;
+        }
+    }
+    if (!acceptance)
+        throw std::runtime_error("acceptance not found in the own branch");
+
+    const double cap       = acceptance->labor_units;
+    const double remaining = cap - paid;
+    if (remaining <= 1e-9) {
+        std::cerr << "already paid in full: " << paid << "/" << cap
+                  << " labor-h — payments must not exceed the appraisal (§12.8)\n";
+        return 1;
+    }
+    const auto   units_s = flag_val(argc, argv, "--units");
+    const double units   = units_s.empty() ? remaining : std::stod(units_s);
+    if (units > remaining + 1e-9) {
+        std::cerr << "refused: " << units << "h would exceed the appraisal — paid "
+                  << paid << "/" << cap << " labor-h, payable " << remaining
+                  << "h (§12.8)\n";
+        return 1;
+    }
+
+    const std::string me_hex = to_hex(ctx.user_id.bytes);
+    const std::string to_s   = to_hex(acceptance->work.chain.data(), 32);
+
+    records::Transfer t{};
+    t.from      = ctx.user_id.bytes;
+    t.to        = acceptance->work.chain;
+    t.origins   = pick_portions(ctx, to_s, units);
+    t.reason    = acc_ref;
+    t.timestamp = static_cast<int64_t>(std::time(nullptr));
+
+    const Block block = append_record(ctx, Record{t});
+    print_portions(t, me_hex, to_s);
+    std::cout << "paid " << units << "h (" << paid + units << "/" << cap
+              << ")  transfer ref: " << me_hex << "/"
+              << to_hex(Crypto::hash_block(block).bytes) << "\n";
+
+    const auto via = flag_val(argc, argv, "--via");
+    if (!via.empty()) upload_block(via, block);
     return 0;
 }
 
@@ -1603,7 +1781,7 @@ static int cmd_fraud_claim(const fs::path& data_dir, int argc, char** argv) {
     std::cerr << "verdict: CONFIRMED — writing FraudClaim to own chain.\n";
 
     FraudClaim claim{target, kind, *proof, flag_val(argc, argv, "--reason")};
-    return cmd_write(data_dir, parse_leaf_index(argc, argv), claim);
+    return cmd_write(data_dir, argc, argv,claim);
 }
 
 // ── Usage ─────────────────────────────────────────────────────────────────────
@@ -1678,11 +1856,14 @@ Labor:
     [--start UNIX_TS]
     [--input  NAME:QTY:UNIT ...]   (repeatable)
     [--output NAME:QTY:UNIT ...]   (repeatable)
-  accept                           Accept work → creates labor-hours
-    --work        WORK_REF
+  accept                           Appraise received work (records.md §9.5)
+    --work        WORK_REF             (fetch it first: bc fetch <ref> --via URL)
     --quality     TEXT
-    --hours-raw   FLOAT
-    --labor-units FLOAT
+    [--hours-raw FLOAT]                default: hours of the fetched WorkRecord
+    [--coef FLOAT] [--labor-units F]   default appraisal: hours-raw * coef
+  pay --acceptance REF             Pay the worker up to the appraisal (§12.8)
+    [--units N] [--via URL]            default: the unpaid remainder
+  fetch <chain>/<hash> --via URL   Fetch any foreign block for local reading
 
 Merge over a relay (sync.md §4.1):
   merge run                        Initiate a merge and drive it to completion
@@ -1796,6 +1977,8 @@ int main(int argc, char** argv) {
         else if (cmd == "cache"     && subcmd == "publish") return cmd_cache_publish(data_dir, argc, argv);
         else if (cmd == "cache"     && subcmd == "complete")return cmd_cache_complete(data_dir, argc, argv);
         else if (cmd == "wallet")                           return cmd_wallet(data_dir, argc, argv);
+        else if (cmd == "fetch")                            return cmd_fetch(data_dir, argc, argv);
+        else if (cmd == "pay")                              return cmd_pay(data_dir, argc, argv);
         else if (cmd == "transfer"  && subcmd == "send")    return cmd_transfer_send(data_dir, argc, argv);
         else if (cmd == "transfer"  && subcmd == "recv")    return cmd_transfer_recv(data_dir, argc, argv);
         else if (cmd == "pledge"    && subcmd == "add")     return cmd_pledge_add(data_dir, argc, argv);
