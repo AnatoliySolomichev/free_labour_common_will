@@ -57,7 +57,9 @@ int main(int argc, char* argv[]) {
         aggregator::AggregatorStorage storage(db_path);
         aggregator::AggregatorServer  server(
             storage, port, peers,
-            std::chrono::seconds(sync_interval));
+            std::chrono::seconds(sync_interval),
+            std::chrono::seconds(3600),
+            std::filesystem::path(db_path) / "own");   // signed DailyAggregate chain
 
         g_server = &server;
         std::signal(SIGINT,  on_signal);

@@ -27,9 +27,10 @@ enum class RecordType : uint8_t {
     WorkRecord   = 0x53,
     Acceptance   = 0x54,
     // Economy
-    Transfer     = 0x70,
-    Pledge       = 0x72,
-    PledgeRevoke = 0x73,
+    Transfer       = 0x70,
+    DailyAggregate = 0x71,
+    Pledge         = 0x72,
+    PledgeRevoke   = 0x73,
 };
 
 // ── Cross-chain reference (records.md §4) ────────────────────────────────────
@@ -204,6 +205,31 @@ struct PledgeRevoke {
     int64_t timestamp;  // Unix timestamp UTC
 };
 
+// Daily rate of one (specialty name, grade level) pair (records.md §11.2).
+struct RateEntry {
+    std::string specialty;  // global key: the specialty name
+    uint8_t     level;      // grade level 1–6
+    double      rate;       // стч/hour, after smoothing
+    double      hours;      // Σ hours_raw of the day's settled deals
+    uint64_t    deals;      // number of settled deals counted
+
+    bool operator==(const RateEntry& o) const noexcept {
+        return specialty == o.specialty && level == o.level && rate == o.rate
+            && hours == o.hours && deals == o.deals;
+    }
+};
+
+// Signed daily specialty rates, written into the aggregator's own chain
+// (records.md §11.2): the block author IS the aggregator. Only settled deals
+// count; every figure is re-checkable against the chains.
+struct DailyAggregate {
+    static constexpr RecordType TYPE = RecordType::DailyAggregate;
+
+    int64_t                date;       // UTC day start (ts − ts mod 86400)
+    std::vector<RateEntry> rates;
+    int64_t                timestamp;  // Unix timestamp UTC
+};
+
 // ── Record variant ────────────────────────────────────────────────────────────
 
 using Record = std::variant<
@@ -219,6 +245,7 @@ using Record = std::variant<
     WorkRecord,
     Acceptance,
     Transfer,
+    DailyAggregate,
     Pledge,
     PledgeRevoke
 >;

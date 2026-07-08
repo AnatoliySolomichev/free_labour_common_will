@@ -300,6 +300,25 @@ TEST(RecordsCodec, PledgeRevokeRoundtrip) {
     EXPECT_EQ(decoded.timestamp, pr.timestamp);
 }
 
+TEST(RecordsCodec, DailyAggregateRoundtrip) {
+    DailyAggregate d{};
+    d.date      = 1'700'000'000LL - 1'700'000'000LL % 86400;
+    d.timestamp = 1'700'000'042LL;
+    d.rates     = { {"хлебопёк", 3, 1.333, 0.6, 2},
+                    {"кардиохирург", 3, 14.0, 0.75, 1} };
+
+    const auto decoded = std::get<DailyAggregate>(roundtrip(d));
+    EXPECT_EQ(decoded.date,      d.date);
+    EXPECT_EQ(decoded.timestamp, d.timestamp);
+    ASSERT_EQ(decoded.rates.size(), 2u);
+    EXPECT_EQ(decoded.rates[0], d.rates[0]);
+    EXPECT_EQ(decoded.rates[1], d.rates[1]);
+
+    DailyAggregate empty{};
+    empty.date = 0;
+    EXPECT_TRUE(std::get<DailyAggregate>(roundtrip(empty)).rates.empty());
+}
+
 TEST(RecordsCodec, EconomyDeterminism) {
     Transfer t{};
     t.from    = make_uid(0x01);

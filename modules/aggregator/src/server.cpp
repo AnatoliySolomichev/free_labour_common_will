@@ -1,8 +1,10 @@
 #include "aggregator/server.h"
 #include "aggregator/discovery_view.h"
 #include "aggregator/economy_view.h"
+#include "aggregator/rates_view.h"
 #include "blockchain/serializer.h"
 #include "blockchain/errors.h"
+#include <records/codec.h>
 #include <httplib.h>
 #include <algorithm>
 #include <ctime>
@@ -119,7 +121,8 @@ AggregatorServer::AggregatorServer(AggregatorStorage& storage,
                                    uint16_t port,
                                    std::vector<std::string> peers,
                                    std::chrono::seconds sync_interval,
-                                   std::chrono::seconds mailbox_ttl)
+                                   std::chrono::seconds mailbox_ttl,
+                                   std::filesystem::path own_chain_dir)
     : storage_(storage)
     , port_(port)
     , peers_(std::move(peers))
@@ -127,6 +130,13 @@ AggregatorServer::AggregatorServer(AggregatorStorage& storage,
     , mailbox_ttl_(mailbox_ttl)
     , impl_(std::make_unique<Impl>())
 {
+    if (!own_chain_dir.empty()) {
+        try {
+            own_chain_ = std::make_unique<OwnChain>(own_chain_dir);
+        } catch (const std::exception& e) {
+            std::cerr << "[aggregator] own chain unavailable: " << e.what() << "\n";
+        }
+    }
     setup_routes();
 }
 
@@ -464,6 +474,104 @@ void AggregatorServer::setup_routes() {
                      + "}";
             }
             body += "]";
+            res.set_content(body, "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
+                            "application/json");
+        }
+    });
+
+    // GET /economy/rates — today's specialty rates (records.md §11.2).
+    // Computed lazily once per day and published as a signed DailyAggregate
+    // block in the aggregator's own chain; the block also enters the block
+    // warehouse, so it gossips to peers and clients can fetch + verify it.
+    svr.Get("/economy/rates", [&](const httplib::Request& req, httplib::Response& res) {
+        if (!own_chain_) {
+            res.status = 501;
+            res.set_content("{\"error\":\"aggregator has no own chain\"}",
+                            "application/json");
+            return;
+        }
+        try {
+            // ?day=TS — preview: recompute the raw day average over that
+            // day's deals without publishing (re-checkability: compare with
+            // the published aggregate).
+            if (req.has_param("day")) {
+                const int64_t d = std::stoll(req.get_param_value("day"));
+                std::string body = "{\"preview_day\":" + std::to_string(d)
+                                 + ",\"rates\":[";
+                bool first = true;
+                for (const auto& r : build_daily_rates(storage_, d - d % 86'400, {})) {
+                    if (!first) body += ',';
+                    first = false;
+                    body += "{\"specialty\":\"" + json_escape(r.specialty)
+                         + "\",\"level\":" + std::to_string(r.level)
+                         + ",\"rate\":"    + std::to_string(r.rate)
+                         + ",\"hours\":"   + std::to_string(r.hours)
+                         + ",\"deals\":"   + std::to_string(r.deals)
+                         + "}";
+                }
+                body += "]}";
+                res.set_content(body, "application/json");
+                return;
+            }
+
+            std::lock_guard<std::mutex> lock(rates_mutex_);
+            const auto now = static_cast<int64_t>(std::time(nullptr));
+            const int64_t day = now - now % 86'400;
+
+            std::optional<records::DailyAggregate> today;
+            Hash today_hash{};
+            std::vector<records::RateEntry> previous;
+            int64_t prev_date = -1;
+            for (const Block& b : own_chain_->branch()) {
+                if (b.type != BlockType::DATA) continue;
+                try {
+                    const auto rec = records::Codec::decode(b.payload.data(),
+                                                            b.payload.size());
+                    const auto* d = std::get_if<records::DailyAggregate>(&rec);
+                    if (!d) continue;
+                    if (d->date == day) {
+                        today      = *d;   // a later block for today overrides
+                        today_hash = Crypto::hash_block(b);
+                    } else if (d->date < day && d->date >= prev_date) {
+                        previous  = d->rates;
+                        prev_date = d->date;
+                    }
+                } catch (const records::CodecError&) {}
+            }
+
+            if (!today) {
+                records::DailyAggregate d{};
+                d.date      = day;
+                d.timestamp = now;
+                // Today's rates derive from YESTERDAY's settled deals
+                // (main_ideas.pdf: коэффициенты этого дня → следующего).
+                d.rates     = build_daily_rates(storage_, day - 86'400, previous);
+                const Block block = own_chain_->append_data(
+                    records::Codec::encode(records::Record{d}));
+                try { storage_.add_block(block); } catch (...) {}
+                today      = std::move(d);
+                today_hash = Crypto::hash_block(block);
+            }
+
+            std::string body = "{\"date\":" + std::to_string(today->date)
+                + ",\"chain\":\"" + to_hex(own_chain_->uid().bytes)
+                + "\",\"block\":\"" + to_hex(today_hash.bytes)
+                + "\",\"rates\":[";
+            bool first = true;
+            for (const auto& r : today->rates) {
+                if (!first) body += ',';
+                first = false;
+                body += "{\"specialty\":\"" + json_escape(r.specialty)
+                     + "\",\"level\":" + std::to_string(r.level)
+                     + ",\"rate\":"    + std::to_string(r.rate)
+                     + ",\"hours\":"   + std::to_string(r.hours)
+                     + ",\"deals\":"   + std::to_string(r.deals)
+                     + "}";
+            }
+            body += "]}";
             res.set_content(body, "application/json");
         } catch (const std::exception& e) {
             res.status = 500;

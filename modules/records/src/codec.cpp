@@ -213,6 +213,22 @@ void enc_pledge_revoke(Buf& out, const PledgeRevoke& pr) {
     w_uint(out, 2); w_int64(out, pr.timestamp);
 }
 
+void enc_daily_aggregate(Buf& out, const DailyAggregate& d) {
+    w_map(out, 4);
+    w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::DailyAggregate));
+    w_uint(out, 1); w_int64(out, d.date);
+    w_uint(out, 2); w_arr(out, d.rates.size());
+    for (const auto& r : d.rates) {
+        w_map(out, 5);
+        w_uint(out, 0); w_text(out, r.specialty);
+        w_uint(out, 1); w_uint(out, r.level);
+        w_uint(out, 2); w_float64(out, r.rate);
+        w_uint(out, 3); w_float64(out, r.hours);
+        w_uint(out, 4); w_uint(out, r.deals);
+    }
+    w_uint(out, 3); w_int64(out, d.timestamp);
+}
+
 // ── CBOR reader ───────────────────────────────────────────────────────────────
 
 class CborReader {
@@ -561,6 +577,28 @@ PledgeRevoke dec_pledge_revoke_fields(CborReader& r) {
     return pr;
 }
 
+DailyAggregate dec_daily_aggregate_fields(CborReader& r) {
+    DailyAggregate d{};
+    expect_key(r, 1); d.date = r.r_int();
+    expect_key(r, 2);
+    {
+        const uint64_t n = r.r_arr();
+        d.rates.reserve(static_cast<size_t>(n));
+        for (uint64_t i = 0; i < n; ++i) {
+            if (r.r_map() != 5) throw CodecError("RateEntry: expected 5 fields");
+            RateEntry e{};
+            expect_key(r, 0); e.specialty = r.r_text();
+            expect_key(r, 1); e.level     = r.r_uint8();
+            expect_key(r, 2); e.rate      = r.r_float64();
+            expect_key(r, 3); e.hours     = r.r_float64();
+            expect_key(r, 4); e.deals     = r.r_uint();
+            d.rates.push_back(std::move(e));
+        }
+    }
+    expect_key(r, 3); d.timestamp = r.r_int();
+    return d;
+}
+
 } // namespace (anonymous)
 
 // ── Codec public methods ──────────────────────────────────────────────────────
@@ -583,6 +621,7 @@ std::vector<uint8_t> Codec::encode(const Record& rec) {
         else if constexpr (std::is_same_v<T, Transfer>)    enc_transfer(out, r);
         else if constexpr (std::is_same_v<T, Pledge>)      enc_pledge(out, r);
         else if constexpr (std::is_same_v<T, PledgeRevoke>) enc_pledge_revoke(out, r);
+        else if constexpr (std::is_same_v<T, DailyAggregate>) enc_daily_aggregate(out, r);
     }, rec);
     return out;
 }
@@ -608,6 +647,7 @@ Record Codec::decode(const uint8_t* data, size_t len) {
         case RecordType::Transfer:    return dec_transfer_fields(r);
         case RecordType::Pledge:      return dec_pledge_fields(r);
         case RecordType::PledgeRevoke: return dec_pledge_revoke_fields(r);
+        case RecordType::DailyAggregate: return dec_daily_aggregate_fields(r);
         default:
             throw CodecError("CBOR: unknown record type discriminator");
     }

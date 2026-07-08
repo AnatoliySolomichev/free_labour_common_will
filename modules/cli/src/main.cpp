@@ -125,7 +125,7 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--idx", "--depth", "--proof", "--merkle-root", "--target", "--leaf-hash",
     "--reason", "--peer", "--via", "--timeout",
     "--to", "--units", "--origin", "--pledge", "--executor", "--expires",
-    "--acceptance", "--coef",
+    "--acceptance", "--coef", "--k",
 };
 
 // True when a standalone flag (no value) is present.
@@ -339,6 +339,52 @@ static Block fetch_block_from(const std::string& via, const Ref& src) {
     if (block.address.user_id.bytes != src.chain)
         throw std::runtime_error("block belongs to a different chain than the ref says");
     return block;
+}
+
+// Resolve the (specialty, level) of a work's agent — Grade → Specialty, local
+// external store first, then the aggregator — and look up today's network
+// rate in GET /economy/rates (records.md §11.2). nullopt on any gap.
+static std::optional<double> lookup_rate(Context& ctx, const std::string& via,
+                                         const Ref& agent_ref) {
+    auto get_record = [&](const Ref& ref) -> std::optional<Record> {
+        std::optional<Block> b = find_external_by_hash(ctx, ref.hash);
+        if (!b) {
+            try {
+                b = fetch_block_from(via, ref);
+                if (!ctx.storage.has_external_block(b->address))
+                    ctx.storage.put_external_block(*b);
+            } catch (const std::exception&) {
+                return std::nullopt;
+            }
+        }
+        if (b->type != BlockType::DATA) return std::nullopt;
+        try { return Codec::decode(b->payload.data(), b->payload.size()); }
+        catch (const CodecError&) { return std::nullopt; }
+    };
+
+    const auto grade_rec = get_record(agent_ref);
+    if (!grade_rec) return std::nullopt;
+    const auto* grade = std::get_if<Grade>(&*grade_rec);
+    if (!grade) return std::nullopt;
+    const auto spec_rec = get_record(grade->specialty);
+    if (!spec_rec) return std::nullopt;
+    const auto* spec = std::get_if<Specialty>(&*spec_rec);
+    if (!spec) return std::nullopt;
+
+    std::string host = via;
+    if (host.rfind("http://", 0) == 0) host = host.substr(7);
+    httplib::Client cli(host);
+    cli.set_connection_timeout(5);
+    const auto res = cli.Get("/economy/rates");
+    if (!res || res->status != 200) return std::nullopt;
+
+    const std::string needle = "\"specialty\":\"" + spec->name
+                             + "\",\"level\":" + std::to_string(grade->level)
+                             + ",\"rate\":";
+    const auto pos = res->body.find(needle);
+    if (pos == std::string::npos) return std::nullopt;
+    try { return std::stod(res->body.substr(pos + needle.size())); }
+    catch (...) { return std::nullopt; }
 }
 
 // bc block stub [--leaf L]
@@ -712,9 +758,28 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
         const auto rec = Codec::decode(block->payload.data(), block->payload.size());
         const auto* wr = std::get_if<WorkRecord>(&rec);
         if (!wr) throw std::runtime_error("--work does not reference a WorkRecord");
-        const double coef = std::stod(flag_val(argc, argv, "--coef", "1.0"));
-        a.hours_raw   = raw_s.empty() ? wr->hours : std::stod(raw_s);
-        a.labor_units = lu_s.empty() ? a.hours_raw * coef : std::stod(lu_s);
+        a.hours_raw = raw_s.empty() ? wr->hours : std::stod(raw_s);
+        if (!lu_s.empty()) {
+            a.labor_units = std::stod(lu_s);
+        } else {
+            // Appraisal = network rate × negotiated k × hours (economy.md §2а).
+            const auto coef_s = flag_val(argc, argv, "--coef");
+            const auto via    = flag_val(argc, argv, "--via");
+            double rate = 1.0;
+            if (!coef_s.empty()) {
+                rate = std::stod(coef_s);
+            } else if (!via.empty()) {
+                if (const auto r = lookup_rate(ctx, via, wr->agent)) {
+                    rate = *r;
+                    std::cerr << "network rate: " << rate << " стч/h\n";
+                } else {
+                    std::cerr << "rate lookup failed — using 1.0 "
+                                 "(override with --coef)\n";
+                }
+            }
+            const double k = std::stod(flag_val(argc, argv, "--k", "1.0"));
+            a.labor_units = a.hours_raw * rate * k;
+        }
     } else {
         a.hours_raw   = std::stod(raw_s);
         a.labor_units = std::stod(lu_s);
@@ -1426,6 +1491,16 @@ static int economy_get(const std::string& via, const std::string& path) {
     return res->status == 200 ? 0 : 1;
 }
 
+// bc rates --via URL
+static int cmd_rates(int argc, char** argv) {
+    const auto via = flag_val(argc, argv, "--via");
+    if (via.empty()) {
+        std::cerr << "Usage: bc rates --via URL\n";
+        return 1;
+    }
+    return economy_get(via, "/economy/rates");
+}
+
 // bc ideas top --via URL
 static int cmd_ideas_top(int argc, char** argv) {
     const auto via = flag_val(argc, argv, "--via");
@@ -1992,7 +2067,9 @@ Labor:
     --work        WORK_REF             (fetch it first: bc fetch <ref> --via URL)
     --quality     TEXT
     [--hours-raw FLOAT]                default: hours of the fetched WorkRecord
-    [--coef FLOAT] [--labor-units F]   default appraisal: hours-raw * coef
+    [--via URL] [--k FLOAT]            appraisal = network rate * k * hours
+    [--coef FLOAT] [--labor-units F]   manual rate / full manual appraisal
+  rates --via URL                  Today's specialty rates (signed DailyAggregate)
   pay --acceptance REF             Pay the worker up to the appraisal (§12.8)
     [--units N] [--via URL]            default: the unpaid remainder
   fetch <chain>/<hash> --via URL   Fetch any foreign block for local reading
@@ -2115,6 +2192,7 @@ int main(int argc, char** argv) {
         else if (cmd == "cache"     && subcmd == "complete")return cmd_cache_complete(data_dir, argc, argv);
         else if (cmd == "wallet")                           return cmd_wallet(data_dir, argc, argv);
         else if (cmd == "ideas"     && subcmd == "top")     return cmd_ideas_top(argc, argv);
+        else if (cmd == "rates")                            return cmd_rates(argc, argv);
         else if (cmd == "discover")                         return cmd_discover(data_dir, argc, argv);
         else if (cmd == "chain"     && subcmd == "info")    return cmd_chain_info(argc, argv);
         else if (cmd == "fetch")                            return cmd_fetch(data_dir, argc, argv);
