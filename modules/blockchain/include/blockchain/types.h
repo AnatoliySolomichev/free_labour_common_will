@@ -84,6 +84,12 @@ inline bool is_leaf_node(NodeIndex index) noexcept {
     return node_depth(index) == 31;
 }
 
+// Any existing heap position (depth 0–31). Branches may grow from any valid
+// node (blockchain.md §3.2 v0.7); only depth-31 nodes have no child nodes.
+inline bool is_valid_node(NodeIndex index) noexcept {
+    return node_depth(index) <= 31;
+}
+
 // Returns heap indices [0, ..., target] from root to target (inclusive).
 inline std::vector<NodeIndex> path_indices(NodeIndex target) noexcept {
     std::vector<NodeIndex> path;

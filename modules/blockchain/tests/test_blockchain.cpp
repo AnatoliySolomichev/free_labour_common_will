@@ -96,9 +96,39 @@ TEST_F(BlockchainTest, EnsurePathIdempotent) {
     EXPECT_NO_THROW(bc_->ensure_path(root_kp_.pub, LEAF, key_for));
 }
 
-TEST_F(BlockchainTest, EnsurePathNonLeafThrows) {
+// Branches may grow from any node (blockchain.md §3.2 v0.7): a mid-depth node
+// carries both child nodes and its own linear branch.
+TEST_F(BlockchainTest, BranchOnIntermediateNode) {
+    std::map<NodeIndex, KeyPair> keys;
+    keys[0] = root_kp_;
+    auto key_for = [&](NodeIndex idx) {
+        auto it = keys.find(idx);
+        if (it == keys.end()) it = keys.emplace(idx, Crypto::generate_keypair()).first;
+        return it->second;
+    };
+
+    // Node 5 sits at depth 2 (path 0 → 2 → 5) — a "department" branch.
+    bc_->ensure_path(root_kp_.pub, 5, key_for);
+    const Block b0 = bc_->append_data_block(root_kp_.pub, 5, {0xAA},
+                                            keys.at(5), 1'000LL);
+    EXPECT_EQ(b0.address.node_index, 5u);
+    EXPECT_EQ(b0.address.block_index, 0u);
+    // Block 0 chains to the node's own hash.
+    EXPECT_EQ(b0.prev_hash, Crypto::hash_node(storage_->get_node(root_kp_.pub, 5)));
+
+    // The same node still parents deeper structure: 5 → 11 works alongside.
+    bc_->ensure_path(root_kp_.pub, 11, key_for);
+    bc_->append_data_block(root_kp_.pub, 11, {0xBB}, keys.at(11), 1'001LL);
+
+    EXPECT_EQ(bc_->get_branch(root_kp_.pub, 5).size(), 1u);
+    EXPECT_EQ(bc_->get_branch(root_kp_.pub, 11).size(), 1u);
+}
+
+TEST_F(BlockchainTest, EnsurePathInvalidIndexThrows) {
     auto key_for = [&](NodeIndex) { return Crypto::generate_keypair(); };
-    EXPECT_THROW(bc_->ensure_path(root_kp_.pub, 1, key_for), InvalidArgumentError);
+    // 0xFFFFFFFF sits at depth 32 — beyond the tree.
+    EXPECT_THROW(bc_->ensure_path(root_kp_.pub, 0xFFFF'FFFFu, key_for),
+                 InvalidArgumentError);
 }
 
 TEST_F(BlockchainTest, EnsurePathNoRootThrows) {
@@ -191,11 +221,12 @@ TEST_F(BlockchainTest, AppendDataBlockPrevHashLinked) {
     EXPECT_EQ(b1.prev_hash, Crypto::hash_block(b0));
 }
 
-TEST_F(BlockchainTest, AppendDataBlockNonLeafThrows) {
-    // Node 0 (root) is not a leaf.
+TEST_F(BlockchainTest, AppendDataBlockInvalidIndexThrows) {
+    // 0xFFFFFFFF sits at depth 32 — beyond the tree. (Node 0 is fine now:
+    // even the root has its own branch, blockchain.md §3.2 v0.7.)
     KeyPair kp = Crypto::generate_keypair();
     EXPECT_THROW(
-        bc_->append_data_block(root_kp_.pub, 0, {}, kp, 1'000LL),
+        bc_->append_data_block(root_kp_.pub, 0xFFFF'FFFFu, {}, kp, 1'000LL),
         InvalidArgumentError);
 }
 

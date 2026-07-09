@@ -180,6 +180,40 @@ TEST_F(MergeDialogueTest, FourChainsPairwiseMergeLinkIntoOneDag) {
     }
 }
 
+// Internal merge (blockchain.md §3.2/§5.3 v0.7): two branches of the SAME
+// chain merge — the mid-depth "public vertex" branch absorbs the leaf branch,
+// so one external merge later commits the whole tree.
+TEST_F(MergeDialogueTest, InternalMergeOfOwnBranches) {
+    alice_->append_block(0xAA, 1'000LL);
+
+    // Second branch on node 5 (depth 2, path 0 → 2 → 5).
+    for (NodeIndex idx : path_indices(5))
+        if (!alice_->path_keys.count(idx))
+            alice_->path_keys[idx] = Crypto::generate_keypair();
+    alice_->bc->ensure_path(alice_->root_kp.pub, 5,
+                            [&](NodeIndex i) { return alice_->path_keys.at(i); });
+    alice_->bc->append_data_block(alice_->root_kp.pub, 5, {0x05},
+                                  alice_->path_keys.at(5), 1'000LL);
+
+    MergeSession vertex_session(*alice_->storage, *alice_->validator);
+    MergeDialogue vertex(vertex_session, alice_->cache,
+                         chainsync::MergeConfig{alice_->root_kp.pub, 5,
+                                                alice_->path_keys.at(5),
+                                                2'000LL, 1u});
+    MergeDialogue leaf = alice_->dialogue(2'000LL);
+    pump(vertex, leaf);
+
+    ASSERT_TRUE(vertex.done()) << vertex.error();
+    ASSERT_TRUE(leaf.done()) << leaf.error();
+    const Hash root = alice_->committed_root(*vertex.merge_block());
+    EXPECT_EQ(root, alice_->committed_root(*leaf.merge_block()));
+    EXPECT_EQ(vertex.merge_block()->address.node_index, 5u);
+
+    // The vertex snapshot now commits both branches of the same chain.
+    EXPECT_EQ(alice_->cache.leaf_count(), 2u);
+    EXPECT_EQ(alice_->cache.composition_count(), 1u);
+}
+
 // ── Message flow shape (documents the wire sequence) ──────────────────────────
 
 TEST_F(MergeDialogueTest, MessageFlowSequence) {

@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <deque>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -125,7 +126,7 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--idx", "--depth", "--proof", "--merkle-root", "--target", "--leaf-hash",
     "--reason", "--peer", "--via", "--timeout",
     "--to", "--units", "--origin", "--pledge", "--executor", "--expires",
-    "--acceptance", "--coef", "--k",
+    "--acceptance", "--coef", "--k", "--with",
 };
 
 // True when a standalone flag (no value) is present.
@@ -173,9 +174,10 @@ static NodeIndex parse_leaf_index(int argc, char** argv) {
     unsigned long long v = 0;
     try { v = std::stoull(s, nullptr, 0); }
     catch (...) { throw std::runtime_error("--leaf: invalid index: " + s); }
-    if (v > 0xFFFF'FFFEu || !is_leaf_node(static_cast<NodeIndex>(v)))
+    // Branches may grow from any node of the tree (blockchain.md §3.2 v0.7).
+    if (v > 0xFFFF'FFFEu || !is_valid_node(static_cast<NodeIndex>(v)))
         throw std::runtime_error(
-            "--leaf " + s + " is not a valid leaf (depth must be 31, range 0x7FFFFFFF..0xFFFFFFFE)");
+            "--leaf " + s + " is not a valid node index (0..0xFFFFFFFE)");
     return static_cast<NodeIndex>(v);
 }
 
@@ -535,20 +537,20 @@ static int cmd_identity_show(const fs::path& data_dir) {
 static int cmd_branch_init(const fs::path& data_dir, int argc, char** argv) {
     const auto pos = get_positionals(argc, argv);  // [branch, init, <leaf>]
     if (pos.size() < 3) {
-        std::cerr << "Usage: bc branch init <leaf_index>\n"
-                     "  leaf_index: decimal or hex (0x...), range 0x7FFFFFFF..0xFFFFFFFE\n";
+        std::cerr << "Usage: bc branch init <node_index>\n"
+                     "  node_index: decimal or hex (0x...), any tree node 0..0xFFFFFFFE\n";
         return 1;
     }
 
     NodeIndex leaf = 0;
     try {
         unsigned long long v = std::stoull(pos[2], nullptr, 0);
-        if (v > 0xFFFF'FFFEu || !is_leaf_node(static_cast<NodeIndex>(v)))
-            throw std::runtime_error("not a leaf");
+        if (v > 0xFFFF'FFFEu || !is_valid_node(static_cast<NodeIndex>(v)))
+            throw std::runtime_error("not a valid node");
         leaf = static_cast<NodeIndex>(v);
     } catch (...) {
-        std::cerr << "Invalid leaf index: " << pos[2]
-                  << " (must be at depth 31, range 0x7FFFFFFF..0xFFFFFFFE)\n";
+        std::cerr << "Invalid node index: " << pos[2]
+                  << " (valid range 0..0xFFFFFFFE)\n";
         return 1;
     }
 
@@ -1042,6 +1044,74 @@ static int cmd_merge_run(const fs::path& data_dir, int argc, char** argv) {
     std::cerr << "no answer within " << timeout
               << "s — dialogue stalled and abandoned (safe to retry)\n";
     return 1;
+}
+
+// bc merge own --with NODE [--leaf L] [--depth N]
+// Internal merge (blockchain.md §3.2/§5.3): the --leaf branch (public vertex)
+// merges with own branch NODE in-process; both branches append co-signed
+// MERGE blocks and the vertex snapshot commits both.
+static int cmd_merge_own(const fs::path& data_dir, int argc, char** argv) {
+    const auto with_s = flag_val(argc, argv, "--with");
+    if (with_s.empty()) {
+        std::cerr << "Usage: bc merge own --with NODE_INDEX [--leaf L] [--depth N]\n";
+        return 1;
+    }
+    NodeIndex with = 0;
+    try {
+        const unsigned long long v = std::stoull(with_s, nullptr, 0);
+        if (v > 0xFFFF'FFFEu || !is_valid_node(static_cast<NodeIndex>(v)))
+            throw std::runtime_error("bad node");
+        with = static_cast<NodeIndex>(v);
+    } catch (...) {
+        std::cerr << "Invalid --with node index: " << with_s << "\n";
+        return 1;
+    }
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    if (with == leaf) {
+        std::cerr << "--with must name a different branch\n";
+        return 1;
+    }
+
+    Context ctx(data_dir, leaf);
+    const KeyPair with_kp = load_keypair(data_dir, with);   // branch init first
+    const auto     dep_s  = flag_val(argc, argv, "--depth");
+    const uint32_t depth  = dep_s.empty() ? 1u
+                          : static_cast<uint32_t>(std::stoul(dep_s));
+    const auto now = static_cast<Timestamp>(std::time(nullptr));
+
+    MergeSession session_a(ctx.storage, ctx.validator);
+    MergeSession session_b(ctx.storage, ctx.validator);
+    chainsync::ParticipantCache cache(data_dir / "sync_cache");
+    chainsync::MergeDialogue a(session_a, cache,
+        chainsync::MergeConfig{ctx.user_id, leaf, ctx.working_kp, now, depth});
+    chainsync::MergeDialogue b(session_b, cache,
+        chainsync::MergeConfig{ctx.user_id, with, with_kp, now, depth});
+
+    // In-memory pump: deliver messages until both dialogues go quiet.
+    std::deque<std::vector<uint8_t>> to_b, to_a;
+    for (auto& m : a.start()) to_b.push_back(std::move(m));
+    while (!to_b.empty() || !to_a.empty()) {
+        if (!to_b.empty()) {
+            auto msg = std::move(to_b.front());
+            to_b.pop_front();
+            for (auto& r : b.on_message(msg.data(), msg.size()))
+                to_a.push_back(std::move(r));
+        } else {
+            auto msg = std::move(to_a.front());
+            to_a.pop_front();
+            for (auto& r : a.on_message(msg.data(), msg.size()))
+                to_b.push_back(std::move(r));
+        }
+    }
+
+    if (!a.done() || !b.done()) {
+        std::cerr << "internal merge failed: "
+                  << (a.failed() ? a.error() : b.error()) << "\n";
+        return 1;
+    }
+    std::cerr << "branch " << leaf << " <-> branch " << with << ":\n";
+    print_merge_result(*a.merge_block());
+    return 0;
 }
 
 // bc merge serve --via URL [--leaf L] [--depth N] [--timeout SEC] [--once]
@@ -2080,6 +2150,8 @@ Merge over a relay (sync.md §4.1):
     --via  URL                         aggregator relay, e.g. http://host:8080
     [--depth N] [--timeout SEC]        declared depth (1) / give-up time (60)
   discover --via URL               Ranked merge-partner suggestions (sync.md §8)
+  merge own --with NODE            Internal merge of two own branches: the
+    [--leaf L]                         --leaf branch (public vertex) commits NODE
   merge serve --via URL            Respond to incoming merge OFFERs in a loop
     [--depth N] [--timeout SEC]        SEC=0: run forever
     [--once]                           exit after the first completed merge
@@ -2134,8 +2206,10 @@ Sync cache (sync.md §5; gossip §7.1):
 Other:
   list                             List all records in a branch
 
---leaf INDEX  Target branch leaf index (decimal or 0x hex).
-              Default: 0x7FFFFFFF. Valid range: 0x7FFFFFFF..0xFFFFFFFE.
+--leaf INDEX  Target branch node index (decimal or 0x hex) — branches may grow
+              from ANY tree node (blockchain.md §3.2): low indices = high-level
+              service branches, deep ones = personal/channel branches.
+              Default: 0x7FFFFFFF. Valid range: 0..0xFFFFFFFE.
               Run 'branch init <index>' before first use of a new branch.
 
 REF format: <chain_id_64hex>/<block_hash_64hex>
@@ -2182,6 +2256,7 @@ int main(int argc, char** argv) {
         else if (cmd == "merge"     && subcmd == "cosign")  return cmd_merge_cosign(data_dir, argc, argv);
         else if (cmd == "merge"     && subcmd == "finalize")return cmd_merge_finalize(data_dir, argc, argv);
         else if (cmd == "merge"     && subcmd == "run")     return cmd_merge_run(data_dir, argc, argv);
+        else if (cmd == "merge"     && subcmd == "own")     return cmd_merge_own(data_dir, argc, argv);
         else if (cmd == "merge"     && subcmd == "serve")   return cmd_merge_serve(data_dir, argc, argv);
         else if (cmd == "seal"      && subcmd == "add")     return cmd_seal_add(data_dir, argc, argv);
         else if (cmd == "seal"      && subcmd == "list")    return cmd_seal_list(data_dir, argc, argv);
