@@ -170,15 +170,18 @@ struct OriginQty {
     }
 };
 
-// The only way value moves (records.md §11.1). Lives in the sender's chain.
+// The only way value moves (records.md §11.1). Lives in the sender's chain;
+// the SPENDING branch is the branch the block is written into (its key signs
+// the spend — per-branch purses, economy.md §5а). Debt stays chain-level:
 // issuer == from → self-issue: a new debt/claim pair is born (§12.2);
 // issuer == to   → redemption: the paper returns to its debtor and annihilates;
 // otherwise      → endorsement: someone else's paper passed along.
 struct Transfer {
     static constexpr RecordType TYPE = RecordType::Transfer;
 
-    std::array<uint8_t, 32> from;      // sender (= owner of this record)
-    std::array<uint8_t, 32> to;        // receiver
+    std::array<uint8_t, 32> from;      // sender chain (= owner of this record)
+    std::array<uint8_t, 32> to;        // receiver chain
+    uint32_t                to_node;   // receiver branch — whose purse is credited
     std::vector<OriginQty>  origins;   // named portions; total = transfer amount
     std::optional<Ref>      reason;    // Acceptance, Pledge, ProductionChain, ...
     int64_t                 timestamp; // Unix timestamp UTC

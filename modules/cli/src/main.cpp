@@ -126,7 +126,7 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--idx", "--depth", "--proof", "--merkle-root", "--target", "--leaf-hash",
     "--reason", "--peer", "--via", "--timeout",
     "--to", "--units", "--origin", "--pledge", "--executor", "--expires",
-    "--acceptance", "--coef", "--k", "--with",
+    "--acceptance", "--coef", "--k", "--with", "--to-node",
 };
 
 // True when a standalone flag (no value) is present.
@@ -266,6 +266,7 @@ static std::string record_summary(const Record& rec) {
 // ── Open storage helper ───────────────────────────────────────────────────────
 
 struct Context {
+    fs::path    data_dir;
     LmdbStorage storage;
     Validator   validator;
     Blockchain  bc;
@@ -273,14 +274,31 @@ struct Context {
     KeyPair     working_kp;
     NodeIndex   leaf;
 
-    Context(const fs::path& data_dir, NodeIndex leaf_index)
-        : storage   (data_dir / "db")
+    Context(const fs::path& dir, NodeIndex leaf_index)
+        : data_dir  (dir)
+        , storage   (dir / "db")
         , validator (storage)
         , bc        (storage, validator)
-        , user_id   (load_user_id(data_dir))
-        , working_kp(load_keypair(data_dir, leaf_index))
+        , user_id   (load_user_id(dir))
+        , working_kp(load_keypair(dir, leaf_index))
         , leaf      (leaf_index)
     {}
+
+    // Local branches that actually hold blocks (key files name candidate
+    // nodes; a branch exists once its tip index does).
+    std::vector<NodeIndex> local_branches() {
+        std::vector<NodeIndex> out;
+        const auto keys_dir = data_dir / "keys";
+        if (!fs::exists(keys_dir)) return out;
+        for (const auto& entry : fs::directory_iterator(keys_dir)) {
+            NodeIndex idx = 0;
+            try { idx = static_cast<NodeIndex>(std::stoul(entry.path().stem().string())); }
+            catch (...) { continue; }
+            if (storage.branch_tip_index(user_id, idx).has_value())
+                out.push_back(idx);
+        }
+        return out;
+    }
 };
 
 // ── Write helper: encode + append DATA block ──────────────────────────────────
@@ -1212,13 +1230,15 @@ static std::array<uint8_t, 32> uid_from_hex(const std::string& s) {
     return a;
 }
 
-// Analytic wallet view — no protocol enforcement (records.md §12.7): own
-// outgoing transfers come from the branch, incoming ones from the external
-// store (fetched by 'bc transfer recv').
+// Analytic wallet view — no protocol enforcement (records.md §12.7).
+// Per-branch purses (economy.md §5а): holdings belong to the selected branch —
+// outgoing transfers written in it spend from it, incoming ones credited via
+// to_node fill it. Debt stays chain-level: issue/redemption sum over ALL
+// local branches — the person owes, whichever pocket spent.
 struct WalletView {
-    std::map<std::string, double> holdings;   // issuer hex → held units of their paper
-    double issued   = 0;                      // own paper put into circulation
-    double redeemed = 0;                      // own paper returned (annihilated)
+    std::map<std::string, double> holdings;   // issuer hex → units held by this branch
+    double issued   = 0;                      // own paper in circulation (chain-wide)
+    double redeemed = 0;                      // own paper annihilated (chain-wide)
     double debt() const { return issued - redeemed; }
 };
 
@@ -1226,20 +1246,23 @@ static WalletView compute_wallet(Context& ctx) {
     WalletView w;
     const auto& me = ctx.user_id.bytes;
 
-    std::vector<Block> blocks;
-    try { blocks = ctx.bc.get_branch(ctx.user_id, ctx.leaf); }
-    catch (const BlockchainError&) {}
-    for (const auto& b : blocks) {
-        if (b.type != BlockType::DATA) continue;
-        try {
-            const auto rec = Codec::decode(b.payload.data(), b.payload.size());
-            const auto* t  = std::get_if<records::Transfer>(&rec);
-            if (!t || t->from != me) continue;
-            for (const auto& o : t->origins) {
-                if (o.issuer == me) w.issued += o.units;              // self-issue
-                else w.holdings[to_hex(o.issuer.data(), 32)] -= o.units;
-            }
-        } catch (const CodecError&) {}
+    for (const NodeIndex branch : ctx.local_branches()) {
+        std::vector<Block> blocks;
+        try { blocks = ctx.bc.get_branch(ctx.user_id, branch); }
+        catch (const BlockchainError&) { continue; }
+        for (const auto& b : blocks) {
+            if (b.type != BlockType::DATA) continue;
+            try {
+                const auto rec = Codec::decode(b.payload.data(), b.payload.size());
+                const auto* t  = std::get_if<records::Transfer>(&rec);
+                if (!t || t->from != me) continue;
+                for (const auto& o : t->origins) {
+                    if (o.issuer == me) w.issued += o.units;   // chain-level debt
+                    else if (branch == ctx.leaf)               // this purse spent
+                        w.holdings[to_hex(o.issuer.data(), 32)] -= o.units;
+                }
+            } catch (const CodecError&) {}
+        }
     }
 
     ctx.storage.for_each_external_block([&](const Block& b) {
@@ -1251,7 +1274,8 @@ static WalletView compute_wallet(Context& ctx) {
             if (b.address.user_id.bytes != t->from) return true;      // spoofed sender
             for (const auto& o : t->origins) {
                 if (o.issuer == me) w.redeemed += o.units;            // redemption
-                else w.holdings[to_hex(o.issuer.data(), 32)] += o.units;
+                else if (t->to_node == ctx.leaf)                      // this purse credited
+                    w.holdings[to_hex(o.issuer.data(), 32)] += o.units;
             }
         } catch (const CodecError&) {}
         return true;
@@ -1325,7 +1349,8 @@ static int cmd_wallet(const fs::path& data_dir, int argc, char** argv) {
     const auto w = compute_wallet(ctx);
 
     double held = 0;
-    std::cout << "holdings (paper of others):\n";
+    std::cout << "purse of branch 0x" << std::hex << ctx.leaf << std::dec
+              << " (paper of others):\n";
     if (w.holdings.empty()) std::cout << "  (none)\n";
     for (const auto& [issuer, units] : w.holdings) {
         std::cout << "  " << issuer.substr(0, 16) << "...  " << units << "h\n";
@@ -1356,7 +1381,11 @@ static int cmd_transfer_send(const fs::path& data_dir, int argc, char** argv) {
     records::Transfer t{};
     t.from      = ctx.user_id.bytes;
     t.to        = uid_from_hex(to_s);
+    t.to_node   = DEFAULT_LEAF;
     t.timestamp = static_cast<int64_t>(std::time(nullptr));
+    const auto to_node_s = flag_val(argc, argv, "--to-node");
+    if (!to_node_s.empty())
+        t.to_node = static_cast<NodeIndex>(std::stoull(to_node_s, nullptr, 0));
     const auto reason_s = flag_val(argc, argv, "--reason");
     if (!reason_s.empty()) t.reason = parse_ref(reason_s);
 
@@ -1425,7 +1454,9 @@ static int cmd_transfer_recv(const fs::path& data_dir, int argc, char** argv) {
     double total = 0;
     for (const auto& o : t->origins) total += o.units;
     std::cout << "received " << total << "h in " << t->origins.size()
-              << " portion(s) from " << to_hex(t->from.data(), 32).substr(0, 16) << "...\n";
+              << " portion(s) from " << to_hex(t->from.data(), 32).substr(0, 16)
+              << "...  (credited to branch 0x" << std::hex << t->to_node
+              << std::dec << ")\n";
     const auto w = compute_wallet(ctx);
     std::cerr << "wallet: " << w.holdings.size() << " issuer(s) held, own debt "
               << w.debt() << "h\n";
@@ -1530,9 +1561,13 @@ static int cmd_pay(const fs::path& data_dir, int argc, char** argv) {
     records::Transfer t{};
     t.from      = ctx.user_id.bytes;
     t.to        = acceptance->work.chain;
+    t.to_node   = DEFAULT_LEAF;
     t.origins   = pick_portions(ctx, to_s, units);
     t.reason    = acc_ref;
     t.timestamp = static_cast<int64_t>(std::time(nullptr));
+    // Pay into the purse of the branch that did the work (economy.md §5а).
+    if (const auto work_block = find_external_by_hash(ctx, acceptance->work.hash))
+        t.to_node = work_block->address.node_index;
 
     const Block block = append_record(ctx, Record{t});
     print_portions(t, me_hex, to_s);
@@ -2183,10 +2218,12 @@ Fraud (records.md §3A, blockchain.md §6.5.6):
                --merkle-root HEX
 
 Economy (records.md §11 — именные трудочасы, §12.7):
-  wallet                           Holdings per issuer + own debt in circulation
-  transfer send                    Move labor-hours; auto-picks portions:
-    --to UID_HEX --units N             receiver's paper first (redemption), then
-    [--origin ISSUER_HEX:UNITS]...     other held paper, self-issue for the rest
+  wallet [--leaf N]                Branch purse (economy.md §5а: the --leaf
+                                       branch's holdings) + chain-wide debt
+  transfer send                    Move labor-hours; spends from the --leaf
+    --to UID_HEX --units N             purse: receiver's paper first, then other
+    [--to-node N]                      held paper, self-issue for the rest;
+    [--origin ISSUER_HEX:UNITS]...     --to-node picks the credited purse
     [--reason REF] [--via URL]         (--via also uploads the block for the receiver)
   transfer recv <chain>/<hash>     Fetch an incoming transfer from an aggregator,
     --via URL                          store it and acknowledge on-chain (Copy)

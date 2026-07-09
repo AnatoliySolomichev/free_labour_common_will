@@ -179,19 +179,20 @@ void enc_acceptance(Buf& out, const Acceptance& a) {
 }
 
 void enc_transfer(Buf& out, const Transfer& t) {
-    w_map(out, 6);
+    w_map(out, 7);
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Transfer));
     w_uint(out, 1); w_fixed(out, t.from);
     w_uint(out, 2); w_fixed(out, t.to);
-    w_uint(out, 3); w_arr(out, t.origins.size());
+    w_uint(out, 3); w_uint(out, t.to_node);
+    w_uint(out, 4); w_arr(out, t.origins.size());
     for (const auto& o : t.origins) {
         w_map(out, 2);
         w_uint(out, 0); w_fixed(out, o.issuer);
         w_uint(out, 1); w_float64(out, o.units);
     }
-    w_uint(out, 4);
+    w_uint(out, 5);
     if (t.reason) w_ref(out, *t.reason); else w_null(out);
-    w_uint(out, 5); w_int64(out, t.timestamp);
+    w_uint(out, 6); w_int64(out, t.timestamp);
 }
 
 void enc_pledge(Buf& out, const Pledge& p) {
@@ -545,6 +546,12 @@ Transfer dec_transfer_fields(CborReader& r) {
     expect_key(r, 2); r.r_fixed(t.to);
     expect_key(r, 3);
     {
+        const uint64_t v = r.r_uint();
+        if (v > 0xFFFF'FFFEull) throw CodecError("Transfer: bad to_node");
+        t.to_node = static_cast<uint32_t>(v);
+    }
+    expect_key(r, 4);
+    {
         const uint64_t n = r.r_arr();
         t.origins.reserve(static_cast<size_t>(n));
         for (uint64_t i = 0; i < n; ++i) {
@@ -555,8 +562,8 @@ Transfer dec_transfer_fields(CborReader& r) {
             t.origins.push_back(o);
         }
     }
-    expect_key(r, 4); t.reason    = dec_opt_ref(r);
-    expect_key(r, 5); t.timestamp = r.r_int();
+    expect_key(r, 5); t.reason    = dec_opt_ref(r);
+    expect_key(r, 6); t.timestamp = r.r_int();
     return t;
 }
 

@@ -236,6 +236,7 @@ TEST(RecordsCodec, TransferRoundtripAllOriginKinds) {
     Transfer t{};
     t.from      = make_uid(0xA1);
     t.to        = make_uid(0xB2);
+    t.to_node   = 5;                          // credited branch (per-branch purse)
     t.origins   = { {make_uid(0xA1), 1.5},    // self-issue (issuer == from)
                     {make_uid(0xB2), 0.25},   // redemption (issuer == to)
                     {make_uid(0xC3), 2.0} };  // endorsement
@@ -245,6 +246,7 @@ TEST(RecordsCodec, TransferRoundtripAllOriginKinds) {
     const auto decoded = std::get<Transfer>(roundtrip(t));
     EXPECT_EQ(decoded.from,      t.from);
     EXPECT_EQ(decoded.to,        t.to);
+    EXPECT_EQ(decoded.to_node,   5u);
     EXPECT_EQ(decoded.origins,   t.origins);
     ASSERT_TRUE(decoded.reason.has_value());
     EXPECT_EQ(*decoded.reason,   *t.reason);
