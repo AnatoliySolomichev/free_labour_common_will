@@ -85,6 +85,15 @@ public:
     std::vector<std::vector<uint8_t>> get_seal_bytes(const Hash& block_hash) const;
     std::vector<Hash> all_sealed_block_hashes() const;
 
+    // Revocation warehouse (sync.md §7.2; blockchain.md §6.7 rule 8).
+    // Certificates are opaque bytes keyed chain(32)‖BLAKE2b(bytes)(32) —
+    // identical certificates store once. The fetching node verifies them
+    // autonomously (RevocationCert::verify) — the warehouse never does.
+    // Throws: StorageError.
+    bool put_revocation_bytes(const UserId& chain, const std::vector<uint8_t>& bytes);
+    std::vector<std::vector<uint8_t>> get_revocation_bytes(const UserId& chain) const;
+    std::vector<UserId> all_revoked_chains() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

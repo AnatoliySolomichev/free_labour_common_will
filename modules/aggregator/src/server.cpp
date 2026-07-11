@@ -450,6 +450,70 @@ void AggregatorServer::setup_routes() {
         res.set_content(body, "application/cbor");
     });
 
+    // ── Revocation warehouse (sync.md §7.2; blockchain.md §6.7 rule 8) ────────
+    //
+    // Self-verifying certificates; bytes in, bytes out — the fetching node runs
+    // RevocationCert::verify itself, the warehouse never parses.
+
+    // Registered before /revocations/:chain — httplib matches in registration order.
+    svr.Get("/revocations/manifest", [&](const httplib::Request&, httplib::Response& res) {
+        const auto chains = storage_.all_revoked_chains();
+        std::string body = "{\"hashes\":[";  // chain ids; same shape as other manifests
+        for (std::size_t i = 0; i < chains.size(); ++i) {
+            if (i) body += ',';
+            body += '"';
+            body += to_hex(chains[i].bytes);
+            body += '"';
+        }
+        body += "]}";
+        res.set_content(body, "application/json");
+    });
+
+    svr.Post("/revocations/:chain", [&](const httplib::Request& req, httplib::Response& res) {
+        auto ch = hex_to_hash(req.path_params.at("chain"));
+        if (!ch) {
+            res.status = 400;
+            res.set_content("{\"error\":\"invalid chain id\"}", "application/json");
+            return;
+        }
+        if (req.body.empty() || req.body.size() > kRevocationCertMaxBytes) {
+            res.status = 400;
+            res.set_content("{\"error\":\"bad size\"}", "application/json");
+            return;
+        }
+        UserId chain{};
+        chain.bytes = ch->bytes;
+        try {
+            if (storage_.get_revocation_bytes(chain).size() >= kRevocationsPerChainCap) {
+                res.status = 429;
+                res.set_content("{\"error\":\"revocation list full\"}", "application/json");
+                return;
+            }
+            const bool stored = storage_.put_revocation_bytes(
+                chain, {req.body.begin(), req.body.end()});
+            res.set_content(stored ? "{\"status\":\"stored\"}"
+                                   : "{\"status\":\"duplicate\"}",
+                            "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
+                            "application/json");
+        }
+    });
+
+    svr.Get("/revocations/:chain", [&](const httplib::Request& req, httplib::Response& res) {
+        auto ch = hex_to_hash(req.path_params.at("chain"));
+        if (!ch) { res.status = 400; return; }
+        UserId chain{};
+        chain.bytes = ch->bytes;
+        std::string body;
+        const auto certs = storage_.get_revocation_bytes(chain);
+        cbor_array_head(body, certs.size());
+        for (const auto& c : certs)
+            cbor_bstr(body, std::string(c.begin(), c.end()));
+        res.set_content(body, "application/cbor");
+    });
+
     // ── Economy view (records.md §13) ─────────────────────────────────────────
     //
     // Derived data, recomputed per request by scanning known blocks. Every
@@ -765,6 +829,41 @@ void AggregatorServer::sync_with_peer(const std::string& peer_url) {
             try {
                 if (storage_.put_seal_bytes(
                         bh, {body.begin() + pos, body.begin() + pos + len}))
+                    ++gossiped;
+            } catch (...) {}
+            pos += static_cast<std::size_t>(len);
+        }
+    }
+
+    // 4. Pull revocation certificates (sync.md §7.2): merge per-chain lists —
+    // content-addressed storage dedupes; certificates are self-verifying and
+    // checked by end clients, not here.
+    for (const Hash& ch : manifest_hashes("/revocations/manifest")) {
+        auto res = cli.Get("/revocations/" + to_hex(ch.bytes));
+        if (!res || res->status != 200) continue;
+        UserId chain{};
+        chain.bytes = ch.bytes;
+        const std::string& body = res->body;
+        std::size_t pos = 0;
+        auto head = [&](uint8_t expect_major) -> long long {
+            if (pos >= body.size()) return -1;
+            const uint8_t b = static_cast<uint8_t>(body[pos++]);
+            if ((b >> 5) != expect_major) return -1;
+            const uint8_t ai = b & 0x1F;
+            if (ai < 24) return ai;
+            int extra = ai == 24 ? 1 : ai == 25 ? 2 : ai == 26 ? 4 : ai == 27 ? 8 : -1;
+            if (extra < 0 || pos + extra > body.size()) return -1;
+            long long v = 0;
+            for (int i = 0; i < extra; ++i) v = (v << 8) | static_cast<uint8_t>(body[pos++]);
+            return v;
+        };
+        const long long n = head(4);
+        for (long long i = 0; i < n; ++i) {
+            const long long len = head(2);
+            if (len < 0 || pos + len > body.size()) break;
+            try {
+                if (storage_.put_revocation_bytes(
+                        chain, {body.begin() + pos, body.begin() + pos + len}))
                     ++gossiped;
             } catch (...) {}
             pos += static_cast<std::size_t>(len);

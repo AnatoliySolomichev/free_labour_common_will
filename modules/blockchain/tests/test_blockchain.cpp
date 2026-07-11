@@ -739,3 +739,50 @@ TEST_F(RevocationTest, CertificateNonAncestorRejected) {
         cert.path.push_back(storage_->get_node(root_kp_.pub, idx));
     EXPECT_THROW(RevocationCert::verify(cert), RevocationError);
 }
+
+// ── Step 4: imported foreign revocations feed the local index (§6.7 rule 8) ───
+
+TEST_F(RevocationTest, ImportedForeignRevocationIsEffective) {
+    // A partner's chain lives in its own storage; we receive its revocation as
+    // a certificate and import it: path nodes + external block → local index.
+    auto foreign_db = std::filesystem::temp_directory_path() / "bc_foreign_rev";
+    std::filesystem::remove_all(foreign_db);
+    {
+        LmdbStorage f_storage(foreign_db);
+        Validator   f_validator(f_storage);
+        Blockchain  f_bc(f_storage, f_validator);
+
+        KeyPair f_root = Crypto::generate_keypair();
+        KeyPair f_kp1  = Crypto::generate_keypair();
+        KeyPair f_kp3  = Crypto::generate_keypair();
+        KeyPair f_kp7  = Crypto::generate_keypair();
+        std::map<NodeIndex, KeyPair> keys{
+            {0, f_root}, {1, f_kp1}, {3, f_kp3}, {7, f_kp7}};
+        f_bc.create_identity(f_root);
+        f_bc.ensure_path(f_root.pub, 7, [&](NodeIndex i) { return keys.at(i); });
+
+        KeyPair repl = Crypto::generate_keypair();
+        Block b = f_bc.revoke_node(f_root.pub, 7, 4'000LL, repl.pub, 3, f_kp3, 5'000LL);
+        auto cert = RevocationCert::build(f_storage, b.address);
+
+        // ── the "wire": only certificate bytes cross storages ──
+        auto bytes = Serializer::encode(cert);
+        auto recv  = Serializer::decode_revocation_cert(bytes.data(), bytes.size());
+        RevocationCert::verify(recv);
+
+        // Import into OUR storage (as bc revoke fetch does).
+        const UserId chain = recv.block.address.user_id;
+        for (const auto& node : recv.path)
+            if (!storage_->has_node(chain, node.index))
+                storage_->put_node(chain, node);
+        storage_->put_external_block(recv.block);
+
+        // The partner's node 7 is now revoked in our view.
+        auto st = validator_->effective_revocation(chain, 7);
+        ASSERT_TRUE(st.has_value());
+        EXPECT_EQ(st->compromised_since, 4'000LL);
+        ASSERT_TRUE(st->replacement_pubkey.has_value());
+        EXPECT_EQ(*st->replacement_pubkey, repl.pub);
+    }
+    std::filesystem::remove_all(foreign_db);
+}

@@ -2137,6 +2137,19 @@ static int cmd_fraud_verify(int argc, char** argv) {
 
 // ── Key revocation (blockchain.md §6.7) ──────────────────────────────────────
 
+// POST a certificate to the aggregator revocation warehouse (sync.md §7.2).
+static bool post_revocation_cert(const std::string& via, const UserId& chain,
+                                 const std::vector<uint8_t>& bytes) {
+    std::string host = via;
+    if (host.rfind("http://", 0) == 0) host = host.substr(7);
+    httplib::Client cli(host);
+    cli.set_connection_timeout(5);
+    const auto res = cli.Post("/revocations/" + to_hex(chain.bytes),
+        std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size()),
+        "application/cbor");
+    return res && res->status == 200;
+}
+
 // bc revoke create --node N [--ancestor A] [--since UNIX_TS] [--replace] [--out FILE]
 // Writes a REVOCATION block into the ancestor's branch (default radius: parent)
 // and emits a self-verifying certificate. --replace generates a fresh key and
@@ -2205,6 +2218,153 @@ static int cmd_revoke_create(const fs::path& data_dir, int argc, char** argv) {
         std::cout << "certificate: " << out << " (" << bytes.size() << " bytes)\n";
     } else {
         std::cout << "certificate hex: " << to_hex(bytes.data(), bytes.size()) << "\n";
+    }
+
+    // Speed of propagation comes from the warehouse, not the record's height
+    // (§6.7 rule 1) — publish right away when an aggregator is given.
+    const auto via = flag_val(argc, argv, "--via");
+    if (!via.empty())
+        std::cerr << (post_revocation_cert(via, uid, bytes)
+                          ? "Published to " : "publish failed: ")
+                  << via << "\n";
+    return 0;
+}
+
+// bc revoke publish --via URL (--node N | --cert FILE)
+// Push certificates to the warehouse: every local REVOCATION block targeting
+// --node (a certificate is built per block), or a ready certificate file.
+static int cmd_revoke_publish(const fs::path& data_dir, int argc, char** argv) {
+    const auto via    = flag_val(argc, argv, "--via");
+    const auto node_s = flag_val(argc, argv, "--node");
+    const auto file   = flag_val(argc, argv, "--cert");
+    if (via.empty() || (node_s.empty() == file.empty())) {
+        std::cerr << "Usage: bc revoke publish --via URL (--node N | --cert FILE)\n";
+        return 1;
+    }
+
+    if (!file.empty()) {
+        std::ifstream f(file, std::ios::binary);
+        if (!f) { std::cerr << "cannot read " << file << "\n"; return 1; }
+        f.seekg(0, std::ios::end);
+        std::vector<uint8_t> bytes(static_cast<size_t>(f.tellg()));
+        f.seekg(0);
+        f.read(reinterpret_cast<char*>(bytes.data()),
+               static_cast<std::streamsize>(bytes.size()));
+
+        const auto cert = Serializer::decode_revocation_cert(bytes.data(), bytes.size());
+        RevocationCert::verify(cert); // don't publish garbage
+        const bool ok = post_revocation_cert(via, cert.block.address.user_id, bytes);
+        std::cout << (ok ? "published 1 certificate to " : "publish failed: ")
+                  << via << "\n";
+        return ok ? 0 : 1;
+    }
+
+    const auto node = static_cast<NodeIndex>(std::stoull(node_s, nullptr, 0));
+    LmdbStorage storage(data_dir / "db");
+    const UserId uid = load_user_id(data_dir);
+
+    const auto addrs = storage.get_revocation_addresses(uid, node);
+    if (addrs.empty()) {
+        std::cout << "no local revocations target node " << node << "\n";
+        return 1;
+    }
+    size_t ok = 0;
+    for (const auto& addr : addrs) {
+        const auto cert  = RevocationCert::build(storage, addr);
+        const auto bytes = Serializer::encode(cert);
+        if (post_revocation_cert(via, uid, bytes)) ++ok;
+    }
+    std::cout << "published " << ok << "/" << addrs.size()
+              << " certificate(s) to " << via << "\n";
+    return ok == addrs.size() ? 0 : 1;
+}
+
+// bc revoke fetch CHAIN_HEX --via URL
+// Pull certificates for a chain from the warehouse, verify each autonomously
+// (the warehouse is untrusted), import the good ones — path nodes plus the
+// REVOCATION block (external) feed the local revocation index — and print the
+// effective state per revoked node.
+static int cmd_revoke_fetch(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);  // [revoke, fetch, <chain>]
+    const auto via = flag_val(argc, argv, "--via");
+    if (pos.size() < 3 || via.empty()) {
+        std::cerr << "Usage: bc revoke fetch CHAIN_HEX --via URL\n";
+        return 1;
+    }
+    UserId chain{};
+    if (!from_hex(pos[2], chain.bytes.data(), 32)) {
+        std::cerr << "Invalid chain id hex (expected 64 hex chars)\n";
+        return 1;
+    }
+
+    std::string host = via;
+    if (host.rfind("http://", 0) == 0) host = host.substr(7);
+    httplib::Client cli(host);
+    cli.set_connection_timeout(5);
+    const auto res = cli.Get("/revocations/" + to_hex(chain.bytes));
+    if (!res || res->status != 200) {
+        std::cerr << "aggregator unreachable or error: " << via << "\n";
+        return 1;
+    }
+
+    LmdbStorage storage(data_dir / "db");
+    Validator   validator(storage);
+
+    // CBOR array(bstr) — minimal parse mirroring the warehouse encoder.
+    const std::string& body = res->body;
+    std::size_t bpos = 0;
+    auto head = [&](uint8_t expect_major) -> long long {
+        if (bpos >= body.size()) return -1;
+        const uint8_t b = static_cast<uint8_t>(body[bpos++]);
+        if ((b >> 5) != expect_major) return -1;
+        const uint8_t ai = b & 0x1F;
+        if (ai < 24) return ai;
+        int extra = ai == 24 ? 1 : ai == 25 ? 2 : ai == 26 ? 4 : ai == 27 ? 8 : -1;
+        if (extra < 0 || bpos + extra > body.size()) return -1;
+        long long v = 0;
+        for (int i = 0; i < extra; ++i)
+            v = (v << 8) | static_cast<uint8_t>(body[bpos++]);
+        return v;
+    };
+
+    std::size_t imported = 0, rejected = 0;
+    std::set<NodeIndex> touched;
+    const long long n = head(4);
+    for (long long i = 0; i < n; ++i) {
+        const long long len = head(2);
+        if (len < 0 || bpos + len > body.size()) break;
+        const auto* p = reinterpret_cast<const uint8_t*>(body.data()) + bpos;
+        bpos += static_cast<std::size_t>(len);
+        try {
+            const auto cert = Serializer::decode_revocation_cert(
+                p, static_cast<size_t>(len));
+            RevocationCert::verify(cert);
+            if (!(cert.block.address.user_id == chain))
+                throw RevocationError("certificate belongs to another chain");
+
+            for (const auto& node : cert.path)
+                if (!storage.has_node(chain, node.index))
+                    storage.put_node(chain, node);
+            if (!storage.has_block(cert.block.address) &&
+                !storage.has_external_block(cert.block.address))
+                storage.put_external_block(cert.block);
+
+            touched.insert(RevocationCert::payload(cert).revoked_node_index);
+            ++imported;
+        } catch (const std::exception&) { ++rejected; }
+    }
+
+    std::cout << "imported " << imported << " certificate(s), rejected "
+              << rejected << "\n";
+    for (NodeIndex node : touched) {
+        const auto st = validator.effective_revocation(chain, node);
+        if (!st.has_value()) continue;
+        std::cout << "node " << node << ": revoked since "
+                  << st->compromised_since
+                  << (st->replacement_pubkey.has_value()
+                          ? "  replacement " + short_hex(st->replacement_pubkey->bytes)
+                          : std::string("  FROZEN"))
+                  << "\n";
     }
     return 0;
 }
@@ -2380,13 +2540,17 @@ Fraud (records.md §3A, blockchain.md §6.5.6):
                --proof HEX                 KIND = bad_sig | hash_mismatch
                --merkle-root HEX
 
-Key revocation (blockchain.md §6.7):
+Key revocation (blockchain.md §6.7; warehouse — sync.md §7.2):
   revoke create --node N           Revoke a branch key from an ancestor's branch
     [--ancestor A] [--since TS]        (default ancestor: parent). --replace
     [--replace] [--out FILE]           generates and assigns a fresh key; emits
-                                       a self-verifying certificate (CBOR)
+    [--via URL]                        a self-verifying certificate (CBOR);
+                                       --via publishes it to the warehouse
   revoke verify (--cert FILE | --hex HEX)  Check a certificate autonomously
   revoke status --node N           Effective revocation + per-block zones
+  revoke publish --via URL         Push certificates to the warehouse
+    (--node N | --cert FILE)
+  revoke fetch CHAIN_HEX --via URL Pull, verify and import a chain's certificates
 
 Economy (records.md §11 — именные трудочасы, §12.7):
   wallet [--leaf N]                Branch purse (economy.md §5а: the --leaf
@@ -2473,6 +2637,8 @@ int main(int argc, char** argv) {
         else if (cmd == "revoke"    && subcmd == "create")  return cmd_revoke_create(data_dir, argc, argv);
         else if (cmd == "revoke"    && subcmd == "verify")  return cmd_revoke_verify(argc, argv);
         else if (cmd == "revoke"    && subcmd == "status")  return cmd_revoke_status(data_dir, argc, argv);
+        else if (cmd == "revoke"    && subcmd == "publish") return cmd_revoke_publish(data_dir, argc, argv);
+        else if (cmd == "revoke"    && subcmd == "fetch")   return cmd_revoke_fetch(data_dir, argc, argv);
         else if (cmd == "cache"     && subcmd == "list")    return cmd_cache_list(data_dir);
         else if (cmd == "cache"     && subcmd == "publish") return cmd_cache_publish(data_dir, argc, argv);
         else if (cmd == "cache"     && subcmd == "complete")return cmd_cache_complete(data_dir, argc, argv);

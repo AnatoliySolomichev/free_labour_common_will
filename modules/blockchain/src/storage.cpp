@@ -228,6 +228,40 @@ bool LmdbStorage::has_node(const UserId& user_id, NodeIndex index) const noexcep
 
 // ── Blocks ────────────────────────────────────────────────────────────────────
 
+// Revocation index (§6.7): revoked_node → 8-byte entries (author node BE4 +
+// block index BE4), maintained inside the caller's write transaction for both
+// own and external REVOCATION blocks. Malformed payload is skipped — the block
+// stays stored, validators reject it later. Returns MDB_SUCCESS or an LMDB rc.
+static int index_revocation_in_txn(MDB_txn* txn, MDB_dbi dbi_rev, const Block& block) {
+    if (block.type != BlockType::REVOCATION) return MDB_SUCCESS;
+    RevocationPayload rp;
+    try {
+        rp = Serializer::decode_revocation_payload(block.payload.data(),
+                                                   block.payload.size());
+    } catch (const SerializationError&) { return MDB_SUCCESS; }
+
+    auto rk = node_key(block.address.user_id, rp.revoked_node_index);
+    MDB_val rmk{rk.size(), rk.data()};
+    MDB_val old{};
+    std::vector<uint8_t> list;
+    int grc = mdb_get(txn, dbi_rev, &rmk, &old);
+    if (grc == MDB_SUCCESS)
+        list.assign(static_cast<const uint8_t*>(old.mv_data),
+                    static_cast<const uint8_t*>(old.mv_data) + old.mv_size);
+    else if (grc != MDB_NOTFOUND) return grc;
+
+    uint8_t entry[8];
+    be32(entry,     block.address.node_index);
+    be32(entry + 4, block.address.block_index);
+    // Dedupe: the same address may arrive via put_block and put_external_block.
+    for (size_t i = 0; i + 8 <= list.size(); i += 8)
+        if (std::memcmp(list.data() + i, entry, 8) == 0) return MDB_SUCCESS;
+    list.insert(list.end(), entry, entry + 8);
+
+    MDB_val nmv{list.size(), list.data()};
+    return mdb_put(txn, dbi_rev, &rmk, &nmv, 0);
+}
+
 void LmdbStorage::put_block(const Block& block) {
     auto k = block_key(block.address);
     auto v = Serializer::encode(block);
@@ -243,35 +277,8 @@ void LmdbStorage::put_block(const Block& block) {
     }
     if (rc != MDB_SUCCESS) { mdb_txn_abort(txn); lcheck(rc, "put_block: mdb_put"); }
 
-    // Revocation index (§6.7): revoked_node → 8-byte entries (author BE4 + idx BE4),
-    // same transaction. Malformed payload is not indexed — the validator rejects it.
-    if (block.type == BlockType::REVOCATION) {
-        try {
-            RevocationPayload rp = Serializer::decode_revocation_payload(
-                block.payload.data(), block.payload.size());
-
-            auto rk = node_key(block.address.user_id, rp.revoked_node_index);
-            MDB_val rmk{rk.size(), rk.data()};
-            MDB_val old{};
-            std::vector<uint8_t> list;
-            int grc = mdb_get(txn, impl_->dbi_revocations, &rmk, &old);
-            if (grc == MDB_SUCCESS)
-                list.assign(static_cast<const uint8_t*>(old.mv_data),
-                            static_cast<const uint8_t*>(old.mv_data) + old.mv_size);
-            else if (grc != MDB_NOTFOUND) { mdb_txn_abort(txn); lcheck(grc, "put_block: rev_get"); }
-
-            uint8_t entry[8];
-            be32(entry,     block.address.node_index);
-            be32(entry + 4, block.address.block_index);
-            list.insert(list.end(), entry, entry + 8);
-
-            MDB_val nmv{list.size(), list.data()};
-            int prc = mdb_put(txn, impl_->dbi_revocations, &rmk, &nmv, 0);
-            if (prc != MDB_SUCCESS) { mdb_txn_abort(txn); lcheck(prc, "put_block: rev_put"); }
-        } catch (const SerializationError&) {
-            // not indexable; the block itself is still stored
-        }
-    }
+    int irc = index_revocation_in_txn(txn, impl_->dbi_revocations, block);
+    if (irc != MDB_SUCCESS) { mdb_txn_abort(txn); lcheck(irc, "put_block: rev_index"); }
 
     lcheck(mdb_txn_commit(txn), "put_block: commit");
 }
@@ -454,6 +461,12 @@ void LmdbStorage::put_external_block(const Block& block) {
         throw InvalidArgumentError("put_external_block: duplicate");
     }
     if (rc != MDB_SUCCESS) { mdb_txn_abort(txn); lcheck(rc, "put_external_block: mdb_put"); }
+
+    // Foreign REVOCATION blocks (imported certificates, §6.7 rule 8) feed the
+    // same index, so effective_revocation works for partners' chains too.
+    int irc = index_revocation_in_txn(txn, impl_->dbi_revocations, block);
+    if (irc != MDB_SUCCESS) { mdb_txn_abort(txn); lcheck(irc, "put_external_block: rev_index"); }
+
     lcheck(mdb_txn_commit(txn), "put_external_block: commit");
 }
 

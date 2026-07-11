@@ -287,3 +287,73 @@ TEST_F(RelayTest, FullMailboxAnswers429) {
     // The other mailbox still accepts (per-recipient quota).
     EXPECT_EQ(post(cli, kUidB, "fine"), 200);
 }
+
+// ── Revocation warehouse (sync.md §7.2; blockchain.md §6.7 rule 8) ────────────
+
+TEST_F(RelayTest, RevocationWarehouseStoresDedupesAndLists) {
+    start_server(std::chrono::seconds(3600));
+    httplib::Client cli(host());
+
+    const std::string chain(64, 'a');
+    auto post = [&](const std::string& body) {
+        auto res = cli.Post("/revocations/" + chain, body, "application/cbor");
+        return res ? res->body : "";
+    };
+
+    EXPECT_NE(post("cert-one").find("stored"),    std::string::npos);
+    EXPECT_NE(post("cert-one").find("duplicate"), std::string::npos);  // content dedupe
+    EXPECT_NE(post("cert-two").find("stored"),    std::string::npos);
+
+    // GET returns CBOR array(2) with both blobs verbatim.
+    auto res = cli.Get("/revocations/" + chain);
+    ASSERT_TRUE(res && res->status == 200);
+    EXPECT_EQ(static_cast<uint8_t>(res->body[0]), 0x82u);   // array(2)
+    EXPECT_NE(res->body.find("cert-one"), std::string::npos);
+    EXPECT_NE(res->body.find("cert-two"), std::string::npos);
+
+    // Manifest lists the chain once; another chain's list is empty.
+    auto man = cli.Get("/revocations/manifest");
+    ASSERT_TRUE(man && man->status == 200);
+    EXPECT_NE(man->body.find(chain), std::string::npos);
+    auto other = cli.Get("/revocations/" + std::string(64, 'b'));
+    ASSERT_TRUE(other && other->status == 200);
+    EXPECT_EQ(static_cast<uint8_t>(other->body[0]), 0x80u);  // array(0)
+
+    // Oversized certificate is rejected.
+    auto big = cli.Post("/revocations/" + chain,
+                        std::string(20000, 'x'), "application/cbor");
+    ASSERT_TRUE(big);
+    EXPECT_EQ(big->status, 400);
+}
+
+TEST_F(RelayTest, AggregatorsGossipRevocations) {
+    start_server(std::chrono::seconds(3600));
+    httplib::Client cli_a(host());
+
+    const std::string chain(64, 'c');
+    ASSERT_TRUE(cli_a.Post("/revocations/" + chain, "gossiped-cert",
+                           "application/cbor"));
+
+    const uint16_t port_b = port_ + 300;
+    auto db_b = db_path_;
+    db_b += "_revb";
+    AggregatorStorage storage_b(db_b);
+    AggregatorServer  server_b(storage_b, port_b,
+                               {"http://127.0.0.1:" + std::to_string(port_)},
+                               std::chrono::seconds(1));
+    std::thread thread_b([&] { server_b.run(); });
+
+    httplib::Client cli_b("127.0.0.1:" + std::to_string(port_b));
+    bool arrived = false;
+    for (int i = 0; i < 100 && !arrived; ++i) {
+        auto res = cli_b.Get("/revocations/" + chain);
+        if (res && res->status == 200 &&
+            res->body.find("gossiped-cert") != std::string::npos) arrived = true;
+        else std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    server_b.stop();
+    thread_b.join();
+    std::filesystem::remove_all(db_b);
+
+    EXPECT_TRUE(arrived) << "revocation certificate did not gossip within 10s";
+}

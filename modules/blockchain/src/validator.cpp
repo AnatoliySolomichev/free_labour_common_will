@@ -195,7 +195,12 @@ Validator::collect_revocations(const UserId& user_id, NodeIndex target) const {
     for (const BlockAddress& addr : storage_.get_revocation_addresses(user_id, target)) {
         if (!is_ancestor(addr.node_index, target)) continue;
 
-        Block b = storage_.get_block(addr);
+        // Own chains live in `blocks`; partners' revocations arrive as imported
+        // certificates and live in `external_blocks` (§6.7 rule 8).
+        Block b;
+        if      (storage_.has_block(addr))          b = storage_.get_block(addr);
+        else if (storage_.has_external_block(addr)) b = storage_.get_external_block(addr);
+        else continue;
         if (b.type != BlockType::REVOCATION) continue;
         RevocationPayload rp;
         try {
