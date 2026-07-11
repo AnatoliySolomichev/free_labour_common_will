@@ -17,6 +17,7 @@ add_library(blockchain
     src/fraud.cpp
     src/storage.cpp
     src/validator.cpp
+    src/revocation.cpp
     src/seal_manager.cpp
     src/merge_session.cpp
     src/blockchain.cpp

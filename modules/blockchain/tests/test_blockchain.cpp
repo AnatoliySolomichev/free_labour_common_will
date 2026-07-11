@@ -662,3 +662,80 @@ TEST_F(RevocationTest, StorageIndexReturnsAddresses) {
     EXPECT_EQ(addrs[1].node_index, 1u);
     EXPECT_TRUE(storage_->get_revocation_addresses(root_kp_.pub, 15).empty());
 }
+
+// ── Step 3: self-verifying revocation certificate (§6.7 rule 8) ───────────────
+
+TEST_F(RevocationTest, CertificateBuildAndVerify) {
+    KeyPair repl = Crypto::generate_keypair();
+    Block b = bc_->revoke_node(root_kp_.pub, 7, 1'000LL, repl.pub, 3, kp3_, 2'000LL);
+
+    auto cert = RevocationCert::build(*storage_, b.address);
+    EXPECT_EQ(cert.path.size(), 3u); // nodes 0 → 1 → 3
+    EXPECT_NO_THROW(RevocationCert::verify(cert));
+
+    auto rp = RevocationCert::payload(cert);
+    EXPECT_EQ(rp.revoked_node_index, 7u);
+    EXPECT_EQ(rp.revoked_pubkey, kp7_.pub);
+    ASSERT_TRUE(rp.replacement_pubkey.has_value());
+    EXPECT_EQ(*rp.replacement_pubkey, repl.pub);
+}
+
+TEST_F(RevocationTest, CertificateSurvivesSerialization) {
+    Block b = bc_->revoke_node(root_kp_.pub, 7, 1'000LL, std::nullopt, 1, kp1_, 2'000LL);
+    auto cert = RevocationCert::build(*storage_, b.address);
+
+    auto enc = Serializer::encode(cert);
+    auto dec = Serializer::decode_revocation_cert(enc.data(), enc.size());
+
+    EXPECT_NO_THROW(RevocationCert::verify(dec));
+    EXPECT_EQ(dec.path.size(), cert.path.size()); // grandparent author: 0 → 1
+    EXPECT_EQ(Crypto::hash_block(dec.block), Crypto::hash_block(cert.block));
+}
+
+TEST_F(RevocationTest, CertificateTamperedNodeRejected) {
+    Block b = bc_->revoke_node(root_kp_.pub, 7, 1'000LL, std::nullopt, 3, kp3_, 2'000LL);
+    auto cert = RevocationCert::build(*storage_, b.address);
+    cert.path[1].created_at += 1; // breaks node 1's own parent signature
+    EXPECT_THROW(RevocationCert::verify(cert), SignatureError);
+}
+
+TEST_F(RevocationTest, CertificateTruncatedPathRejected) {
+    Block b = bc_->revoke_node(root_kp_.pub, 7, 1'000LL, std::nullopt, 3, kp3_, 2'000LL);
+    auto cert = RevocationCert::build(*storage_, b.address);
+    cert.path.pop_back(); // tip no longer matches the block's node
+    EXPECT_THROW(RevocationCert::verify(cert), ChainIntegrityError);
+}
+
+TEST_F(RevocationTest, CertificateTamperedPayloadRejected) {
+    Block b = bc_->revoke_node(root_kp_.pub, 7, 1'000LL, std::nullopt, 3, kp3_, 2'000LL);
+    auto cert = RevocationCert::build(*storage_, b.address);
+    cert.block.payload.push_back(0x00); // breaks the block signature
+    EXPECT_THROW(RevocationCert::verify(cert), SignatureError);
+}
+
+TEST_F(RevocationTest, CertificateForeignRootRejected) {
+    Block b = bc_->revoke_node(root_kp_.pub, 7, 1'000LL, std::nullopt, 3, kp3_, 2'000LL);
+    auto cert = RevocationCert::build(*storage_, b.address);
+    cert.block.address.user_id = Crypto::generate_keypair().pub;
+    // Root identity no longer matches the block's chain (checked before sigs).
+    EXPECT_THROW(RevocationCert::verify(cert), RevocationError);
+}
+
+TEST_F(RevocationTest, CertificateNonAncestorRejected) {
+    // A "revocation" of node 7 authored by node 4 — a sibling subtree.
+    KeyPair kp4 = Crypto::generate_keypair();
+    std::map<NodeIndex, KeyPair> keys{{0, root_kp_}, {1, kp1_}, {4, kp4}};
+    bc_->ensure_path(root_kp_.pub, 4, [&](NodeIndex i) { return keys.at(i); });
+
+    RevocationPayload rp{};
+    rp.revoked_node_index = 7;
+    rp.revoked_pubkey     = kp7_.pub;
+    rp.compromised_since  = 1'000LL;
+    Block b = craft_revocation(4, kp4, rp, 2'000LL);
+
+    RevocationCertificate cert{};
+    cert.block = b;
+    for (NodeIndex idx : path_indices(4))
+        cert.path.push_back(storage_->get_node(root_kp_.pub, idx));
+    EXPECT_THROW(RevocationCert::verify(cert), RevocationError);
+}

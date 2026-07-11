@@ -127,6 +127,7 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--reason", "--peer", "--via", "--timeout",
     "--to", "--units", "--origin", "--pledge", "--executor", "--expires",
     "--acceptance", "--coef", "--k", "--with", "--to-node",
+    "--node", "--ancestor", "--since", "--out", "--cert", "--hex",
 };
 
 // True when a standalone flag (no value) is present.
@@ -2134,6 +2135,168 @@ static int cmd_fraud_verify(int argc, char** argv) {
     return 0;
 }
 
+// ── Key revocation (blockchain.md §6.7) ──────────────────────────────────────
+
+// bc revoke create --node N [--ancestor A] [--since UNIX_TS] [--replace] [--out FILE]
+// Writes a REVOCATION block into the ancestor's branch (default radius: parent)
+// and emits a self-verifying certificate. --replace generates a fresh key and
+// assigns it (the "second block" of the stop-then-replace flow when a stop
+// revocation already exists).
+static int cmd_revoke_create(const fs::path& data_dir, int argc, char** argv) {
+    const auto node_s = flag_val(argc, argv, "--node");
+    if (node_s.empty()) {
+        std::cerr << "Usage: bc revoke create --node N [--ancestor A] "
+                     "[--since UNIX_TS] [--replace] [--out FILE]\n";
+        return 1;
+    }
+    const auto revoked = static_cast<NodeIndex>(std::stoull(node_s, nullptr, 0));
+    if (revoked == 0)
+        throw std::runtime_error("the root cannot be revoked — it has no ancestor "
+                                 "(recovery: blockchain.md §11.5)");
+    const auto anc_s = flag_val(argc, argv, "--ancestor");
+    const NodeIndex ancestor = anc_s.empty()
+        ? (revoked - 1) / 2  // default radius: parent (§6.7 rule 1)
+        : static_cast<NodeIndex>(std::stoull(anc_s, nullptr, 0));
+
+    const auto now     = static_cast<Timestamp>(std::time(nullptr));
+    const auto since_s = flag_val(argc, argv, "--since");
+    const Timestamp since =
+        since_s.empty() ? now : static_cast<Timestamp>(std::stoll(since_s, nullptr, 0));
+
+    LmdbStorage storage(data_dir / "db");
+    Validator   validator(storage);
+    Blockchain  bc(storage, validator);
+    const UserId  uid         = load_user_id(data_dir);
+    const KeyPair ancestor_kp = load_keypair(data_dir, ancestor);
+
+    std::optional<KeyPair>   fresh;
+    std::optional<PublicKey> replacement;
+    if (flag_present(argc, argv, "--replace")) {
+        fresh       = Crypto::generate_keypair();
+        replacement = fresh->pub;
+    }
+
+    const Block b = bc.revoke_node(uid, revoked, since, replacement,
+                                   ancestor, ancestor_kp, now);
+
+    if (fresh.has_value()) {
+        // The compromised key file steps aside; the branch continues fresh.
+        const auto kp_path = key_path(data_dir, revoked);
+        if (fs::exists(kp_path))
+            fs::rename(kp_path, fs::path(kp_path.string() + ".revoked"));
+        save_keypair(data_dir, revoked, *fresh);
+    }
+
+    std::cout << "revocation block #" << b.address.block_index
+              << " in branch " << ancestor << "\n"
+              << "revoked node " << revoked << "  since " << since
+              << (replacement.has_value() ? "  — replacement assigned"
+                                          : "  — emergency stop (branch frozen)")
+              << "\n";
+
+    const auto cert  = RevocationCert::build(storage, b.address);
+    const auto bytes = Serializer::encode(cert);
+    const auto out   = flag_val(argc, argv, "--out");
+    if (!out.empty()) {
+        std::ofstream f(out, std::ios::binary | std::ios::trunc);
+        if (!f) throw std::runtime_error("cannot write " + out);
+        f.write(reinterpret_cast<const char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+        std::cout << "certificate: " << out << " (" << bytes.size() << " bytes)\n";
+    } else {
+        std::cout << "certificate hex: " << to_hex(bytes.data(), bytes.size()) << "\n";
+    }
+    return 0;
+}
+
+// bc revoke verify (--cert FILE | --hex HEX)
+// Autonomous check of a revocation certificate — needs no identity or storage.
+static int cmd_revoke_verify(int argc, char** argv) {
+    const auto file = flag_val(argc, argv, "--cert");
+    const auto hexs = flag_val(argc, argv, "--hex");
+    if (file.empty() == hexs.empty()) { // exactly one source required
+        std::cerr << "Usage: bc revoke verify (--cert FILE | --hex HEX)\n";
+        return 1;
+    }
+
+    std::vector<uint8_t> bytes;
+    if (!file.empty()) {
+        std::ifstream f(file, std::ios::binary);
+        if (!f) { std::cerr << "cannot read " << file << "\n"; return 1; }
+        f.seekg(0, std::ios::end);
+        bytes.resize(static_cast<size_t>(f.tellg()));
+        f.seekg(0);
+        f.read(reinterpret_cast<char*>(bytes.data()),
+               static_cast<std::streamsize>(bytes.size()));
+    } else {
+        bytes = from_hex_vec(hexs);
+    }
+
+    const auto cert = Serializer::decode_revocation_cert(bytes.data(), bytes.size());
+    try {
+        RevocationCert::verify(cert);
+    } catch (const std::exception& e) {
+        std::cout << "verdict: INVALID — " << e.what() << "\n";
+        return 1;
+    }
+    const auto rp = RevocationCert::payload(cert);
+    std::cout << "verdict:  OK\n"
+              << "chain:    " << to_hex(cert.block.address.user_id.bytes) << "\n"
+              << "author:   node " << cert.block.address.node_index
+              << " (depth " << node_depth(cert.block.address.node_index) << ")\n"
+              << "revoked:  node " << rp.revoked_node_index
+              << "  key " << short_hex(rp.revoked_pubkey.bytes) << "\n"
+              << "since:    " << rp.compromised_since << "\n"
+              << "replaced: "
+              << (rp.replacement_pubkey.has_value()
+                      ? short_hex(rp.replacement_pubkey->bytes)
+                      : std::string("no (emergency stop — branch frozen)"))
+              << "\n";
+    return 0;
+}
+
+// bc revoke status --node N
+// Local view: effective revocation of a branch and per-block zone counters.
+static int cmd_revoke_status(const fs::path& data_dir, int argc, char** argv) {
+    const auto node_s = flag_val(argc, argv, "--node");
+    if (node_s.empty()) {
+        std::cerr << "Usage: bc revoke status --node N\n";
+        return 1;
+    }
+    const auto node = static_cast<NodeIndex>(std::stoull(node_s, nullptr, 0));
+
+    LmdbStorage storage(data_dir / "db");
+    Validator   validator(storage);
+    const UserId uid = load_user_id(data_dir);
+
+    const auto st = validator.branch_revocation_status(uid, node);
+    const char* state =
+          st.state == BranchRevocationState::ACTIVE ? "ACTIVE"
+        : st.state == BranchRevocationState::FROZEN ? "FROZEN" : "REPLACED";
+    std::cout << "branch " << node << ": " << state << "\n";
+    if (st.revocation.has_value()) {
+        std::cout << "  since:  " << st.revocation->compromised_since << "\n"
+                  << "  source: branch " << st.revocation->latest.node_index
+                  << " block #" << st.revocation->latest.block_index << "\n";
+        if (st.revocation->replacement_pubkey.has_value())
+            std::cout << "  replacement: "
+                      << short_hex(st.revocation->replacement_pubkey->bytes) << "\n";
+    }
+    size_t clean = 0, suspect = 0, invalid = 0;
+    for (auto s : st.blocks) {
+        if      (s == BlockRevocationStatus::CLEAN)   ++clean;
+        else if (s == BlockRevocationStatus::SUSPECT) ++suspect;
+        else                                          ++invalid;
+    }
+    std::cout << "  blocks: " << st.blocks.size() << " (clean " << clean
+              << ", suspect " << suspect
+              << ", invalid-after-replacement " << invalid << ")\n";
+    if (validator.node_invalidated_by_revocation(uid, node))
+        std::cout << "  node itself is invalidated by an ancestor's revocation "
+                     "(§6.7 rule 6)\n";
+    return 0;
+}
+
 static void print_usage() {
     std::cerr <<
 R"(Usage: bc [--data-dir PATH] <command> [--leaf INDEX]
@@ -2217,6 +2380,14 @@ Fraud (records.md §3A, blockchain.md §6.5.6):
                --proof HEX                 KIND = bad_sig | hash_mismatch
                --merkle-root HEX
 
+Key revocation (blockchain.md §6.7):
+  revoke create --node N           Revoke a branch key from an ancestor's branch
+    [--ancestor A] [--since TS]        (default ancestor: parent). --replace
+    [--replace] [--out FILE]           generates and assigns a fresh key; emits
+                                       a self-verifying certificate (CBOR)
+  revoke verify (--cert FILE | --hex HEX)  Check a certificate autonomously
+  revoke status --node N           Effective revocation + per-block zones
+
 Economy (records.md §11 — именные трудочасы, §12.7):
   wallet [--leaf N]                Branch purse (economy.md §5а: the --leaf
                                        branch's holdings) + chain-wide debt
@@ -2299,6 +2470,9 @@ int main(int argc, char** argv) {
         else if (cmd == "seal"      && subcmd == "list")    return cmd_seal_list(data_dir, argc, argv);
         else if (cmd == "fraud"     && subcmd == "verify")  return cmd_fraud_verify(argc, argv);
         else if (cmd == "fraud"     && subcmd == "claim")   return cmd_fraud_claim(data_dir, argc, argv);
+        else if (cmd == "revoke"    && subcmd == "create")  return cmd_revoke_create(data_dir, argc, argv);
+        else if (cmd == "revoke"    && subcmd == "verify")  return cmd_revoke_verify(argc, argv);
+        else if (cmd == "revoke"    && subcmd == "status")  return cmd_revoke_status(data_dir, argc, argv);
         else if (cmd == "cache"     && subcmd == "list")    return cmd_cache_list(data_dir);
         else if (cmd == "cache"     && subcmd == "publish") return cmd_cache_publish(data_dir, argc, argv);
         else if (cmd == "cache"     && subcmd == "complete")return cmd_cache_complete(data_dir, argc, argv);

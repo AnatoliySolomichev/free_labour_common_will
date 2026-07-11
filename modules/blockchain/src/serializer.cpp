@@ -135,6 +135,14 @@ void enc_revocation_payload(Buf& out, const RevocationPayload& rp) {
     }
 }
 
+void enc_revocation_cert(Buf& out, const RevocationCertificate& c) {
+    w_map(out, 2);
+    w_uint(out, 0); enc_block(out, c.block);
+    w_uint(out, 1);
+    w_arr(out, c.path.size());
+    for (const auto& n : c.path) enc_node(out, n);
+}
+
 void enc_merkle_proof(Buf& out, const MerkleTree::Proof& p) {
     w_map(out, 2);
     w_uint(out, 0);
@@ -376,6 +384,17 @@ RevocationPayload dec_revocation_payload(CborReader& r) {
     return rp;
 }
 
+RevocationCertificate dec_revocation_cert(CborReader& r) {
+    if (r.r_map() != 2) throw SerializationError("RevocationCertificate: expected 2 fields");
+    RevocationCertificate c{};
+    expect_key(r, 0); c.block = dec_block(r);
+    expect_key(r, 1);
+    const uint64_t n = r.r_arr();
+    c.path.reserve(static_cast<size_t>(n));
+    for (uint64_t i = 0; i < n; ++i) c.path.push_back(dec_node(r));
+    return c;
+}
+
 MerkleTree::Proof dec_merkle_proof(CborReader& r) {
     if (r.r_map() != 2) throw SerializationError("MerkleProof: expected 2 fields");
     MerkleTree::Proof p{};
@@ -499,6 +518,14 @@ std::vector<uint8_t> Serializer::encode(const RevocationPayload& payload) {
 
 RevocationPayload Serializer::decode_revocation_payload(const uint8_t* data, size_t len) {
     CborReader r(data, len); return dec_revocation_payload(r);
+}
+
+std::vector<uint8_t> Serializer::encode(const RevocationCertificate& cert) {
+    Buf out; enc_revocation_cert(out, cert); return out;
+}
+
+RevocationCertificate Serializer::decode_revocation_cert(const uint8_t* data, size_t len) {
+    CborReader r(data, len); return dec_revocation_cert(r);
 }
 
 FraudProofData Serializer::decode_fraud_proof(const uint8_t* data, size_t len) {
