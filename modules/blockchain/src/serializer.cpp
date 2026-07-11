@@ -124,6 +124,17 @@ void enc_merge_payload(Buf& out, const MergePayload& mp) {
     w_uint(out, 5); w_uint(out, mp.validated_depth);
 }
 
+void enc_revocation_payload(Buf& out, const RevocationPayload& rp) {
+    // Map of 3 fields (emergency stop) or 4 (with replacement) — §6.7.
+    w_map(out, rp.replacement_pubkey.has_value() ? 4 : 3);
+    w_uint(out, 0); w_uint(out, rp.revoked_node_index);
+    w_uint(out, 1); w_fixed(out, rp.revoked_pubkey.bytes);
+    w_uint(out, 2); w_int64(out, rp.compromised_since);
+    if (rp.replacement_pubkey.has_value()) {
+        w_uint(out, 3); w_fixed(out, rp.replacement_pubkey->bytes);
+    }
+}
+
 void enc_merkle_proof(Buf& out, const MerkleTree::Proof& p) {
     w_map(out, 2);
     w_uint(out, 0);
@@ -349,6 +360,22 @@ MergePayload dec_merge_payload(CborReader& r) {
     return mp;
 }
 
+RevocationPayload dec_revocation_payload(CborReader& r) {
+    const uint64_t n = r.r_map();
+    if (n != 3 && n != 4)
+        throw SerializationError("RevocationPayload: expected 3 or 4 fields");
+    RevocationPayload rp{};
+    expect_key(r, 0); rp.revoked_node_index = static_cast<NodeIndex>(r.r_uint());
+    expect_key(r, 1); r.r_fixed(rp.revoked_pubkey.bytes);
+    expect_key(r, 2); rp.compromised_since = r.r_int();
+    if (n == 4) {
+        PublicKey repl{};
+        expect_key(r, 3); r.r_fixed(repl.bytes);
+        rp.replacement_pubkey = repl;
+    }
+    return rp;
+}
+
 MerkleTree::Proof dec_merkle_proof(CborReader& r) {
     if (r.r_map() != 2) throw SerializationError("MerkleProof: expected 2 fields");
     MerkleTree::Proof p{};
@@ -464,6 +491,14 @@ MergeSnapshot Serializer::decode_snapshot(const uint8_t* data, size_t len) {
 
 std::vector<uint8_t> Serializer::encode(const FraudProofData& proof) {
     Buf out; enc_fraud_proof(out, proof); return out;
+}
+
+std::vector<uint8_t> Serializer::encode(const RevocationPayload& payload) {
+    Buf out; enc_revocation_payload(out, payload); return out;
+}
+
+RevocationPayload Serializer::decode_revocation_payload(const uint8_t* data, size_t len) {
+    CborReader r(data, len); return dec_revocation_payload(r);
 }
 
 FraudProofData Serializer::decode_fraud_proof(const uint8_t* data, size_t len) {

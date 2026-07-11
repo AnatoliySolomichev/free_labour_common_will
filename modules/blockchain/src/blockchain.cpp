@@ -172,42 +172,59 @@ Block Blockchain::rotate_key(
     return b;
 }
 
-Block Blockchain::revoke_node(
-    const UserId&    user_id,
-    NodeIndex        revoked_node_index,
-    Timestamp        compromised_since,
-    const PublicKey& replacement_pubkey,
-    const KeyPair&   parent_keypair,
-    Timestamp        timestamp)
-{
-    // [OPEN §11.1] Placed in the revoking parent node's service branch.
-    NodeIndex par_node_idx = (revoked_node_index - 1) / 2;
+PublicKey Blockchain::effective_working_pubkey(const UserId& user_id,
+                                               NodeIndex node_index) const {
+    Node node = storage_.get_node(user_id, node_index);
+    PublicKey key = node.working_pubkey;
 
-    Hash prev_hash;
-    auto tip_opt = storage_.branch_tip_index(user_id, par_node_idx);
-    if (!tip_opt.has_value()) {
-        Node par = storage_.get_node(user_id, par_node_idx);
-        prev_hash = Crypto::hash_node(par);
-    } else {
-        prev_hash = Crypto::hash_block(
-            storage_.get_block({user_id, par_node_idx, *tip_opt}));
+    auto tip_opt = storage_.branch_tip_index(user_id, node_index);
+    if (!tip_opt.has_value()) return key;
+
+    for (BlockIndex i = 0; i <= *tip_opt; ++i) {
+        Block b = storage_.get_block({user_id, node_index, i});
+        if (b.type == BlockType::KEY_ROTATION && b.payload.size() >= 32)
+            std::copy(b.payload.begin(), b.payload.begin() + 32, key.bytes.begin());
     }
+    return key;
+}
+
+Block Blockchain::revoke_node(
+    const UserId&                   user_id,
+    NodeIndex                       revoked_node_index,
+    Timestamp                       compromised_since,
+    const std::optional<PublicKey>& replacement_pubkey,
+    NodeIndex                       ancestor_index,
+    const KeyPair&                  ancestor_keypair,
+    Timestamp                       timestamp)
+{
+    if (revoked_node_index == 0)
+        throw RevocationError("root cannot be revoked — it has no ancestor (§11.5)");
+    if (!is_valid_node(revoked_node_index))
+        throw InvalidArgumentError("revoke_node: invalid revoked node index");
+    // Covers self-revocation: a key cannot revoke itself (§6.7 rule 2).
+    if (!is_ancestor(ancestor_index, revoked_node_index))
+        throw RevocationError("revocation author is not a strict ancestor of the revoked node");
+
+    // The exact key being revoked: current effective key of the revoked branch.
+    PublicKey revoked_key = effective_working_pubkey(user_id, revoked_node_index);
+
+    if (ancestor_keypair.pub != effective_working_pubkey(user_id, ancestor_index))
+        throw InvalidArgumentError(
+            "revoke_node: keypair does not match the ancestor branch working key");
+
+    Hash prev_hash = branch_tip_hash(user_id, ancestor_index);
+    auto tip_opt   = storage_.branch_tip_index(user_id, ancestor_index);
     BlockIndex idx = tip_opt.has_value() ? (*tip_opt + 1) : 0;
 
-    // RevocationPayload (raw): 4B revoked_node_index BE + 8B compromised_since BE
-    //                          + 32B replacement_pubkey = 44 bytes.
-    std::vector<uint8_t> payload(44);
-    uint32_t ri = revoked_node_index;
-    payload[0] = (ri >> 24) & 0xFF; payload[1] = (ri >> 16) & 0xFF;
-    payload[2] = (ri >>  8) & 0xFF; payload[3] =  ri        & 0xFF;
-    uint64_t cs = static_cast<uint64_t>(compromised_since);
-    for (int i = 0; i < 8; ++i) payload[4 + i] = (cs >> (56 - 8 * i)) & 0xFF;
-    std::copy(replacement_pubkey.bytes.begin(), replacement_pubkey.bytes.end(),
-              payload.begin() + 12);
+    RevocationPayload rp{};
+    rp.revoked_node_index = revoked_node_index;
+    rp.revoked_pubkey     = revoked_key;
+    rp.compromised_since  = compromised_since;
+    rp.replacement_pubkey = replacement_pubkey;
 
     Block b = build_signed_block(
-        {user_id, par_node_idx, idx}, prev_hash, timestamp,
-        BlockType::REVOCATION, std::move(payload), parent_keypair.sec);
+        {user_id, ancestor_index, idx}, prev_hash, timestamp,
+        BlockType::REVOCATION, Serializer::encode(rp), ancestor_keypair.sec);
     storage_.put_block(b);
     return b;
 }

@@ -90,6 +90,15 @@ inline bool is_valid_node(NodeIndex index) noexcept {
     return node_depth(index) <= 31;
 }
 
+// Strict-ancestor check via heap arithmetic (parent = (n-1)/2).
+// A node is not its own ancestor.
+inline bool is_ancestor(NodeIndex ancestor, NodeIndex descendant) noexcept {
+    if (descendant <= ancestor) return false;
+    NodeIndex cur = descendant;
+    while (cur > ancestor) cur = (cur - 1) / 2;
+    return cur == ancestor;
+}
+
 // Returns heap indices [0, ..., target] from root to target (inclusive).
 inline std::vector<NodeIndex> path_indices(NodeIndex target) noexcept {
     std::vector<NodeIndex> path;
@@ -184,11 +193,15 @@ struct KeyRotationPayload {
     PublicKey new_working_pubkey;
 };
 
+// Key revocation (§6.7). Lives in a branch of a strict ancestor of the revoked
+// node; signed by that ancestor branch's working key (priority gradient §4.4).
 struct RevocationPayload {
-    NodeIndex revoked_node_index;
-    Timestamp compromised_since;
-    PublicKey replacement_pubkey;
-    // [OPEN §11.1] placement of this block in the tree is an open question
+    NodeIndex                revoked_node_index;
+    PublicKey                revoked_pubkey;     // the exact key being revoked
+    Timestamp                compromised_since;
+    // absent = emergency stop; a replacement may be assigned later by a second
+    // REVOCATION block (§6.7 rule 3)
+    std::optional<PublicKey> replacement_pubkey;
 };
 
 // ── Seal ──────────────────────────────────────────────────────────────────────

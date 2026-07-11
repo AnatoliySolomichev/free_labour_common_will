@@ -333,3 +333,54 @@ TEST(Serializer, DecodeBlockWrongType) {
         Serializer::decode_block(enc.data(), enc.size()),
         SerializationError);
 }
+
+// ── RevocationPayload round-trip (§6.7) ───────────────────────────────────────
+
+TEST(Serializer, RevocationPayloadRoundTripStop) {
+    RevocationPayload rp{};
+    rp.revoked_node_index = 47;
+    rp.revoked_pubkey.bytes.fill(0xAB);
+    rp.compromised_since  = 1'720'000'000LL;
+    // no replacement: emergency stop → 3-field map
+
+    auto enc = Serializer::encode(rp);
+    auto d   = Serializer::decode_revocation_payload(enc.data(), enc.size());
+
+    EXPECT_EQ(d.revoked_node_index, 47u);
+    EXPECT_EQ(d.revoked_pubkey, rp.revoked_pubkey);
+    EXPECT_EQ(d.compromised_since, rp.compromised_since);
+    EXPECT_FALSE(d.replacement_pubkey.has_value());
+}
+
+TEST(Serializer, RevocationPayloadRoundTripReplacement) {
+    RevocationPayload rp{};
+    rp.revoked_node_index = 0x7FFF'FFFFu;
+    rp.revoked_pubkey.bytes.fill(0x11);
+    rp.compromised_since  = -1LL; // pre-epoch timestamps must survive
+    PublicKey repl{};
+    repl.bytes.fill(0x22);
+    rp.replacement_pubkey = repl;
+
+    auto enc = Serializer::encode(rp);
+    auto d   = Serializer::decode_revocation_payload(enc.data(), enc.size());
+
+    EXPECT_EQ(d.revoked_node_index, rp.revoked_node_index);
+    EXPECT_EQ(d.revoked_pubkey, rp.revoked_pubkey);
+    EXPECT_EQ(d.compromised_since, -1LL);
+    ASSERT_TRUE(d.replacement_pubkey.has_value());
+    EXPECT_EQ(*d.replacement_pubkey, repl);
+}
+
+TEST(Serializer, RevocationPayloadDeterministic) {
+    RevocationPayload rp{};
+    rp.revoked_node_index = 7;
+    rp.revoked_pubkey.bytes.fill(0x33);
+    rp.compromised_since  = 42;
+
+    EXPECT_EQ(Serializer::encode(rp), Serializer::encode(rp));
+    // Stop form is strictly shorter than the replacement form.
+    RevocationPayload with_repl = rp;
+    PublicKey repl{};
+    with_repl.replacement_pubkey = repl;
+    EXPECT_LT(Serializer::encode(rp).size(), Serializer::encode(with_repl).size());
+}

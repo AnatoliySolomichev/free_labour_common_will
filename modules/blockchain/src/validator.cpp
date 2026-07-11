@@ -79,6 +79,95 @@ void Validator::validate_branch(const UserId& user_id, NodeIndex leaf_index) con
     }
 }
 
+// All REVOCATION blocks concerning `target` found in the branches of its
+// ancestors, in (ancestor depth, block index) order: root-most ancestor first.
+static std::vector<std::pair<BlockAddress, RevocationPayload>>
+collect_revocations(const IStorage& storage, const UserId& user_id, NodeIndex target) {
+    std::vector<std::pair<BlockAddress, RevocationPayload>> found;
+    if (target == 0) return found;
+
+    for (NodeIndex anc : path_indices((target - 1) / 2)) {
+        if (!storage.has_node(user_id, anc)) continue;
+        auto tip_opt = storage.branch_tip_index(user_id, anc);
+        if (!tip_opt.has_value()) continue;
+
+        for (BlockIndex i = 0; i <= *tip_opt; ++i) {
+            Block b = storage.get_block({user_id, anc, i});
+            if (b.type != BlockType::REVOCATION) continue;
+            RevocationPayload rp =
+                Serializer::decode_revocation_payload(b.payload.data(), b.payload.size());
+            if (rp.revoked_node_index == target)
+                found.emplace_back(b.address, std::move(rp));
+        }
+    }
+    return found;
+}
+
+void Validator::validate_revocation(const Block& block) const {
+    if (block.type != BlockType::REVOCATION)
+        throw InvalidArgumentError("validate_revocation: block is not a REVOCATION");
+
+    const RevocationPayload rp =
+        Serializer::decode_revocation_payload(block.payload.data(), block.payload.size());
+    const UserId& uid = block.address.user_id;
+
+    if (rp.revoked_node_index == 0)
+        throw RevocationError("root cannot be revoked — it has no ancestor (§11.5)");
+    if (!is_valid_node(rp.revoked_node_index))
+        throw RevocationError("revoked node index is invalid");
+    // Strict ancestry also rules out self-revocation (§6.7 rule 2).
+    if (!is_ancestor(block.address.node_index, rp.revoked_node_index))
+        throw RevocationError("revocation author is not a strict ancestor of the revoked node");
+
+    // revoked_pubkey must be a historical working key of the revoked branch:
+    // the node key, any KEY_ROTATION key, or a replacement assigned by an
+    // earlier revocation (stop → replace → revoke-again flow).
+    Node revoked = storage_.get_node(uid, rp.revoked_node_index); // NodeNotFoundError
+    std::vector<PublicKey> known{revoked.working_pubkey};
+
+    auto tip_opt = storage_.branch_tip_index(uid, rp.revoked_node_index);
+    if (tip_opt.has_value()) {
+        for (BlockIndex i = 0; i <= *tip_opt; ++i) {
+            Block b = storage_.get_block({uid, rp.revoked_node_index, i});
+            if (b.type == BlockType::KEY_ROTATION && b.payload.size() >= 32) {
+                PublicKey k{};
+                std::copy(b.payload.begin(), b.payload.begin() + 32, k.bytes.begin());
+                known.push_back(k);
+            }
+        }
+    }
+    for (const auto& [addr, prior] : collect_revocations(storage_, uid, rp.revoked_node_index)) {
+        if (addr == block.address) continue; // a block cannot legitimize itself
+        if (prior.replacement_pubkey.has_value())
+            known.push_back(*prior.replacement_pubkey);
+    }
+
+    const bool matches = std::any_of(known.begin(), known.end(),
+        [&](const PublicKey& k) { return k == rp.revoked_pubkey; });
+    if (!matches)
+        throw RevocationError("revoked_pubkey does not match any key of the revoked node");
+}
+
+std::optional<RevocationState> Validator::effective_revocation(
+    const UserId& user_id, NodeIndex node_index) const {
+    auto found = collect_revocations(storage_, user_id, node_index);
+    if (found.empty()) return std::nullopt;
+
+    // Highest ancestor wins (§4.4): collect_revocations returns ancestors in
+    // root→parent order, so the winning branch is the node_index of found[0].
+    const NodeIndex winner = found[0].first.node_index;
+
+    RevocationState st{};
+    st.compromised_since = std::numeric_limits<Timestamp>::max();
+    for (const auto& [addr, rp] : found) {
+        if (addr.node_index != winner) continue;
+        st.compromised_since   = std::min(st.compromised_since, rp.compromised_since);
+        st.replacement_pubkey  = rp.replacement_pubkey; // last block has the last word
+        st.latest              = addr;
+    }
+    return st;
+}
+
 void Validator::validate_seal(const Seal& seal) const {
     if (!Crypto::verify(seal.block_hash.bytes.data(), seal.block_hash.bytes.size(),
                         seal.signature, seal.signer_id))

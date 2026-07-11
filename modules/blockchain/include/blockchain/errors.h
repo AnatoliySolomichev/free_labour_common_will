@@ -70,4 +70,11 @@ public:
     using BlockchainError::BlockchainError;
 };
 
+// Semantic violation of the key-revocation rules (§6.7): non-ancestor author,
+// self-revocation, root revocation, revoked_pubkey mismatch.
+class RevocationError : public BlockchainError {
+public:
+    using BlockchainError::BlockchainError;
+};
+
 } // namespace blockchain

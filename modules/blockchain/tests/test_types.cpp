@@ -109,3 +109,21 @@ TEST(NodeStruct, ParentIndex) {
     n.index = 1;
     EXPECT_EQ(n.parent_index(), 0u);
 }
+
+// ── is_ancestor ───────────────────────────────────────────────────────────────
+
+TEST(TreeUtils, IsAncestorDirectAndDeep) {
+    EXPECT_TRUE(is_ancestor(0, 1));
+    EXPECT_TRUE(is_ancestor(0, 2));
+    EXPECT_TRUE(is_ancestor(1, 3));   // parent
+    EXPECT_TRUE(is_ancestor(1, 7));   // grandparent
+    EXPECT_TRUE(is_ancestor(0, 0x7FFF'FFFFu)); // root is everyone's ancestor
+}
+
+TEST(TreeUtils, IsAncestorRejectsSelfSiblingsAndDescendants) {
+    EXPECT_FALSE(is_ancestor(7, 7));   // strict: not its own ancestor
+    EXPECT_FALSE(is_ancestor(3, 4));   // sibling subtrees
+    EXPECT_FALSE(is_ancestor(4, 7));   // 4 is not on 7's path (0,1,3,7)
+    EXPECT_FALSE(is_ancestor(7, 3));   // descendant is not an ancestor
+    EXPECT_FALSE(is_ancestor(1, 0));   // nothing is an ancestor of the root
+}

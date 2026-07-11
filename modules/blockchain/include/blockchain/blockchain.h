@@ -89,18 +89,30 @@ public:
         Timestamp      timestamp
     );
 
-    // Append a REVOCATION block (§6.7). Signs with parent_keypair.
-    // [OPEN §11.1] placement of the block is an open question; currently appended
-    // to the parent node's service branch.
-    // Throws: CryptoError, StorageError, NodeNotFoundError.
+    // Append a REVOCATION block (§6.7) to the branch of ancestor_index.
+    // ancestor_index must be a strict ancestor of revoked_node_index; the default
+    // radius is the parent (N-1)/2, higher ancestors — by choice or escalation.
+    // replacement_pubkey == nullopt is the emergency stop; a replacement may be
+    // assigned later by a second REVOCATION (§6.7 rule 3, "последнее слово").
+    // revoked_pubkey is filled from the revoked branch's current effective
+    // working key (node key + KEY_ROTATION history).
+    // Throws: CryptoError, StorageError, NodeNotFoundError,
+    //         RevocationError (not an ancestor / root / self),
+    //         InvalidArgumentError (ancestor keypair mismatch).
     Block revoke_node(
-        const UserId&    user_id,
-        NodeIndex        revoked_node_index,
-        Timestamp        compromised_since,
-        const PublicKey& replacement_pubkey,
-        const KeyPair&   parent_keypair,
-        Timestamp        timestamp
+        const UserId&                   user_id,
+        NodeIndex                       revoked_node_index,
+        Timestamp                       compromised_since,
+        const std::optional<PublicKey>& replacement_pubkey,
+        NodeIndex                       ancestor_index,
+        const KeyPair&                  ancestor_keypair,
+        Timestamp                       timestamp
     );
+
+    // Current effective working key of a branch: the node's working_pubkey,
+    // advanced by KEY_ROTATION blocks in the branch (§6.6).
+    // Throws: NodeNotFoundError, BlockNotFoundError.
+    PublicKey effective_working_pubkey(const UserId& user_id, NodeIndex node_index) const;
 
     // ── Reading ───────────────────────────────────────────────────────────────
 

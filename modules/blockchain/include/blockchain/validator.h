@@ -4,6 +4,16 @@
 
 namespace blockchain {
 
+// Effective revocation state of a node, resolved over all REVOCATION blocks
+// found in its ancestors' branches (§6.7): the highest ancestor wins (§4.4);
+// within the winning branch, the earliest compromised_since applies and the
+// latest block has the last word on replacement ("stop now, replace later").
+struct RevocationState {
+    Timestamp                compromised_since;
+    std::optional<PublicKey> replacement_pubkey; // nullopt = branch is frozen
+    BlockAddress             latest;             // block that had the last word
+};
+
 // Checks invariants (§9). Read-only access to storage; no state mutation.
 class Validator {
 public:
@@ -31,6 +41,23 @@ public:
     // Throws: SignatureError, ChainIntegrityError, TimestampError,
     //         BlockNotFoundError, NodeNotFoundError.
     void validate_branch(const UserId& user_id, NodeIndex leaf_index) const;
+
+    // ── Revocation checks (§6.7) ──────────────────────────────────────────────
+
+    // Semantic validation of a REVOCATION block stored in an ancestor branch:
+    // payload decodes, the author node is a strict ancestor of the revoked node,
+    // the revoked node is not the root and exists, revoked_pubkey matches one of
+    // its historical working keys (node key, KEY_ROTATION keys, or a replacement
+    // assigned by an earlier revocation). Signature/prev_hash integrity is the
+    // job of validate_branch (invariant 7).
+    // Throws: InvalidArgumentError (not a REVOCATION block), SerializationError,
+    //         NodeNotFoundError, RevocationError.
+    void validate_revocation(const Block& block) const;
+
+    // Resolve the effective revocation state of a node by scanning the branches
+    // of all its ancestors present in storage. nullopt = not revoked.
+    std::optional<RevocationState> effective_revocation(
+        const UserId& user_id, NodeIndex node_index) const;
 
     // ── Seal check (invariant 3) ──────────────────────────────────────────────
 

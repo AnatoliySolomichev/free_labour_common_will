@@ -23,6 +23,7 @@ public:
     static std::vector<uint8_t> encode(const ExternalRef& ref);
     static std::vector<uint8_t> encode(const MergeSnapshot& snapshot);
     static std::vector<uint8_t> encode(const FraudProofData& proof);
+    static std::vector<uint8_t> encode(const RevocationPayload& payload);
 
     // Deserialize from CBOR. Throws: SerializationError on malformed input.
     static Node          decode_node         (const uint8_t* data, size_t len);
@@ -32,6 +33,7 @@ public:
     static MergePayload  decode_merge_payload(const uint8_t* data, size_t len);
     static MergeSnapshot decode_snapshot     (const uint8_t* data, size_t len);
     static FraudProofData decode_fraud_proof (const uint8_t* data, size_t len);
+    static RevocationPayload decode_revocation_payload(const uint8_t* data, size_t len);
 };
 
 } // namespace blockchain
