@@ -6,9 +6,7 @@
 
 namespace blockchain {
 
-// Verify a block signature against a candidate key (signed bytes = canonical
-// CBOR with the signature zeroed).
-static bool signed_by(const Block& block, const PublicKey& key) {
+bool block_signed_by(const Block& block, const PublicKey& key) {
     Block to_verify = block;
     to_verify.signature = Signature::null();
     auto bytes = Serializer::encode(to_verify);
@@ -121,7 +119,7 @@ BranchRevocationStatus Validator::branch_revocation_status(
             Block b = storage_.get_block({user_id, node_index, i});
 
             if (!switched) {
-                if (signed_by(b, lineage)) {
+                if (block_signed_by(b, lineage)) {
                     const bool suspect = out.revocation.has_value()
                         && b.timestamp_claimed > out.revocation->compromised_since;
                     out.blocks.push_back(suspect ? BlockRevocationStatus::SUSPECT
@@ -129,7 +127,7 @@ BranchRevocationStatus Validator::branch_revocation_status(
                     if (b.type == BlockType::KEY_ROTATION && b.payload.size() >= 32)
                         std::copy(b.payload.begin(), b.payload.begin() + 32,
                                   lineage.bytes.begin());
-                } else if (has_repl && signed_by(b, *out.revocation->replacement_pubkey)) {
+                } else if (has_repl && block_signed_by(b, *out.revocation->replacement_pubkey)) {
                     switched = true;
                     current  = *out.revocation->replacement_pubkey;
                     out.blocks.push_back(BlockRevocationStatus::CLEAN);
@@ -141,12 +139,12 @@ BranchRevocationStatus Validator::branch_revocation_status(
                                          "nor the replacement");
                 }
             } else {
-                if (signed_by(b, current)) {
+                if (block_signed_by(b, current)) {
                     out.blocks.push_back(BlockRevocationStatus::CLEAN);
                     if (b.type == BlockType::KEY_ROTATION && b.payload.size() >= 32)
                         std::copy(b.payload.begin(), b.payload.begin() + 32,
                                   current.bytes.begin());
-                } else if (signed_by(b, lineage)) {
+                } else if (block_signed_by(b, lineage)) {
                     // §6.7 rule 9: the old key resurfacing after the switch.
                     out.blocks.push_back(BlockRevocationStatus::INVALID_AFTER_REPLACEMENT);
                     // do not follow its rotations
@@ -218,7 +216,7 @@ Validator::collect_revocations(const UserId& user_id, NodeIndex target) const {
         auto author_state = effective_revocation(user_id, addr.node_index);
         if (author_state.has_value()) {
             const bool by_replacement = author_state->replacement_pubkey.has_value()
-                && signed_by(b, *author_state->replacement_pubkey);
+                && block_signed_by(b, *author_state->replacement_pubkey);
             if (!by_replacement && b.timestamp_claimed > author_state->compromised_since)
                 continue;
         }
@@ -302,6 +300,32 @@ std::optional<RevocationState> Validator::effective_revocation(
         st.latest              = addr;
     }
     return st;
+}
+
+void Validator::check_tip_against_revocations(const BranchTipInfo& tip) const {
+    if (tip.path.empty()) return;
+    const UserId chain = tip.path.front().structural_pubkey;
+
+    // Fake subtrees (§6.7 rule 6): an edge created under a revoked parent key
+    // after its compromise poisons everything below. Nodes come from the tip
+    // itself — the partner's tree need not be in storage.
+    for (size_t k = 1; k < tip.path.size(); ++k) {
+        auto st = effective_revocation(chain, tip.path[k - 1].index);
+        if (st.has_value() && tip.path[k].created_at > st->compromised_since)
+            throw RevocationError(
+                "partner path node was created under a revoked key (§6.7 rule 6)");
+    }
+
+    // The branch itself (§6.7 rules 3/9): frozen → no new bilateral acts;
+    // replaced → the tip must already run under the replacement key.
+    auto st = effective_revocation(chain, tip.tip_address.node_index);
+    if (!st.has_value()) return;
+    if (!st->replacement_pubkey.has_value())
+        throw RevocationError("partner branch is frozen by revocation (§6.7)");
+    if (tip.tip_block.has_value() &&
+        !block_signed_by(*tip.tip_block, *st->replacement_pubkey))
+        throw RevocationError(
+            "partner tip is not signed by the revocation replacement key (§6.7)");
 }
 
 void Validator::validate_seal(const Seal& seal) const {

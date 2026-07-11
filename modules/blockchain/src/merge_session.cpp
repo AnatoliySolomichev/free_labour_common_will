@@ -73,6 +73,12 @@ void MergeSession::verify_partner_tip(const BranchTipInfo& partner_tip) const {
         if (!(partner_tip.tip_block->address == partner_tip.tip_address))
             throw ChainIntegrityError("partner tip_block address does not match tip_address");
     }
+
+    // Local revocation knowledge (§6.7 rule 11 — rules apply when accepting
+    // the new): refuse frozen branches, stale tips of replaced branches and
+    // fake subtrees. Knowledge = own records + imported certificates; keeping
+    // it fresh is the caller's policy (sync.md §10.3).
+    validator_.check_tip_against_revocations(partner_tip);
 }
 
 // ── Snapshot accessor ─────────────────────────────────────────────────────────
@@ -113,6 +119,18 @@ PendingMergeBlock MergeSession::create_pending(
     if (partner_tip.tip_address.block_index == EMPTY_BRANCH_INDEX)
         throw InvalidArgumentError(
             "cannot merge with an empty-branch partner (§6.4)");
+
+    // §6.7: a revoked own branch may not open new bilateral acts — frozen at
+    // all, replaced only under the authorized key (mirrors
+    // Blockchain::ensure_branch_writable; merges bypass the facade).
+    if (validator_.effective_revocation(user_id, leaf_index).has_value()) {
+        const auto own_st = validator_.branch_revocation_status(user_id, leaf_index);
+        if (own_st.state == BranchRevocationState::FROZEN)
+            throw RevocationError("own branch is frozen by revocation (§6.7)");
+        if (own_st.next_key.has_value() && own_working_keypair.pub != *own_st.next_key)
+            throw RevocationError(
+                "own branch key was replaced by revocation; use the replacement key (§6.7)");
+    }
 
     // Union own snapshot with the partner's → the packet's new snapshot and the
     // in-block commitments (§6.5.1).

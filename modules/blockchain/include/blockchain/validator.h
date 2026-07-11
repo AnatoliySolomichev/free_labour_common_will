@@ -41,6 +41,10 @@ struct BranchRevocationStatus {
     std::optional<PublicKey>            next_key;
 };
 
+// Verify a block's signature against a candidate key (canonical CBOR bytes
+// with the signature zeroed).
+bool block_signed_by(const Block& block, const PublicKey& key);
+
 // Checks invariants (§9). Read-only access to storage; no state mutation.
 class Validator {
 public:
@@ -102,6 +106,18 @@ public:
     // Throws: NodeNotFoundError.
     bool node_invalidated_by_revocation(
         const UserId& user_id, NodeIndex node_index) const;
+
+    // §6.7 rule 11 — the acceptance-time check: match a partner's branch tip
+    // against local revocation knowledge (own records + imported certificates).
+    // Uses the nodes carried by the tip itself — the partner's tree need not be
+    // in storage. Refuses: a frozen branch; a tip of a replaced branch not
+    // signed by the replacement key (stale or stolen; a rotation *after* the
+    // replacement is not recognized without the partner's branch history — MVP
+    // limitation); a path node created under a revoked key after its
+    // compromised_since (fake subtree, rule 6). No local knowledge — no
+    // objection: freshness is the caller's policy (sync.md §10.3).
+    // Throws: RevocationError.
+    void check_tip_against_revocations(const BranchTipInfo& tip) const;
 
     // ── Seal check (invariant 3) ──────────────────────────────────────────────
 

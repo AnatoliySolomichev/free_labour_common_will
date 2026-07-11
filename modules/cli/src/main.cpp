@@ -302,6 +302,74 @@ struct Context {
     }
 };
 
+// ── Revocation freshness (blockchain.md §6.7 rule 11; sync.md §10.3) ──────────
+
+struct RevFetchResult {
+    bool                reachable = false;
+    std::size_t         imported  = 0;
+    std::size_t         rejected  = 0;
+    std::set<NodeIndex> touched;   // revoked nodes seen in imported certificates
+};
+
+// Pull the chain's revocation certificates from the warehouse, verify each
+// autonomously (the warehouse is untrusted) and import the good ones: path
+// nodes + the REVOCATION block (external) feed the local revocation index.
+static RevFetchResult fetch_import_revocations(LmdbStorage& storage,
+                                               const UserId& chain,
+                                               const std::string& via) {
+    RevFetchResult r{};
+    std::string host = via;
+    if (host.rfind("http://", 0) == 0) host = host.substr(7);
+    httplib::Client cli(host);
+    cli.set_connection_timeout(5);
+    const auto res = cli.Get("/revocations/" + to_hex(chain.bytes));
+    if (!res || res->status != 200) return r;
+    r.reachable = true;
+
+    // CBOR array(bstr) — minimal parse mirroring the warehouse encoder.
+    const std::string& body = res->body;
+    std::size_t bpos = 0;
+    auto head = [&](uint8_t expect_major) -> long long {
+        if (bpos >= body.size()) return -1;
+        const uint8_t b = static_cast<uint8_t>(body[bpos++]);
+        if ((b >> 5) != expect_major) return -1;
+        const uint8_t ai = b & 0x1F;
+        if (ai < 24) return ai;
+        int extra = ai == 24 ? 1 : ai == 25 ? 2 : ai == 26 ? 4 : ai == 27 ? 8 : -1;
+        if (extra < 0 || bpos + extra > body.size()) return -1;
+        long long v = 0;
+        for (int i = 0; i < extra; ++i)
+            v = (v << 8) | static_cast<uint8_t>(body[bpos++]);
+        return v;
+    };
+
+    const long long n = head(4);
+    for (long long i = 0; i < n; ++i) {
+        const long long len = head(2);
+        if (len < 0 || bpos + len > body.size()) break;
+        const auto* p = reinterpret_cast<const uint8_t*>(body.data()) + bpos;
+        bpos += static_cast<std::size_t>(len);
+        try {
+            const auto cert = Serializer::decode_revocation_cert(
+                p, static_cast<size_t>(len));
+            RevocationCert::verify(cert);
+            if (!(cert.block.address.user_id == chain))
+                throw RevocationError("certificate belongs to another chain");
+
+            for (const auto& node : cert.path)
+                if (!storage.has_node(chain, node.index))
+                    storage.put_node(chain, node);
+            if (!storage.has_block(cert.block.address) &&
+                !storage.has_external_block(cert.block.address))
+                storage.put_external_block(cert.block);
+
+            r.touched.insert(RevocationCert::payload(cert).revoked_node_index);
+            ++r.imported;
+        } catch (const std::exception&) { ++r.rejected; }
+    }
+    return r;
+}
+
 // ── Write helper: encode + append DATA block ──────────────────────────────────
 
 static void upload_block(const std::string& via, const Block& block);
@@ -1024,6 +1092,14 @@ static int cmd_merge_run(const fs::path& data_dir, int argc, char** argv) {
                             : static_cast<uint32_t>(std::stoul(dep_s));
 
     Context ctx(data_dir, leaf);
+
+    // Freshness (§6.7 rule 11, sync.md §10.3): refresh the peer's revocations
+    // from the same aggregator before opening a bilateral act.
+    const auto rf = fetch_import_revocations(ctx.storage, peer, via);
+    if (rf.imported > 0)
+        std::cerr << "peer revocations refreshed: " << rf.imported
+                  << " certificate(s)\n";
+
     MergeSession session(ctx.storage, ctx.validator);
     chainsync::ParticipantCache cache(data_dir / "sync_cache");
     const auto now = static_cast<Timestamp>(std::time(nullptr));
@@ -1349,6 +1425,12 @@ static int cmd_wallet(const fs::path& data_dir, int argc, char** argv) {
     Context ctx(data_dir, leaf);
     const auto w = compute_wallet(ctx);
 
+    // §6.7: surface the purse branch's own revocation state.
+    if (auto rst = ctx.validator.effective_revocation(ctx.user_id, ctx.leaf))
+        std::cout << (rst->replacement_pubkey.has_value()
+                          ? "note: this branch was revoked and REPLACED (§6.7)\n"
+                          : "WARNING: this branch is FROZEN by revocation (§6.7)\n");
+
     double held = 0;
     std::cout << "purse of branch 0x" << std::hex << ctx.leaf << std::dec
               << " (paper of others):\n";
@@ -1433,9 +1515,25 @@ static int cmd_transfer_recv(const fs::path& data_dir, int argc, char** argv) {
     const NodeIndex leaf = parse_leaf_index(argc, argv);
     Context ctx(data_dir, leaf);
 
+    // Freshness (§6.7 rule 11, sync.md §10.3): refresh the sender's revocations
+    // before accepting value — the zones apply at acceptance time.
+    UserId sender{};
+    sender.bytes = src.chain;
+    fetch_import_revocations(ctx.storage, sender, via);
+
     const Block block = fetch_block_from(via, src);
     if (block.type != BlockType::DATA)
         throw std::runtime_error("referenced block is not a DATA block");
+
+    // Refuse paper from a revoked paying branch unless the transfer block runs
+    // under the replacement key (§6.7: frozen/stolen purses cannot pay anew).
+    if (auto rst = ctx.validator.effective_revocation(sender, block.address.node_index)) {
+        const bool under_replacement = rst->replacement_pubkey.has_value()
+            && block_signed_by(block, *rst->replacement_pubkey);
+        if (!under_replacement)
+            throw std::runtime_error(
+                "sender's paying branch is revoked (blockchain.md §6.7) — transfer refused");
+    }
 
     const auto rec = Codec::decode(block.payload.data(), block.payload.size());
     const auto* t  = std::get_if<records::Transfer>(&rec);
@@ -2297,66 +2395,18 @@ static int cmd_revoke_fetch(const fs::path& data_dir, int argc, char** argv) {
         return 1;
     }
 
-    std::string host = via;
-    if (host.rfind("http://", 0) == 0) host = host.substr(7);
-    httplib::Client cli(host);
-    cli.set_connection_timeout(5);
-    const auto res = cli.Get("/revocations/" + to_hex(chain.bytes));
-    if (!res || res->status != 200) {
+    LmdbStorage storage(data_dir / "db");
+    Validator   validator(storage);
+
+    const auto r = fetch_import_revocations(storage, chain, via);
+    if (!r.reachable) {
         std::cerr << "aggregator unreachable or error: " << via << "\n";
         return 1;
     }
 
-    LmdbStorage storage(data_dir / "db");
-    Validator   validator(storage);
-
-    // CBOR array(bstr) — minimal parse mirroring the warehouse encoder.
-    const std::string& body = res->body;
-    std::size_t bpos = 0;
-    auto head = [&](uint8_t expect_major) -> long long {
-        if (bpos >= body.size()) return -1;
-        const uint8_t b = static_cast<uint8_t>(body[bpos++]);
-        if ((b >> 5) != expect_major) return -1;
-        const uint8_t ai = b & 0x1F;
-        if (ai < 24) return ai;
-        int extra = ai == 24 ? 1 : ai == 25 ? 2 : ai == 26 ? 4 : ai == 27 ? 8 : -1;
-        if (extra < 0 || bpos + extra > body.size()) return -1;
-        long long v = 0;
-        for (int i = 0; i < extra; ++i)
-            v = (v << 8) | static_cast<uint8_t>(body[bpos++]);
-        return v;
-    };
-
-    std::size_t imported = 0, rejected = 0;
-    std::set<NodeIndex> touched;
-    const long long n = head(4);
-    for (long long i = 0; i < n; ++i) {
-        const long long len = head(2);
-        if (len < 0 || bpos + len > body.size()) break;
-        const auto* p = reinterpret_cast<const uint8_t*>(body.data()) + bpos;
-        bpos += static_cast<std::size_t>(len);
-        try {
-            const auto cert = Serializer::decode_revocation_cert(
-                p, static_cast<size_t>(len));
-            RevocationCert::verify(cert);
-            if (!(cert.block.address.user_id == chain))
-                throw RevocationError("certificate belongs to another chain");
-
-            for (const auto& node : cert.path)
-                if (!storage.has_node(chain, node.index))
-                    storage.put_node(chain, node);
-            if (!storage.has_block(cert.block.address) &&
-                !storage.has_external_block(cert.block.address))
-                storage.put_external_block(cert.block);
-
-            touched.insert(RevocationCert::payload(cert).revoked_node_index);
-            ++imported;
-        } catch (const std::exception&) { ++rejected; }
-    }
-
-    std::cout << "imported " << imported << " certificate(s), rejected "
-              << rejected << "\n";
-    for (NodeIndex node : touched) {
+    std::cout << "imported " << r.imported << " certificate(s), rejected "
+              << r.rejected << "\n";
+    for (NodeIndex node : r.touched) {
         const auto st = validator.effective_revocation(chain, node);
         if (!st.has_value()) continue;
         std::cout << "node " << node << ": revoked since "

@@ -786,3 +786,149 @@ TEST_F(RevocationTest, ImportedForeignRevocationIsEffective) {
     }
     std::filesystem::remove_all(foreign_db);
 }
+
+// ── Step 5: acceptance-time revocation checks (§6.7 rule 11) ──────────────────
+
+// Partner chain living in its own storage; exposes tips the way sync would.
+struct ForeignChain {
+    std::filesystem::path        dir;
+    std::unique_ptr<LmdbStorage> storage;
+    std::unique_ptr<Validator>   validator;
+    std::unique_ptr<Blockchain>  bc;
+    KeyPair root, kp1, kp3, kp7;
+
+    explicit ForeignChain(const std::string& tag) {
+        dir = std::filesystem::temp_directory_path() / ("bc_foreign_" + tag);
+        std::filesystem::remove_all(dir);
+        storage   = std::make_unique<LmdbStorage>(dir);
+        validator = std::make_unique<Validator>(*storage);
+        bc        = std::make_unique<Blockchain>(*storage, *validator);
+        root = Crypto::generate_keypair();
+        kp1  = Crypto::generate_keypair();
+        kp3  = Crypto::generate_keypair();
+        kp7  = Crypto::generate_keypair();
+        std::map<NodeIndex, KeyPair> keys{{0, root}, {1, kp1}, {3, kp3}, {7, kp7}};
+        bc->create_identity(root);
+        bc->ensure_path(root.pub, 7, [&](NodeIndex i) { return keys.at(i); });
+    }
+    ~ForeignChain() {
+        bc.reset(); validator.reset(); storage.reset();
+        std::filesystem::remove_all(dir);
+    }
+
+    UserId uid() const { return root.pub; }
+
+    BranchTipInfo tip(NodeIndex branch) const {
+        MergeSession s(*storage, *validator);
+        return s.prepare_tip(root.pub, branch);
+    }
+};
+
+// Import the certificate of a foreign REVOCATION block, as bc revoke fetch does.
+static void import_certificate(LmdbStorage& into, const ForeignChain& f,
+                               const Block& rev_block) {
+    auto cert  = RevocationCert::build(*f.storage, rev_block.address);
+    auto bytes = Serializer::encode(cert);
+    auto recv  = Serializer::decode_revocation_cert(bytes.data(), bytes.size());
+    RevocationCert::verify(recv);
+    for (const auto& node : recv.path)
+        if (!into.has_node(f.uid(), node.index))
+            into.put_node(f.uid(), node);
+    into.put_external_block(recv.block);
+}
+
+TEST_F(RevocationTest, TipCheckRefusesFrozenPartnerBranch) {
+    ForeignChain f("frozen");
+    f.bc->append_data_block(f.uid(), 7, {0x01}, f.kp7, 1'000LL);
+    Block rev = f.bc->revoke_node(f.uid(), 7, 500LL, std::nullopt, 3, f.kp3, 2'000LL);
+    import_certificate(*storage_, f, rev);
+
+    EXPECT_THROW(validator_->check_tip_against_revocations(f.tip(7)),
+                 RevocationError);
+}
+
+TEST_F(RevocationTest, TipCheckRefusesStaleTipOfReplacedBranch) {
+    ForeignChain f("stale");
+    f.bc->append_data_block(f.uid(), 7, {0x01}, f.kp7, 1'000LL);
+    KeyPair repl = Crypto::generate_keypair();
+    Block rev = f.bc->revoke_node(f.uid(), 7, 500LL, repl.pub, 3, f.kp3, 2'000LL);
+    import_certificate(*storage_, f, rev);
+
+    // The tip is still under the old key — stale or stolen.
+    EXPECT_THROW(validator_->check_tip_against_revocations(f.tip(7)),
+                 RevocationError);
+}
+
+TEST_F(RevocationTest, TipCheckAcceptsReplacedTip) {
+    ForeignChain f("replaced");
+    f.bc->append_data_block(f.uid(), 7, {0x01}, f.kp7, 1'000LL);
+    KeyPair repl = Crypto::generate_keypair();
+    Block rev = f.bc->revoke_node(f.uid(), 7, 500LL, repl.pub, 3, f.kp3, 2'000LL);
+    f.bc->append_data_block(f.uid(), 7, {0x02}, repl, 3'000LL); // re-tip under R
+    import_certificate(*storage_, f, rev);
+
+    EXPECT_NO_THROW(validator_->check_tip_against_revocations(f.tip(7)));
+}
+
+TEST_F(RevocationTest, TipCheckSilentWithoutLocalKnowledge) {
+    ForeignChain f("unknown");
+    f.bc->append_data_block(f.uid(), 7, {0x01}, f.kp7, 1'000LL);
+    f.bc->revoke_node(f.uid(), 7, 500LL, std::nullopt, 3, f.kp3, 2'000LL);
+    // Certificate NOT imported: no local knowledge — no objection.
+    // Keeping knowledge fresh is the caller's policy (sync.md §10.3).
+    EXPECT_NO_THROW(validator_->check_tip_against_revocations(f.tip(7)));
+}
+
+TEST_F(RevocationTest, TipCheckRefusesFakeSubtreeNode) {
+    ForeignChain f("fake");
+    // Node 15 under 7, "created" after the compromise moment (§6.7 rule 6).
+    KeyPair kp15 = Crypto::generate_keypair();
+    Node n7 = f.bc->get_node(f.uid(), 7);
+    Node n{};
+    n.index             = 15;
+    n.structural_pubkey = kp15.pub;
+    n.working_pubkey    = kp15.pub;
+    n.parent_hash       = Crypto::hash_node(n7);
+    n.created_at        = 9'000LL;
+    n.parent_sig        = Signature::null();
+    auto nb = Serializer::encode(n);
+    n.parent_sig = Crypto::sign(nb.data(), nb.size(), f.kp7.sec);
+    f.storage->put_node(f.uid(), n);
+    f.bc->append_data_block(f.uid(), 15, {0x01}, kp15, 9'500LL);
+
+    Block rev = f.bc->revoke_node(f.uid(), 7, 5'000LL, std::nullopt, 3, f.kp3, 9'600LL);
+    import_certificate(*storage_, f, rev);
+
+    // Branch 15 itself is not revoked; the poisoned edge 7→15 is refused.
+    EXPECT_THROW(validator_->check_tip_against_revocations(f.tip(15)),
+                 RevocationError);
+}
+
+TEST_F(RevocationTest, VerifyPartnerTipChecksRevocations) {
+    ForeignChain f("verify");
+    f.bc->append_data_block(f.uid(), 7, {0x01}, f.kp7, 1'000LL);
+    Block rev = f.bc->revoke_node(f.uid(), 7, 500LL, std::nullopt, 3, f.kp3, 2'000LL);
+    import_certificate(*storage_, f, rev);
+
+    MergeSession session(*storage_, *validator_);
+    EXPECT_THROW(session.verify_partner_tip(f.tip(7)), RevocationError);
+}
+
+TEST_F(RevocationTest, MergeFromRevokedOwnBranchRefused) {
+    // A frozen own branch may not open new bilateral acts (merges bypass the
+    // facade's append protection).
+    bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 1'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, 500LL, std::nullopt, 3, kp3_, 2'000LL);
+
+    ForeignChain f("mergepeer");
+    f.bc->append_data_block(f.uid(), 7, {0x01}, f.kp7, 1'000LL);
+    MergeSession f_session(*f.storage, *f.validator);
+    auto partner_tip  = f.tip(7);
+    auto partner_snap = f_session.snapshot_for(f.uid(), 7);
+
+    MergeSession session(*storage_, *validator_);
+    EXPECT_THROW(
+        session.create_pending(root_kp_.pub, 7, partner_tip, partner_snap,
+                               kp7_, 3'000LL, 1),
+        RevocationError);
+}
