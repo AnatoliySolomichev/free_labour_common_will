@@ -475,3 +475,190 @@ TEST_F(RevocationTest, ReplacementKeyIsRevocableAgain) {
     ASSERT_TRUE(st.has_value());
     EXPECT_FALSE(st->replacement_pubkey.has_value());
 }
+
+// ── Step 2: revocation effects in validation (§6.7 rules 9–11) ────────────────
+
+TEST_F(RevocationTest, StatusCleanSuspectSplit) {
+    bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 1'000LL);
+    bc_->append_data_block(root_kp_.pub, 7, {0x02}, kp7_, 2'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, 1'500LL, std::nullopt, 3, kp3_, 3'000LL);
+
+    auto st = validator_->branch_revocation_status(root_kp_.pub, 7);
+    EXPECT_EQ(st.state, BranchRevocationState::FROZEN);
+    EXPECT_FALSE(st.next_key.has_value());
+    ASSERT_EQ(st.blocks.size(), 2u);
+    EXPECT_EQ(st.blocks[0], BlockRevocationStatus::CLEAN);   // ts 1000 ≤ since 1500
+    EXPECT_EQ(st.blocks[1], BlockRevocationStatus::SUSPECT); // ts 2000 > since 1500
+}
+
+TEST_F(RevocationTest, ActiveBranchStatus) {
+    bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 1'000LL);
+    auto st = validator_->branch_revocation_status(root_kp_.pub, 7);
+    EXPECT_EQ(st.state, BranchRevocationState::ACTIVE);
+    ASSERT_TRUE(st.next_key.has_value());
+    EXPECT_EQ(*st.next_key, kp7_.pub);
+    ASSERT_EQ(st.blocks.size(), 1u);
+    EXPECT_EQ(st.blocks[0], BlockRevocationStatus::CLEAN);
+}
+
+TEST_F(RevocationTest, AppendToFrozenBranchThrows) {
+    bc_->revoke_node(root_kp_.pub, 7, 1'000LL, std::nullopt, 3, kp3_, 2'000LL);
+    EXPECT_THROW(
+        bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 3'000LL),
+        RevocationError);
+}
+
+TEST_F(RevocationTest, ReplacedBranchAcceptsOnlyReplacement) {
+    KeyPair repl = Crypto::generate_keypair();
+    bc_->revoke_node(root_kp_.pub, 7, 1'000LL, repl.pub, 3, kp3_, 2'000LL);
+
+    EXPECT_THROW(
+        bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 3'000LL),
+        RevocationError);
+
+    Block b = bc_->append_data_block(root_kp_.pub, 7, {0x01}, repl, 3'000LL);
+    EXPECT_EQ(b.address.block_index, 0u);
+
+    auto st = validator_->branch_revocation_status(root_kp_.pub, 7);
+    EXPECT_EQ(st.state, BranchRevocationState::REPLACED);
+    ASSERT_EQ(st.blocks.size(), 1u);
+    EXPECT_EQ(st.blocks[0], BlockRevocationStatus::CLEAN);
+    ASSERT_TRUE(st.next_key.has_value());
+    EXPECT_EQ(*st.next_key, repl.pub);
+
+    // validate_branch follows the out-of-branch key switch (§6.7 rule 9).
+    EXPECT_NO_THROW(bc_->validate_branch(root_kp_.pub, 7));
+}
+
+TEST_F(RevocationTest, SwitchAfterExistingBlocks) {
+    bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 1'000LL);
+    KeyPair repl = Crypto::generate_keypair();
+    bc_->revoke_node(root_kp_.pub, 7, 500LL, repl.pub, 3, kp3_, 2'000LL);
+    bc_->append_data_block(root_kp_.pub, 7, {0x02}, repl, 3'000LL);
+
+    auto st = validator_->branch_revocation_status(root_kp_.pub, 7);
+    ASSERT_EQ(st.blocks.size(), 2u);
+    EXPECT_EQ(st.blocks[0], BlockRevocationStatus::SUSPECT); // ts 1000 > since 500
+    EXPECT_EQ(st.blocks[1], BlockRevocationStatus::CLEAN);   // signed by replacement
+    EXPECT_NO_THROW(bc_->validate_branch(root_kp_.pub, 7));
+}
+
+TEST_F(RevocationTest, OldKeyAfterSwitchIsInvalid) {
+    KeyPair repl = Crypto::generate_keypair();
+    bc_->revoke_node(root_kp_.pub, 7, 1'000LL, repl.pub, 3, kp3_, 2'000LL);
+    bc_->append_data_block(root_kp_.pub, 7, {0x01}, repl, 3'000LL);
+
+    // The thief appends with the old key after the switch (bypassing the facade).
+    Hash prev = bc_->branch_tip_hash(root_kp_.pub, 7);
+    Block b{};
+    b.address           = {root_kp_.pub, 7, 1};
+    b.prev_hash         = prev;
+    b.timestamp_claimed = 4'000LL;
+    b.type              = BlockType::DATA;
+    b.payload           = {0x80};
+    b.signature         = Signature::null();
+    auto bytes          = Serializer::encode(b);
+    b.signature         = Crypto::sign(bytes.data(), bytes.size(), kp7_.sec);
+    storage_->put_block(b);
+
+    auto st = validator_->branch_revocation_status(root_kp_.pub, 7);
+    ASSERT_EQ(st.blocks.size(), 2u);
+    EXPECT_EQ(st.blocks[1], BlockRevocationStatus::INVALID_AFTER_REPLACEMENT);
+    EXPECT_THROW(bc_->validate_branch(root_kp_.pub, 7), SignatureError);
+}
+
+TEST_F(RevocationTest, RotationAfterReplacementContinues) {
+    KeyPair repl = Crypto::generate_keypair();
+    bc_->revoke_node(root_kp_.pub, 7, 1'000LL, repl.pub, 3, kp3_, 2'000LL);
+    bc_->append_data_block(root_kp_.pub, 7, {0x01}, repl, 3'000LL);
+
+    KeyPair repl2 = Crypto::generate_keypair();
+    bc_->rotate_key(root_kp_.pub, 7, repl, repl2, 4'000LL);
+    bc_->append_data_block(root_kp_.pub, 7, {0x02}, repl2, 5'000LL);
+
+    auto st = validator_->branch_revocation_status(root_kp_.pub, 7);
+    EXPECT_EQ(st.state, BranchRevocationState::REPLACED);
+    ASSERT_TRUE(st.next_key.has_value());
+    EXPECT_EQ(*st.next_key, repl2.pub);
+    for (auto s : st.blocks) EXPECT_EQ(s, BlockRevocationStatus::CLEAN);
+    EXPECT_NO_THROW(bc_->validate_branch(root_kp_.pub, 7));
+}
+
+TEST_F(RevocationTest, HijackedAuthorRecordIsFiltered) {
+    // The thief of node 3's key "revokes" 7 to hijack it via replacement.
+    KeyPair thief_repl = Crypto::generate_keypair();
+    bc_->revoke_node(root_kp_.pub, 7, 8'000LL, thief_repl.pub, 3, kp3_, 9'000LL);
+
+    // The owner escalates: node 1 revokes node 3 as compromised since 5'000 —
+    // earlier than the thief's record (ts 9'000), so that record loses weight
+    // (§6.7 rule 10).
+    bc_->revoke_node(root_kp_.pub, 3, 5'000LL, std::nullopt, 1, kp1_, 10'000LL);
+
+    EXPECT_FALSE(validator_->effective_revocation(root_kp_.pub, 7).has_value());
+}
+
+TEST_F(RevocationTest, PreCompromiseAuthorRecordStillCounts) {
+    // A record written before the author's own compromise moment keeps weight.
+    bc_->revoke_node(root_kp_.pub, 7, 2'000LL, std::nullopt, 3, kp3_, 3'000LL);
+    bc_->revoke_node(root_kp_.pub, 3, 5'000LL, std::nullopt, 1, kp1_, 10'000LL);
+
+    auto st = validator_->effective_revocation(root_kp_.pub, 7);
+    ASSERT_TRUE(st.has_value());
+    EXPECT_EQ(st->compromised_since, 2'000LL);
+}
+
+TEST_F(RevocationTest, ReplacedAuthorRevokesWithNewKey) {
+    // Node 3 was revoked and replaced; the owner keeps administering 7 from 3 —
+    // records signed by the replacement count (§6.7 rule 10).
+    KeyPair repl3 = Crypto::generate_keypair();
+    bc_->revoke_node(root_kp_.pub, 3, 5'000LL, repl3.pub, 1, kp1_, 6'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, 7'000LL, std::nullopt, 3, repl3, 8'000LL);
+
+    auto st = validator_->effective_revocation(root_kp_.pub, 7);
+    ASSERT_TRUE(st.has_value());
+    EXPECT_EQ(st->compromised_since, 7'000LL);
+}
+
+TEST_F(RevocationTest, NodeInvalidatedByRevocation) {
+    // Children of 7: 15 (created after the compromise moment) and 16 (before).
+    auto make_node = [&](NodeIndex idx, Timestamp created_at,
+                         const Node& parent, const KeyPair& parent_kp) {
+        KeyPair kp = Crypto::generate_keypair();
+        Node n{};
+        n.index             = idx;
+        n.structural_pubkey = kp.pub;
+        n.working_pubkey    = kp.pub;
+        n.parent_hash       = Crypto::hash_node(parent);
+        n.created_at        = created_at;
+        n.parent_sig        = Signature::null();
+        auto bytes          = Serializer::encode(n);
+        n.parent_sig        = Crypto::sign(bytes.data(), bytes.size(), parent_kp.sec);
+        storage_->put_node(root_kp_.pub, n);
+        return kp;
+    };
+    Node node7 = bc_->get_node(root_kp_.pub, 7);
+    KeyPair kp15 = make_node(15, 9'000LL, node7, kp7_);
+    make_node(16, 1'000LL, node7, kp7_);
+    // Grandchild under the poisoned edge: "created before" — still invalid.
+    Node node15 = bc_->get_node(root_kp_.pub, 15);
+    make_node(31, 100LL, node15, kp15);
+
+    bc_->revoke_node(root_kp_.pub, 7, 5'000LL, std::nullopt, 3, kp3_, 6'000LL);
+
+    EXPECT_TRUE (validator_->node_invalidated_by_revocation(root_kp_.pub, 15));
+    EXPECT_FALSE(validator_->node_invalidated_by_revocation(root_kp_.pub, 16));
+    EXPECT_TRUE (validator_->node_invalidated_by_revocation(root_kp_.pub, 31));
+    EXPECT_FALSE(validator_->node_invalidated_by_revocation(root_kp_.pub, 7));
+}
+
+TEST_F(RevocationTest, StorageIndexReturnsAddresses) {
+    bc_->revoke_node(root_kp_.pub, 7, 1'000LL, std::nullopt, 3, kp3_, 2'000LL);
+    KeyPair repl = Crypto::generate_keypair();
+    bc_->revoke_node(root_kp_.pub, 7, 1'000LL, repl.pub, 1, kp1_, 3'000LL);
+
+    auto addrs = storage_->get_revocation_addresses(root_kp_.pub, 7);
+    ASSERT_EQ(addrs.size(), 2u);
+    EXPECT_EQ(addrs[0].node_index, 3u);
+    EXPECT_EQ(addrs[1].node_index, 1u);
+    EXPECT_TRUE(storage_->get_revocation_addresses(root_kp_.pub, 15).empty());
+}

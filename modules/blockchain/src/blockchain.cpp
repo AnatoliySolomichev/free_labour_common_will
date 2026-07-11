@@ -119,6 +119,21 @@ Hash Blockchain::branch_tip_hash(const UserId& user_id,
 
 // ── Block operations ──────────────────────────────────────────────────────────
 
+void Blockchain::ensure_branch_writable(const UserId& user_id, NodeIndex node_index,
+                                        const PublicKey& signing_pubkey) const {
+    // Fast path: no revocation — nothing to enforce (the common case).
+    if (!validator_.effective_revocation(user_id, node_index).has_value()) return;
+
+    auto st = validator_.branch_revocation_status(user_id, node_index);
+    if (st.state == BranchRevocationState::FROZEN)
+        throw RevocationError(
+            "branch is frozen by revocation — no replacement assigned (§6.7)");
+    if (st.state == BranchRevocationState::REPLACED
+        && st.next_key.has_value() && signing_pubkey != *st.next_key)
+        throw RevocationError(
+            "branch key was replaced by revocation; signing key is not the authorized one");
+}
+
 Block Blockchain::append_data_block(
     const UserId&        user_id,
     NodeIndex            leaf_index,
@@ -128,6 +143,7 @@ Block Blockchain::append_data_block(
 {
     if (!is_valid_node(leaf_index))
         throw InvalidArgumentError("append_data_block: invalid node index (depth > 31)");
+    ensure_branch_writable(user_id, leaf_index, working_keypair.pub);
 
     Hash prev_hash = branch_tip_hash(user_id, leaf_index);
     auto tip_opt   = storage_.branch_tip_index(user_id, leaf_index);
@@ -158,6 +174,8 @@ Block Blockchain::rotate_key(
     const KeyPair& new_keypair,
     Timestamp      timestamp)
 {
+    ensure_branch_writable(user_id, leaf_index, old_working_keypair.pub);
+
     Hash prev_hash = branch_tip_hash(user_id, leaf_index);
     auto tip_opt   = storage_.branch_tip_index(user_id, leaf_index);
     BlockIndex idx = tip_opt.has_value() ? (*tip_opt + 1) : 0;
@@ -205,10 +223,20 @@ Block Blockchain::revoke_node(
     if (!is_ancestor(ancestor_index, revoked_node_index))
         throw RevocationError("revocation author is not a strict ancestor of the revoked node");
 
-    // The exact key being revoked: current effective key of the revoked branch.
-    PublicKey revoked_key = effective_working_pubkey(user_id, revoked_node_index);
+    // The exact key being revoked: the currently authorized key of the revoked
+    // branch (rotation lineage or an earlier replacement); for a frozen branch —
+    // the last key of its lineage.
+    auto target_st = validator_.branch_revocation_status(user_id, revoked_node_index);
+    PublicKey revoked_key = target_st.next_key.has_value()
+        ? *target_st.next_key
+        : effective_working_pubkey(user_id, revoked_node_index);
 
-    if (ancestor_keypair.pub != effective_working_pubkey(user_id, ancestor_index))
+    // The author branch itself must be writable with this keypair (it may have
+    // been replaced by its own revocation — then only the replacement signs).
+    auto author_st = validator_.branch_revocation_status(user_id, ancestor_index);
+    if (author_st.state == BranchRevocationState::FROZEN)
+        throw RevocationError("revoke_node: author branch is frozen by revocation");
+    if (!author_st.next_key.has_value() || ancestor_keypair.pub != *author_st.next_key)
         throw InvalidArgumentError(
             "revoke_node: keypair does not match the ancestor branch working key");
 

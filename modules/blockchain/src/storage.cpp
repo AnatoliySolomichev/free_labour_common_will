@@ -111,12 +111,13 @@ std::vector<Seal> decode_seal_list(const uint8_t* data, size_t len) {
 // ── LmdbStorage::Impl ─────────────────────────────────────────────────────────
 
 struct LmdbStorage::Impl {
-    MDB_env* env           = nullptr;
-    MDB_dbi  dbi_nodes     = 0;
-    MDB_dbi  dbi_blocks    = 0;
-    MDB_dbi  dbi_seals     = 0;
-    MDB_dbi  dbi_ext       = 0;
-    MDB_dbi  dbi_snapshots = 0;
+    MDB_env* env             = nullptr;
+    MDB_dbi  dbi_nodes       = 0;
+    MDB_dbi  dbi_blocks      = 0;
+    MDB_dbi  dbi_seals       = 0;
+    MDB_dbi  dbi_ext         = 0;
+    MDB_dbi  dbi_snapshots   = 0;
+    MDB_dbi  dbi_revocations = 0;
 };
 
 // ── Transaction ───────────────────────────────────────────────────────────────
@@ -144,7 +145,7 @@ LmdbStorage::LmdbStorage(std::filesystem::path db_path)
     std::filesystem::create_directories(db_path);
 
     lcheck(mdb_env_create(&impl_->env),             "mdb_env_create");
-    lcheck(mdb_env_set_maxdbs(impl_->env, 5),       "mdb_env_set_maxdbs");
+    lcheck(mdb_env_set_maxdbs(impl_->env, 6),       "mdb_env_set_maxdbs");
     lcheck(mdb_env_set_mapsize(impl_->env, 1u << 30),"mdb_env_set_mapsize"); // 1 GiB
     lcheck(mdb_env_open(impl_->env, db_path.c_str(), 0, 0600), "mdb_env_open");
 
@@ -155,7 +156,8 @@ LmdbStorage::LmdbStorage(std::filesystem::path db_path)
         (rc = mdb_dbi_open(txn, "blocks",    MDB_CREATE, &impl_->dbi_blocks))    != MDB_SUCCESS ||
         (rc = mdb_dbi_open(txn, "seals",     MDB_CREATE, &impl_->dbi_seals))     != MDB_SUCCESS ||
         (rc = mdb_dbi_open(txn, "external",  MDB_CREATE, &impl_->dbi_ext))       != MDB_SUCCESS ||
-        (rc = mdb_dbi_open(txn, "snapshots", MDB_CREATE, &impl_->dbi_snapshots)) != MDB_SUCCESS) {
+        (rc = mdb_dbi_open(txn, "snapshots", MDB_CREATE, &impl_->dbi_snapshots)) != MDB_SUCCESS ||
+        (rc = mdb_dbi_open(txn, "revocations", MDB_CREATE, &impl_->dbi_revocations)) != MDB_SUCCESS) {
         mdb_txn_abort(txn);
         throw StorageError(std::string("mdb_dbi_open: ") + mdb_strerror(rc));
     }
@@ -240,7 +242,68 @@ void LmdbStorage::put_block(const Block& block) {
         throw InvalidArgumentError("put_block: duplicate block address");
     }
     if (rc != MDB_SUCCESS) { mdb_txn_abort(txn); lcheck(rc, "put_block: mdb_put"); }
+
+    // Revocation index (§6.7): revoked_node → 8-byte entries (author BE4 + idx BE4),
+    // same transaction. Malformed payload is not indexed — the validator rejects it.
+    if (block.type == BlockType::REVOCATION) {
+        try {
+            RevocationPayload rp = Serializer::decode_revocation_payload(
+                block.payload.data(), block.payload.size());
+
+            auto rk = node_key(block.address.user_id, rp.revoked_node_index);
+            MDB_val rmk{rk.size(), rk.data()};
+            MDB_val old{};
+            std::vector<uint8_t> list;
+            int grc = mdb_get(txn, impl_->dbi_revocations, &rmk, &old);
+            if (grc == MDB_SUCCESS)
+                list.assign(static_cast<const uint8_t*>(old.mv_data),
+                            static_cast<const uint8_t*>(old.mv_data) + old.mv_size);
+            else if (grc != MDB_NOTFOUND) { mdb_txn_abort(txn); lcheck(grc, "put_block: rev_get"); }
+
+            uint8_t entry[8];
+            be32(entry,     block.address.node_index);
+            be32(entry + 4, block.address.block_index);
+            list.insert(list.end(), entry, entry + 8);
+
+            MDB_val nmv{list.size(), list.data()};
+            int prc = mdb_put(txn, impl_->dbi_revocations, &rmk, &nmv, 0);
+            if (prc != MDB_SUCCESS) { mdb_txn_abort(txn); lcheck(prc, "put_block: rev_put"); }
+        } catch (const SerializationError&) {
+            // not indexable; the block itself is still stored
+        }
+    }
+
     lcheck(mdb_txn_commit(txn), "put_block: commit");
+}
+
+std::vector<BlockAddress> LmdbStorage::get_revocation_addresses(
+    const UserId& user_id, NodeIndex revoked_node) const {
+    auto rk = node_key(user_id, revoked_node);
+    MDB_val mk{rk.size(), rk.data()};
+    MDB_val mv{};
+
+    MDB_txn* txn;
+    lcheck(mdb_txn_begin(impl_->env, nullptr, MDB_RDONLY, &txn), "get_revocations: begin");
+    int rc = mdb_get(txn, impl_->dbi_revocations, &mk, &mv);
+    if (rc == MDB_NOTFOUND) { mdb_txn_abort(txn); return {}; }
+    if (rc != MDB_SUCCESS)  { mdb_txn_abort(txn); lcheck(rc, "get_revocations: mdb_get"); }
+
+    const auto* p = static_cast<const uint8_t*>(mv.mv_data);
+    const size_t n = mv.mv_size / 8;
+    std::vector<BlockAddress> out;
+    out.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        const uint8_t* e = p + i * 8;
+        BlockAddress a{};
+        a.user_id     = user_id;
+        a.node_index  = (uint32_t(e[0]) << 24) | (uint32_t(e[1]) << 16)
+                      | (uint32_t(e[2]) <<  8) |  uint32_t(e[3]);
+        a.block_index = (uint32_t(e[4]) << 24) | (uint32_t(e[5]) << 16)
+                      | (uint32_t(e[6]) <<  8) |  uint32_t(e[7]);
+        out.push_back(a);
+    }
+    mdb_txn_abort(txn);
+    return out;
 }
 
 Block LmdbStorage::get_block(const BlockAddress& address) const {

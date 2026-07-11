@@ -40,6 +40,15 @@ public:
     virtual std::optional<BlockIndex> branch_tip_index(
         const UserId& user_id, NodeIndex leaf_index) const noexcept = 0;
 
+    // ── Revocation index (§6.7) ───────────────────────────────────────────────
+
+    // Addresses of REVOCATION blocks targeting revoked_node in this user's tree,
+    // in insertion order. Maintained automatically by put_block. Entries are not
+    // semantically validated here — Validator filters them (ancestry, author
+    // validity, key match).
+    virtual std::vector<BlockAddress> get_revocation_addresses(
+        const UserId& user_id, NodeIndex revoked_node) const = 0;
+
     // ── Seals ─────────────────────────────────────────────────────────────────
 
     // Multiple seals per block are allowed. Throws: StorageError.
@@ -105,6 +114,9 @@ public:
     bool  has_block(const BlockAddress& address) const noexcept override;
     std::optional<BlockIndex> branch_tip_index(
         const UserId& user_id, NodeIndex leaf_index) const noexcept override;
+
+    std::vector<BlockAddress> get_revocation_addresses(
+        const UserId& user_id, NodeIndex revoked_node) const override;
 
     void              put_seal(const Seal& seal) override;
     std::vector<Seal> get_seals(const Hash& block_hash) const override;

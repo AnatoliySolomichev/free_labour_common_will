@@ -6,6 +6,15 @@
 
 namespace blockchain {
 
+// Verify a block signature against a candidate key (signed bytes = canonical
+// CBOR with the signature zeroed).
+static bool signed_by(const Block& block, const PublicKey& key) {
+    Block to_verify = block;
+    to_verify.signature = Signature::null();
+    auto bytes = Serializer::encode(to_verify);
+    return Crypto::verify(bytes.data(), bytes.size(), block.signature, key);
+}
+
 Validator::Validator(const IStorage& storage) : storage_(storage) {}
 
 void Validator::validate_node(const Node& node, const UserId& user_id) const {
@@ -62,10 +71,24 @@ void Validator::validate_branch(const UserId& user_id, NodeIndex leaf_index) con
     PublicKey work_key = leaf.working_pubkey;
     Timestamp prev_ts  = std::numeric_limits<Timestamp>::min();
 
+    // A replacement assigned by revocation (§6.7 rules 3/9) may take over the
+    // branch at first use; after the switch the old lineage may not sign.
+    auto rev = effective_revocation(user_id, leaf_index);
+    bool switched = false;
+
     for (BlockIndex i = 0; i <= *tip_opt; ++i) {
         Block b = storage_.get_block({user_id, leaf_index, i});
 
-        validate_block(b, prev_hash, work_key); // checks prev_hash + signature
+        try {
+            validate_block(b, prev_hash, work_key); // checks prev_hash + signature
+        } catch (const SignatureError&) {
+            if (switched || !rev.has_value() || !rev->replacement_pubkey.has_value())
+                throw;
+            // §6.7 rule 9: first use of the replacement switches the key.
+            validate_block(b, prev_hash, *rev->replacement_pubkey);
+            work_key = *rev->replacement_pubkey;
+            switched = true;
+        }
 
         if (b.timestamp_claimed < prev_ts)
             throw TimestampError("block timestamp is not monotonically non-decreasing");
@@ -79,27 +102,135 @@ void Validator::validate_branch(const UserId& user_id, NodeIndex leaf_index) con
     }
 }
 
-// All REVOCATION blocks concerning `target` found in the branches of its
-// ancestors, in (ancestor depth, block index) order: root-most ancestor first.
-static std::vector<std::pair<BlockAddress, RevocationPayload>>
-collect_revocations(const IStorage& storage, const UserId& user_id, NodeIndex target) {
+BranchRevocationStatus Validator::branch_revocation_status(
+    const UserId& user_id, NodeIndex node_index) const {
+    BranchRevocationStatus out{};
+    out.revocation = effective_revocation(user_id, node_index);
+
+    Node node = storage_.get_node(user_id, node_index);
+    PublicKey lineage = node.working_pubkey; // pre-replacement rotation lineage
+    PublicKey current = lineage;             // authorized key after the switch
+    bool switched = false;
+    const bool has_repl =
+        out.revocation.has_value() && out.revocation->replacement_pubkey.has_value();
+
+    auto tip_opt = storage_.branch_tip_index(user_id, node_index);
+    if (tip_opt.has_value()) {
+        out.blocks.reserve(*tip_opt + 1);
+        for (BlockIndex i = 0; i <= *tip_opt; ++i) {
+            Block b = storage_.get_block({user_id, node_index, i});
+
+            if (!switched) {
+                if (signed_by(b, lineage)) {
+                    const bool suspect = out.revocation.has_value()
+                        && b.timestamp_claimed > out.revocation->compromised_since;
+                    out.blocks.push_back(suspect ? BlockRevocationStatus::SUSPECT
+                                                 : BlockRevocationStatus::CLEAN);
+                    if (b.type == BlockType::KEY_ROTATION && b.payload.size() >= 32)
+                        std::copy(b.payload.begin(), b.payload.begin() + 32,
+                                  lineage.bytes.begin());
+                } else if (has_repl && signed_by(b, *out.revocation->replacement_pubkey)) {
+                    switched = true;
+                    current  = *out.revocation->replacement_pubkey;
+                    out.blocks.push_back(BlockRevocationStatus::CLEAN);
+                    if (b.type == BlockType::KEY_ROTATION && b.payload.size() >= 32)
+                        std::copy(b.payload.begin(), b.payload.begin() + 32,
+                                  current.bytes.begin());
+                } else {
+                    throw SignatureError("block signed by neither the key lineage "
+                                         "nor the replacement");
+                }
+            } else {
+                if (signed_by(b, current)) {
+                    out.blocks.push_back(BlockRevocationStatus::CLEAN);
+                    if (b.type == BlockType::KEY_ROTATION && b.payload.size() >= 32)
+                        std::copy(b.payload.begin(), b.payload.begin() + 32,
+                                  current.bytes.begin());
+                } else if (signed_by(b, lineage)) {
+                    // §6.7 rule 9: the old key resurfacing after the switch.
+                    out.blocks.push_back(BlockRevocationStatus::INVALID_AFTER_REPLACEMENT);
+                    // do not follow its rotations
+                } else {
+                    throw SignatureError("block signed by neither the replacement "
+                                         "lineage nor the old key");
+                }
+            }
+        }
+    }
+
+    if (!out.revocation.has_value()) {
+        out.state    = BranchRevocationState::ACTIVE;
+        out.next_key = lineage;
+    } else if (!has_repl) {
+        out.state    = BranchRevocationState::FROZEN;
+        out.next_key = std::nullopt;
+    } else {
+        out.state    = BranchRevocationState::REPLACED;
+        out.next_key = switched ? current : *out.revocation->replacement_pubkey;
+    }
+    return out;
+}
+
+bool Validator::node_invalidated_by_revocation(
+    const UserId& user_id, NodeIndex node_index) const {
+    auto indices = path_indices(node_index); // root → node
+    for (size_t k = 1; k < indices.size(); ++k) {
+        const NodeIndex parent = indices[k - 1];
+        const NodeIndex child  = indices[k];
+        auto st = effective_revocation(user_id, parent);
+        if (!st.has_value()) continue;
+        Node c = storage_.get_node(user_id, child);
+        // created_at is author-claimed; anti-backdating of node creation is the
+        // witnessing-based finalization (§11.2).
+        if (c.created_at > st->compromised_since) return true;
+    }
+    return false;
+}
+
+std::vector<std::pair<BlockAddress, RevocationPayload>>
+Validator::collect_revocations(const UserId& user_id, NodeIndex target) const {
     std::vector<std::pair<BlockAddress, RevocationPayload>> found;
     if (target == 0) return found;
 
-    for (NodeIndex anc : path_indices((target - 1) / 2)) {
-        if (!storage.has_node(user_id, anc)) continue;
-        auto tip_opt = storage.branch_tip_index(user_id, anc);
-        if (!tip_opt.has_value()) continue;
+    for (const BlockAddress& addr : storage_.get_revocation_addresses(user_id, target)) {
+        if (!is_ancestor(addr.node_index, target)) continue;
 
-        for (BlockIndex i = 0; i <= *tip_opt; ++i) {
-            Block b = storage.get_block({user_id, anc, i});
-            if (b.type != BlockType::REVOCATION) continue;
-            RevocationPayload rp =
-                Serializer::decode_revocation_payload(b.payload.data(), b.payload.size());
-            if (rp.revoked_node_index == target)
-                found.emplace_back(b.address, std::move(rp));
+        Block b = storage_.get_block(addr);
+        if (b.type != BlockType::REVOCATION) continue;
+        RevocationPayload rp;
+        try {
+            rp = Serializer::decode_revocation_payload(b.payload.data(), b.payload.size());
+        } catch (const SerializationError&) { continue; }
+        if (rp.revoked_node_index != target) continue;
+
+        // §6.7 rule 10: a record from an author that was itself under revocation
+        // at writing time does not count — a revocation is a one-sided action and
+        // loses weight in the suspect zone. Recursion is finite: authors are
+        // strictly shallower, the root is unrevocable. Post-replacement records
+        // (signed by the author's replacement key) count; records signed by a
+        // rotated successor of the replacement are not recognized here — MVP
+        // simplification.
+        auto author_state = effective_revocation(user_id, addr.node_index);
+        if (author_state.has_value()) {
+            const bool by_replacement = author_state->replacement_pubkey.has_value()
+                && signed_by(b, *author_state->replacement_pubkey);
+            if (!by_replacement && b.timestamp_claimed > author_state->compromised_since)
+                continue;
         }
+
+        found.emplace_back(b.address, std::move(rp));
     }
+
+    // Root-most author first, then branch order (§4.4 gradient + "last word").
+    std::sort(found.begin(), found.end(),
+              [](const auto& a, const auto& b) {
+                  const uint32_t da = node_depth(a.first.node_index);
+                  const uint32_t db = node_depth(b.first.node_index);
+                  if (da != db) return da < db;
+                  if (a.first.node_index != b.first.node_index)
+                      return a.first.node_index < b.first.node_index;
+                  return a.first.block_index < b.first.block_index;
+              });
     return found;
 }
 
@@ -136,7 +267,7 @@ void Validator::validate_revocation(const Block& block) const {
             }
         }
     }
-    for (const auto& [addr, prior] : collect_revocations(storage_, uid, rp.revoked_node_index)) {
+    for (const auto& [addr, prior] : collect_revocations(uid, rp.revoked_node_index)) {
         if (addr == block.address) continue; // a block cannot legitimize itself
         if (prior.replacement_pubkey.has_value())
             known.push_back(*prior.replacement_pubkey);
@@ -150,7 +281,7 @@ void Validator::validate_revocation(const Block& block) const {
 
 std::optional<RevocationState> Validator::effective_revocation(
     const UserId& user_id, NodeIndex node_index) const {
-    auto found = collect_revocations(storage_, user_id, node_index);
+    auto found = collect_revocations(user_id, node_index);
     if (found.empty()) return std::nullopt;
 
     // Highest ancestor wins (§4.4): collect_revocations returns ancestors in

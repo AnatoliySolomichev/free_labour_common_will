@@ -133,6 +133,12 @@ public:
     void validate_branch(const UserId& user_id, NodeIndex leaf_index) const;
 
 private:
+    // §6.7: refuse to extend a FROZEN branch, or a REPLACED one with a key other
+    // than the authorized replacement lineage. ACTIVE branches are not checked
+    // here (invariant 7 is validation's job).
+    void ensure_branch_writable(const UserId& user_id, NodeIndex node_index,
+                                const PublicKey& signing_pubkey) const;
+
     IStorage&  storage_;
     Validator& validator_;
 };
