@@ -1,0 +1,33 @@
+### БЫЛО (до отзыва) — кошелёк Глеба:
+purse of branch 0x7fffffff (paper of others):
+  ecb9577beb6f2981...  5.48538h
+  fdf1dde117c5bce8...  13.9392h
+total held: 19.4246h
+own debt in circulation: 1.83199h  (issued 26.2561, redeemed 24.4241)
+emission thread: link #15  declared debt -1.83199h
+
+### revoke create --node 0x7FFFFFFF --replace:
+revocation block #0 in branch 1073741823
+revoked node 2147483647  since 1769774400  — replacement assigned
+certificate: /tmp/economy_full/results/gleb_revocation.cbor (5812 bytes)
+Published to http://localhost:8080
+
+### revoke verify --cert (автономная проверка сертификата):
+verdict:  OK
+chain:    c0d5a46354783f5653cfc16ab3cfbbd995a7fb8a785b848b4206b8ee2e7f2327
+author:   node 1073741823 (depth 30)
+revoked:  node 2147483647  key 529a0e49005bb4d8...
+since:    1769774400
+replaced: 3e0d4d10a088c7f0...
+
+### revoke status --node 0x7FFFFFFF:
+branch 2147483647: REPLACED
+  since:  1769774400
+  source: branch 1073741823 block #0
+  replacement: 3e0d4d10a088c7f0...
+  blocks: 63 (clean 63, suspect 0, invalid-after-replacement 0)
+
+### СТАЛО (после отзыва) — кошелёк помечен REPLACED:
+note: this branch was revoked and REPLACED (§6.7)
+purse of branch 0x7fffffff (paper of others):
+  964b373a1964bd1c...  -1.94454h
