@@ -252,6 +252,13 @@ static std::string record_summary(const Record& rec) {
             ss << "[Transfer]    to:" << short_hex(r.to)
                << "  " << total << "h  (" << r.origins.size() << " portion(s))";
             if (r.reason) ss << "  reason:" << short_hex(r.reason->hash);
+            if (r.emission)
+                ss << "  link#" << r.emission->seq
+                   << " debt:" << r.emission->debt_after;
+        } else if constexpr (std::is_same_v<T, records::Redemption>) {
+            ss << "[Redemption]  transfer:" << short_hex(r.transfer.hash)
+               << "  +" << r.units << "h  link#" << r.link.seq
+               << "  debt:" << r.link.debt_after;
         } else if constexpr (std::is_same_v<T, Pledge>) {
             ss << "[Pledge]      target:" << short_hex(r.target.hash)
                << "  " << r.units << "h";
@@ -1391,6 +1398,66 @@ static std::vector<records::OriginQty> pick_portions(Context& ctx,
     return portions;
 }
 
+// ── Emission thread (economy.md §4.3) ─────────────────────────────────────────
+
+struct EmissionThreadState {
+    uint64_t                    next_seq = 0;
+    double                      debt     = 0;  // declared debt at the thread tip
+    std::optional<records::Ref> tip;           // last link block
+};
+
+// The thread tip across all local branches: self-issues (Transfer.emission)
+// and redemption receipts share one chain-wide seq space.
+static EmissionThreadState emission_thread_state(Context& ctx) {
+    EmissionThreadState st{};
+    bool found = false;
+
+    for (const NodeIndex branch : ctx.local_branches()) {
+        std::vector<Block> blocks;
+        try { blocks = ctx.bc.get_branch(ctx.user_id, branch); }
+        catch (const BlockchainError&) { continue; }
+        for (const auto& b : blocks) {
+            if (b.type != BlockType::DATA) continue;
+            records::Record rec;
+            try { rec = Codec::decode(b.payload.data(), b.payload.size()); }
+            catch (const CodecError&) { continue; }
+
+            const records::EmissionLink* link = nullptr;
+            if (const auto* t = std::get_if<records::Transfer>(&rec)) {
+                if (t->from == ctx.user_id.bytes && t->emission) link = &*t->emission;
+            } else if (const auto* rd = std::get_if<records::Redemption>(&rec)) {
+                link = &rd->link;
+            }
+            if (!link) continue;
+            if (!found || link->seq + 1 > st.next_seq) {
+                found       = true;
+                st.next_seq = link->seq + 1;
+                st.debt     = link->debt_after;
+                st.tip      = records::Ref{ctx.user_id.bytes,
+                                           Crypto::hash_block(b).bytes};
+            }
+        }
+    }
+    return st;
+}
+
+// Fill the transfer's emission-thread link when it self-issues (Transfer v3).
+static void attach_emission_link(Context& ctx, records::Transfer& t) {
+    double self_issued = 0;
+    for (const auto& o : t.origins)
+        if (o.issuer == t.from) self_issued += o.units;
+    if (self_issued <= 1e-9) return;
+
+    const auto st = emission_thread_state(ctx);
+    records::EmissionLink link{};
+    link.seq        = st.next_seq;
+    link.prev       = st.tip;
+    link.debt_after = st.debt - self_issued;
+    t.emission = link;
+    std::cerr << "  emission link #" << link.seq
+              << "  declared debt " << link.debt_after << "h\n";
+}
+
 // Best-effort upload so the receiver can fetch the block from the aggregator.
 static void upload_block(const std::string& via, const Block& block) {
     std::string host = via;
@@ -1442,6 +1509,19 @@ static int cmd_wallet(const fs::path& data_dir, int argc, char** argv) {
     std::cout << "total held: " << held << "h\n"
               << "own debt in circulation: " << w.debt()
               << "h  (issued " << w.issued << ", redeemed " << w.redeemed << ")\n";
+
+    // Emission thread (economy.md §4.3): the declared, self-attested debt level.
+    const auto th = emission_thread_state(ctx);
+    if (th.tip.has_value()) {
+        std::cout << "emission thread: link #" << (th.next_seq - 1)
+                  << "  declared debt " << th.debt << "h";
+        if (std::abs(-th.debt - w.debt()) > 1e-6)
+            std::cout << "  (differs from computed " << -w.debt()
+                      << "h — receipts pending?)";
+        std::cout << "\n";
+    } else {
+        std::cout << "emission thread: empty (no self-issues yet)\n";
+    }
     return 0;
 }
 
@@ -1451,9 +1531,12 @@ static int cmd_transfer_send(const fs::path& data_dir, int argc, char** argv) {
     const auto to_s      = flag_val(argc, argv, "--to");
     const auto units_s   = flag_val(argc, argv, "--units");
     const auto origins_s = flag_all(argc, argv, "--origin");
-    if (to_s.empty() || (units_s.empty() && origins_s.empty())) {
-        std::cerr << "Usage: bc transfer send --to UID_HEX --units N "
-                     "[--origin ISSUER_HEX:UNITS]... [--reason REF] [--via URL] [--leaf L]\n";
+    const auto reason_s  = flag_val(argc, argv, "--reason");
+    if (to_s.empty() || (units_s.empty() && origins_s.empty()) || reason_s.empty()) {
+        std::cerr << "Usage: bc transfer send --to UID_HEX --units N --reason REF "
+                     "[--origin ISSUER_HEX:UNITS]... [--via URL] [--leaf L]\n"
+                     "--reason (the settled Acceptance) is mandatory: hours move "
+                     "only against accepted labor (records.md §12.9)\n";
         return 1;
     }
 
@@ -1469,8 +1552,7 @@ static int cmd_transfer_send(const fs::path& data_dir, int argc, char** argv) {
     const auto to_node_s = flag_val(argc, argv, "--to-node");
     if (!to_node_s.empty())
         t.to_node = static_cast<NodeIndex>(std::stoull(to_node_s, nullptr, 0));
-    const auto reason_s = flag_val(argc, argv, "--reason");
-    if (!reason_s.empty()) t.reason = parse_ref(reason_s);
+    t.reason = parse_ref(reason_s);
 
     if (!origins_s.empty()) {
         // Manual portions.
@@ -1491,6 +1573,7 @@ static int cmd_transfer_send(const fs::path& data_dir, int argc, char** argv) {
     } else {
         t.origins = pick_portions(ctx, to_s, std::stod(units_s));
     }
+    attach_emission_link(ctx, t);   // Transfer v3: self-issues are threaded (§4.3)
 
     const Block block = append_record(ctx, Record{t});
     print_portions(t, me_hex, to_s);
@@ -1542,6 +1625,21 @@ static int cmd_transfer_recv(const fs::path& data_dir, int argc, char** argv) {
         throw std::runtime_error("transfer is not addressed to this identity");
     if (t->from != block.address.user_id.bytes)
         throw std::runtime_error("transfer 'from' does not match the authoring chain");
+    // Strict equivalence (records.md §12.9): hours move only against accepted
+    // labor — a reason-less transfer is not recognized.
+    if (!t->reason)
+        throw std::runtime_error(
+            "transfer carries no reason (Acceptance) — refused (records.md §12.9)");
+    // Transfer v3: a self-issuing transfer must be threaded (economy.md §4.3).
+    {
+        double self_issued = 0;
+        for (const auto& o : t->origins)
+            if (o.issuer == t->from) self_issued += o.units;
+        if (self_issued > 1e-9 && !t->emission)
+            throw std::runtime_error(
+                "self-issuing transfer has no emission-thread link — refused "
+                "(economy.md §4.3)");
+    }
 
     if (ctx.storage.has_external_block(block.address)) {
         std::cerr << "already received — wallet unchanged\n";
@@ -1549,6 +1647,26 @@ static int cmd_transfer_recv(const fs::path& data_dir, int argc, char** argv) {
     }
     ctx.storage.put_external_block(block);
     append_record(ctx, Record{Copy{src}});   // on-chain acknowledgment (двусторонность)
+
+    // Own paper returned → the "+" link of the emission thread (§4.3): write
+    // the redemption receipt; the debt shrinks and the whole credit history
+    // stays readable off the thread.
+    double returned = 0;
+    for (const auto& o : t->origins)
+        if (o.issuer == ctx.user_id.bytes) returned += o.units;
+    if (returned > 1e-9) {
+        const auto th = emission_thread_state(ctx);
+        records::Redemption rd{};
+        rd.transfer        = src;
+        rd.units           = returned;
+        rd.link.seq        = th.next_seq;
+        rd.link.prev       = th.tip;
+        rd.link.debt_after = th.debt + returned;
+        rd.timestamp       = static_cast<int64_t>(std::time(nullptr));
+        append_record(ctx, Record{rd});
+        std::cout << "redemption receipt #" << rd.link.seq << ": +" << returned
+                  << "h  declared debt " << rd.link.debt_after << "h\n";
+    }
 
     double total = 0;
     for (const auto& o : t->origins) total += o.units;
@@ -1667,6 +1785,7 @@ static int cmd_pay(const fs::path& data_dir, int argc, char** argv) {
     // Pay into the purse of the branch that did the work (economy.md §5а).
     if (const auto work_block = find_external_by_hash(ctx, acceptance->work.hash))
         t.to_node = work_block->address.node_index;
+    attach_emission_link(ctx, t);   // Transfer v3: self-issues are threaded (§4.3)
 
     const Block block = append_record(ctx, Record{t});
     print_portions(t, me_hex, to_s);

@@ -31,6 +31,7 @@ enum class RecordType : uint8_t {
     DailyAggregate = 0x71,
     Pledge         = 0x72,
     PledgeRevoke   = 0x73,
+    Redemption     = 0x74,
 };
 
 // ── Cross-chain reference (records.md §4) ────────────────────────────────────
@@ -170,12 +171,30 @@ struct OriginQty {
     }
 };
 
+// One link of the chain-wide emission thread (economy.md §4.3): every
+// self-issue ("−") and every redemption receipt ("+") carries a sequential
+// number, a reference to the previous link (whatever branch it lives in) and
+// the declared debt level after the operation. Two links with one seq =
+// equivocation, an objective fraud proof.
+struct EmissionLink {
+    uint64_t           seq        = 0;  // chain-wide link counter
+    std::optional<Ref> prev;            // previous link; absent for the first
+    double             debt_after = 0;  // declared debt (negative = owing)
+
+    bool operator==(const EmissionLink& o) const noexcept {
+        return seq == o.seq && prev == o.prev && debt_after == o.debt_after;
+    }
+};
+
 // The only way value moves (records.md §11.1). Lives in the sender's chain;
 // the SPENDING branch is the branch the block is written into (its key signs
 // the spend — per-branch purses, economy.md §5а). Debt stays chain-level:
 // issuer == from → self-issue: a new debt/claim pair is born (§12.2);
 // issuer == to   → redemption: the paper returns to its debtor and annihilates;
 // otherwise      → endorsement: someone else's paper passed along.
+// v3 (economy.md §4.2/§4.3): reason is mandatory for recognition (strict
+// equivalence — hours move only against accepted labor); a self-issuing
+// transfer must carry its emission-thread link.
 struct Transfer {
     static constexpr RecordType TYPE = RecordType::Transfer;
 
@@ -183,8 +202,23 @@ struct Transfer {
     std::array<uint8_t, 32> to;        // receiver chain
     uint32_t                to_node;   // receiver branch — whose purse is credited
     std::vector<OriginQty>  origins;   // named portions; total = transfer amount
-    std::optional<Ref>      reason;    // Acceptance, Pledge, ProductionChain, ...
+    std::optional<Ref>      reason;    // Acceptance (mandatory for recognition, §12.9)
     int64_t                 timestamp; // Unix timestamp UTC
+    // Present iff origins contain a self-issued portion (issuer == from).
+    std::optional<EmissionLink> emission;
+};
+
+// Issuer's receipt for own paper returned by a payer's Transfer — the "+" link
+// of the emission thread (records.md §11.5, economy.md §4.3): the debt shrinks
+// by `units`. Written by the issuer upon receiving own paper; a chain's credit
+// history (max closed debt, repayment speed) reads straight off the thread.
+struct Redemption {
+    static constexpr RecordType TYPE = RecordType::Redemption;
+
+    Ref          transfer;   // the payer's Transfer that returned the paper
+    double       units;      // own paper annihilated
+    EmissionLink link;       // mandatory: every redemption is threaded
+    int64_t      timestamp;  // Unix timestamp UTC
 };
 
 // Public promise to pay (part of) the cost of future work (records.md §11.3).
@@ -250,7 +284,8 @@ using Record = std::variant<
     Transfer,
     DailyAggregate,
     Pledge,
-    PledgeRevoke
+    PledgeRevoke,
+    Redemption
 >;
 
 } // namespace records

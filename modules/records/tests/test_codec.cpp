@@ -366,3 +366,90 @@ TEST(RecordsCodec, SameInputSameBytes) {
 
     EXPECT_EQ(Codec::encode(wr), Codec::encode(wr));
 }
+
+// ── Transfer v3: emission thread (economy.md §4.3) ────────────────────────────
+
+TEST(RecordsCodec, TransferV3EmissionLinkRoundtrip) {
+    Transfer t{};
+    t.from      = make_uid(0xA1);
+    t.to        = make_uid(0xB2);
+    t.to_node   = 7;
+    t.origins   = { {make_uid(0xA1), 10.0} };   // self-issue → threaded
+    t.reason    = make_ref(0x11, 0x22);
+    t.timestamp = 1'700'000'000LL;
+
+    EmissionLink link{};
+    link.seq        = 3;
+    link.prev       = make_ref(0x33, 0x44);
+    link.debt_after = -17.0;                    // "+10 from level -7 → -17"
+    t.emission = link;
+
+    const auto decoded = std::get<Transfer>(roundtrip(t));
+    ASSERT_TRUE(decoded.emission.has_value());
+    EXPECT_EQ(decoded.emission->seq, 3u);
+    ASSERT_TRUE(decoded.emission->prev.has_value());
+    EXPECT_EQ(*decoded.emission->prev, *link.prev);
+    EXPECT_DOUBLE_EQ(decoded.emission->debt_after, -17.0);
+}
+
+TEST(RecordsCodec, TransferV3FirstLinkHasNoPrev) {
+    Transfer t{};
+    t.from      = make_uid(0x01);
+    t.to        = make_uid(0x02);
+    t.origins   = { {make_uid(0x01), 7.0} };
+    t.timestamp = 1LL;
+    EmissionLink link{};
+    link.seq        = 0;
+    link.debt_after = -7.0;
+    t.emission = link;
+
+    const auto decoded = std::get<Transfer>(roundtrip(t));
+    ASSERT_TRUE(decoded.emission.has_value());
+    EXPECT_EQ(decoded.emission->seq, 0u);
+    EXPECT_FALSE(decoded.emission->prev.has_value());
+    EXPECT_DOUBLE_EQ(decoded.emission->debt_after, -7.0);
+}
+
+TEST(RecordsCodec, TransferV2WithoutEmissionStillDecodes) {
+    Transfer t{};
+    t.from      = make_uid(0x01);
+    t.to        = make_uid(0x02);
+    t.origins   = { {make_uid(0x03), 1.0} };    // pure endorsement, no thread
+    t.timestamp = 2LL;
+
+    const auto decoded = std::get<Transfer>(roundtrip(t));
+    EXPECT_FALSE(decoded.emission.has_value());
+}
+
+// ── Redemption (0x74): the "+" link of the thread ─────────────────────────────
+
+TEST(RecordsCodec, RedemptionRoundtrip) {
+    Redemption rd{};
+    rd.transfer        = make_ref(0x55, 0x66);
+    rd.units           = 4.5;
+    rd.link.seq        = 8;
+    rd.link.prev       = make_ref(0x77, 0x88);
+    rd.link.debt_after = -12.5;
+    rd.timestamp       = 1'700'000'123LL;
+
+    const auto decoded = std::get<Redemption>(roundtrip(rd));
+    EXPECT_EQ(decoded.transfer, rd.transfer);
+    EXPECT_DOUBLE_EQ(decoded.units, 4.5);
+    EXPECT_EQ(decoded.link.seq, 8u);
+    ASSERT_TRUE(decoded.link.prev.has_value());
+    EXPECT_EQ(*decoded.link.prev, *rd.link.prev);
+    EXPECT_DOUBLE_EQ(decoded.link.debt_after, -12.5);
+    EXPECT_EQ(decoded.timestamp, rd.timestamp);
+}
+
+TEST(RecordsCodec, RedemptionFirstLinkNoPrev) {
+    Redemption rd{};
+    rd.transfer        = make_ref(0x01, 0x02);
+    rd.units           = 1.0;
+    rd.link.seq        = 0;
+    rd.link.debt_after = 1.0;
+    rd.timestamp       = 5LL;
+
+    const auto decoded = std::get<Redemption>(roundtrip(rd));
+    EXPECT_FALSE(decoded.link.prev.has_value());
+}

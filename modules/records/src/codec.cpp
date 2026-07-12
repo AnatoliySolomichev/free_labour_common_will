@@ -179,7 +179,8 @@ void enc_acceptance(Buf& out, const Acceptance& a) {
 }
 
 void enc_transfer(Buf& out, const Transfer& t) {
-    w_map(out, 7);
+    // v2 = map(7); v3 with an emission-thread link = map(10) (economy.md §4.3).
+    w_map(out, t.emission ? 10 : 7);
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Transfer));
     w_uint(out, 1); w_fixed(out, t.from);
     w_uint(out, 2); w_fixed(out, t.to);
@@ -193,6 +194,24 @@ void enc_transfer(Buf& out, const Transfer& t) {
     w_uint(out, 5);
     if (t.reason) w_ref(out, *t.reason); else w_null(out);
     w_uint(out, 6); w_int64(out, t.timestamp);
+    if (t.emission) {
+        w_uint(out, 7); w_uint(out, t.emission->seq);
+        w_uint(out, 8);
+        if (t.emission->prev) w_ref(out, *t.emission->prev); else w_null(out);
+        w_uint(out, 9); w_float64(out, t.emission->debt_after);
+    }
+}
+
+void enc_redemption(Buf& out, const Redemption& rd) {
+    w_map(out, 7);
+    w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Redemption));
+    w_uint(out, 1); w_ref(out, rd.transfer);
+    w_uint(out, 2); w_float64(out, rd.units);
+    w_uint(out, 3); w_uint(out, rd.link.seq);
+    w_uint(out, 4);
+    if (rd.link.prev) w_ref(out, *rd.link.prev); else w_null(out);
+    w_uint(out, 5); w_float64(out, rd.link.debt_after);
+    w_uint(out, 6); w_int64(out, rd.timestamp);
 }
 
 void enc_pledge(Buf& out, const Pledge& p) {
@@ -540,7 +559,9 @@ Acceptance dec_acceptance_fields(CborReader& r) {
     return a;
 }
 
-Transfer dec_transfer_fields(CborReader& r) {
+Transfer dec_transfer_fields(CborReader& r, uint64_t field_count) {
+    if (field_count != 7 && field_count != 10)
+        throw CodecError("Transfer: expected 7 (v2) or 10 (v3) fields");
     Transfer t{};
     expect_key(r, 1); r.r_fixed(t.from);
     expect_key(r, 2); r.r_fixed(t.to);
@@ -564,7 +585,25 @@ Transfer dec_transfer_fields(CborReader& r) {
     }
     expect_key(r, 5); t.reason    = dec_opt_ref(r);
     expect_key(r, 6); t.timestamp = r.r_int();
+    if (field_count == 10) {
+        EmissionLink link{};
+        expect_key(r, 7); link.seq        = r.r_uint();
+        expect_key(r, 8); link.prev       = dec_opt_ref(r);
+        expect_key(r, 9); link.debt_after = r.r_float64();
+        t.emission = link;
+    }
     return t;
+}
+
+Redemption dec_redemption_fields(CborReader& r) {
+    Redemption rd{};
+    expect_key(r, 1); rd.transfer        = dec_ref(r);
+    expect_key(r, 2); rd.units           = r.r_float64();
+    expect_key(r, 3); rd.link.seq        = r.r_uint();
+    expect_key(r, 4); rd.link.prev       = dec_opt_ref(r);
+    expect_key(r, 5); rd.link.debt_after = r.r_float64();
+    expect_key(r, 6); rd.timestamp       = r.r_int();
+    return rd;
 }
 
 Pledge dec_pledge_fields(CborReader& r) {
@@ -629,13 +668,16 @@ std::vector<uint8_t> Codec::encode(const Record& rec) {
         else if constexpr (std::is_same_v<T, Pledge>)      enc_pledge(out, r);
         else if constexpr (std::is_same_v<T, PledgeRevoke>) enc_pledge_revoke(out, r);
         else if constexpr (std::is_same_v<T, DailyAggregate>) enc_daily_aggregate(out, r);
+        else if constexpr (std::is_same_v<T, Redemption>)  enc_redemption(out, r);
     }, rec);
     return out;
 }
 
 Record Codec::decode(const uint8_t* data, size_t len) {
     CborReader r(data, len);
-    r.r_map();          // consume map header (field count not checked here; per-type decoders own their layout)
+    // Field count is owned by per-type decoders; Transfer needs it to tell
+    // v2 (7 fields) from v3 with an emission link (10 fields).
+    const uint64_t field_count = r.r_map();
     expect_key(r, 0);   // type discriminator is always key 0
     const uint8_t disc = r.r_uint8();
 
@@ -651,10 +693,11 @@ Record Codec::decode(const uint8_t* data, size_t len) {
         case RecordType::Worker:      return dec_worker_fields(r);
         case RecordType::WorkRecord:  return dec_work_record_fields(r);
         case RecordType::Acceptance:  return dec_acceptance_fields(r);
-        case RecordType::Transfer:    return dec_transfer_fields(r);
+        case RecordType::Transfer:    return dec_transfer_fields(r, field_count);
         case RecordType::Pledge:      return dec_pledge_fields(r);
         case RecordType::PledgeRevoke: return dec_pledge_revoke_fields(r);
         case RecordType::DailyAggregate: return dec_daily_aggregate_fields(r);
+        case RecordType::Redemption: return dec_redemption_fields(r);
         default:
             throw CodecError("CBOR: unknown record type discriminator");
     }

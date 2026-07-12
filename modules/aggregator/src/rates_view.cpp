@@ -3,6 +3,7 @@
 #include <records/codec.h>
 
 #include <algorithm>
+#include <cmath>
 #include <map>
 #include <set>
 
@@ -29,14 +30,14 @@ std::vector<records::RateEntry> build_daily_rates(
     const int64_t day_end = day_start + 86'400;
 
     // One scan: records by block hash (for provenance resolution), the day's
-    // acceptances, and the set of settled acceptance hashes.
+    // acceptances, and the total paid per acceptance hash.
     std::map<RefHash, records::Record> by_hash;
     struct Deal {
         records::Acceptance acc;
         UserId              payer;
     };
-    std::map<RefHash, Deal> day_deals;
-    std::set<RefHash>       settled;
+    std::map<RefHash, Deal>   day_deals;
+    std::map<RefHash, double> paid;
 
     for (const Hash& bh : storage.all_block_hashes()) {
         const auto block = storage.get_block_by_hash(bh);
@@ -54,7 +55,8 @@ std::vector<records::RateEntry> build_daily_rates(
                 day_deals[bh.bytes] = Deal{*a, block->address.user_id};
         } else if (const auto* t = std::get_if<records::Transfer>(&rec)) {
             if (t->from == block->address.user_id.bytes && t->reason)
-                settled.insert(t->reason->hash);
+                for (const auto& o : t->origins)
+                    paid[t->reason->hash] += o.units;
         }
         by_hash[bh.bytes] = std::move(rec);
     }
@@ -62,7 +64,12 @@ std::vector<records::RateEntry> build_daily_rates(
     // Fold settled, fully-resolvable, non-self deals per (specialty, level).
     std::map<std::pair<std::string, uint8_t>, Accum> day;
     for (const auto& [acc_hash, deal] : day_deals) {
-        if (!settled.count(acc_hash)) continue;                    // filter (Б)
+        // Filter (Б) + §12.8 "=": only exactly settled deals enter the
+        // averaging — payment must equal the appraisal, an underpaid deal is
+        // a hidden discount and must not move the rates (economy.md §4.2).
+        const auto pit = paid.find(acc_hash);
+        if (pit == paid.end() ||
+            std::abs(pit->second - deal.acc.labor_units) > 1e-6) continue;
         if (deal.acc.work.chain == deal.payer.bytes) continue;     // self-deal
 
         const auto work_it = by_hash.find(deal.acc.work.hash);
