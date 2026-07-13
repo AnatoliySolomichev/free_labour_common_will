@@ -22,6 +22,8 @@ static void usage(const char* prog) {
               << "  --db PATH          LMDB directory path\n"
               << "  --peer URL         Peer server URL, repeatable (e.g. http://host:8080)\n"
               << "  --sync-interval N  Pull-sync interval in seconds (default: 30)\n"
+              << "  --catalog PATH     Directory of catalog JSON files (docs/catalogs);\n"
+              << "                     served at GET /catalog. Omitted → 501.\n"
               << "\nExample:\n"
               << "  aggregator_server --port 8080 --db /data/agg\n"
               << "  aggregator_server --port 8081 --db /data/agg2 \\\n"
@@ -33,6 +35,7 @@ int main(int argc, char* argv[]) {
     std::string  db_path;
     std::vector<std::string> peers;
     int          sync_interval = 30;
+    std::string  catalog_dir;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -44,6 +47,8 @@ int main(int argc, char* argv[]) {
             peers.push_back(argv[++i]);
         else if (arg == "--sync-interval" && i+1 < argc)
             sync_interval = std::stoi(argv[++i]);
+        else if (arg == "--catalog" && i+1 < argc)
+            catalog_dir = argv[++i];
         else if (arg == "--help" || arg == "-h") { usage(argv[0]); return 0; }
     }
 
@@ -59,7 +64,8 @@ int main(int argc, char* argv[]) {
             storage, port, peers,
             std::chrono::seconds(sync_interval),
             std::chrono::seconds(3600),
-            std::filesystem::path(db_path) / "own");   // signed DailyAggregate chain
+            std::filesystem::path(db_path) / "own",    // signed DailyAggregate chain
+            catalog_dir);                              // GET /catalog (records.md §8.7)
 
         g_server = &server;
         std::signal(SIGINT,  on_signal);

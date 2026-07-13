@@ -6,6 +6,7 @@
 #include <blockchain/serializer.h>
 #include <blockchain/storage.h>
 #include <blockchain/validator.h>
+#include <records/catalog.h>
 #include <records/codec.h>
 #include <records/draft.h>
 #include <records/types.h>
@@ -129,6 +130,7 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--to", "--units", "--origin", "--pledge", "--executor", "--expires",
     "--acceptance", "--coef", "--k", "--with", "--to-node",
     "--node", "--ancestor", "--since", "--out", "--cert", "--hex",
+    "--skill", "--need", "--search",
 };
 
 // True when a standalone flag (no value) is present.
@@ -685,6 +687,55 @@ static int cmd_branch_init(const fs::path& data_dir, int argc, char** argv) {
     return 0;
 }
 
+// ── Catalogs (records.md §8.7) ────────────────────────────────────────────────
+
+// Fetch the aggregator's catalog bundle. Returns nullopt when the aggregator is
+// unreachable or serves no catalog — validation then simply does not happen
+// (a missing catalog must never block a person from writing about themselves).
+static std::optional<std::vector<records::Catalog>> fetch_catalogs(
+        const std::string& via) {
+    if (via.empty()) return std::nullopt;
+    std::string host = via;
+    if (host.rfind("http://", 0) == 0) host = host.substr(7);
+    httplib::Client cli(host);
+    cli.set_connection_timeout(5);
+    const auto res = cli.Get("/catalog");
+    if (!res || res->status != 200) return std::nullopt;
+    try {
+        return records::parse_catalog_bundle(res->body);
+    } catch (const records::CatalogError&) {
+        return std::nullopt;
+    }
+}
+
+// Check every cat: tag against the catalog. A typo in a slug silently breaks
+// matching — the person is listed but never found — so it is refused, not warned
+// about. --force overrides, for a slug the catalog does not carry yet.
+static bool validate_slugs(const std::vector<std::string>& tags,
+                           const std::vector<records::Catalog>& catalogs,
+                           const std::string& where) {
+    const auto known = records::all_slugs(catalogs);
+    bool ok = true;
+    for (const auto& tag : tags) {
+        if (tag.rfind("cat:", 0) != 0) continue;
+        const std::string slug = tag.substr(4);
+        if (known.count(slug)) continue;
+        ok = false;
+        std::cerr << where << ": слага \"" << slug << "\" нет в каталоге.\n";
+        const auto near = records::search(catalogs, slug.substr(0, slug.find('.') + 1));
+        if (!near.empty()) {
+            std::cerr << "  похожие: ";
+            for (std::size_t i = 0; i < near.size() && i < 6; ++i)
+                std::cerr << (i ? ", " : "") << near[i]->slug;
+            std::cerr << "\n";
+        }
+    }
+    if (!ok)
+        std::cerr << "  найдите слаг: bc catalog --via URL --search ТЕКСТ\n"
+                     "  либо запишите как есть: --force (каталог дополнит организатор)\n";
+    return ok;
+}
+
 static int cmd_concept_add(const fs::path& data_dir, int argc, char** argv) {
     const auto pos = get_positionals(argc, argv);  // [concept, add, <text>]
     if (pos.size() < 3) {
@@ -694,7 +745,12 @@ static int cmd_concept_add(const fs::path& data_dir, int argc, char** argv) {
     Concept c;
     c.text = pos[2];
     c.tags = flag_all(argc, argv, "--tag");
-    return cmd_write(data_dir, argc, argv,c);
+
+    if (!flag_present(argc, argv, "--force")) {
+        if (const auto catalogs = fetch_catalogs(flag_val(argc, argv, "--via")))
+            if (!validate_slugs(c.tags, *catalogs, "запись")) return 1;
+    }
+    return cmd_write(data_dir, argc, argv, c);
 }
 
 static int cmd_concept_link(const fs::path& data_dir, int argc, char** argv) {
@@ -1846,6 +1902,79 @@ static int cmd_chain_info(int argc, char** argv) {
     return economy_get(via, "/economy/chain/" + pos[2]);
 }
 
+// bc catalog [--via URL] [--search TEXT]
+// The picker: what slugs exist, so nobody has to invent one.
+static int cmd_catalog(int argc, char** argv) {
+    const auto via = flag_val(argc, argv, "--via");
+    if (via.empty()) {
+        std::cerr << "Usage: bc catalog --via URL [--search TEXT]\n";
+        return 1;
+    }
+    const auto catalogs = fetch_catalogs(via);
+    if (!catalogs) {
+        std::cerr << "агрегатор не отдал каталог (запущен ли он с --catalog PATH?)\n";
+        return 1;
+    }
+    const auto query = flag_val(argc, argv, "--search");
+    const auto hits  = records::search(*catalogs, query);
+    if (hits.empty()) {
+        std::cout << "ничего не найдено по \"" << query << "\"\n";
+        return 0;
+    }
+    std::string group;
+    for (const auto* e : hits) {
+        if (e->group != group) {
+            group = e->group;
+            std::cout << "\n" << group << "\n";
+        }
+        std::cout << "  " << std::left << std::setw(26) << e->slug << e->ru;
+        if (!e->closed_by.empty()) {
+            std::cout << "   ← закрывают:";
+            for (const auto& p : e->closed_by) std::cout << " " << p;
+        }
+        std::cout << "\n";
+    }
+    return 0;
+}
+
+// bc directory --skill SLUG --via URL   /   bc needs list [--need SLUG] --via URL
+// Who offers a skill, who needs what — straight off the aggregator's ProfileView.
+static int directory_get(const std::string& via, const std::string& facet,
+                         const std::string& slug) {
+    std::string host = via;
+    if (host.rfind("http://", 0) == 0) host = host.substr(7);
+    httplib::Client cli(host);
+    cli.set_connection_timeout(5);
+    const auto res = cli.Get("/directory/" + facet + "/" + slug);
+    if (!res) {
+        std::cerr << "aggregator unreachable: " << via << "\n";
+        return 1;
+    }
+    std::cout << res->body << "\n";
+    return res->status == 200 ? 0 : 1;
+}
+
+static int cmd_directory(int argc, char** argv) {
+    const auto via   = flag_val(argc, argv, "--via");
+    const auto skill = flag_val(argc, argv, "--skill");
+    if (via.empty() || skill.empty()) {
+        std::cerr << "Usage: bc directory --skill SLUG --via URL\n";
+        return 1;
+    }
+    return directory_get(via, "skills", skill);
+}
+
+static int cmd_needs_list(int argc, char** argv) {
+    const auto via  = flag_val(argc, argv, "--via");
+    const auto need = flag_val(argc, argv, "--need");
+    if (via.empty()) {
+        std::cerr << "Usage: bc needs list [--need SLUG] --via URL\n";
+        return 1;
+    }
+    if (need.empty()) return economy_get(via, "/profiles");   // all open needs live here
+    return directory_get(via, "needs", need);
+}
+
 // bc apply --draft FILE [--dry-run] [--yes] [--leaf N] [--via URL]
 //
 // A scribe, an accountant or an AI prepares the draft; the owner signs it here
@@ -1883,6 +2012,21 @@ static int cmd_apply(const fs::path& data_dir, int argc, char** argv) {
     if (flag_val(argc, argv, "--leaf").empty() && draft.leaf.has_value())
         leaf = static_cast<NodeIndex>(*draft.leaf);
 
+    // A model asked to pick a catalog slug sometimes invents one. An invented
+    // slug does not fail loudly — the person is simply never found by anyone
+    // searching for that skill. So it is checked before signing, not after.
+    const auto via = flag_val(argc, argv, "--via");
+    if (!flag_present(argc, argv, "--force")) {
+        if (const auto catalogs = fetch_catalogs(via)) {
+            bool ok = true;
+            for (std::size_t i = 0; i < draft.records.size(); ++i)
+                if (const auto* c = std::get_if<Concept>(&draft.records[i]))
+                    ok &= validate_slugs(c->tags, *catalogs,
+                                         "запись #" + std::to_string(i + 1));
+            if (!ok) return 1;
+        }
+    }
+
     // Everything is rendered in full: hiding part of a record is the very risk
     // being guarded against.
     std::cout << "Черновик: " << file << "\n"
@@ -1909,8 +2053,7 @@ static int cmd_apply(const fs::path& data_dir, int argc, char** argv) {
         }
     }
 
-    Context    ctx(data_dir, leaf);
-    const auto via = flag_val(argc, argv, "--via");
+    Context ctx(data_dir, leaf);
     for (std::size_t i = 0; i < draft.records.size(); ++i) {
         const Block block = append_record(ctx, draft.records[i]);
         std::cout << "  " << (i + 1) << ". block #" << block.address.block_index
@@ -2763,10 +2906,21 @@ type; catalogs: docs/catalogs.md):
     --tag cat:prof.electrician                | industry | hobby | obstacle
     [--tag horizon:now]              cat:  an entry from the catalogs
     [--tag retrain:yes]
+  catalog --via URL                Browse the catalogs — find the cat: slug to
+    [--search TEXT]                    write, instead of inventing one (§8.7)
   export profiles --via URL        Dump decoded profiles of every known chain
     [--out FILE] [--chain UID_HEX]     (JSON: skills, needs, tags verbatim) —
                                        for need↔skill matching, by hand or by
                                        an external AI
+
+Finding each other (records.md §8.6):
+  directory --skill SLUG --via URL Who offers this skill (closed facts excluded)
+  needs list --via URL             Open needs: all of them, or one slug
+    [--need SLUG]
+
+  Unknown cat: slugs are REFUSED when the aggregator serves a catalog — a typo
+  in a slug does not fail loudly, it just makes you unfindable. Override with
+  --force when the catalog does not carry your slug yet.
 
 Delegated authoring — a scribe/AI prepares, the OWNER signs (ИР-005 п.5):
   apply --draft FILE               Sign and append the records of a draft. The
@@ -2957,6 +3111,9 @@ int main(int argc, char** argv) {
         else if (cmd == "chain"     && subcmd == "info")    return cmd_chain_info(argc, argv);
         else if (cmd == "export"    && subcmd == "profiles")return cmd_export_profiles(argc, argv);
         else if (cmd == "apply")                            return cmd_apply(data_dir, argc, argv);
+        else if (cmd == "catalog")                          return cmd_catalog(argc, argv);
+        else if (cmd == "directory")                        return cmd_directory(argc, argv);
+        else if (cmd == "needs"     && subcmd == "list")    return cmd_needs_list(argc, argv);
         else if (cmd == "fetch")                            return cmd_fetch(data_dir, argc, argv);
         else if (cmd == "pay")                              return cmd_pay(data_dir, argc, argv);
         else if (cmd == "transfer"  && subcmd == "send")    return cmd_transfer_send(data_dir, argc, argv);

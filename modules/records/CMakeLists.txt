@@ -4,6 +4,7 @@ cmake_minimum_required(VERSION 3.16)
 
 add_library(records
     src/codec.cpp
+    src/catalog.cpp
     src/draft.cpp
 )
 
@@ -18,6 +19,7 @@ find_package(GTest REQUIRED)
 
 add_executable(records_tests
     tests/test_codec.cpp
+    tests/test_catalog.cpp
     tests/test_draft.cpp
 )
 

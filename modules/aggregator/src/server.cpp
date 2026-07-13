@@ -9,6 +9,10 @@
 #include <httplib.h>
 #include <algorithm>
 #include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <optional>
 #include <sstream>
 #include <iomanip>
 #include <iostream>
@@ -88,6 +92,14 @@ void cbor_array_head(std::string& out, uint64_t n) { cbor_head(out, 4, n); }
 void cbor_bstr(std::string& out, const std::string& bytes) {
     cbor_head(out, 2, bytes.size());
     out += bytes;
+}
+
+// Whole file as text; nullopt when it cannot be read.
+std::optional<std::string> read_file(const std::filesystem::path& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return std::nullopt;
+    return std::string((std::istreambuf_iterator<char>(f)),
+                        std::istreambuf_iterator<char>());
 }
 
 // ── Profile JSON (records.md §8.6) ────────────────────────────────────────────
@@ -172,12 +184,14 @@ AggregatorServer::AggregatorServer(AggregatorStorage& storage,
                                    std::vector<std::string> peers,
                                    std::chrono::seconds sync_interval,
                                    std::chrono::seconds mailbox_ttl,
-                                   std::filesystem::path own_chain_dir)
+                                   std::filesystem::path own_chain_dir,
+                                   std::filesystem::path catalog_dir)
     : storage_(storage)
     , port_(port)
     , peers_(std::move(peers))
     , sync_interval_(sync_interval)
     , mailbox_ttl_(mailbox_ttl)
+    , catalog_dir_(std::move(catalog_dir))
     , impl_(std::make_unique<Impl>())
 {
     if (!own_chain_dir.empty()) {
@@ -820,6 +834,115 @@ void AggregatorServer::setup_routes() {
                 return;
             }
             res.set_content(profile_to_json(uid, *profile), "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
+                            "application/json");
+        }
+    });
+
+    // ── Catalogs (records.md §8.7; docs/catalogs.md) ──────────────────────────
+    //
+    // Served verbatim from disk on every request — editing a catalog file needs
+    // no restart. The files are the source; the aggregator only hands them out,
+    // so all participants pick slugs from one version.
+
+    svr.Get("/catalog", [&](const httplib::Request&, httplib::Response& res) {
+        if (catalog_dir_.empty()) {
+            res.status = 501;
+            res.set_content("{\"error\":\"catalog dir not configured\"}",
+                            "application/json");
+            return;
+        }
+        try {
+            // Bundle: {"professions": <file>, "needs": <file>, ...}. The files
+            // are already JSON, so they are embedded, never re-serialized.
+            std::string body = "{";
+            bool        first = true;
+            std::vector<std::filesystem::path> files;
+            for (const auto& entry : std::filesystem::directory_iterator(catalog_dir_))
+                if (entry.is_regular_file() && entry.path().extension() == ".json")
+                    files.push_back(entry.path());
+            std::sort(files.begin(), files.end());   // deterministic order
+
+            for (const auto& path : files) {
+                const auto text = read_file(path);
+                if (!text) continue;
+                if (!first) body += ',';
+                first = false;
+                body += '"' + json_escape(path.stem().string()) + "\":" + *text;
+            }
+            body += '}';
+            res.set_content(body, "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
+                            "application/json");
+        }
+    });
+
+    svr.Get("/catalog/:name", [&](const httplib::Request& req,
+                                  httplib::Response& res) {
+        if (catalog_dir_.empty()) {
+            res.status = 501;
+            res.set_content("{\"error\":\"catalog dir not configured\"}",
+                            "application/json");
+            return;
+        }
+        const std::string name = req.path_params.at("name");
+        // A name is a bare catalog name — never a path. Refuse anything that
+        // could climb out of the directory.
+        if (name.empty() || name.find('/') != std::string::npos ||
+            name.find('\\') != std::string::npos || name.find("..") != std::string::npos) {
+            res.status = 400;
+            res.set_content("{\"error\":\"invalid catalog name\"}", "application/json");
+            return;
+        }
+        const auto text = read_file(catalog_dir_ / (name + ".json"));
+        if (!text) {
+            res.status = 404;
+            res.set_content("{\"error\":\"no such catalog\"}", "application/json");
+            return;
+        }
+        res.set_content(*text, "application/json");
+    });
+
+    // ── Directory: who offers a skill / who needs what (records.md §8.6) ──────
+    //
+    // The matching primitive, straight off ProfileView::by_slug. Closed facts
+    // drop out. Advisory and re-checkable, like every derived view.
+
+    svr.Get("/directory/:facet/:slug", [&](const httplib::Request& req,
+                                           httplib::Response& res) {
+        const std::string facet_s = req.path_params.at("facet");
+        const std::string slug    = req.path_params.at("slug");
+
+        std::optional<ProfileFacet> facet;
+        for (const auto& fk : FACET_KEYS)
+            if (facet_s == fk.key) facet = fk.facet;    // "skills", "needs", ...
+        if (!facet) {
+            res.status = 400;
+            res.set_content("{\"error\":\"unknown facet\"}", "application/json");
+            return;
+        }
+        try {
+            const auto  view = ProfileView::build(storage_);
+            std::string body = "{\"facet\":\"" + json_escape(facet_s)
+                             + "\",\"slug\":\"" + json_escape(slug)
+                             + "\",\"chains\":[";
+            bool first = true;
+            for (const auto& uid : view.by_slug(*facet, slug)) {
+                const auto profile = view.chain(uid);
+                if (!profile) continue;
+                for (const auto* fact : profile->by_facet(*facet)) {
+                    if (fact->slug != slug || fact->closed) continue;
+                    if (!first) body += ',';
+                    first = false;
+                    body += fact_to_json(uid, *fact);
+                }
+            }
+            body += "]}";
+            res.set_content(body, "application/json");
         } catch (const std::exception& e) {
             res.status = 500;
             res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",

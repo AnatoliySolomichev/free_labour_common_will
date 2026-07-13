@@ -44,12 +44,15 @@ public:
     // own_chain_dir: when non-empty, the server maintains its own chain there
     // and publishes signed DailyAggregate blocks (GET /economy/rates,
     // records.md §11.2); empty → the rates endpoint answers 501.
+    // catalog_dir: directory of catalog JSON files (docs/catalogs) served at
+    // GET /catalog (records.md §8.7); empty → the catalog endpoints answer 501.
     AggregatorServer(AggregatorStorage& storage,
                      uint16_t           port,
                      std::vector<std::string> peer_urls,
                      std::chrono::seconds     sync_interval,
                      std::chrono::seconds     mailbox_ttl   = std::chrono::seconds(3600),
-                     std::filesystem::path    own_chain_dir = {});
+                     std::filesystem::path    own_chain_dir = {},
+                     std::filesystem::path    catalog_dir   = {});
 
     static constexpr std::size_t kMailboxCap       = 1024;  // envelopes per recipient
     static constexpr std::size_t kSealsPerBlockCap = 4096;  // seals per block
@@ -86,6 +89,8 @@ private:
 
     std::unique_ptr<OwnChain> own_chain_;   // null → no rates publication
     std::mutex                rates_mutex_;
+
+    std::filesystem::path     catalog_dir_; // empty → catalog endpoints answer 501
 
     struct Impl; // holds httplib::Server (keeps httplib out of this header)
     std::unique_ptr<Impl> impl_;
