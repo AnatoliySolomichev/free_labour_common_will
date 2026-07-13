@@ -84,7 +84,10 @@ EconomyView EconomyView::build(const AggregatorStorage& storage, int64_t now) {
             UserId to{};
             to.bytes = t->to;
             view.chains_[to].received += total;
-            if (t->reason) settlements[t->reason->hash] += total;
+            // A pledge is settled by `settles`, never by `reason` (Transfer v4,
+            // records.md §11.1): reason must point at the Acceptance being paid
+            // for (§12.9), so it could never also name the pledge being closed.
+            if (t->settles) settlements[t->settles->hash] += total;
         } else if (const auto* a = std::get_if<records::Acceptance>(&rec)) {
             UserId worker{};
             worker.bytes = a->work.chain;
@@ -102,7 +105,7 @@ EconomyView EconomyView::build(const AggregatorStorage& storage, int64_t now) {
     // Resolve pledge statuses and fold them into ideas and chains.
     std::map<RefHash, IdeaFunding>       ideas;
     std::map<RefHash, std::set<UserId>>  pledger_sets;
-    // A pledge's settlement = transfers whose reason points at the pledge.
+    // A pledge is settled by transfers naming it in `settles` (Transfer v4).
     for (auto& [hash, st] : pledges) {
         st.settled = 0;
         auto s = settlements.find(hash);

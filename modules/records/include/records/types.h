@@ -195,6 +195,11 @@ struct EmissionLink {
 // v3 (economy.md §4.2/§4.3): reason is mandatory for recognition (strict
 // equivalence — hours move only against accepted labor); a self-issuing
 // transfer must carry its emission-thread link.
+//
+// v4 (records.md §11.1, ИР-006): `reason` and `settles` answer two different
+// questions and so must be two fields. One `reason` could not do both: §12.9
+// demands it point at an Acceptance ("what am I paying for"), which left a
+// Pledge honestly paid off by labour marked active forever.
 struct Transfer {
     static constexpr RecordType TYPE = RecordType::Transfer;
 
@@ -202,7 +207,8 @@ struct Transfer {
     std::array<uint8_t, 32> to;        // receiver chain
     uint32_t                to_node;   // receiver branch — whose purse is credited
     std::vector<OriginQty>  origins;   // named portions; total = transfer amount
-    std::optional<Ref>      reason;    // Acceptance (mandatory for recognition, §12.9)
+    std::optional<Ref>      reason;    // WHAT for: Acceptance (mandatory, §12.9)
+    std::optional<Ref>      settles;   // WHICH promise this closes: Pledge (v4)
     int64_t                 timestamp; // Unix timestamp UTC
     // Present iff origins contain a self-issued portion (issuer == from).
     std::optional<EmissionLink> emission;

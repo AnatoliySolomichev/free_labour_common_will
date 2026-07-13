@@ -93,13 +93,6 @@ TEST_F(EconomyViewTest, IdeasBoardAndChainDossiers) {
     const Block carol_pledge = add(carol, cp);
     add(carol, records::PledgeRevoke{ref_to(carol, carol_pledge), 10});
 
-    records::Transfer settle{};
-    settle.from    = bob.bytes;
-    settle.to      = alice.bytes;
-    settle.origins = { {bob.bytes, 3.0} };            // self-issue
-    settle.reason  = ref_to(bob, bob_pledge);
-    add(bob, settle);
-
     // Alice's work appraised by Bob at 4.2 labor-h.
     records::WorkRecord work{};
     work.agent  = idea_ref;   // any ref; agent grade is irrelevant here
@@ -112,7 +105,18 @@ TEST_F(EconomyViewTest, IdeasBoardAndChainDossiers) {
     acc.quality     = "пройдено";
     acc.hours_raw   = 4;
     acc.labor_units = 4.2;
-    add(bob, acc);
+    const Block acc_block = add(bob, acc);
+
+    // Transfer v4 (§11.1): `reason` says WHAT is paid for (the acceptance),
+    // `settles` says WHICH promise this closes. A pledge is settled only by
+    // `settles` — `reason` must name the acceptance, so it never could.
+    records::Transfer settle{};
+    settle.from    = bob.bytes;
+    settle.to      = alice.bytes;
+    settle.origins = { {bob.bytes, 3.0} };            // self-issue
+    settle.reason  = ref_to(bob, acc_block);
+    settle.settles = ref_to(bob, bob_pledge);
+    add(bob, settle);
 
     const auto view = EconomyView::build(*storage_, /*now=*/1000);
 

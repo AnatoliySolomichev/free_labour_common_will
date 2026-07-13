@@ -830,13 +830,26 @@ static int cmd_react(const fs::path& data_dir, int argc, char** argv) {
     return cmd_write(data_dir, argc, argv,r);
 }
 
+// bc specialty add <slug> — the name IS the catalog slug (records.md §9.1).
+// It is the network-wide key rates are computed on (§11.2): while it was free
+// text, "Электрик" / "электрик" / "Электромонтёр" produced three different rates
+// and tore the statistics apart. The slug is also what the profile already uses
+// (cat:prof.electrician), so a person and their labour speak one key.
 static int cmd_specialty_add(const fs::path& data_dir, int argc, char** argv) {
-    const auto pos = get_positionals(argc, argv);  // [specialty, add, <name>]
+    const auto pos = get_positionals(argc, argv);  // [specialty, add, <slug>]
     if (pos.size() < 3) {
-        std::cerr << "Usage: bc specialty add <name>\n";
+        std::cerr << "Usage: bc specialty add <slug>   (e.g. prof.electrician)\n"
+                     "  find it: bc catalog --via URL --search ТЕКСТ\n";
         return 1;
     }
-    return cmd_write(data_dir, argc, argv,Specialty{ pos[2] });
+    const std::string slug = pos[2];
+
+    if (!flag_present(argc, argv, "--force")) {
+        if (const auto catalogs = fetch_catalogs(flag_val(argc, argv, "--via")))
+            if (!validate_slugs({"cat:" + slug}, *catalogs, "специальность"))
+                return 1;
+    }
+    return cmd_write(data_dir, argc, argv, Specialty{ slug });
 }
 
 static int cmd_grade_add(const fs::path& data_dir, int argc, char** argv) {
@@ -1845,6 +1858,11 @@ static int cmd_pay(const fs::path& data_dir, int argc, char** argv) {
     t.origins   = pick_portions(ctx, to_s, units);
     t.reason    = acc_ref;
     t.timestamp = static_cast<int64_t>(std::time(nullptr));
+    // Transfer v4 (§11.1): reason says WHAT is paid for, settles says WHICH
+    // promise this closes. Without it a pledge honestly paid off by labour would
+    // stay "active" forever and expire.
+    const auto pledge_s = flag_val(argc, argv, "--pledge");
+    if (!pledge_s.empty()) t.settles = parse_ref(pledge_s);
     // Pay into the purse of the branch that did the work (economy.md §5а).
     if (const auto work_block = find_external_by_hash(ctx, acceptance->work.hash))
         t.to_node = work_block->address.node_index;
@@ -2283,7 +2301,10 @@ static int cmd_pledge_add(const fs::path& data_dir, int argc, char** argv) {
     const Block block = append_record(ctx, Record{p});
     std::cout << "pledge ref: " << to_hex(ctx.user_id.bytes) << "/"
               << to_hex(Crypto::hash_block(block).bytes) << "\n";
-    std::cerr << "(settle with: bc transfer send --reason <pledge ref>; "
+    // Transfer v4 (§11.1): a pledge is closed by paying for ACCEPTED work and
+    // naming the pledge in --pledge. Paying "against the pledge itself" was the
+    // old dead path — §12.9 refuses a transfer whose reason is not an acceptance.
+    std::cerr << "(settle with: bc pay --acceptance <acc ref> --pledge <pledge ref>; "
                  "revoke with: bc pledge revoke)\n";
     const auto via = flag_val(argc, argv, "--via");
     if (!via.empty()) upload_block(via, block);
@@ -2343,8 +2364,11 @@ static int cmd_pledge_list(const fs::path& data_dir, int argc, char** argv) {
             auto it = pledges.find(to_hex(pr->pledge.hash.data(), 32));
             if (it != pledges.end()) it->second.revoked = true;
         } else if (const auto* t = std::get_if<records::Transfer>(&rec)) {
-            if (!t->reason || t->reason->chain != ctx.user_id.bytes) continue;
-            auto it = pledges.find(to_hex(t->reason->hash.data(), 32));
+            // Settlement is named by `settles`, never by `reason` (Transfer v4,
+            // records.md §11.1): reason must point at the Acceptance being paid
+            // for (§12.9), so it could never also name the pledge being closed.
+            if (!t->settles || t->settles->chain != ctx.user_id.bytes) continue;
+            auto it = pledges.find(to_hex(t->settles->hash.data(), 32));
             if (it == pledges.end()) continue;
             for (const auto& o : t->origins) it->second.settled += o.units;
         }
@@ -3089,7 +3113,11 @@ Knowledge graph:
         [--chain CHAIN_HEX]        (default: own chain)
 
 Labor:
-  specialty add <name>             Add a specialty
+  specialty add <slug>             Add a specialty — the name IS the catalog slug
+    [--via URL] [--force]              (prof.electrician). It is the network-wide
+                                       key rates are keyed on (§11.2): free text
+                                       tore the statistics into "Электрик" /
+                                       "электрик" / "Электромонтёр".
   grade add <spec_ref> <level>     Add a grade (level 1-6)
   work log                         Log a work event
     --agent  GRADE_REF
@@ -3107,6 +3135,10 @@ Labor:
   rates --via URL                  Today's specialty rates (signed DailyAggregate)
   pay --acceptance REF             Pay the worker up to the appraisal (§12.8)
     [--units N] [--via URL]            default: the unpaid remainder
+    [--pledge REF]                     Transfer v4 (§11.1): --acceptance says
+                                       WHAT is paid for, --pledge says WHICH
+                                       promise this closes. Without it a pledge
+                                       paid off by labour stays "active" forever.
   fetch <chain>/<hash> --via URL   Fetch any foreign block for local reading
 
 Merge over a relay (sync.md §4.1):

@@ -253,6 +253,60 @@ TEST(RecordsCodec, TransferRoundtripAllOriginKinds) {
     EXPECT_EQ(decoded.timestamp, t.timestamp);
 }
 
+// Transfer v4 (records.md §11.1): `settles` is key 10 and rides after the
+// emission group (7-9), so every combination keeps CBOR keys ascending —
+// deterministic encoding holds for map sizes 7, 8, 10 and 11 alike.
+TEST(RecordsCodec, TransferV4SettlesRoundtripsInEveryCombination) {
+    Transfer base{};
+    base.from      = make_uid(0xA1);
+    base.to        = make_uid(0xB2);
+    base.origins   = { {make_uid(0xA1), 3.0} };   // self-issue
+    base.reason    = make_ref(0x11, 0x22);        // the acceptance being paid
+    base.timestamp = 1'700'000'000LL;
+
+    EmissionLink link{};
+    link.seq        = 7;
+    link.prev       = make_ref(0x33, 0x44);
+    link.debt_after = -3.0;
+
+    const Ref pledge = make_ref(0x55, 0x66);
+
+    {   // map(7) — v2/v3 without either
+        const auto d = std::get<Transfer>(roundtrip(base));
+        EXPECT_FALSE(d.settles.has_value());
+        EXPECT_FALSE(d.emission.has_value());
+    }
+    {   // map(8) — settles only
+        Transfer t = base;
+        t.settles  = pledge;
+        const auto d = std::get<Transfer>(roundtrip(t));
+        ASSERT_TRUE(d.settles.has_value());
+        EXPECT_EQ(*d.settles, pledge);
+        EXPECT_FALSE(d.emission.has_value());
+    }
+    {   // map(10) — emission only
+        Transfer t = base;
+        t.emission = link;
+        const auto d = std::get<Transfer>(roundtrip(t));
+        ASSERT_TRUE(d.emission.has_value());
+        EXPECT_EQ(d.emission->seq, 7u);
+        EXPECT_FALSE(d.settles.has_value());
+    }
+    {   // map(11) — both: paying off a promise with freshly issued paper
+        Transfer t = base;
+        t.emission = link;
+        t.settles  = pledge;
+        const auto d = std::get<Transfer>(roundtrip(t));
+        ASSERT_TRUE(d.settles.has_value());
+        EXPECT_EQ(*d.settles, pledge);
+        ASSERT_TRUE(d.emission.has_value());
+        EXPECT_DOUBLE_EQ(d.emission->debt_after, -3.0);
+        // reason still answers a different question: what the payment is for.
+        ASSERT_TRUE(d.reason.has_value());
+        EXPECT_EQ(*d.reason, *base.reason);
+    }
+}
+
 TEST(RecordsCodec, TransferWithoutReason) {
     Transfer t{};
     t.from      = make_uid(0x01);
