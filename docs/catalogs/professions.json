@@ -1,0 +1,27 @@
+{
+  "catalog": "professions",
+  "version": "2026.07",
+  "entries": [
+    { "slug": "prof.electrician",  "ru": "Электрик",        "group": "Ремонт и строительство", "aliases": ["электромонтёр", "электромонтажник"] },
+    { "slug": "prof.plumber",      "ru": "Сантехник",       "group": "Ремонт и строительство", "aliases": ["слесарь-сантехник"] },
+    { "slug": "prof.carpenter",    "ru": "Столяр",          "group": "Ремонт и строительство", "aliases": ["плотник"] },
+    { "slug": "prof.builder",      "ru": "Строитель",       "group": "Ремонт и строительство", "aliases": ["отделочник", "каменщик"] },
+    { "slug": "prof.welder",       "ru": "Сварщик",         "group": "Ремонт и строительство", "aliases": [] },
+    { "slug": "prof.auto-mechanic","ru": "Автослесарь",     "group": "Транспорт",              "aliases": ["автомеханик"] },
+    { "slug": "prof.driver",       "ru": "Водитель",        "group": "Транспорт",              "aliases": [] },
+    { "slug": "prof.tailor",       "ru": "Швея",            "group": "Быт и услуги",           "aliases": ["портной", "закройщик"] },
+    { "slug": "prof.cook",         "ru": "Повар",           "group": "Быт и услуги",           "aliases": ["кулинар"] },
+    { "slug": "prof.hairdresser",  "ru": "Парикмахер",      "group": "Быт и услуги",           "aliases": ["стилист"] },
+    { "slug": "prof.photographer", "ru": "Фотограф",        "group": "Творчество",             "aliases": ["видеограф"] },
+    { "slug": "prof.designer",     "ru": "Дизайнер",        "group": "Творчество",             "aliases": [] },
+    { "slug": "prof.accountant",   "ru": "Бухгалтер",       "group": "Финансы и право",        "aliases": ["финансист"] },
+    { "slug": "prof.lawyer",       "ru": "Юрист",           "group": "Финансы и право",        "aliases": ["адвокат"] },
+    { "slug": "prof.programmer",   "ru": "Программист",     "group": "ИТ",                     "aliases": ["разработчик"] },
+    { "slug": "prof.sysadmin",     "ru": "Системный администратор", "group": "ИТ",             "aliases": ["админ"] },
+    { "slug": "prof.teacher",      "ru": "Преподаватель",   "group": "Образование",            "aliases": ["учитель", "репетитор"] },
+    { "slug": "prof.doctor",       "ru": "Врач",            "group": "Здоровье",               "aliases": ["медик"] },
+    { "slug": "prof.nurse",        "ru": "Медсестра",       "group": "Здоровье",               "aliases": ["медбрат"] },
+    { "slug": "prof.farmer",       "ru": "Фермер",          "group": "Сельское хозяйство",     "aliases": ["агроном"] },
+    { "slug": "prof.scribe",       "ru": "Писарь / оператор данных", "group": "Услуги",        "aliases": ["помощник", "оператор блокчейна"] }
+  ]
+}

@@ -1845,6 +1845,48 @@ static int cmd_chain_info(int argc, char** argv) {
     return economy_get(via, "/economy/chain/" + pos[2]);
 }
 
+// bc export profiles --via URL [--out FILE] [--chain UID_HEX]
+// The aggregator's decoded self-descriptions (records.md §8.6, §13): skills,
+// needs, aspirations of every known chain, tags verbatim. This is the JSON that
+// feeds manual need↔skill matching or an external AI — the project embeds none.
+static int cmd_export_profiles(int argc, char** argv) {
+    const auto via   = flag_val(argc, argv, "--via");
+    const auto out   = flag_val(argc, argv, "--out");
+    const auto chain = flag_val(argc, argv, "--chain");
+    if (via.empty()) {
+        std::cerr << "Usage: bc export profiles --via URL [--out FILE] "
+                     "[--chain UID_HEX]\n";
+        return 1;
+    }
+    const std::string path = chain.empty() ? "/profiles" : "/profiles/" + chain;
+
+    std::string host = via;
+    if (host.rfind("http://", 0) == 0) host = host.substr(7);
+    httplib::Client cli(host);
+    cli.set_connection_timeout(5);
+    const auto res = cli.Get(path);
+    if (!res) {
+        std::cerr << "aggregator unreachable: " << via << "\n";
+        return 1;
+    }
+    if (res->status != 200) {
+        std::cerr << res->body << "\n";
+        return 1;
+    }
+    if (out.empty()) {
+        std::cout << res->body << "\n";
+        return 0;
+    }
+    std::ofstream f(out, std::ios::binary);
+    if (!f) {
+        std::cerr << "cannot write " << out << "\n";
+        return 1;
+    }
+    f << res->body;
+    std::cerr << "wrote " << res->body.size() << " bytes to " << out << "\n";
+    return 0;
+}
+
 // bc discover --via URL [--leaf L]
 // Ranked merge-partner suggestions for the own chain (sync.md §8).
 static int cmd_discover(const fs::path& data_dir, int argc, char** argv) {
@@ -2638,6 +2680,18 @@ Branches:
   branch init <leaf_index>         Init a new branch (decimal or 0x hex)
   block stub                       Append an empty stub block (bootstrap merge / time anchor)
 
+Profile (records.md §8.6 — a profile fact is a tagged Concept, no new record
+type; catalogs: docs/catalogs.md):
+  concept add "text"               Declare a skill / need / aspiration:
+    --tag kind:skill                 kind: skill | need | aspiration
+    --tag cat:prof.electrician                | industry | hobby | obstacle
+    [--tag horizon:now]              cat:  an entry from the catalogs
+    [--tag retrain:yes]
+  export profiles --via URL        Dump decoded profiles of every known chain
+    [--out FILE] [--chain UID_HEX]     (JSON: skills, needs, tags verbatim) —
+                                       for need↔skill matching, by hand or by
+                                       an external AI
+
 Knowledge graph:
   concept add <text>               Add an idea
               [--tag TAG...]
@@ -2816,6 +2870,7 @@ int main(int argc, char** argv) {
         else if (cmd == "rates")                            return cmd_rates(argc, argv);
         else if (cmd == "discover")                         return cmd_discover(data_dir, argc, argv);
         else if (cmd == "chain"     && subcmd == "info")    return cmd_chain_info(argc, argv);
+        else if (cmd == "export"    && subcmd == "profiles")return cmd_export_profiles(argc, argv);
         else if (cmd == "fetch")                            return cmd_fetch(data_dir, argc, argv);
         else if (cmd == "pay")                              return cmd_pay(data_dir, argc, argv);
         else if (cmd == "transfer"  && subcmd == "send")    return cmd_transfer_send(data_dir, argc, argv);

@@ -1,0 +1,22 @@
+{
+  "catalog": "needs",
+  "version": "2026.07",
+  "entries": [
+    { "slug": "need.food",             "ru": "Еда и продукты",              "group": "Базовые" },
+    { "slug": "need.clothing",         "ru": "Одежда и обувь",              "group": "Базовые" },
+    { "slug": "need.housing",          "ru": "Жильё",                       "group": "Базовые" },
+    { "slug": "need.housing-repair",   "ru": "Ремонт жилья",                "group": "Ремонт", "aliases": ["починить в квартире"] },
+    { "slug": "need.electrical",       "ru": "Электрика — ремонт/монтаж",   "group": "Ремонт" },
+    { "slug": "need.plumbing",         "ru": "Сантехника — ремонт/монтаж",  "group": "Ремонт" },
+    { "slug": "need.appliance-repair", "ru": "Ремонт техники",              "group": "Ремонт", "aliases": ["починить технику"] },
+    { "slug": "need.vehicle-repair",   "ru": "Ремонт автомобиля",           "group": "Транспорт" },
+    { "slug": "need.transport",        "ru": "Перевозка / доставка",        "group": "Транспорт" },
+    { "slug": "need.appliances",       "ru": "Бытовая техника",             "group": "Вещи" },
+    { "slug": "need.childcare",        "ru": "Забота о детях",              "group": "Семья", "aliases": ["няня", "детский сад"] },
+    { "slug": "need.education",        "ru": "Обучение / консультация",     "group": "Развитие", "aliases": ["консультация специалиста"] },
+    { "slug": "need.health",           "ru": "Здоровье / медпомощь",        "group": "Здоровье" },
+    { "slug": "need.legal",            "ru": "Юридическая помощь",          "group": "Услуги" },
+    { "slug": "need.accounting",       "ru": "Бухгалтерия / финансы",       "group": "Услуги" },
+    { "slug": "need.leisure",          "ru": "Отдых и досуг",               "group": "Досуг" }
+  ]
+}

@@ -1,6 +1,7 @@
 #include "aggregator/server.h"
 #include "aggregator/discovery_view.h"
 #include "aggregator/economy_view.h"
+#include "aggregator/profile_view.h"
 #include "aggregator/rates_view.h"
 #include "blockchain/serializer.h"
 #include "blockchain/errors.h"
@@ -89,6 +90,18 @@ void cbor_bstr(std::string& out, const std::string& bytes) {
     out += bytes;
 }
 
+// ── Profile JSON (records.md §8.6) ────────────────────────────────────────────
+// Facet → JSON key. Plurals are spelled out: "industry" + "s" is not a word.
+struct FacetKey { ProfileFacet facet; const char* key; };
+constexpr FacetKey FACET_KEYS[] = {
+    { ProfileFacet::Skill,      "skills"      },
+    { ProfileFacet::Need,       "needs"       },
+    { ProfileFacet::Aspiration, "aspirations" },
+    { ProfileFacet::Industry,   "industries"  },
+    { ProfileFacet::Hobby,      "hobbies"     },
+    { ProfileFacet::Obstacle,   "obstacles"   },
+};
+
 std::string json_escape(const std::string& s) {
     std::string out;
     out.reserve(s.size());
@@ -105,6 +118,43 @@ std::string json_escape(const std::string& s) {
         }
     }
     return out;
+}
+
+// Tags are emitted verbatim: an attribute the view does not model (geo, radius,
+// working hours) still reaches the consumer. That is the point — the profile
+// convention evolves in docs and catalogs, not in this code.
+std::string fact_to_json(const UserId& chain, const ProfileFact& f) {
+    std::string s = "{\"slug\":\""      + json_escape(f.slug)
+                  + "\",\"text\":\""    + json_escape(f.text)
+                  + "\",\"ref\":\""     + to_hex(chain.bytes)
+                  + "/"                 + to_hex(f.block_hash.bytes)
+                  + "\",\"node_index\":" + std::to_string(f.address.node_index)
+                  + ",\"block_index\":"  + std::to_string(f.address.block_index)
+                  + ",\"closed\":"       + (f.closed ? "true" : "false")
+                  + ",\"tags\":[";
+    for (std::size_t i = 0; i < f.tags.size(); ++i) {
+        if (i) s += ',';
+        s += '"' + json_escape(f.tags[i]) + '"';
+    }
+    s += "]}";
+    return s;
+}
+
+std::string profile_to_json(const UserId& chain, const ChainProfile& profile) {
+    std::string s = "{\"chain\":\"" + to_hex(chain.bytes) + "\"";
+    for (const auto& fk : FACET_KEYS) {
+        s += ",\"";
+        s += fk.key;
+        s += "\":[";
+        const auto facts = profile.by_facet(fk.facet);
+        for (std::size_t i = 0; i < facts.size(); ++i) {
+            if (i) s += ',';
+            s += fact_to_json(chain, *facts[i]);
+        }
+        s += ']';
+    }
+    s += '}';
+    return s;
 }
 
 } // anonymous namespace
@@ -717,6 +767,59 @@ void AggregatorServer::setup_routes() {
             }
             body += "]";
             res.set_content(body, "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
+                            "application/json");
+        }
+    });
+
+    // ── Profiles (records.md §8.6/§8.7, §13) ──────────────────────────────────
+    //
+    // Participants' self-description, decoded from ordinary tagged Concepts —
+    // skills, needs, aspirations, industries. Feeds manual need↔skill matching
+    // and any external AI: the project embeds no LLM by design (ИР-005).
+    // Derived and re-checkable, like every aggregator view.
+
+    svr.Get("/profiles", [&](const httplib::Request&, httplib::Response& res) {
+        try {
+            const auto  view = ProfileView::build(storage_);
+            std::string body = "{\"chains\":[";
+            bool        first = true;
+            for (const auto& [uid, profile] : view.chains()) {
+                if (!first) body += ',';
+                first = false;
+                body += profile_to_json(uid, profile);
+            }
+            body += "]}";
+            res.set_content(body, "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
+                            "application/json");
+        }
+    });
+
+    svr.Get("/profiles/:uid", [&](const httplib::Request& req,
+                                  httplib::Response& res) {
+        const auto uid_hash = hex_to_hash(req.path_params.at("uid"));
+        if (!uid_hash) {
+            res.status = 400;
+            res.set_content("{\"error\":\"invalid uid\"}", "application/json");
+            return;
+        }
+        try {
+            const auto view = ProfileView::build(storage_);
+            UserId uid{};
+            uid.bytes = uid_hash->bytes;
+            const auto profile = view.chain(uid);
+            if (!profile) {
+                res.status = 404;
+                res.set_content("{\"error\":\"chain has no profile records\"}",
+                                "application/json");
+                return;
+            }
+            res.set_content(profile_to_json(uid, *profile), "application/json");
         } catch (const std::exception& e) {
             res.status = 500;
             res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
