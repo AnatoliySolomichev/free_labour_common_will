@@ -7,6 +7,7 @@
 #include <blockchain/storage.h>
 #include <blockchain/validator.h>
 #include <records/catalog.h>
+#include <records/json.h>
 #include <records/codec.h>
 #include <records/draft.h>
 #include <records/types.h>
@@ -685,6 +686,11 @@ static int cmd_branch_init(const fs::path& data_dir, int argc, char** argv) {
 
     std::cout << "Branch " << leaf << " initialized.\n";
     return 0;
+}
+
+// Short form of a hex chain id — reports are read by people, not by hash.
+static std::string short_hex_str(const std::string& hex) {
+    return hex.size() > 8 ? hex.substr(0, 8) + "…" : hex;
 }
 
 // ── Catalogs (records.md §8.7) ────────────────────────────────────────────────
@@ -1975,6 +1981,139 @@ static int cmd_needs_list(int argc, char** argv) {
     return directory_get(via, "needs", need);
 }
 
+// bc match --via URL [--json]
+//
+// The report the whole thing exists for: whose needs are closed by whose skills,
+// what nobody can close, and who could grow into the gap. Rendered for a person;
+// --json hands the raw report to an external AI (no LLM lives in here).
+static int cmd_match(int argc, char** argv) {
+    const auto via = flag_val(argc, argv, "--via");
+    if (via.empty()) {
+        std::cerr << "Usage: bc match --via URL [--json]\n";
+        return 1;
+    }
+    std::string host = via;
+    if (host.rfind("http://", 0) == 0) host = host.substr(7);
+    httplib::Client cli(host);
+    cli.set_connection_timeout(10);
+    const auto res = cli.Get("/match");
+    if (!res) {
+        std::cerr << "aggregator unreachable: " << via << "\n";
+        return 1;
+    }
+    if (res->status != 200) {
+        std::cerr << res->body << "\n";
+        return 1;
+    }
+    if (flag_present(argc, argv, "--json")) {
+        std::cout << res->body << "\n";
+        return 0;
+    }
+
+    using records::json::Value;
+    Value root;
+    try {
+        root = records::json::Reader(res->body).read();
+    } catch (const records::json::JsonError& e) {
+        std::cerr << "агрегатор вернул некорректный JSON: " << e.what() << "\n";
+        return 1;
+    }
+    auto str = [](const records::json::Object& o, const char* k) -> std::string {
+        const Value* v = records::json::find(o, k);
+        return (v && v->is_string()) ? v->string : std::string{};
+    };
+    auto arr = [](const Value& v, const char* k) -> const Value* {
+        const Value* f = v.is_object() ? records::json::find(v.object, k) : nullptr;
+        return (f && f->is_array()) ? f : nullptr;
+    };
+
+    // ── Matches ───────────────────────────────────────────────────────────────
+    std::size_t met = 0, unmet = 0;
+    std::cout << "СТЫКОВКИ\n";
+    if (const Value* needs = arr(root, "needs")) {
+        for (const auto& n : needs->array) {
+            if (!n.is_object()) continue;
+            const auto  seeker = str(n.object, "seeker");
+            const auto  text   = str(n.object, "text");
+            const auto  urg    = str(n.object, "urgency");
+            const Value* cands = arr(n, "candidates");
+            const bool  has    = cands && !cands->array.empty();
+            has ? ++met : ++unmet;
+
+            std::cout << (has ? "  + " : "  - ") << short_hex_str(seeker)
+                      << "  \"" << text << "\""
+                      << (urg == "high" ? "  [срочно]" : "") << "\n";
+            if (!has) {
+                std::cout << "      никто не закрывает\n";
+                continue;
+            }
+            for (const auto& c : cands->array) {
+                if (!c.is_object()) continue;
+                const Value* d = records::json::find(c.object, "distance_km");
+                std::cout << "      закроет " << short_hex_str(str(c.object, "chain"))
+                          << "  " << str(c.object, "slug");
+                const auto grade = str(c.object, "grade");
+                if (!grade.empty()) std::cout << ", разряд " << grade;
+                if (d && d->is_number() && d->number >= 0) {
+                    std::ostringstream km;
+                    km << std::fixed << std::setprecision(1) << d->number;
+                    std::cout << ", " << km.str() << " км";
+                } else {
+                    std::cout << ", удалённо";
+                }
+                std::cout << "\n";
+            }
+        }
+    }
+    std::cout << "\n  закрыто " << met << " из " << (met + unmet) << "\n";
+
+    // ── Rings ─────────────────────────────────────────────────────────────────
+    if (const Value* rings = arr(root, "rings"); rings && !rings->array.empty()) {
+        std::cout << "\nКОЛЬЦА ОБМЕНА (замыкаются без долга наружу)\n";
+        for (const auto& ring : rings->array) {
+            if (!ring.is_array()) continue;
+            std::cout << "  ";
+            for (std::size_t i = 0; i < ring.array.size(); ++i) {
+                if (i) std::cout << " → ";
+                std::cout << short_hex_str(ring.array[i].string);
+            }
+            if (!ring.array.empty())
+                std::cout << " → " << short_hex_str(ring.array[0].string);
+            std::cout << "\n";
+        }
+    }
+
+    // ── Deficits ──────────────────────────────────────────────────────────────
+    if (const Value* defs = arr(root, "deficits"); defs && !defs->array.empty()) {
+        std::cout << "\nДЕФИЦИТ И ПЕРЕОБУЧЕНИЕ\n";
+        for (const auto& d : defs->array) {
+            if (!d.is_object()) continue;
+            std::cout << "  " << str(d.object, "need")
+                      << "  \"" << str(d.object, "text") << "\"\n";
+
+            if (const Value* p = arr(d, "professions"); p && !p->array.empty()) {
+                std::cout << "      закрыла бы профессия:";
+                for (const auto& x : p->array) std::cout << " " << x.string;
+                std::cout << "\n";
+            } else {
+                std::cout << "      профессией не закрывается\n";
+            }
+            if (const Value* a = arr(d, "aspiring"); a && !a->array.empty()) {
+                std::cout << "      уже хотят это освоить:";
+                for (const auto& x : a->array) std::cout << " " << short_hex_str(x.string);
+                std::cout << "\n";
+            } else if (const Value* w = arr(d, "willing"); w && !w->array.empty()) {
+                std::cout << "      готовы переучиваться вообще:";
+                for (const auto& x : w->array) std::cout << " " << short_hex_str(x.string);
+                std::cout << "\n";
+            } else {
+                std::cout << "      переучиваться пока никто не готов\n";
+            }
+        }
+    }
+    return 0;
+}
+
 // bc apply --draft FILE [--dry-run] [--yes] [--leaf N] [--via URL]
 //
 // A scribe, an accountant or an AI prepares the draft; the owner signs it here
@@ -2913,6 +3052,12 @@ type; catalogs: docs/catalogs.md):
                                        for need↔skill matching, by hand or by
                                        an external AI
 
+Matching — the point of it all (ИР-005):
+  match --via URL                  Report: whose needs are closed by whose skills,
+    [--json]                           exchange rings, deficits and who could
+                                       retrain into them. Needs the aggregator to
+                                       run with --catalog. --json → for an AI.
+
 Finding each other (records.md §8.6):
   directory --skill SLUG --via URL Who offers this skill (closed facts excluded)
   needs list --via URL             Open needs: all of them, or one slug
@@ -3112,6 +3257,7 @@ int main(int argc, char** argv) {
         else if (cmd == "export"    && subcmd == "profiles")return cmd_export_profiles(argc, argv);
         else if (cmd == "apply")                            return cmd_apply(data_dir, argc, argv);
         else if (cmd == "catalog")                          return cmd_catalog(argc, argv);
+        else if (cmd == "match")                            return cmd_match(argc, argv);
         else if (cmd == "directory")                        return cmd_directory(argc, argv);
         else if (cmd == "needs"     && subcmd == "list")    return cmd_needs_list(argc, argv);
         else if (cmd == "fetch")                            return cmd_fetch(data_dir, argc, argv);

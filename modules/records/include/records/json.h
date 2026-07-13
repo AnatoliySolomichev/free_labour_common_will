@@ -8,7 +8,8 @@
 // decode \uXXXX escapes including surrogate pairs: a model writing Cyrillic
 // commonly emits them.
 //
-// Not a public header: callers translate JsonError into their own error type.
+// Callers translate JsonError into their own error type (DraftError, CatalogError)
+// or render it as-is.
 
 #include <cstdint>
 #include <stdexcept>

@@ -1,10 +1,12 @@
 #include "aggregator/server.h"
 #include "aggregator/discovery_view.h"
 #include "aggregator/economy_view.h"
+#include "aggregator/match_view.h"
 #include "aggregator/profile_view.h"
 #include "aggregator/rates_view.h"
 #include "blockchain/serializer.h"
 #include "blockchain/errors.h"
+#include <records/catalog.h>
 #include <records/codec.h>
 #include <httplib.h>
 #include <algorithm>
@@ -940,6 +942,98 @@ void AggregatorServer::setup_routes() {
                     first = false;
                     body += fact_to_json(uid, *fact);
                 }
+            }
+            body += "]}";
+            res.set_content(body, "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
+                            "application/json");
+        }
+    });
+
+    // ── GET /match (ИР-005) ───────────────────────────────────────────────────
+    //
+    // The payoff: whose needs are closed by whose skills, what nobody can close,
+    // and who could grow into the gap. Needs the catalog (closed_by) — without
+    // it a program cannot know that wiring is fixed by an electrician.
+
+    svr.Get("/match", [&](const httplib::Request&, httplib::Response& res) {
+        if (catalog_dir_.empty()) {
+            res.status = 501;
+            res.set_content(
+                "{\"error\":\"matching needs a catalog: start with --catalog PATH\"}",
+                "application/json");
+            return;
+        }
+        try {
+            const auto text = read_file(catalog_dir_ / "needs.json");
+            if (!text) {
+                res.status = 501;
+                res.set_content("{\"error\":\"needs.json not found in catalog dir\"}",
+                                "application/json");
+                return;
+            }
+            const auto needs_catalog = records::parse_catalog(*text);
+
+            ClosedBy closed_by;
+            for (const auto& e : needs_catalog.entries)
+                closed_by[e.slug] = e.closed_by;
+
+            const auto view = MatchView::build(storage_, closed_by);
+
+            std::string body = "{\"needs\":[";
+            bool first = true;
+            for (const auto& m : view.needs()) {
+                if (!first) body += ',';
+                first = false;
+                body += "{\"seeker\":\""    + to_hex(m.seeker.bytes)
+                     + "\",\"ref\":\""      + to_hex(m.seeker.bytes) + "/"
+                                            + to_hex(m.block_hash.bytes)
+                     + "\",\"slug\":\""     + json_escape(m.slug)
+                     + "\",\"text\":\""     + json_escape(m.text)
+                     + "\",\"urgency\":\""  + json_escape(m.urgency)
+                     + "\",\"candidates\":[";
+                bool c_first = true;
+                for (const auto& c : m.candidates) {
+                    if (!c_first) body += ',';
+                    c_first = false;
+                    body += "{\"chain\":\""   + to_hex(c.chain.bytes)
+                         + "\",\"slug\":\""   + json_escape(c.slug)
+                         + "\",\"text\":\""   + json_escape(c.text)
+                         + "\",\"grade\":\""  + json_escape(c.grade)
+                         + "\",\"distance_km\":" + std::to_string(c.distance_km)
+                         + "}";
+                }
+                body += "]}";
+            }
+            body += "],\"deficits\":[";
+            first = true;
+            for (const auto& d : view.deficits()) {
+                if (!first) body += ',';
+                first = false;
+                body += "{\"need\":\""  + json_escape(d.need_slug)
+                     + "\",\"text\":\"" + json_escape(d.text)
+                     + "\",\"professions\":[";
+                for (std::size_t i = 0; i < d.professions.size(); ++i)
+                    body += (i ? ",\"" : "\"") + json_escape(d.professions[i]) + '"';
+                body += "],\"aspiring\":[";
+                for (std::size_t i = 0; i < d.aspiring.size(); ++i)
+                    body += (i ? ",\"" : "\"") + to_hex(d.aspiring[i].bytes) + '"';
+                body += "],\"willing\":[";
+                for (std::size_t i = 0; i < d.willing.size(); ++i)
+                    body += (i ? ",\"" : "\"") + to_hex(d.willing[i].bytes) + '"';
+                body += "]}";
+            }
+            body += "],\"rings\":[";
+            first = true;
+            for (const auto& ring : view.rings()) {
+                if (!first) body += ',';
+                first = false;
+                body += '[';
+                for (std::size_t i = 0; i < ring.chains.size(); ++i)
+                    body += (i ? ",\"" : "\"") + to_hex(ring.chains[i].bytes) + '"';
+                body += ']';
             }
             body += "]}";
             res.set_content(body, "application/json");

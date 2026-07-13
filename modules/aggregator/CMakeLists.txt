@@ -10,6 +10,7 @@ add_library(aggregator
     src/server.cpp
     src/economy_view.cpp
     src/discovery_view.cpp
+    src/match_view.cpp
     src/profile_view.cpp
     src/rates_view.cpp
     src/own_chain.cpp
@@ -45,6 +46,7 @@ add_executable(aggregator_tests
     tests/test_relay.cpp
     tests/test_economy_view.cpp
     tests/test_discovery_view.cpp
+    tests/test_match_view.cpp
     tests/test_profile_view.cpp
     tests/test_rates_view.cpp
 )

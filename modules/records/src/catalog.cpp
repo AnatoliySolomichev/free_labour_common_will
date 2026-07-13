@@ -1,6 +1,6 @@
 #include "records/catalog.h"
 
-#include "json.h"
+#include <records/json.h>
 
 namespace records {
 
