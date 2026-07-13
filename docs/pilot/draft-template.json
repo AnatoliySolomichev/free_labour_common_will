@@ -1,0 +1,45 @@
+{
+  "records": [
+    {
+      "t": "concept",
+      "text": "ЧТО Я УМЕЮ — живым языком: профессия, стаж, чем именно могу помочь",
+      "tags": [
+        "kind:skill",
+        "cat:prof.electrician",
+        "geo:55.75,37.62",
+        "r:30",
+        "grade:4",
+        "exp:8",
+        "capacity:20"
+      ]
+    },
+    {
+      "t": "concept",
+      "text": "ЧТО МНЕ НУЖНО — конкретно: что починить, с чем помочь, что сделать",
+      "tags": [
+        "kind:need",
+        "cat:need.food",
+        "geo:55.75,37.62",
+        "r:25",
+        "horizon:now",
+        "urgency:normal"
+      ]
+    },
+    {
+      "t": "concept",
+      "text": "ЧЕМУ ГОТОВ НАУЧИТЬСЯ — если в округе не хватает специалистов",
+      "tags": [
+        "kind:aspiration",
+        "cat:prof.accountant",
+        "retrain:yes"
+      ]
+    },
+    {
+      "t": "concept",
+      "text": "ЧТО ЛЮБЛЮ ДЕЛАТЬ — хобби, занятия по душе",
+      "tags": [
+        "kind:hobby"
+      ]
+    }
+  ]
+}
