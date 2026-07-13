@@ -7,6 +7,7 @@
 #include <blockchain/storage.h>
 #include <blockchain/validator.h>
 #include <records/codec.h>
+#include <records/draft.h>
 #include <records/types.h>
 #include <sync/dialogue_channel.h>
 #include <sync/participant_cache.h>
@@ -1845,6 +1846,81 @@ static int cmd_chain_info(int argc, char** argv) {
     return economy_get(via, "/economy/chain/" + pos[2]);
 }
 
+// bc apply --draft FILE [--dry-run] [--yes] [--leaf N] [--via URL]
+//
+// A scribe, an accountant or an AI prepares the draft; the owner signs it here
+// (ИР-005 п.5). The draft holds no keys and grants no authority: value appears
+// only when each record is appended to the owner's branch under the owner's key
+// — one block, one signature. records::parse_draft refuses value-bearing types
+// outright, so a Transfer cannot hide among profile facts; what remains is a
+// short, fully-rendered batch a person can read in one sitting.
+static int cmd_apply(const fs::path& data_dir, int argc, char** argv) {
+    const auto file = flag_val(argc, argv, "--draft");
+    if (file.empty()) {
+        std::cerr << "Usage: bc apply --draft FILE [--dry-run] [--yes] "
+                     "[--leaf N] [--via URL]\n";
+        return 1;
+    }
+
+    std::ifstream f(file, std::ios::binary);
+    if (!f) {
+        std::cerr << "cannot read " << file << "\n";
+        return 1;
+    }
+    const std::string json((std::istreambuf_iterator<char>(f)),
+                            std::istreambuf_iterator<char>());
+
+    records::Draft draft;
+    try {
+        draft = records::parse_draft(json);
+    } catch (const records::DraftError& e) {
+        std::cerr << "Черновик отклонён — " << e.what() << "\n";
+        return 1;
+    }
+
+    // --leaf wins over the draft's own "leaf"; then the draft; then the default.
+    NodeIndex leaf = parse_leaf_index(argc, argv);
+    if (flag_val(argc, argv, "--leaf").empty() && draft.leaf.has_value())
+        leaf = static_cast<NodeIndex>(*draft.leaf);
+
+    // Everything is rendered in full: hiding part of a record is the very risk
+    // being guarded against.
+    std::cout << "Черновик: " << file << "\n"
+              << "Ветка:    " << leaf << "\n"
+              << "Записей:  " << draft.records.size() << "\n\n";
+    for (std::size_t i = 0; i < draft.records.size(); ++i)
+        std::cout << "  " << (i + 1) << ". "
+                  << records::render_record(draft.records[i]) << "\n\n";
+
+    if (flag_present(argc, argv, "--dry-run")) {
+        std::cout << "Пробный прогон — ничего не записано и не подписано.\n";
+        return 0;
+    }
+
+    if (!flag_present(argc, argv, "--yes")) {
+        std::cout << "Подписать " << draft.records.size()
+                  << " запис(ь/и) своим ключом ветки " << leaf << "? [y/N] "
+                  << std::flush;
+        std::string answer;
+        if (!std::getline(std::cin, answer) ||
+            (answer != "y" && answer != "Y" && answer != "д" && answer != "Д")) {
+            std::cout << "Отменено — ничего не подписано.\n";
+            return 1;
+        }
+    }
+
+    Context    ctx(data_dir, leaf);
+    const auto via = flag_val(argc, argv, "--via");
+    for (std::size_t i = 0; i < draft.records.size(); ++i) {
+        const Block block = append_record(ctx, draft.records[i]);
+        std::cout << "  " << (i + 1) << ". block #" << block.address.block_index
+                  << "  hash: " << to_hex(Crypto::hash_block(block).bytes) << "\n";
+        if (!via.empty()) upload_block(via, block);
+    }
+    std::cout << "Подписано и записано: " << draft.records.size() << "\n";
+    return 0;
+}
+
 // bc export profiles --via URL [--out FILE] [--chain UID_HEX]
 // The aggregator's decoded self-descriptions (records.md §8.6, §13): skills,
 // needs, aspirations of every known chain, tags verbatim. This is the JSON that
@@ -2692,6 +2768,15 @@ type; catalogs: docs/catalogs.md):
                                        for need↔skill matching, by hand or by
                                        an external AI
 
+Delegated authoring — a scribe/AI prepares, the OWNER signs (ИР-005 п.5):
+  apply --draft FILE               Sign and append the records of a draft. The
+    [--dry-run]                        draft holds no keys: it grants nothing
+    [--yes] [--leaf N] [--via URL]     until signed here, one block per record.
+                                       Only concept / concept-link / composite
+                                       are accepted — value-bearing records are
+                                       refused, so a transfer cannot hide in a
+                                       batch. --dry-run renders it, signs nothing.
+
 Knowledge graph:
   concept add <text>               Add an idea
               [--tag TAG...]
@@ -2871,6 +2956,7 @@ int main(int argc, char** argv) {
         else if (cmd == "discover")                         return cmd_discover(data_dir, argc, argv);
         else if (cmd == "chain"     && subcmd == "info")    return cmd_chain_info(argc, argv);
         else if (cmd == "export"    && subcmd == "profiles")return cmd_export_profiles(argc, argv);
+        else if (cmd == "apply")                            return cmd_apply(data_dir, argc, argv);
         else if (cmd == "fetch")                            return cmd_fetch(data_dir, argc, argv);
         else if (cmd == "pay")                              return cmd_pay(data_dir, argc, argv);
         else if (cmd == "transfer"  && subcmd == "send")    return cmd_transfer_send(data_dir, argc, argv);

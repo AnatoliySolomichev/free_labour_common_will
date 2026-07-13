@@ -7,6 +7,7 @@
     { "slug": "prof.carpenter",    "ru": "Столяр",          "group": "Ремонт и строительство", "aliases": ["плотник"] },
     { "slug": "prof.builder",      "ru": "Строитель",       "group": "Ремонт и строительство", "aliases": ["отделочник", "каменщик"] },
     { "slug": "prof.welder",       "ru": "Сварщик",         "group": "Ремонт и строительство", "aliases": [] },
+    { "slug": "prof.appliance-repair", "ru": "Мастер по ремонту техники", "group": "Быт и услуги", "aliases": ["ремонт бытовой техники"] },
     { "slug": "prof.auto-mechanic","ru": "Автослесарь",     "group": "Транспорт",              "aliases": ["автомеханик"] },
     { "slug": "prof.driver",       "ru": "Водитель",        "group": "Транспорт",              "aliases": [] },
     { "slug": "prof.tailor",       "ru": "Швея",            "group": "Быт и услуги",           "aliases": ["портной", "закройщик"] },
