@@ -9,6 +9,9 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     git \
     gdb \
+    python3 \
+    python3-pip \
+    python3-venv \
     libsodium-dev \
     liblmdb-dev \
     libgtest-dev \
