@@ -1,4 +1,5 @@
 #include "aggregator/server.h"
+#include "aggregator/deal_view.h"
 #include "aggregator/discovery_view.h"
 #include "aggregator/economy_view.h"
 #include "aggregator/match_view.h"
@@ -1034,6 +1035,84 @@ void AggregatorServer::setup_routes() {
                 for (std::size_t i = 0; i < ring.chains.size(); ++i)
                     body += (i ? ",\"" : "\"") + to_hex(ring.chains[i].bytes) + '"';
                 body += ']';
+            }
+            body += "]}";
+            res.set_content(body, "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
+                            "application/json");
+        }
+    });
+
+    // ── GET /deals (records.md §8.6 «словарь сделки»; ИР-006 шаг 2) ───────────
+    //
+    // Every deal the aggregator can assemble: a need with its tail of links,
+    // staged. Full refs are included on purpose — the CLI verbs act on them, so
+    // nobody copies 64-hex hashes by hand. Advisory and re-checkable.
+
+    svr.Get("/deals", [&](const httplib::Request&, httplib::Response& res) {
+        try {
+            const auto view = DealView::build(storage_);
+            std::string body = "{\"deals\":[";
+            bool first = true;
+            for (const auto& d : view.deals()) {
+                if (!first) body += ',';
+                first = false;
+                body += "{\"seeker\":\"" + to_hex(d.seeker.bytes) + "\"";
+                if (d.need_hash)
+                    body += ",\"need_ref\":\"" + to_hex(d.seeker.bytes) + "/"
+                          + to_hex(d.need_hash->bytes) + "\"";
+                body += ",\"slug\":\""    + json_escape(d.slug)
+                      + "\",\"text\":\""  + json_escape(d.text)
+                      + "\",\"urgency\":\"" + json_escape(d.urgency)
+                      + "\",\"stage\":\"" + DealView::stage_name(d.stage())
+                      + "\",\"closed\":"  + (d.closed ? "true" : "false")
+                      + ",\"appraised\":" + std::to_string(d.appraised())
+                      + ",\"paid\":"      + std::to_string(d.paid())
+                      + ",\"takers\":[";
+                bool f2 = true;
+                for (const auto& t : d.takers) {
+                    if (!f2) body += ',';
+                    f2 = false;
+                    body += "{\"chain\":\""      + to_hex(t.chain.bytes)
+                          + "\",\"skill_ref\":\"" + to_hex(t.chain.bytes) + "/"
+                          + to_hex(t.skill_hash.bytes) + "\"}";
+                }
+                body += "],\"pledges\":[";
+                f2 = true;
+                for (const auto& p : d.pledges) {
+                    if (!f2) body += ',';
+                    f2 = false;
+                    body += "{\"pledger\":\"" + to_hex(p.pledger.bytes)
+                          + "\",\"ref\":\""   + to_hex(p.pledger.bytes) + "/"
+                          + to_hex(p.pledge_hash.bytes)
+                          + "\",\"units\":"   + std::to_string(p.units)
+                          + ",\"settled\":"   + std::to_string(p.settled)
+                          + ",\"revoked\":"   + (p.revoked ? "true" : "false");
+                    if (p.executor)
+                        body += ",\"executor\":\"" + to_hex(p.executor->bytes) + "\"";
+                    body += "}";
+                }
+                body += "],\"works\":[";
+                f2 = true;
+                for (const auto& w : d.works) {
+                    if (!f2) body += ',';
+                    f2 = false;
+                    body += "{\"worker\":\"" + to_hex(w.worker.bytes)
+                          + "\",\"ref\":\""  + to_hex(w.worker.bytes) + "/"
+                          + to_hex(w.work_hash.bytes)
+                          + "\",\"action\":\"" + json_escape(w.action)
+                          + "\",\"hours\":"  + std::to_string(w.hours)
+                          + ",\"accepted\":" + (w.accepted ? "true" : "false");
+                    if (w.accepted)
+                        body += ",\"acceptance_ref\":\"" + to_hex(w.acceptor.bytes)
+                              + "/" + to_hex(w.acceptance_hash.bytes)
+                              + "\",\"labor_units\":" + std::to_string(w.labor_units)
+                              + ",\"paid\":" + std::to_string(w.paid);
+                    body += "}";
+                }
+                body += "]}";
             }
             body += "]}";
             res.set_content(body, "application/json");

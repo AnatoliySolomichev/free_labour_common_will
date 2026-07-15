@@ -1794,14 +1794,11 @@ static int cmd_fetch(const fs::path& data_dir, int argc, char** argv) {
 // Pays (the remainder of) an own acceptance's appraisal to the worker
 // (records.md §9.5). Refuses to exceed the appraised value — payments for one
 // work never outgrow its labor_units (§12.8).
-static int cmd_pay(const fs::path& data_dir, int argc, char** argv) {
-    const auto acc_s = flag_val(argc, argv, "--acceptance");
-    if (acc_s.empty()) {
-        std::cerr << "Usage: bc pay --acceptance REF [--units N] [--via URL] [--leaf L]\n";
-        return 1;
-    }
-
-    const NodeIndex leaf = parse_leaf_index(argc, argv);
+// Core of paying an own acceptance — shared by `bc pay` and `bc deal settle`
+// (the deal verbs resolve the refs so nobody copies 64-hex hashes by hand).
+static int do_pay(const fs::path& data_dir, NodeIndex leaf,
+                  const std::string& acc_s, const std::string& units_s,
+                  const std::string& pledge_s, const std::string& via) {
     Context ctx(data_dir, leaf);
 
     const Ref acc_ref = parse_ref(acc_s);
@@ -1839,7 +1836,6 @@ static int cmd_pay(const fs::path& data_dir, int argc, char** argv) {
                   << " labor-h — payments must not exceed the appraisal (§12.8)\n";
         return 1;
     }
-    const auto   units_s = flag_val(argc, argv, "--units");
     const double units   = units_s.empty() ? remaining : std::stod(units_s);
     if (units > remaining + 1e-9) {
         std::cerr << "refused: " << units << "h would exceed the appraisal — paid "
@@ -1861,7 +1857,6 @@ static int cmd_pay(const fs::path& data_dir, int argc, char** argv) {
     // Transfer v4 (§11.1): reason says WHAT is paid for, settles says WHICH
     // promise this closes. Without it a pledge honestly paid off by labour would
     // stay "active" forever and expire.
-    const auto pledge_s = flag_val(argc, argv, "--pledge");
     if (!pledge_s.empty()) t.settles = parse_ref(pledge_s);
     // Pay into the purse of the branch that did the work (economy.md §5а).
     if (const auto work_block = find_external_by_hash(ctx, acceptance->work.hash))
@@ -1874,9 +1869,21 @@ static int cmd_pay(const fs::path& data_dir, int argc, char** argv) {
               << ")  transfer ref: " << me_hex << "/"
               << to_hex(Crypto::hash_block(block).bytes) << "\n";
 
-    const auto via = flag_val(argc, argv, "--via");
     if (!via.empty()) upload_block(via, block);
     return 0;
+}
+
+static int cmd_pay(const fs::path& data_dir, int argc, char** argv) {
+    const auto acc_s = flag_val(argc, argv, "--acceptance");
+    if (acc_s.empty()) {
+        std::cerr << "Usage: bc pay --acceptance REF [--units N] [--pledge REF] "
+                     "[--via URL] [--leaf L]\n";
+        return 1;
+    }
+    return do_pay(data_dir, parse_leaf_index(argc, argv), acc_s,
+                  flag_val(argc, argv, "--units"),
+                  flag_val(argc, argv, "--pledge"),
+                  flag_val(argc, argv, "--via"));
 }
 
 // Shared GET for the aggregator economy view (records.md §13). Prints the
@@ -2129,6 +2136,402 @@ static int cmd_match(int argc, char** argv) {
             }
         }
     }
+    return 0;
+}
+
+// ── bc deal — сделка как потребность с хвостом ссылок (records.md §8.6) ───────
+//
+// The verbs act on DealView state fetched from the aggregator, resolving every
+// ref themselves: in the step-1 live run one deal took 12 commands and 7 manual
+// copies of 64-hex hashes — a human will not do that twice. The vocabulary is
+// ordinary ConceptLinks («берусь», «исполняет», «закрыто») — no new types.
+
+// GET a JSON endpoint and parse it. nullopt on any failure.
+static std::optional<records::json::Value> fetch_json(const std::string& via,
+                                                      const std::string& path) {
+    std::string host = via;
+    if (host.rfind("http://", 0) == 0) host = host.substr(7);
+    httplib::Client cli(host);
+    cli.set_connection_timeout(5);
+    const auto res = cli.Get(path);
+    if (!res || res->status != 200) return std::nullopt;
+    try {
+        return records::json::Reader(res->body).read();
+    } catch (const records::json::JsonError&) {
+        return std::nullopt;
+    }
+}
+
+static std::string jstr(const records::json::Object& o, const char* k) {
+    const auto* v = records::json::find(o, k);
+    return (v && v->is_string()) ? v->string : std::string{};
+}
+static double jnum(const records::json::Object& o, const char* k) {
+    const auto* v = records::json::find(o, k);
+    return (v && v->is_number()) ? v->number : 0.0;
+}
+static const records::json::Value* jarr(const records::json::Object& o,
+                                        const char* k) {
+    const auto* v = records::json::find(o, k);
+    return (v && v->is_array()) ? v : nullptr;
+}
+
+// The deal for a need ref, out of GET /deals. nullopt when the aggregator
+// does not know it (not uploaded yet, or no such need).
+static std::optional<records::json::Value> find_deal(const std::string& via,
+                                                     const std::string& need_ref) {
+    const auto root = fetch_json(via, "/deals");
+    if (!root || !root->is_object()) return std::nullopt;
+    const auto* deals = jarr(root->object, "deals");
+    if (!deals) return std::nullopt;
+    for (const auto& d : deals->array)
+        if (d.is_object() && jstr(d.object, "need_ref") == need_ref) return d;
+    return std::nullopt;
+}
+
+// Own facts of one record shape, scanned across local branches — so the verbs
+// can resolve "my skill" / "my grade" without the person copying hashes.
+struct OwnFact { std::string ref; std::string label; };
+
+template <typename Pick>
+static std::vector<OwnFact> scan_own_facts(Context& ctx, Pick pick) {
+    std::vector<OwnFact> out;
+    for (const NodeIndex node : ctx.local_branches()) {
+        std::vector<Block> blocks;
+        try { blocks = ctx.bc.get_branch(ctx.user_id, node); }
+        catch (const BlockchainError&) { continue; }
+        for (const auto& b : blocks) {
+            if (b.type != BlockType::DATA) continue;
+            Record rec;
+            try { rec = Codec::decode(b.payload.data(), b.payload.size()); }
+            catch (const CodecError&) { continue; }
+            if (auto label = pick(rec))
+                out.push_back(OwnFact{
+                    to_hex(ctx.user_id.bytes) + "/" +
+                        to_hex(Crypto::hash_block(b).bytes),
+                    *label});
+        }
+    }
+    return out;
+}
+
+// bc deal list --via URL [--all]
+// My deals with their stage and — the point — the exact next command, refs
+// filled in.
+static int cmd_deal_list(const fs::path& data_dir, int argc, char** argv) {
+    const auto via = flag_val(argc, argv, "--via");
+    if (via.empty()) {
+        std::cerr << "Usage: bc deal list --via URL [--all]\n";
+        return 1;
+    }
+    const auto root = fetch_json(via, "/deals");
+    if (!root || !root->is_object()) {
+        std::cerr << "aggregator unreachable or /deals failed: " << via << "\n";
+        return 1;
+    }
+    const auto* deals = jarr(root->object, "deals");
+    if (!deals) { std::cerr << "bad /deals response\n"; return 1; }
+
+    const bool  all = flag_present(argc, argv, "--all");
+    std::string me;
+    try { me = to_hex(load_user_id(data_dir).bytes); }
+    catch (const std::exception&) { /* no identity yet — show all */ }
+
+    std::size_t shown = 0;
+    for (const auto& d : deals->array) {
+        if (!d.is_object()) continue;
+        const auto seeker   = jstr(d.object, "seeker");
+        const auto need_ref = jstr(d.object, "need_ref");
+        const auto stage    = jstr(d.object, "stage");
+
+        // my roles in this deal
+        bool i_seek = !me.empty() && seeker == me;
+        bool i_work = false, i_took = false;
+        std::string first_taker, work_ref, acc_ref;
+        double appraised = jnum(d.object, "appraised");
+        double paid      = jnum(d.object, "paid");
+        if (const auto* ts = jarr(d.object, "takers"))
+            for (const auto& t : ts->array) {
+                if (!t.is_object()) continue;
+                if (first_taker.empty()) first_taker = jstr(t.object, "chain");
+                if (jstr(t.object, "chain") == me) i_took = true;
+            }
+        if (const auto* ws = jarr(d.object, "works"))
+            for (const auto& w : ws->array) {
+                if (!w.is_object()) continue;
+                if (jstr(w.object, "worker") == me) i_work = true;
+                if (work_ref.empty()) work_ref = jstr(w.object, "ref");
+                if (acc_ref.empty())  acc_ref  = jstr(w.object, "acceptance_ref");
+            }
+        if (!all && !(i_seek || i_work || i_took)) continue;
+        ++shown;
+
+        const auto urgency = jstr(d.object, "urgency");
+        std::cout << "  «" << jstr(d.object, "text") << "»"
+                  << (urgency == "high" ? "  [срочно]" : "") << "\n"
+                  << "    заказчик " << short_hex_str(seeker)
+                  << (i_seek ? " (вы)" : "") << "   стадия: " << stage;
+        if (appraised > 0)
+            std::cout << "   оплачено " << paid << "/" << appraised << "ч";
+        std::cout << "\n";
+
+        // the exact next move, refs filled in
+        std::string hint;
+        if (stage == "открыта" && !i_seek)
+            hint = "bc deal take " + need_ref + " --via " + via;
+        else if (stage == "есть желающие" && i_seek)
+            hint = "bc deal hire " + need_ref + " --executor " + first_taker +
+                   " --units N --via " + via;
+        else if (stage == "нанят" && !i_seek)
+            hint = "bc deal work " + need_ref +
+                   " --hours H --action \"...\" --via " + via;
+        else if (stage == "работа сделана" && i_seek && !work_ref.empty())
+            hint = "bc fetch " + work_ref + " --via " + via +
+                   "  &&  bc accept --work " + work_ref + " --via " + via;
+        else if ((stage == "принято" || stage == "оплачено") && i_seek)
+            hint = "bc deal settle " + need_ref + " --via " + via;
+        if (!hint.empty()) std::cout << "    → ваш ход: " << hint << "\n";
+        std::cout << "\n";
+    }
+    if (shown == 0)
+        std::cout << (all ? "сделок нет\n"
+                          : "ваших сделок нет (все — bc deal list --all)\n");
+    return 0;
+}
+
+// bc deal take NEED_REF [--skill REF] [--leaf L] [--via URL]
+// «Берусь»: my skill → your need (заявка, records.md §14.7).
+static int cmd_deal_take(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);   // [deal, take, NEED_REF]
+    if (pos.size() < 3) {
+        std::cerr << "Usage: bc deal take NEED_REF [--skill SKILL_REF] "
+                     "[--leaf L] [--via URL]\n";
+        return 1;
+    }
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+
+    std::string skill_ref = flag_val(argc, argv, "--skill");
+    if (skill_ref.empty()) {
+        const auto skills = scan_own_facts(ctx, [](const Record& rec)
+                -> std::optional<std::string> {
+            const auto* c = std::get_if<Concept>(&rec);
+            if (!c) return std::nullopt;
+            for (const auto& tag : c->tags)
+                if (tag == "kind:skill") return c->text;
+            return std::nullopt;
+        });
+        if (skills.size() == 1) {
+            skill_ref = skills[0].ref;
+        } else if (skills.empty()) {
+            std::cerr << "у вас нет записи навыка (kind:skill) — сначала "
+                         "заявите его: bc concept add ... --tag kind:skill\n";
+            return 1;
+        } else {
+            std::cerr << "у вас несколько навыков — укажите --skill REF:\n";
+            for (const auto& s : skills)
+                std::cerr << "  " << s.ref << "  \"" << s.label << "\"\n";
+            return 1;
+        }
+    }
+
+    ConceptLink cl;
+    cl.from = parse_ref(skill_ref);
+    cl.to   = parse_ref(pos[2]);
+    cl.kind = "берусь";
+    if (cl.from.chain != ctx.user_id.bytes)
+        throw std::runtime_error("--skill must reference your own record — "
+                                 "you volunteer with YOUR skill (§8.6)");
+    const Block block = append_record(ctx, Record{cl});
+    std::cout << "взялись: " << skill_ref << " → " << pos[2] << "\n";
+    const auto via = flag_val(argc, argv, "--via");
+    if (!via.empty()) upload_block(via, block);
+    return 0;
+}
+
+// bc deal hire NEED_REF --executor UID --units N [--expires TS]
+// Sugar for `pledge add --target NEED_REF` — hiring is a pledge with a name.
+static int cmd_deal_hire(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos     = get_positionals(argc, argv);
+    const auto exec_s  = flag_val(argc, argv, "--executor");
+    const auto units_s = flag_val(argc, argv, "--units");
+    if (pos.size() < 3 || exec_s.empty() || units_s.empty()) {
+        std::cerr << "Usage: bc deal hire NEED_REF --executor UID_HEX --units N "
+                     "[--expires TS] [--leaf L] [--via URL]\n";
+        return 1;
+    }
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+
+    Pledge p{};
+    p.target    = parse_ref(pos[2]);
+    p.units     = std::stod(units_s);
+    p.executor  = uid_from_hex(exec_s);
+    p.timestamp = static_cast<int64_t>(std::time(nullptr));
+    if (p.units <= 0) throw std::runtime_error("--units must be positive");
+    if (p.target.chain != ctx.user_id.bytes)
+        throw std::runtime_error("NEED_REF must be your own need — the "
+                                 "customer hires (§8.6)");
+    const auto exp_s = flag_val(argc, argv, "--expires");
+    if (!exp_s.empty()) p.expires = static_cast<int64_t>(std::stoll(exp_s));
+
+    const Block block = append_record(ctx, Record{p});
+    std::cout << "наняли " << short_hex_str(exec_s) << " на " << p.units
+              << "ч  (обещание " << to_hex(ctx.user_id.bytes) << "/"
+              << to_hex(Crypto::hash_block(block).bytes) << ")\n";
+    const auto via = flag_val(argc, argv, "--via");
+    if (!via.empty()) upload_block(via, block);
+    return 0;
+}
+
+// bc deal work NEED_REF --hours H --action TEXT [--agent GRADE_REF]
+// Logs the work AND attaches it to the need («исполняет») in one go — the
+// link is exactly what was lost in direct use of `bc work log` (ИР-006 разрыв 3).
+static int cmd_deal_work(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos      = get_positionals(argc, argv);
+    const auto hours_s  = flag_val(argc, argv, "--hours");
+    const auto action_s = flag_val(argc, argv, "--action");
+    if (pos.size() < 3 || hours_s.empty() || action_s.empty()) {
+        std::cerr << "Usage: bc deal work NEED_REF --hours H --action TEXT "
+                     "[--agent GRADE_REF] [--start TS] [--leaf L] [--via URL]\n";
+        return 1;
+    }
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+
+    std::string agent_ref = flag_val(argc, argv, "--agent");
+    if (agent_ref.empty()) {
+        const auto grades = scan_own_facts(ctx, [](const Record& rec)
+                -> std::optional<std::string> {
+            const auto* g = std::get_if<Grade>(&rec);
+            if (!g) return std::nullopt;
+            return "разряд " + std::to_string(static_cast<int>(g->level));
+        });
+        if (grades.size() == 1) {
+            agent_ref = grades[0].ref;
+        } else if (grades.empty()) {
+            std::cerr << "у вас нет разряда — заведите специальность и разряд:\n"
+                         "  bc specialty add prof.<слаг> --via URL\n"
+                         "  bc grade add <spec_ref> <1-6>\n";
+            return 1;
+        } else {
+            std::cerr << "у вас несколько разрядов — укажите --agent REF:\n";
+            for (const auto& g : grades)
+                std::cerr << "  " << g.ref << "  " << g.label << "\n";
+            return 1;
+        }
+    }
+
+    WorkRecord wr{};
+    wr.agent    = parse_ref(agent_ref);
+    wr.action   = action_s;
+    wr.hours    = std::stod(hours_s);
+    const auto start_s = flag_val(argc, argv, "--start");
+    wr.start_ts = start_s.empty() ? static_cast<int64_t>(std::time(nullptr))
+                                  : static_cast<int64_t>(std::stoll(start_s));
+
+    const Block work_block = append_record(ctx, Record{wr});
+    const auto  work_hash  = Crypto::hash_block(work_block);
+
+    ConceptLink cl;
+    cl.from.chain = ctx.user_id.bytes;
+    cl.from.hash  = work_hash.bytes;
+    cl.to         = parse_ref(pos[2]);
+    cl.kind       = "исполняет";
+    const Block link_block = append_record(ctx, Record{cl});
+
+    std::cout << "работа: " << to_hex(ctx.user_id.bytes) << "/"
+              << to_hex(work_hash.bytes) << "  (" << wr.hours
+              << "ч, привязана к потребности)\n";
+    const auto via = flag_val(argc, argv, "--via");
+    if (!via.empty()) { upload_block(via, work_block); upload_block(via, link_block); }
+    return 0;
+}
+
+// bc deal settle NEED_REF --via URL [--leaf L] [--yes]
+// Pays every accepted-but-unpaid work of the deal (settling the own pledge,
+// Transfer v4), then OFFERS to close: payment ≠ need closed — partial pay and
+// multi-stage needs are real, so the owner is asked, never overruled (§8.6).
+static int cmd_deal_settle(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);
+    const auto via = flag_val(argc, argv, "--via");
+    if (pos.size() < 3 || via.empty()) {
+        std::cerr << "Usage: bc deal settle NEED_REF --via URL [--leaf L] [--yes]\n";
+        return 1;
+    }
+    const std::string& need_ref = pos[2];
+    const auto deal = find_deal(via, need_ref);
+    if (!deal) {
+        std::cerr << "агрегатор не знает эту сделку — блоки выгружены (--via)?\n";
+        return 1;
+    }
+    const NodeIndex leaf   = parse_leaf_index(argc, argv);
+    const auto      me_hex = to_hex(load_user_id(data_dir).bytes);
+    if (jstr(deal->object, "seeker") != me_hex) {
+        std::cerr << "рассчитывается заказчик — это не ваша потребность\n";
+        return 1;
+    }
+
+    // my active pledge on this deal → Transfer.settles (v4)
+    std::string pledge_ref;
+    if (const auto* ps = jarr(deal->object, "pledges"))
+        for (const auto& p : ps->array) {
+            if (!p.is_object()) continue;
+            const auto* revoked = records::json::find(p.object, "revoked");
+            if (revoked && revoked->boolean) continue;
+            if (jstr(p.object, "pledger") == me_hex &&
+                jnum(p.object, "settled") + 1e-9 < jnum(p.object, "units")) {
+                pledge_ref = jstr(p.object, "ref");
+                break;
+            }
+        }
+
+    // pay every accepted work that is not yet paid in full
+    std::size_t paid_now = 0;
+    if (const auto* ws = jarr(deal->object, "works"))
+        for (const auto& w : ws->array) {
+            if (!w.is_object()) continue;
+            const auto* accepted = records::json::find(w.object, "accepted");
+            if (!accepted || !accepted->boolean) continue;
+            if (jnum(w.object, "paid") + 1e-9 >= jnum(w.object, "labor_units"))
+                continue;
+            const auto acc_ref = jstr(w.object, "acceptance_ref");
+            std::cout << "— оплата приёмки " << acc_ref << "\n";
+            if (do_pay(data_dir, leaf, acc_ref, "", pledge_ref, via) != 0)
+                return 1;
+            ++paid_now;
+        }
+    if (paid_now == 0) std::cout << "неоплаченных приёмок нет\n";
+
+    // offer to close — the owner decides, the tool never does
+    std::string close_from;   // the acceptance the need was closed BY (§8.6)
+    if (const auto* ws = jarr(deal->object, "works"))
+        for (const auto& w : ws->array)
+            if (w.is_object() && !jstr(w.object, "acceptance_ref").empty())
+                close_from = jstr(w.object, "acceptance_ref");
+    if (close_from.empty()) close_from = need_ref;   // nothing to point at
+
+    if (!flag_present(argc, argv, "--yes")) {
+        std::cout << "Потребность закрыта? [y/N] " << std::flush;
+        std::string answer;
+        if (!std::getline(std::cin, answer) ||
+            (answer != "y" && answer != "Y" && answer != "д" && answer != "Д")) {
+            std::cout << "оставлена открытой\n";
+            return 0;
+        }
+    }
+    Context     ctx(data_dir, leaf);
+    ConceptLink cl;
+    cl.from = parse_ref(close_from);
+    cl.to   = parse_ref(need_ref);
+    cl.kind = "закрыто";
+    const Block block = append_record(ctx, Record{cl});
+    upload_block(via, block);
+    const auto slash = close_from.find('/');
+    std::cout << "потребность закрыта (чем: "
+              << short_hex_str(slash == std::string::npos
+                                   ? close_from
+                                   : close_from.substr(slash + 1)) << ")\n";
     return 0;
 }
 
@@ -3076,6 +3479,20 @@ type; catalogs: docs/catalogs.md):
                                        for need↔skill matching, by hand or by
                                        an external AI
 
+Deals — from found match to settled labour (records.md §8.6; ИР-006):
+  deal list --via URL [--all]      My deals, staged, with the exact next
+                                       command — refs filled in, nothing copied
+  deal take NEED_REF               «Берусь»: volunteer your skill for a need
+    [--skill REF] [--via URL]          (auto-picks your only skill fact)
+  deal hire NEED_REF               Hire a volunteer: a pledge naming them
+    --executor UID --units N
+  deal work NEED_REF               Log work AND attach it to the need in one
+    --hours H --action TEXT            go («исполняет» link) — auto-picks
+    [--agent GRADE_REF]                your only grade
+  deal settle NEED_REF --via URL   Pay accepted work (settling your pledge,
+    [--yes]                            Transfer v4), then ASK to close — the
+                                       owner decides, the tool never does
+
 Matching — the point of it all (ИР-005):
   match --via URL                  Report: whose needs are closed by whose skills,
     [--json]                           exchange rings, deficits and who could
@@ -3290,6 +3707,11 @@ int main(int argc, char** argv) {
         else if (cmd == "apply")                            return cmd_apply(data_dir, argc, argv);
         else if (cmd == "catalog")                          return cmd_catalog(argc, argv);
         else if (cmd == "match")                            return cmd_match(argc, argv);
+        else if (cmd == "deal"      && subcmd == "list")    return cmd_deal_list(data_dir, argc, argv);
+        else if (cmd == "deal"      && subcmd == "take")    return cmd_deal_take(data_dir, argc, argv);
+        else if (cmd == "deal"      && subcmd == "hire")    return cmd_deal_hire(data_dir, argc, argv);
+        else if (cmd == "deal"      && subcmd == "work")    return cmd_deal_work(data_dir, argc, argv);
+        else if (cmd == "deal"      && subcmd == "settle")  return cmd_deal_settle(data_dir, argc, argv);
         else if (cmd == "directory")                        return cmd_directory(argc, argv);
         else if (cmd == "needs"     && subcmd == "list")    return cmd_needs_list(argc, argv);
         else if (cmd == "fetch")                            return cmd_fetch(data_dir, argc, argv);
