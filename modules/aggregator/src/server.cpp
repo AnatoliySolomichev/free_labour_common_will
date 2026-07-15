@@ -1,4 +1,5 @@
 #include "aggregator/server.h"
+#include "aggregator/attestation_view.h"
 #include "aggregator/deal_view.h"
 #include "aggregator/discovery_view.h"
 #include "aggregator/economy_view.h"
@@ -933,6 +934,11 @@ void AggregatorServer::setup_routes() {
             std::string body = "{\"facet\":\"" + json_escape(facet_s)
                              + "\",\"slug\":\"" + json_escape(slug)
                              + "\",\"chains\":[";
+            // The attestation next to the claim (records.md §14.4): the reader
+            // sees «заявлен» vs «заверен N цепями, M часов» and decides.
+            std::optional<AttestationView> attest;
+            if (*facet == ProfileFacet::Skill)
+                attest = AttestationView::build(storage_);
             bool first = true;
             for (const auto& uid : view.by_slug(*facet, slug)) {
                 const auto profile = view.chain(uid);
@@ -941,7 +947,17 @@ void AggregatorServer::setup_routes() {
                     if (fact->slug != slug || fact->closed) continue;
                     if (!first) body += ',';
                     first = false;
-                    body += fact_to_json(uid, *fact);
+                    std::string one = fact_to_json(uid, *fact);
+                    if (attest) {
+                        std::string att = ",\"attested\":null";
+                        if (const auto a = attest->best(uid, slug))
+                            att = ",\"attested\":{\"level\":"
+                                + std::to_string(static_cast<int>(a->level))
+                                + ",\"chains\":" + std::to_string(a->chains)
+                                + ",\"hours\":"  + std::to_string(a->hours) + "}";
+                        one.insert(one.size() - 1, att);
+                    }
+                    body += one;
                 }
             }
             body += "]}";
@@ -1004,6 +1020,9 @@ void AggregatorServer::setup_routes() {
                          + "\",\"text\":\""   + json_escape(c.text)
                          + "\",\"grade\":\""  + json_escape(c.grade)
                          + "\",\"distance_km\":" + std::to_string(c.distance_km)
+                         + ",\"attested_level\":"  + std::to_string(c.attested_level)
+                         + ",\"attested_chains\":" + std::to_string(c.attested_chains)
+                         + ",\"attested_hours\":"  + std::to_string(c.attested_hours)
                          + "}";
                 }
                 body += "]}";

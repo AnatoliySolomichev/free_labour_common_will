@@ -2077,8 +2077,26 @@ static int cmd_match(int argc, char** argv) {
                 const Value* d = records::json::find(c.object, "distance_km");
                 std::cout << "      закроет " << short_hex_str(str(c.object, "chain"))
                           << "  " << str(c.object, "slug");
+                // The claim next to its attestation (§14.4): a bare claim reads
+                // «заявлен», an earned one names its witnesses — the reader
+                // decides, nothing is scored.
                 const auto grade = str(c.object, "grade");
-                if (!grade.empty()) std::cout << ", разряд " << grade;
+                const Value* al  = records::json::find(c.object, "attested_level");
+                const Value* ac  = records::json::find(c.object, "attested_chains");
+                const Value* ah  = records::json::find(c.object, "attested_hours");
+                const int    att_level  = (al && al->is_number())
+                                              ? static_cast<int>(al->number) : -1;
+                const int    att_chains = (ac && ac->is_number())
+                                              ? static_cast<int>(ac->number) : 0;
+                const double att_hours  = (ah && ah->is_number()) ? ah->number : 0;
+                if (att_chains > 0) {
+                    std::cout << ", разряд " << att_level << " (заверен: "
+                              << att_chains << " цеп., " << att_hours << " ч)";
+                    if (!grade.empty() && grade != std::to_string(att_level))
+                        std::cout << " — заявлен " << grade;
+                } else if (!grade.empty()) {
+                    std::cout << ", разряд " << grade << " (заявлен, приёмок нет)";
+                }
                 if (d && d->is_number() && d->number >= 0) {
                     std::ostringstream km;
                     km << std::fixed << std::setprecision(1) << d->number;

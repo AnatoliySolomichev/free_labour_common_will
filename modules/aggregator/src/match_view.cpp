@@ -1,5 +1,7 @@
 #include "aggregator/match_view.h"
 
+#include "aggregator/attestation_view.h"
+
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -86,6 +88,7 @@ MatchView MatchView::build(const AggregatorStorage& storage,
                            const ClosedBy&          closed_by) {
     MatchView  view;
     const auto profiles = ProfileView::build(storage);
+    const auto attest   = AttestationView::build(storage);
 
     // Supply, indexed by profession slug.
     struct Supply {
@@ -140,9 +143,19 @@ MatchView MatchView::build(const AggregatorStorage& storage,
                         if (s.chain == uid) continue;          // not from oneself
                         const auto d = reachable(need_reach, s.reach);
                         if (!d) continue;                      // out of reach
-                        m.candidates.push_back(
-                            MatchCandidate{s.chain, s.hash, s.slug, s.text,
-                                           s.grade, *d});
+                        MatchCandidate cand;
+                        cand.chain       = s.chain;
+                        cand.block_hash  = s.hash;
+                        cand.slug        = s.slug;
+                        cand.text        = s.text;
+                        cand.grade       = s.grade;
+                        cand.distance_km = *d;
+                        if (const auto a = attest.best(s.chain, s.slug)) {
+                            cand.attested_level  = a->level;
+                            cand.attested_chains = a->chains;
+                            cand.attested_hours  = a->hours;
+                        }
+                        m.candidates.push_back(std::move(cand));
                         helps[uid].insert(s.chain);
                     }
                 }

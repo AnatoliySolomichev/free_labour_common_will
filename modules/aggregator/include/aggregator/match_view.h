@@ -30,7 +30,13 @@ struct MatchCandidate {
     Hash        block_hash{};      // the skill fact
     std::string slug;              // prof.*
     std::string text;
-    std::string grade;             // grade: tag, empty when not stated
+    std::string grade;             // grade: tag — the CLAIM, empty when not stated
+    // Attestation of the claim (records.md §14.4): accepted work at this slug,
+    // counted in distinct accepting chains. level -1 → nothing attested, the
+    // claim is bare. The reader compares claim and attestation and decides.
+    int         attested_level  = -1;
+    std::size_t attested_chains = 0;
+    double      attested_hours  = 0;
     // Distance between the two parties, km. Negative when it does not apply:
     // one side works remotely, or a coordinate is missing.
     double      distance_km = -1;
