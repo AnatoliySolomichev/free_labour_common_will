@@ -113,9 +113,8 @@ struct HttpSnapshotStore::Impl {
 };
 
 HttpSnapshotStore::HttpSnapshotStore(const std::string& base_url) {
-    std::string host = base_url;
-    if (host.rfind("http://", 0) == 0) host = host.substr(7);
-    impl_ = std::make_unique<Impl>(host);
+    // base_url goes to httplib::Client as-is: plain host:port, http:// or https://
+    impl_ = std::make_unique<Impl>(base_url);
 }
 
 HttpSnapshotStore::~HttpSnapshotStore() = default;

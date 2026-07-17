@@ -1154,12 +1154,9 @@ void AggregatorServer::setup_routes() {
 // ── Sync ──────────────────────────────────────────────────────────────────────
 
 void AggregatorServer::sync_with_peer(const std::string& peer_url) {
-    // peer_url example: "http://192.168.1.2:8080"
-    // Strip scheme to get host:port for httplib::Client.
-    std::string host = peer_url;
-    if (host.substr(0, 7) == "http://") host = host.substr(7);
-
-    httplib::Client cli(host);
+    // peer_url examples: "http://192.168.1.2:8080", "https://agg.example.org".
+    // httplib::Client is scheme-aware; the URL goes in as-is.
+    httplib::Client cli(peer_url);
     cli.set_connection_timeout(5);
     cli.set_read_timeout(10);
 

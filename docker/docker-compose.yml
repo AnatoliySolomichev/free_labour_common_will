@@ -5,6 +5,9 @@ services:
       dockerfile: docker/Dockerfile
     volumes:
       - ..:/workspace
+      # Claude Code state (chat history, memory) must survive container
+      # rebuilds — without this volume it lives and dies with the container.
+      - claude-data:/root/.claude
     working_dir: /workspace
     stdin_open: true
     tty: true
@@ -75,6 +78,7 @@ services:
                 --peer http://agg1:8081 --sync-interval 15"
 
 volumes:
+  claude-data:
   aggregator-data:
   agg1-data:
   agg2-data:

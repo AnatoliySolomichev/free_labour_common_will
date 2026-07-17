@@ -329,9 +329,7 @@ static RevFetchResult fetch_import_revocations(LmdbStorage& storage,
                                                const UserId& chain,
                                                const std::string& via) {
     RevFetchResult r{};
-    std::string host = via;
-    if (host.rfind("http://", 0) == 0) host = host.substr(7);
-    httplib::Client cli(host);
+    httplib::Client cli(via);  // scheme-aware: plain host:port, http:// or https://
     cli.set_connection_timeout(5);
     const auto res = cli.Get("/revocations/" + to_hex(chain.bytes));
     if (!res || res->status != 200) return r;
@@ -425,9 +423,7 @@ static std::optional<Block> find_external_by_hash(
 // Fetch a block by ref from an aggregator and verify it really is the
 // referenced one (hash and owning chain must match the ref).
 static Block fetch_block_from(const std::string& via, const Ref& src) {
-    std::string host = via;
-    if (host.rfind("http://", 0) == 0) host = host.substr(7);
-    httplib::Client cli(host);
+    httplib::Client cli(via);  // scheme-aware: plain host:port, http:// or https://
     cli.set_connection_timeout(5);
     const auto res = cli.Get("/sync/block/" + to_hex(src.hash.data(), 32));
     if (!res || res->status != 200)
@@ -471,9 +467,7 @@ static std::optional<double> lookup_rate(Context& ctx, const std::string& via,
     const auto* spec = std::get_if<Specialty>(&*spec_rec);
     if (!spec) return std::nullopt;
 
-    std::string host = via;
-    if (host.rfind("http://", 0) == 0) host = host.substr(7);
-    httplib::Client cli(host);
+    httplib::Client cli(via);  // scheme-aware: plain host:port, http:// or https://
     cli.set_connection_timeout(5);
     const auto res = cli.Get("/economy/rates");
     if (!res || res->status != 200) return std::nullopt;
@@ -701,9 +695,7 @@ static std::string short_hex_str(const std::string& hex) {
 static std::optional<std::vector<records::Catalog>> fetch_catalogs(
         const std::string& via) {
     if (via.empty()) return std::nullopt;
-    std::string host = via;
-    if (host.rfind("http://", 0) == 0) host = host.substr(7);
-    httplib::Client cli(host);
+    httplib::Client cli(via);  // scheme-aware: plain host:port, http:// or https://
     cli.set_connection_timeout(5);
     const auto res = cli.Get("/catalog");
     if (!res || res->status != 200) return std::nullopt;
@@ -1536,9 +1528,7 @@ static void attach_emission_link(Context& ctx, records::Transfer& t) {
 
 // Best-effort upload so the receiver can fetch the block from the aggregator.
 static void upload_block(const std::string& via, const Block& block) {
-    std::string host = via;
-    if (host.rfind("http://", 0) == 0) host = host.substr(7);
-    httplib::Client cli(host);
+    httplib::Client cli(via);  // scheme-aware: plain host:port, http:// or https://
     cli.set_connection_timeout(5);
     const auto cbor = Serializer::encode(block);
     const auto res  = cli.Post("/blocks",
@@ -1889,9 +1879,7 @@ static int cmd_pay(const fs::path& data_dir, int argc, char** argv) {
 // Shared GET for the aggregator economy view (records.md §13). Prints the
 // JSON body as-is — every figure is re-checkable against the chains.
 static int economy_get(const std::string& via, const std::string& path) {
-    std::string host = via;
-    if (host.rfind("http://", 0) == 0) host = host.substr(7);
-    httplib::Client cli(host);
+    httplib::Client cli(via);  // scheme-aware: plain host:port, http:// or https://
     cli.set_connection_timeout(5);
     const auto res = cli.Get(path);
     if (!res) {
@@ -1972,9 +1960,7 @@ static int cmd_catalog(int argc, char** argv) {
 // Who offers a skill, who needs what — straight off the aggregator's ProfileView.
 static int directory_get(const std::string& via, const std::string& facet,
                          const std::string& slug) {
-    std::string host = via;
-    if (host.rfind("http://", 0) == 0) host = host.substr(7);
-    httplib::Client cli(host);
+    httplib::Client cli(via);  // scheme-aware: plain host:port, http:// or https://
     cli.set_connection_timeout(5);
     const auto res = cli.Get("/directory/" + facet + "/" + slug);
     if (!res) {
@@ -2017,9 +2003,7 @@ static int cmd_match(int argc, char** argv) {
         std::cerr << "Usage: bc match --via URL [--json]\n";
         return 1;
     }
-    std::string host = via;
-    if (host.rfind("http://", 0) == 0) host = host.substr(7);
-    httplib::Client cli(host);
+    httplib::Client cli(via);  // scheme-aware: plain host:port, http:// or https://
     cli.set_connection_timeout(10);
     const auto res = cli.Get("/match");
     if (!res) {
@@ -2167,9 +2151,7 @@ static int cmd_match(int argc, char** argv) {
 // GET a JSON endpoint and parse it. nullopt on any failure.
 static std::optional<records::json::Value> fetch_json(const std::string& via,
                                                       const std::string& path) {
-    std::string host = via;
-    if (host.rfind("http://", 0) == 0) host = host.substr(7);
-    httplib::Client cli(host);
+    httplib::Client cli(via);  // scheme-aware: plain host:port, http:// or https://
     cli.set_connection_timeout(5);
     const auto res = cli.Get(path);
     if (!res || res->status != 200) return std::nullopt;
@@ -2657,9 +2639,7 @@ static int cmd_export_profiles(int argc, char** argv) {
     }
     const std::string path = chain.empty() ? "/profiles" : "/profiles/" + chain;
 
-    std::string host = via;
-    if (host.rfind("http://", 0) == 0) host = host.substr(7);
-    httplib::Client cli(host);
+    httplib::Client cli(via);  // scheme-aware: plain host:port, http:// or https://
     cli.set_connection_timeout(5);
     const auto res = cli.Get(path);
     if (!res) {
@@ -2874,9 +2854,7 @@ static int cmd_seal_add(const fs::path& data_dir, int argc, char** argv) {
     // weight when third parties can see it.
     const auto via = flag_val(argc, argv, "--via");
     if (!via.empty()) {
-        std::string host = via;
-        if (host.rfind("http://", 0) == 0) host = host.substr(7);
-        httplib::Client cli(host);
+        httplib::Client cli(via);  // scheme-aware: plain host:port, http:// or https://
         cli.set_connection_timeout(5);
         const auto bytes = Serializer::encode(seal);
         const auto res   = cli.Post("/seals/" + to_hex(seal.block_hash.bytes),
@@ -2909,9 +2887,7 @@ static int cmd_seal_list(const fs::path& data_dir, int argc, char** argv) {
     // (the warehouse is untrusted) and keep the new ones locally.
     const auto via = flag_val(argc, argv, "--via");
     if (!via.empty()) {
-        std::string host = via;
-        if (host.rfind("http://", 0) == 0) host = host.substr(7);
-        httplib::Client cli(host);
+        httplib::Client cli(via);  // scheme-aware: plain host:port, http:// or https://
         cli.set_connection_timeout(5);
         const auto res = cli.Get("/seals/" + to_hex(block_hash.bytes));
         if (res && res->status == 200) {
@@ -3202,9 +3178,7 @@ static int cmd_fraud_verify(int argc, char** argv) {
 // POST a certificate to the aggregator revocation warehouse (sync.md §7.2).
 static bool post_revocation_cert(const std::string& via, const UserId& chain,
                                  const std::vector<uint8_t>& bytes) {
-    std::string host = via;
-    if (host.rfind("http://", 0) == 0) host = host.substr(7);
-    httplib::Client cli(host);
+    httplib::Client cli(via);  // scheme-aware: plain host:port, http:// or https://
     cli.set_connection_timeout(5);
     const auto res = cli.Post("/revocations/" + to_hex(chain.bytes),
         std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size()),
@@ -3579,7 +3553,7 @@ Labor:
 Merge over a relay (sync.md §4.1):
   merge run                        Initiate a merge and drive it to completion
     --peer UID_HEX                     partner's User ID
-    --via  URL                         aggregator relay, e.g. http://host:8080
+    --via  URL                         aggregator relay, e.g. https://host or http://host:8080
     [--depth N] [--timeout SEC]        declared depth (1) / give-up time (60)
   discover --via URL               Ranked merge-partner suggestions (sync.md §8)
   merge own --with NODE            Internal merge of two own branches: the

@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 enable_testing()
+add_subdirectory(third_party)
 add_subdirectory(modules/blockchain)
 add_subdirectory(modules/records)
 add_subdirectory(modules/sync)

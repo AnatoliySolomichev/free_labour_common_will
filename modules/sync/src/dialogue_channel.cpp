@@ -128,10 +128,9 @@ struct HttpDialogueChannel::Impl {
 };
 
 HttpDialogueChannel::HttpDialogueChannel(const std::string& base_url, UserId self) {
-    std::string host = base_url;
-    if (host.rfind("http://", 0) == 0) host = host.substr(7);
+    // base_url goes to httplib::Client as-is: plain host:port, http:// or https://
     impl_ = std::make_unique<Impl>(
-        host, to_hex(self.bytes.data(), self.bytes.size()));
+        base_url, to_hex(self.bytes.data(), self.bytes.size()));
 }
 
 HttpDialogueChannel::~HttpDialogueChannel() = default;

@@ -21,17 +21,16 @@ add_library(aggregator
 target_include_directories(aggregator
     PUBLIC  include
     PRIVATE ${LMDB_INCLUDE_DIRS}
-            ${CMAKE_SOURCE_DIR}/third_party/httplib
 )
 
 target_link_libraries(aggregator
     PUBLIC  blockchain
     PRIVATE records
+            httplib
             ${LMDB_LIBRARIES}
 )
 
 target_compile_options(aggregator PRIVATE -Wall -Wextra)
-# No CPPHTTPLIB_OPENSSL_SUPPORT defined → httplib compiles in plain-HTTP-only mode.
 
 # ── Server executable ─────────────────────────────────────────────────────────
 
@@ -53,15 +52,13 @@ add_executable(aggregator_tests
     tests/test_match_view.cpp
     tests/test_profile_view.cpp
     tests/test_rates_view.cpp
-)
-
-target_include_directories(aggregator_tests PRIVATE
-    ${CMAKE_SOURCE_DIR}/third_party/httplib
+    tests/test_tls_smoke.cpp
 )
 
 target_link_libraries(aggregator_tests PRIVATE
     aggregator
     records
+    httplib
     GTest::gtest_main
 )
 

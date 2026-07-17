@@ -15,12 +15,12 @@ add_library(sync
 target_include_directories(sync
     PUBLIC  include
     PRIVATE ${LMDB_INCLUDE_DIRS}
-            ${CMAKE_SOURCE_DIR}/third_party/httplib
 )
 
 target_link_libraries(sync
     PUBLIC  blockchain
-    PRIVATE ${LMDB_LIBRARIES}
+    PRIVATE httplib
+            ${LMDB_LIBRARIES}
 )
 
 target_compile_options(sync PRIVATE -Wall -Wextra -Wpedantic)
@@ -38,13 +38,10 @@ add_executable(sync_tests
 )
 
 # aggregator + httplib: only for the live-relay end-to-end test.
-target_include_directories(sync_tests PRIVATE
-    ${CMAKE_SOURCE_DIR}/third_party/httplib
-)
-
 target_link_libraries(sync_tests PRIVATE
     sync
     aggregator
+    httplib
     GTest::gtest_main
 )
 

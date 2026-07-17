@@ -23,6 +23,9 @@ Testing/
 .claude/settings.local.json
 .claude/settings.json
 
+# ── Claude Code container-state backup (chat history, memory) ────────────────
+.claude-container-backup/
+
 # ── Editor / IDE ──────────────────────────────────────────────────────────────
 .vscode/settings.json
 .idea/
