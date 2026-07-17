@@ -1,0 +1,24 @@
+# Production aggregator (free-labour-agg.duckdns.org).
+# Plain HTTP on loopback only — TLS is terminated by the host's nginx.
+# The build tree lives in the mounted repo (build-prod/), so container
+# restarts recompile incrementally and start in seconds.
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+services:
+  aggregator-prod:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    volumes:
+      - ..:/workspace
+      - aggregator-prod-data:/data
+    working_dir: /workspace
+    ports:
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped
+    # Single line on purpose: a folded YAML block keeps newlines on
+    # more-indented lines, which breaks the shell command.
+    command: sh -c "cmake -B build-prod -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build-prod -t aggregator_server && exec build-prod/modules/aggregator/aggregator_server --port 8080 --db /data/agg --catalog docs/catalogs"
+
+volumes:
+  aggregator-prod-data:

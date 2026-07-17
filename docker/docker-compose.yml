@@ -20,10 +20,7 @@ services:
     volumes:
       - ..:/workspace
     working_dir: /workspace
-    command: >
-      sh -c "cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-             && cmake --build build
-             && cd build && ctest --output-on-failure"
+    command: sh -c "cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug && cmake --build build && cd build && ctest --output-on-failure"
 
   # Single aggregator instance (for development / manual testing).
   aggregator:
@@ -36,11 +33,7 @@ services:
     working_dir: /workspace
     ports:
       - "8080:8080"
-    command: >
-      sh -c "cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -q
-             && cmake --build build -t aggregator_server -q
-             && build/modules/aggregator/aggregator_server
-                --port 8080 --db /data/agg"
+    command: sh -c "cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build -t aggregator_server && build/modules/aggregator/aggregator_server --port 8080 --db /data/agg"
 
   # Two-server sync demo: agg1 ↔ agg2 pull from each other every 15s.
   agg1:
@@ -53,12 +46,7 @@ services:
     working_dir: /workspace
     ports:
       - "8081:8081"
-    command: >
-      sh -c "cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -q
-             && cmake --build build -t aggregator_server -q
-             && build/modules/aggregator/aggregator_server
-                --port 8081 --db /data/agg1
-                --peer http://agg2:8082 --sync-interval 15"
+    command: sh -c "cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build -t aggregator_server && build/modules/aggregator/aggregator_server --port 8081 --db /data/agg1 --peer http://agg2:8082 --sync-interval 15"
 
   agg2:
     build:
@@ -70,12 +58,7 @@ services:
     working_dir: /workspace
     ports:
       - "8082:8082"
-    command: >
-      sh -c "cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -q
-             && cmake --build build -t aggregator_server -q
-             && build/modules/aggregator/aggregator_server
-                --port 8082 --db /data/agg2
-                --peer http://agg1:8081 --sync-interval 15"
+    command: sh -c "cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build -t aggregator_server && build/modules/aggregator/aggregator_server --port 8082 --db /data/agg2 --peer http://agg1:8081 --sync-interval 15"
 
 volumes:
   claude-data:
