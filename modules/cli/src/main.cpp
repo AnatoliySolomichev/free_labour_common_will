@@ -7,6 +7,7 @@
 #include <blockchain/storage.h>
 #include <blockchain/validator.h>
 #include <records/catalog.h>
+#include <records/credit.h>
 #include <records/json.h>
 #include <records/codec.h>
 #include <records/draft.h>
@@ -1588,6 +1589,141 @@ static int cmd_wallet(const fs::path& data_dir, int argc, char** argv) {
     } else {
         std::cout << "emission thread: empty (no self-issues yet)\n";
     }
+    return 0;
+}
+
+// ── Credit history — bc trust (ИР-010 layer 1, records.md §11.6) ─────────────
+
+// Collect the subject's emission-thread links from blocks available locally:
+// own branches when the subject is this chain, external blocks otherwise.
+// Layer 1 is deliberately local-only (решение 2026-07-16): what YOU hold
+// after merges, verified by no one else — the honest personal viewpoint.
+static std::vector<records::ObservedLink> observed_links(
+        Context& ctx, const std::array<uint8_t, 32>& subject) {
+    std::vector<records::ObservedLink> out;
+    const auto digest = [&](const Block& b) {
+        if (b.type != BlockType::DATA) return;
+        records::Record rec;
+        try { rec = Codec::decode(b.payload.data(), b.payload.size()); }
+        catch (const CodecError&) { return; }
+
+        records::ObservedLink o{};
+        if (const auto* t = std::get_if<records::Transfer>(&rec)) {
+            if (t->from != subject || !t->emission) return;  // spoofed / unthreaded
+            o.link = *t->emission;
+            for (const auto& p : t->origins)
+                if (p.issuer == t->from) o.units += p.units;
+            o.timestamp = t->timestamp;
+        } else if (const auto* rd = std::get_if<records::Redemption>(&rec)) {
+            o.link          = rd->link;
+            o.units         = rd->units;
+            o.is_redemption = true;
+            o.timestamp     = rd->timestamp;
+        } else {
+            return;
+        }
+        o.block_hash = Crypto::hash_block(b).bytes;
+        out.push_back(o);
+    };
+
+    if (subject == ctx.user_id.bytes) {
+        for (const NodeIndex branch : ctx.local_branches()) {
+            std::vector<Block> blocks;
+            try { blocks = ctx.bc.get_branch(ctx.user_id, branch); }
+            catch (const BlockchainError&) { continue; }
+            for (const auto& b : blocks) digest(b);
+        }
+    } else {
+        ctx.storage.for_each_external_block([&](const Block& b) {
+            if (b.address.user_id.bytes == subject) digest(b);
+            return true;
+        });
+    }
+    return out;
+}
+
+// bc trust CHAIN_HEX_OR_PREFIX [--leaf L]
+static int cmd_trust(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);  // [trust, <chain>]
+    if (pos.size() < 2) {
+        std::cerr << "Usage: bc trust CHAIN_HEX_OR_PREFIX [--leaf L]\n";
+        return 1;
+    }
+    Context ctx(data_dir, parse_leaf_index(argc, argv));
+
+    // Resolve a prefix against chains seen locally (own + external blocks).
+    const std::string& subj_s = pos[1];
+    std::array<uint8_t, 32> subject{};
+    if (subj_s.size() == 64) {
+        subject = uid_from_hex(subj_s);
+    } else {
+        std::set<std::string> candidates;
+        if (const auto me = to_hex(ctx.user_id.bytes); me.rfind(subj_s, 0) == 0)
+            candidates.insert(me);
+        ctx.storage.for_each_external_block([&](const Block& b) {
+            if (const auto uid = to_hex(b.address.user_id.bytes);
+                uid.rfind(subj_s, 0) == 0)
+                candidates.insert(uid);
+            return true;
+        });
+        if (candidates.empty()) {
+            std::cerr << "цепь с префиксом '" << subj_s
+                      << "' локально не встречалась\n";
+            return 1;
+        }
+        if (candidates.size() > 1) {
+            std::cerr << "префикс '" << subj_s << "' неоднозначен:\n";
+            for (const auto& c : candidates)
+                std::cerr << "  " << c.substr(0, 16) << "…\n";
+            return 1;
+        }
+        subject = uid_from_hex(*candidates.begin());
+    }
+
+    const auto h = records::credit_history(observed_links(ctx, subject));
+
+    std::cout << "КРЕДИТНАЯ ИСТОРИЯ  " << to_hex(subject).substr(0, 8) << "…\n"
+              << "  [нить эмиссии в вашей локальной копии цепи; подделка =\n"
+              << "   эквивокация нити — ловится при первом же расхождении]\n\n";
+
+    if (h.links_seen == 0) {
+        std::cout << "  нить эмиссии в вашей картине пуста: вы не мержились с\n"
+                     "  этой цепью, либо она ещё ничего не самоэмитировала.\n";
+        return 0;
+    }
+
+    std::cout << "  видно звеньев: " << h.links_seen << " из " << h.links_expected;
+    if (h.gaps) std::cout << "  — КАРТИНА НЕПОЛНАЯ, судите осторожно";
+    std::cout << "\n  выпущено " << h.issued << "h, погашено " << h.redeemed << "h";
+    if (h.issued > 1e-9)
+        std::cout << " ("
+                  << static_cast<int>(std::round(100.0 * h.redeemed / h.issued))
+                  << "%)";
+    std::cout << "\n  пик долга: " << h.max_debt
+              << "h, максимально возвращено с пика: " << h.max_repaid
+              << "h («столько доверили — вернул»)\n"
+              << "  объявленный долг сейчас: " << h.outstanding << "h\n";
+
+    const auto days_ago = [](int64_t ts) {
+        return (static_cast<int64_t>(std::time(nullptr)) - ts) / 86400;
+    };
+    if (h.last_redemption_ts)
+        std::cout << "  последнее погашение: "
+                  << days_ago(*h.last_redemption_ts) << " дн. назад\n";
+    if (h.last_selfissue_ts)
+        std::cout << "  последняя самоэмиссия: "
+                  << days_ago(*h.last_selfissue_ts) << " дн. назад\n";
+
+    if (h.growth_without_redemption)
+        std::cout << "\n  ФЛАГ: долг только растёт — ни одного погашения "
+                     "(ИР-010, слой 1)\n";
+    if (h.thread_inconsistent)
+        std::cout << "\n  ФЛАГ: объявленный долг не сходится с суммой звеньев — "
+                     "нить ведётся нечестно\n";
+    for (const auto seq : h.equivocated_seqs)
+        std::cout << "\n  ЭКВИВОКАЦИЯ: звено #" << seq
+                  << " существует в двух разных блоках — объективное "
+                     "доказательство обмана (§4.3)\n";
     return 0;
 }
 
@@ -3616,6 +3752,7 @@ Economy (records.md §11 — именные трудочасы, §12.7):
   pledge list                      Own pledges with settlement status
   ideas top --via URL              Funding board: pledged labor per idea (JSON)
   chain info UID_HEX --via URL     Economic dossier of a chain (JSON)
+  trust CHAIN_HEX_OR_PREFIX        Credit history off the emission thread (local view, ИР-010)
 
 Sync cache (sync.md §5; gossip §7.1):
   cache list                       List cached participant leaves and compositions
@@ -3691,6 +3828,7 @@ int main(int argc, char** argv) {
         else if (cmd == "cache"     && subcmd == "publish") return cmd_cache_publish(data_dir, argc, argv);
         else if (cmd == "cache"     && subcmd == "complete")return cmd_cache_complete(data_dir, argc, argv);
         else if (cmd == "wallet")                           return cmd_wallet(data_dir, argc, argv);
+        else if (cmd == "trust")                            return cmd_trust(data_dir, argc, argv);
         else if (cmd == "ideas"     && subcmd == "top")     return cmd_ideas_top(argc, argv);
         else if (cmd == "rates")                            return cmd_rates(argc, argv);
         else if (cmd == "discover")                         return cmd_discover(data_dir, argc, argv);
