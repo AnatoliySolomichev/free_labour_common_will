@@ -86,6 +86,21 @@ TEST(CatalogTest, SearchMatchesSlugNameAndAlias) {
     EXPECT_EQ(search(catalogs, "").size(),              4u);   // empty → everything
 }
 
+TEST(CatalogTest, SearchIsCaseInsensitiveForCyrillicAndAscii) {
+    const auto catalogs = parse_catalog_bundle(
+        R"({"professions":)" + PROFESSIONS + R"(,"needs":)" + NEEDS + "}");
+    // "Повар" in the catalog: found however the user types it.
+    EXPECT_EQ(search(catalogs, "повар").size(),  1u);
+    EXPECT_EQ(search(catalogs, "ПОВАР").size(),  1u);
+    EXPECT_EQ(search(catalogs, "поВАр").size(),  1u);
+    // Ё folds too (alias "электромонтёр").
+    EXPECT_EQ(search(catalogs, "ЭЛЕКТРОМОНТЁР").size(), 1u);
+    // ASCII slugs match regardless of case.
+    EXPECT_EQ(search(catalogs, "NEED.").size(),  2u);
+    // Case-folding must not create false matches.
+    EXPECT_TRUE(search(catalogs, "ВОДОЛАЗ").empty());
+}
+
 TEST(CatalogTest, RefusesMalformedCatalogs) {
     EXPECT_THROW(parse_catalog("{"),                             CatalogError);
     EXPECT_THROW(parse_catalog("[]"),                            CatalogError);

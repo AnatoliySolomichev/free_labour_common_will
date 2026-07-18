@@ -54,8 +54,9 @@ std::vector<Catalog> parse_catalog_bundle(const std::string& json);
 // Every slug across the catalogs — the set a cat: tag is validated against.
 std::set<std::string> all_slugs(const std::vector<Catalog>& catalogs);
 
-// Entries whose slug, name or alias contains `query` (case-sensitive substring),
-// so a participant can find the slug to write. Empty query → everything.
+// Entries whose slug, name or alias contains `query` — case-insensitive for
+// ASCII and Cyrillic ("электрик" finds "Электрик"), so a participant can find
+// the slug to write. Empty query → everything.
 std::vector<const CatalogEntry*> search(const std::vector<Catalog>& catalogs,
                                         const std::string&          query);
 

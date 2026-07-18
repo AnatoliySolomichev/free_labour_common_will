@@ -8,20 +8,20 @@
 
 ## Часть 1. Организатору — один раз
 
-**1. Поднять агрегатор** (он же общая доска объявлений, релей и раздатчик каталогов):
+**1. Агрегатор пилота уже поднят**: `https://free-labour-agg.duckdns.org` (он же общая доска объявлений, релей и раздатчик каталогов; TLS, автозапуск, ежесуточные бэкапы). Поднять свой для другого круга можно так:
 
 ```bash
 aggregator_server --port 8080 --db ~/aggregator-db --catalog docs/catalogs
 ```
 
-Без `--catalog` всё работает, но слаги никто не проверяет — а опечатка в слаге делает человека ненаходимым. Указывайте.
+Без `--catalog` всё работает, но слаги никто не проверяет — а опечатка в слаге делает человека ненаходимым. Указывайте. Наружу такой агрегатор выводите через TLS-прокси (nginx/Caddy), сам он слушает plain HTTP.
 
-**2. Раздать знакомым адрес** — `http://ваш-хост:8080`. Всё, что участнику нужно знать.
+**2. Раздать знакомым адрес** — `https://free-labour-agg.duckdns.org`. Всё, что участнику нужно знать.
 
 **3. Стыковать — одной командой:**
 
 ```bash
-bc match --via http://ваш-хост:8080
+bc match --via https://free-labour-agg.duckdns.org
 ```
 
 ```
@@ -51,8 +51,8 @@ bc match --via http://ваш-хост:8080
 **4. Если хочется отдать ИИ** — есть сырые данные:
 
 ```bash
-bc match --via http://ваш-хост:8080 --json      # готовый отчёт
-bc export profiles --via http://ваш-хост:8080 --out profiles.json   # все профили
+bc match --via https://free-labour-agg.duckdns.org --json      # готовый отчёт
+bc export profiles --via https://free-labour-agg.duckdns.org --out profiles.json   # все профили
 ```
 См. «Промпт для стыковки» ниже.
 
@@ -83,7 +83,7 @@ bc apply --draft мой-профиль.json --dry-run
 ### Шаг 3. Подписать своим ключом
 
 ```bash
-bc apply --draft мой-профиль.json --via http://ваш-хост:8080
+bc apply --draft мой-профиль.json --via https://free-labour-agg.duckdns.org
 ```
 
 Спросит `Подписать N запис(ь/и)? [y/N]`. Каждая запись становится отдельным блоком со **своей** подписью. Проверить, что получилось:
@@ -97,7 +97,7 @@ bc list
 Сначала найдите свой слаг в каталоге, чтобы не выдумывать:
 
 ```bash
-bc catalog --via http://ваш-хост:8080 --search электрик
+bc catalog --via https://free-labour-agg.duckdns.org --search электрик
 #   Ремонт и строительство
 #     prof.electrician          Электрик
 ```
@@ -106,7 +106,7 @@ bc catalog --via http://ваш-хост:8080 --search электрик
 bc concept add "Электромонтаж, 8 лет, допуск до 1000В" \
     --tag kind:skill --tag cat:prof.electrician \
     --tag geo:55.75,37.62 --tag r:30 --tag grade:4 --tag exp:8 \
-    --via http://ваш-хост:8080
+    --via https://free-labour-agg.duckdns.org
 ```
 
 **Неизвестный слаг система не примет** — ни от вас, ни от ИИ-писаря. Опечатка вроде `prof.elektrik` не падает громко: вы бы просто перестали находиться по этому навыку. Поэтому она отвергается сразу, с подсказкой похожих. Если нужного слага в каталоге ещё нет — `--force`, и скажите организатору дополнить каталог.
@@ -118,9 +118,9 @@ bc concept add "Электромонтаж, 8 лет, допуск до 1000В" 
 Внешние инструменты не нужны — всё через `bc`:
 
 ```bash
-bc directory --skill prof.electrician --via http://ваш-хост:8080   # кто умеет
-bc needs list --need need.electrical  --via http://ваш-хост:8080   # кому нужно
-bc needs list --via http://ваш-хост:8080                           # все потребности
+bc directory --skill prof.electrician --via https://free-labour-agg.duckdns.org   # кто умеет
+bc needs list --need need.electrical  --via https://free-labour-agg.duckdns.org   # кому нужно
+bc needs list --via https://free-labour-agg.duckdns.org                           # все потребности
 ```
 
 Закрытые потребности из выдачи выпадают сами.
@@ -177,7 +177,7 @@ bc list
 ```
 
 ```bash
-bc apply --draft close.json --via http://ваш-хост:8080
+bc apply --draft close.json --via https://free-labour-agg.duckdns.org
 ```
 
 Потребность пометится `"closed": true` и выпадет из стыковки. **Закрыть запись может только её хозяин** — чужая связь игнорируется.

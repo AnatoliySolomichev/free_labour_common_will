@@ -104,16 +104,60 @@ std::set<std::string> all_slugs(const std::vector<Catalog>& catalogs) {
     return out;
 }
 
+namespace {
+
+// Case-folds the catalogs' languages in UTF-8 — ASCII A-Z and Cyrillic
+// А..Я/Ё. std::tolower only knows ASCII, so "электрик" would silently miss
+// "Электрик" — the exact "typo makes you unfindable" failure the catalog
+// exists to prevent. Anything else passes through unchanged.
+std::string fold_case(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        const auto c = static_cast<unsigned char>(s[i]);
+        if (c >= 'A' && c <= 'Z') {
+            out.push_back(static_cast<char>(c + 0x20));
+            continue;
+        }
+        if (c == 0xD0 && i + 1 < s.size()) {
+            const auto d = static_cast<unsigned char>(s[i + 1]);
+            if (d >= 0x90 && d <= 0x9F) {          // А..П → а..п
+                out.push_back(static_cast<char>(0xD0));
+                out.push_back(static_cast<char>(d + 0x20));
+                ++i;
+                continue;
+            }
+            if (d >= 0xA0 && d <= 0xAF) {          // Р..Я → р..я
+                out.push_back(static_cast<char>(0xD1));
+                out.push_back(static_cast<char>(d - 0x20));
+                ++i;
+                continue;
+            }
+            if (d == 0x81) {                       // Ё → ё
+                out.push_back(static_cast<char>(0xD1));
+                out.push_back(static_cast<char>(0x91));
+                ++i;
+                continue;
+            }
+        }
+        out.push_back(static_cast<char>(c));
+    }
+    return out;
+}
+
+} // namespace
+
 std::vector<const CatalogEntry*> search(const std::vector<Catalog>& catalogs,
                                         const std::string&          query) {
+    const std::string q = fold_case(query);
     std::vector<const CatalogEntry*> out;
     for (const auto& cat : catalogs) {
         for (const auto& e : cat.entries) {
-            if (query.empty()) { out.push_back(&e); continue; }
-            bool hit = e.slug.find(query) != std::string::npos ||
-                       e.ru.find(query)   != std::string::npos;
+            if (q.empty()) { out.push_back(&e); continue; }
+            bool hit = fold_case(e.slug).find(q) != std::string::npos ||
+                       fold_case(e.ru).find(q)   != std::string::npos;
             for (const auto& a : e.aliases)
-                hit = hit || a.find(query) != std::string::npos;
+                hit = hit || fold_case(a).find(q) != std::string::npos;
             if (hit) out.push_back(&e);
         }
     }
