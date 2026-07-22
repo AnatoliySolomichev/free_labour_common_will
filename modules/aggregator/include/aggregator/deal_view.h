@@ -61,7 +61,8 @@ struct DealWork {
     bool        accepted = false;
     UserId      acceptor{};          // acceptance owner (the customer)
     Hash        acceptance_hash{};
-    double      labor_units = 0;     // appraisal
+    double      labor_units = 0;     // appraisal of the live labor
+    double      carried = 0;         // carried cost of tools/materials (§9.5 v2)
     double      paid = 0;            // transfers whose reason names the acceptance
 };
 
@@ -78,7 +79,7 @@ struct Deal {
     std::vector<DealWork>   works;
 
     DealStage stage() const noexcept;
-    double    appraised() const noexcept;   // Σ labor_units of accepted works
+    double    appraised() const noexcept;   // Σ (labor + carried) of accepted works
     double    paid() const noexcept;
 };
 

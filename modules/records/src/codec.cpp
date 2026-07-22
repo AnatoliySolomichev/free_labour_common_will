@@ -154,8 +154,22 @@ void enc_worker(Buf& out, const Worker& w) {
     w_uint(out, 1); w_fixed(out, w.chain);
 }
 
+// One carry-thread link (records.md §9.4 v2, ИР-011).
+void w_carry_entry(Buf& out, const CarryEntry& ce) {
+    w_map(out, 6);
+    w_uint(out, 0); w_ref(out, ce.src);
+    w_uint(out, 1); w_float64(out, ce.used);
+    w_uint(out, 2); w_float64(out, ce.carried);
+    w_uint(out, 3); w_uint(out, ce.seq);
+    w_uint(out, 4);
+    if (ce.prev) w_ref(out, *ce.prev); else w_null(out);
+    w_uint(out, 5); w_float64(out, ce.after);
+}
+
 void enc_work_record(Buf& out, const WorkRecord& wr) {
-    w_map(out, 7);
+    // v1 = map(7); v2 adds the carry array (key 7) when non-empty, so old
+    // records keep their exact encoding.
+    w_map(out, 7 + (wr.carry.empty() ? 0 : 1));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::WorkRecord));
     w_uint(out, 1); w_ref(out, wr.agent);
     w_uint(out, 2); w_text(out, wr.action);
@@ -165,10 +179,15 @@ void enc_work_record(Buf& out, const WorkRecord& wr) {
     for (const auto& rq : wr.inputs) w_resource_qty(out, rq);
     w_uint(out, 6); w_arr(out, wr.outputs.size());
     for (const auto& rq : wr.outputs) w_resource_qty(out, rq);
+    if (!wr.carry.empty()) {
+        w_uint(out, 7); w_arr(out, wr.carry.size());
+        for (const auto& ce : wr.carry) w_carry_entry(out, ce);
+    }
 }
 
 void enc_acceptance(Buf& out, const Acceptance& a) {
-    w_map(out, 7);
+    // v1 = map(7); v2 adds carried_units (key 7) when present.
+    w_map(out, 7 + (a.carried_units ? 1 : 0));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Acceptance));
     w_uint(out, 1); w_ref(out, a.work);
     w_uint(out, 2); w_fixed(out, a.receiver);
@@ -176,6 +195,39 @@ void enc_acceptance(Buf& out, const Acceptance& a) {
     w_uint(out, 4); w_float64(out, a.hours_raw);
     w_uint(out, 5); w_float64(out, a.labor_units);
     w_uint(out, 6); w_int64(out, a.timestamp);
+    if (a.carried_units) { w_uint(out, 7); w_float64(out, *a.carried_units); }
+}
+
+void enc_material(Buf& out, const Material& m) {
+    w_map(out, 10);
+    w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Material));
+    w_uint(out, 1); w_text(out, m.name);
+    w_uint(out, 2); w_text(out, m.unit);
+    w_uint(out, 3); w_text(out, m.desc);
+    w_uint(out, 4); w_float64(out, m.cost);
+    w_uint(out, 5); w_float64(out, m.qty);
+    w_uint(out, 6); w_text(out, m.basis);
+    w_uint(out, 7);
+    if (m.src) w_ref(out, *m.src); else w_null(out);
+    w_uint(out, 8);
+    if (m.origin) w_ref(out, *m.origin); else w_null(out);
+    w_uint(out, 9); w_text(out, m.note);
+}
+
+void enc_tool(Buf& out, const Tool& t) {
+    w_map(out, 10);
+    w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Tool));
+    w_uint(out, 1); w_text(out, t.name);
+    w_uint(out, 2); w_text(out, t.desc);
+    w_uint(out, 3); w_text(out, t.serial);
+    w_uint(out, 4); w_float64(out, t.cost);
+    w_uint(out, 5); w_float64(out, t.life);
+    w_uint(out, 6); w_text(out, t.basis);
+    w_uint(out, 7);
+    if (t.src) w_ref(out, *t.src); else w_null(out);
+    w_uint(out, 8);
+    if (t.origin) w_ref(out, *t.origin); else w_null(out);
+    w_uint(out, 9); w_text(out, t.note);
 }
 
 void enc_transfer(Buf& out, const Transfer& t) {
@@ -531,7 +583,22 @@ Worker dec_worker_fields(CborReader& r) {
     return w;
 }
 
-WorkRecord dec_work_record_fields(CborReader& r) {
+CarryEntry dec_carry_entry(CborReader& r) {
+    if (r.r_map() != 6) throw CodecError("CarryEntry: expected 6 fields");
+    CarryEntry ce{};
+    expect_key(r, 0); ce.src     = dec_ref(r);
+    expect_key(r, 1); ce.used    = r.r_float64();
+    expect_key(r, 2); ce.carried = r.r_float64();
+    expect_key(r, 3); ce.seq     = r.r_uint();
+    expect_key(r, 4); ce.prev    = dec_opt_ref(r);
+    expect_key(r, 5); ce.after   = r.r_float64();
+    return ce;
+}
+
+WorkRecord dec_work_record_fields(CborReader& r, uint64_t field_count) {
+    // 7 = v1; 8 = v2 with the carry array (records.md §9.4).
+    if (field_count != 7 && field_count != 8)
+        throw CodecError("WorkRecord: expected 7 or 8 fields");
     WorkRecord wr{};
     expect_key(r, 1); wr.agent    = dec_ref(r);
     expect_key(r, 2); wr.action   = r.r_text();
@@ -549,10 +616,20 @@ WorkRecord dec_work_record_fields(CborReader& r) {
         wr.outputs.reserve(static_cast<size_t>(n));
         for (uint64_t i = 0; i < n; ++i) wr.outputs.push_back(dec_resource_qty(r));
     }
+    if (field_count == 8) {
+        expect_key(r, 7);
+        const uint64_t n = r.r_arr();
+        if (n == 0) throw CodecError("WorkRecord: carry present but empty");
+        wr.carry.reserve(static_cast<size_t>(n));
+        for (uint64_t i = 0; i < n; ++i) wr.carry.push_back(dec_carry_entry(r));
+    }
     return wr;
 }
 
-Acceptance dec_acceptance_fields(CborReader& r) {
+Acceptance dec_acceptance_fields(CborReader& r, uint64_t field_count) {
+    // 7 = v1; 8 = v2 with carried_units (records.md §9.5).
+    if (field_count != 7 && field_count != 8)
+        throw CodecError("Acceptance: expected 7 or 8 fields");
     Acceptance a{};
     expect_key(r, 1); a.work         = dec_ref(r);
     expect_key(r, 2); r.r_fixed(a.receiver);
@@ -560,7 +637,38 @@ Acceptance dec_acceptance_fields(CborReader& r) {
     expect_key(r, 4); a.hours_raw    = r.r_float64();
     expect_key(r, 5); a.labor_units  = r.r_float64();
     expect_key(r, 6); a.timestamp    = r.r_int();
+    if (field_count == 8) {
+        expect_key(r, 7); a.carried_units = r.r_float64();
+    }
     return a;
+}
+
+Material dec_material_fields(CborReader& r) {
+    Material m{};
+    expect_key(r, 1); m.name   = r.r_text();
+    expect_key(r, 2); m.unit   = r.r_text();
+    expect_key(r, 3); m.desc   = r.r_text();
+    expect_key(r, 4); m.cost   = r.r_float64();
+    expect_key(r, 5); m.qty    = r.r_float64();
+    expect_key(r, 6); m.basis  = r.r_text();
+    expect_key(r, 7); m.src    = dec_opt_ref(r);
+    expect_key(r, 8); m.origin = dec_opt_ref(r);
+    expect_key(r, 9); m.note   = r.r_text();
+    return m;
+}
+
+Tool dec_tool_fields(CborReader& r) {
+    Tool t{};
+    expect_key(r, 1); t.name   = r.r_text();
+    expect_key(r, 2); t.desc   = r.r_text();
+    expect_key(r, 3); t.serial = r.r_text();
+    expect_key(r, 4); t.cost   = r.r_float64();
+    expect_key(r, 5); t.life   = r.r_float64();
+    expect_key(r, 6); t.basis  = r.r_text();
+    expect_key(r, 7); t.src    = dec_opt_ref(r);
+    expect_key(r, 8); t.origin = dec_opt_ref(r);
+    expect_key(r, 9); t.note   = r.r_text();
+    return t;
 }
 
 Transfer dec_transfer_fields(CborReader& r, uint64_t field_count) {
@@ -673,6 +781,8 @@ std::vector<uint8_t> Codec::encode(const Record& rec) {
         else if constexpr (std::is_same_v<T, Worker>)      enc_worker(out, r);
         else if constexpr (std::is_same_v<T, WorkRecord>)  enc_work_record(out, r);
         else if constexpr (std::is_same_v<T, Acceptance>)  enc_acceptance(out, r);
+        else if constexpr (std::is_same_v<T, Material>)    enc_material(out, r);
+        else if constexpr (std::is_same_v<T, Tool>)        enc_tool(out, r);
         else if constexpr (std::is_same_v<T, Transfer>)    enc_transfer(out, r);
         else if constexpr (std::is_same_v<T, Pledge>)      enc_pledge(out, r);
         else if constexpr (std::is_same_v<T, PledgeRevoke>) enc_pledge_revoke(out, r);
@@ -700,8 +810,10 @@ Record Codec::decode(const uint8_t* data, size_t len) {
         case RecordType::Specialty:   return dec_specialty_fields(r);
         case RecordType::Grade:       return dec_grade_fields(r);
         case RecordType::Worker:      return dec_worker_fields(r);
-        case RecordType::WorkRecord:  return dec_work_record_fields(r);
-        case RecordType::Acceptance:  return dec_acceptance_fields(r);
+        case RecordType::WorkRecord:  return dec_work_record_fields(r, field_count);
+        case RecordType::Acceptance:  return dec_acceptance_fields(r, field_count);
+        case RecordType::Material:    return dec_material_fields(r);
+        case RecordType::Tool:        return dec_tool_fields(r);
         case RecordType::Transfer:    return dec_transfer_fields(r, field_count);
         case RecordType::Pledge:      return dec_pledge_fields(r);
         case RecordType::PledgeRevoke: return dec_pledge_revoke_fields(r);

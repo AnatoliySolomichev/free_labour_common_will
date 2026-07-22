@@ -507,3 +507,135 @@ TEST(RecordsCodec, RedemptionFirstLinkNoPrev) {
     const auto decoded = std::get<Redemption>(roundtrip(rd));
     EXPECT_FALSE(decoded.link.prev.has_value());
 }
+
+// ── Production v2: Tool / Material / carry (records.md §9.4, §10, ИР-011) ─────
+
+TEST(RecordsCodec, ToolRoundtripEstNoRefs) {
+    Tool t{};
+    t.name   = "Печь подовая";
+    t.desc   = "2019 г., под №2";
+    t.serial = "PP-2019-0417";
+    t.cost   = 315.0;
+    t.life   = 8000.0;
+    t.basis  = "est";
+    t.note   = "оценка: 120000₽ / 380₽·ч ≈ 315 ч";
+
+    const auto decoded = std::get<Tool>(roundtrip(t));
+    EXPECT_EQ(decoded.name,   t.name);
+    EXPECT_EQ(decoded.desc,   t.desc);
+    EXPECT_EQ(decoded.serial, t.serial);
+    EXPECT_DOUBLE_EQ(decoded.cost, t.cost);
+    EXPECT_DOUBLE_EQ(decoded.life, t.life);
+    EXPECT_EQ(decoded.basis,  t.basis);
+    EXPECT_FALSE(decoded.src.has_value());
+    EXPECT_FALSE(decoded.origin.has_value());
+    EXPECT_EQ(decoded.note,   t.note);
+}
+
+TEST(RecordsCodec, ToolRoundtripPaidWithOrigin) {
+    Tool t{};
+    t.name   = "Печь подовая";
+    t.serial = "PP-2019-0417";
+    t.cost   = 120.0;                     // купил по остатку продавца
+    t.life   = 5000.0;
+    t.basis  = "paid";
+    t.src    = make_ref(0x21, 0x22);      // приёмка покупки
+    t.origin = make_ref(0x23, 0x24);      // запись экземпляра у продавца
+
+    const auto decoded = std::get<Tool>(roundtrip(t));
+    ASSERT_TRUE(decoded.src.has_value());
+    ASSERT_TRUE(decoded.origin.has_value());
+    EXPECT_EQ(*decoded.src,    *t.src);
+    EXPECT_EQ(*decoded.origin, *t.origin);
+    EXPECT_EQ(decoded.basis, "paid");
+}
+
+TEST(RecordsCodec, MaterialBatchRoundtrip) {
+    Material m{};
+    m.name  = "Мука пшеничная";
+    m.unit  = "кг";
+    m.cost  = 4.0;
+    m.qty   = 50.0;
+    m.basis = "est";
+    m.note  = "чек 2100₽ / 525₽·ч";
+
+    const auto decoded = std::get<Material>(roundtrip(m));
+    EXPECT_EQ(decoded.name, m.name);
+    EXPECT_EQ(decoded.unit, m.unit);
+    EXPECT_DOUBLE_EQ(decoded.cost, m.cost);
+    EXPECT_DOUBLE_EQ(decoded.qty,  m.qty);
+    EXPECT_EQ(decoded.basis, m.basis);
+    EXPECT_FALSE(decoded.src.has_value());
+    EXPECT_FALSE(decoded.origin.has_value());
+    EXPECT_EQ(decoded.note, m.note);
+}
+
+TEST(RecordsCodec, WorkRecordV2CarryRoundtrip) {
+    WorkRecord wr{};
+    wr.agent    = make_ref(0x10, 0x11);
+    wr.action   = "выпечка хлеба";
+    wr.start_ts = 1'700'000'000LL;
+    wr.hours    = 6.0;
+
+    CarryEntry ce{};
+    ce.src     = make_ref(0x61, 0x01);
+    ce.used    = 6.0;
+    ce.carried = 0.23625;                 // 6/8000 × 315
+    ce.seq     = 0;
+    ce.after   = 0.23625;
+    wr.carry.push_back(ce);
+
+    CarryEntry ce2{};
+    ce2.src     = make_ref(0x60, 0x02);
+    ce2.used    = 12.0;                   // кг муки
+    ce2.carried = 0.96;
+    ce2.seq     = 3;
+    ce2.prev    = make_ref(0x99, 0x9A);
+    ce2.after   = 2.4;
+    wr.carry.push_back(ce2);
+
+    const auto decoded = std::get<WorkRecord>(roundtrip(wr));
+    ASSERT_EQ(decoded.carry.size(), 2u);
+    EXPECT_EQ(decoded.carry[0], ce);
+    EXPECT_EQ(decoded.carry[1], ce2);
+    EXPECT_FALSE(decoded.carry[0].prev.has_value());
+    ASSERT_TRUE(decoded.carry[1].prev.has_value());
+}
+
+TEST(RecordsCodec, WorkRecordV1EncodingUnchangedByEmptyCarry) {
+    // Old records must keep their exact bytes: empty carry encodes as v1.
+    WorkRecord wr{};
+    wr.agent    = make_ref(0x10, 0x11);
+    wr.action   = "розетка";
+    wr.start_ts = 1LL;
+    wr.hours    = 1.0;
+
+    const auto bytes = Codec::encode(Record{wr});
+    // map(7): 0xA7 head — not map(8)
+    ASSERT_FALSE(bytes.empty());
+    EXPECT_EQ(bytes[0], 0xA7);
+    const auto decoded = std::get<WorkRecord>(Codec::decode(bytes));
+    EXPECT_TRUE(decoded.carry.empty());
+}
+
+TEST(RecordsCodec, AcceptanceV2CarriedUnits) {
+    Acceptance a{};
+    a.work          = make_ref(0x53, 0x54);
+    a.receiver.fill(0xCC);
+    a.quality       = "пройдено";
+    a.hours_raw     = 6.0;
+    a.labor_units   = 7.2;
+    a.timestamp     = 1'700'000'100LL;
+    a.carried_units = 1.19625;
+
+    const auto decoded = std::get<Acceptance>(roundtrip(a));
+    ASSERT_TRUE(decoded.carried_units.has_value());
+    EXPECT_DOUBLE_EQ(*decoded.carried_units, 1.19625);
+
+    // v1 without carried_units stays map(7) and decodes with nullopt.
+    a.carried_units.reset();
+    const auto bytes = Codec::encode(Record{a});
+    EXPECT_EQ(bytes[0], 0xA7);
+    const auto d1 = std::get<Acceptance>(Codec::decode(bytes));
+    EXPECT_FALSE(d1.carried_units.has_value());
+}

@@ -1128,6 +1128,7 @@ void AggregatorServer::setup_routes() {
                         body += ",\"acceptance_ref\":\"" + to_hex(w.acceptor.bytes)
                               + "/" + to_hex(w.acceptance_hash.bytes)
                               + "\",\"labor_units\":" + std::to_string(w.labor_units)
+                              + ",\"carried\":" + std::to_string(w.carried)
                               + ",\"paid\":" + std::to_string(w.paid);
                     body += "}";
                 }

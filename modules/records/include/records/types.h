@@ -26,6 +26,9 @@ enum class RecordType : uint8_t {
     Worker       = 0x52,
     WorkRecord   = 0x53,
     Acceptance   = 0x54,
+    // Production
+    Material     = 0x60,
+    Tool         = 0x61,
     // Economy
     Transfer       = 0x70,
     DailyAggregate = 0x71,
@@ -134,6 +137,25 @@ struct ResourceQty {
     }
 };
 
+// One link of a carry thread (records.md §9.4 v2, ИР-011): the use of one
+// means of production transfers a share of its UNRECOVERED cost into the
+// work. One thread per Tool/Material record across the whole chain (prev is
+// a Ref, it crosses branches); two links with one prev = equivocation =
+// double-charging one asset over parallel branches.
+struct CarryEntry {
+    Ref                src;      // Tool (§10.2) or Material batch (§10.1)
+    double             used;     // tool-hours worked / material quantity spent
+    double             carried;  // labor-hours transferred into this work
+    uint64_t           seq;      // link counter of the asset's carry thread
+    std::optional<Ref> prev;     // previous link; absent for the first
+    double             after;    // total carried over the asset's life; ≤ cost
+
+    bool operator==(const CarryEntry& o) const noexcept {
+        return src == o.src && used == o.used && carried == o.carried
+            && seq == o.seq && prev == o.prev && after == o.after;
+    }
+};
+
 struct WorkRecord {
     static constexpr RecordType TYPE = RecordType::WorkRecord;
 
@@ -144,6 +166,7 @@ struct WorkRecord {
 
     std::vector<ResourceQty> inputs;   // may be empty
     std::vector<ResourceQty> outputs;  // may be empty
+    std::vector<CarryEntry>  carry;    // v2: cost carried from tools/materials
 };
 
 // Acceptance = the moment labor-hours come into existence (records.md §9.5)
@@ -156,6 +179,45 @@ struct Acceptance {
     double                  hours_raw;    // raw hours from WorkRecord
     double                  labor_units;  // hours_raw * coefficient(grade) on acceptance day
     int64_t                 timestamp;    // Unix timestamp UTC
+    // v2 (ИР-011): Σ carried of the accepted work. Payment ceiling is
+    // labor_units + carried_units; rates take labor_units only (§11.2).
+    std::optional<double>   carried_units;
+};
+
+// ── Production records (records.md §10, v2 — ИР-011) ─────────────────────────
+
+// A batch of consumables with a carryable remainder (§10.1): the batch cost
+// flows into products as the quantity is spent. Field layout mirrors Tool;
+// the thread capacity is the batch size qty.
+struct Material {
+    static constexpr RecordType TYPE = RecordType::Material;
+
+    std::string        name;
+    std::string        unit;    // "кг", "л", "кВт·ч", "шт", ...
+    std::string        desc;    // may be empty
+    double             cost;    // batch cost, labor-hours
+    double             qty;     // batch size in unit (carry-thread capacity)
+    std::string        basis;   // "paid" | "est"
+    std::optional<Ref> src;     // paid: the purchase Acceptance
+    std::optional<Ref> origin;  // previous record of this batch (reissue)
+    std::string        note;    // est: how the estimate was made; may be empty
+};
+
+// A tool/equipment instance with cost and design life (§10.2). Wear carries
+// cost into products via WorkRecord.carry. Reissue (origin) covers resale,
+// downward revaluation and re-entry: new cost ≤ previous remainder.
+struct Tool {
+    static constexpr RecordType TYPE = RecordType::Tool;
+
+    std::string        name;
+    std::string        desc;    // may be empty
+    std::string        serial;  // instance id across chains; may be empty
+    double             cost;    // acquisition cost, labor-hours
+    double             life;    // design life, tool-hours (thread capacity)
+    std::string        basis;   // "paid" | "est"
+    std::optional<Ref> src;     // paid: the purchase Acceptance
+    std::optional<Ref> origin;  // previous record of this instance (reissue)
+    std::string        note;    // est: how the estimate was made; may be empty
 };
 
 // ── Economy records (records.md §11) ─────────────────────────────────────────
@@ -287,6 +349,8 @@ using Record = std::variant<
     Worker,
     WorkRecord,
     Acceptance,
+    Material,
+    Tool,
     Transfer,
     DailyAggregate,
     Pledge,

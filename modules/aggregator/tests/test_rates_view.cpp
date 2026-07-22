@@ -162,6 +162,52 @@ TEST_F(RatesViewTest, SelfDealsAndTinyVolumesExcluded) {
     EXPECT_DOUBLE_EQ(inherited[0].rate, 1.25);
 }
 
+TEST_F(RatesViewTest, CarriedCostSettlesAtFullPayableButAveragesLaborOnly) {
+    // Хлеб с печью (ИР-011, records.md §9.5 v2): labor 6.0 за 6ч плюс
+    // перенос печи 0.23625ч. Потолок оплаты = 6.23625.
+    records::WorkRecord wr{};
+    wr.agent = grade_ref_;
+    wr.hours = 6.0;
+    records::CarryEntry ce{};
+    ce.src.chain = alice_.bytes;
+    ce.src.hash.fill(0x61);
+    ce.used    = 6.0;
+    ce.carried = 0.23625;
+    ce.seq     = 0;
+    ce.after   = 0.23625;
+    wr.carry.push_back(ce);
+    const Block work = add(alice_, wr);
+
+    records::Acceptance a{};
+    a.work          = ref_to(alice_, work);
+    a.receiver      = bob_.bytes;
+    a.hours_raw     = 6.0;
+    a.labor_units   = 6.0;
+    a.carried_units = 0.23625;
+    a.timestamp     = kDay + 100;
+    const Block acc = add(bob_, a);
+
+    // Paying the labor part alone leaves the deal unsettled («=» §12.8 is
+    // now labor + carried) — it must not move the rates.
+    records::Transfer t{};
+    t.from    = bob_.bytes;
+    t.to      = alice_.bytes;
+    t.origins = { {bob_.bytes, 6.0} };
+    t.reason  = ref_to(bob_, acc);
+    add(bob_, t);
+    EXPECT_TRUE(build_daily_rates(*storage_, kDay, {}).empty());
+
+    // Topping up the carried part settles it. The rate is labor/hours = 1.0:
+    // carried cost must NOT distort the price of live labor (§11.2 v2).
+    records::Transfer t2 = t;
+    t2.origins = { {bob_.bytes, 0.23625} };
+    add(bob_, t2);
+    const auto rates = build_daily_rates(*storage_, kDay, {});
+    ASSERT_EQ(rates.size(), 1u);
+    EXPECT_NEAR(rates[0].rate, 1.0, 1e-9);
+    EXPECT_EQ(rates[0].deals, 1u);
+}
+
 TEST_F(RatesViewTest, RatesEndpointPublishesSignedAggregateOnce) {
     settled_deal(bob_, 0.2, 0.3);
 

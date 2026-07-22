@@ -6,6 +6,7 @@
 #include <blockchain/serializer.h>
 #include <blockchain/storage.h>
 #include <blockchain/validator.h>
+#include <records/carry.h>
 #include <records/catalog.h>
 #include <records/credit.h>
 #include <records/json.h>
@@ -133,6 +134,7 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--acceptance", "--coef", "--k", "--with", "--to-node",
     "--node", "--ancestor", "--since", "--out", "--cert", "--hex",
     "--skill", "--need", "--search",
+    "--tool", "--cost", "--life", "--serial", "--desc", "--note", "--paid",
 };
 
 // True when a standalone flag (no value) is present.
@@ -247,10 +249,24 @@ static std::string record_summary(const Record& rec) {
             ss << "[WorkRecord]  \"" << r.action << "\"  " << r.hours << "h";
             if (!r.inputs.empty())  ss << "  in:"  << r.inputs.size();
             if (!r.outputs.empty()) ss << "  out:" << r.outputs.size();
+            if (!r.carry.empty()) {
+                double carried = 0;
+                for (const auto& ce : r.carry) carried += ce.carried;
+                ss << "  carry:" << r.carry.size() << " (" << carried << "h)";
+            }
         } else if constexpr (std::is_same_v<T, Acceptance>) {
             ss << "[Acceptance]  work:" << short_hex(r.work.hash)
-               << "  " << r.labor_units << " labor-h"
-               << "  quality:" << r.quality;
+               << "  " << r.labor_units << " labor-h";
+            if (r.carried_units) ss << " +carry:" << *r.carried_units << "h";
+            ss << "  quality:" << r.quality;
+        } else if constexpr (std::is_same_v<T, records::Tool>) {
+            ss << "[Tool]        \"" << r.name << "\"  " << r.cost
+               << "h  life:" << r.life << "h  [" << r.basis << "]";
+            if (r.origin) ss << "  origin:" << short_hex(r.origin->hash);
+        } else if constexpr (std::is_same_v<T, records::Material>) {
+            ss << "[Material]    \"" << r.name << "\"  " << r.qty << " " << r.unit
+               << "  " << r.cost << "h  [" << r.basis << "]";
+            if (r.origin) ss << "  origin:" << short_hex(r.origin->hash);
         } else if constexpr (std::is_same_v<T, records::Transfer>) {
             double total = 0;
             for (const auto& o : r.origins) total += o.units;
@@ -480,6 +496,138 @@ static std::optional<double> lookup_rate(Context& ctx, const std::string& via,
     if (pos == std::string::npos) return std::nullopt;
     try { return std::stod(res->body.substr(pos + needle.size())); }
     catch (...) { return std::nullopt; }
+}
+
+// ── Carry: перенос стоимости средств производства (ИР-011, records.md §9.4) ──
+
+// The fields the carry logic needs from a Tool or Material record.
+struct AssetInfo {
+    std::string name;
+    double      cost        = 0;
+    double      capacity    = 0;  // Tool.life (hours) / Material.qty (units)
+    std::string basis;            // "paid" | "est"
+    bool        is_material = false;
+    std::string unit;             // material only
+};
+
+static std::optional<AssetInfo> asset_info(const Record& rec) {
+    if (const auto* t = std::get_if<records::Tool>(&rec))
+        return AssetInfo{t->name, t->cost, t->life, t->basis, false, ""};
+    if (const auto* m = std::get_if<records::Material>(&rec))
+        return AssetInfo{m->name, m->cost, m->qty, m->basis, true, m->unit};
+    return std::nullopt;
+}
+
+// A means-of-production record in the own chain, found by block-hash prefix
+// (empty prefix = all). Own chain only: you carry cost off your own assets.
+struct OwnAsset {
+    Ref       ref;
+    AssetInfo info;
+};
+
+static std::vector<OwnAsset> find_own_assets(Context& ctx,
+                                             const std::string& hash_prefix) {
+    std::vector<OwnAsset> out;
+    for (const NodeIndex branch : ctx.local_branches()) {
+        std::vector<Block> blocks;
+        try { blocks = ctx.bc.get_branch(ctx.user_id, branch); }
+        catch (const BlockchainError&) { continue; }
+        for (const auto& b : blocks) {
+            if (b.type != BlockType::DATA) continue;
+            Record rec;
+            try { rec = Codec::decode(b.payload.data(), b.payload.size()); }
+            catch (const CodecError&) { continue; }
+            const auto info = asset_info(rec);
+            if (!info) continue;
+            const auto hash = Crypto::hash_block(b).bytes;
+            if (!hash_prefix.empty() &&
+                to_hex(hash).compare(0, hash_prefix.size(), hash_prefix) != 0)
+                continue;
+            out.push_back({Ref{ctx.user_id.bytes, hash}, *info});
+        }
+    }
+    return out;
+}
+
+// The carry-thread tip of one asset across ALL local branches (records.md
+// §9.4): the thread is one per asset for the whole chain — prev is a Ref and
+// crosses branches; scanning every branch is what keeps it linear.
+struct CarryThreadState {
+    uint64_t           next_seq  = 0;
+    double             collected = 0;
+    std::optional<Ref> tip;   // block carrying the newest link
+};
+
+static CarryThreadState carry_thread_state(Context& ctx, const Ref& asset) {
+    CarryThreadState st{};
+    bool found = false;
+    for (const NodeIndex branch : ctx.local_branches()) {
+        std::vector<Block> blocks;
+        try { blocks = ctx.bc.get_branch(ctx.user_id, branch); }
+        catch (const BlockchainError&) { continue; }
+        for (const auto& b : blocks) {
+            if (b.type != BlockType::DATA) continue;
+            Record rec;
+            try { rec = Codec::decode(b.payload.data(), b.payload.size()); }
+            catch (const CodecError&) { continue; }
+            const auto* wr = std::get_if<WorkRecord>(&rec);
+            if (!wr) continue;
+            for (const auto& ce : wr->carry) {
+                if (!(ce.src == asset)) continue;
+                if (!found || ce.seq + 1 > st.next_seq) {
+                    found        = true;
+                    st.next_seq  = ce.seq + 1;
+                    st.collected = ce.after;
+                    st.tip       = Ref{ctx.user_id.bytes,
+                                       Crypto::hash_block(b).bytes};
+                }
+            }
+        }
+    }
+    return st;
+}
+
+// Parse repeatable --tool "HASH_PREFIX:USED" specs and attach carry links to
+// the work record. The CLI runs the thread itself — the exact pattern of the
+// emission thread in bc pay (economy.md §4.3).
+static void attach_carry(Context& ctx, WorkRecord& wr,
+                         const std::vector<std::string>& specs) {
+    for (const auto& s : specs) {
+        const auto colon = s.rfind(':');
+        if (colon == std::string::npos || colon == 0 || colon + 1 >= s.size())
+            throw std::runtime_error(
+                "--tool ждёт ПРЕФИКС_ХЕША:ЧАСЫ (для партии — :КОЛИЧЕСТВО), получено: " + s);
+        const std::string prefix = s.substr(0, colon);
+        const double      used   = std::stod(s.substr(colon + 1));
+        if (used <= 0) throw std::runtime_error("--tool: часы/количество должны быть > 0");
+
+        const auto matches = find_own_assets(ctx, prefix);
+        if (matches.empty())
+            throw std::runtime_error("средство производства '" + prefix +
+                                     "' не найдено в своей цепи — сперва bc tool add");
+        if (matches.size() > 1)
+            throw std::runtime_error("префикс '" + prefix + "' неоднозначен (" +
+                                     std::to_string(matches.size()) + " записи)");
+        const auto& a  = matches[0];
+        const auto  st = carry_thread_state(ctx, a.ref);
+
+        records::CarryEntry ce{};
+        ce.src     = a.ref;
+        ce.used    = used;
+        ce.carried = records::carry_step(a.info.cost, a.info.capacity,
+                                         used, st.collected);
+        ce.seq     = st.next_seq;
+        ce.prev    = st.tip;
+        ce.after   = st.collected + ce.carried;
+        wr.carry.push_back(ce);
+
+        std::cerr << "  перенос: " << ce.carried << "ч  (" << a.info.name
+                  << ", собрано " << ce.after << "/" << a.info.cost << "ч"
+                  << (a.info.basis == "est" ? ", оценка владельца" : "") << ")";
+        if (ce.carried <= 1e-9)
+            std::cerr << "  — стоимость возвращена, работает бесплатно (§9.4)";
+        std::cerr << "\n";
+    }
 }
 
 // bc block stub [--leaf L]
@@ -873,7 +1021,8 @@ static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
                      "    --hours  FLOAT\n"
                      "   [--start  UNIX_TS]         (default: now)\n"
                      "   [--input  NAME:QTY:UNIT]   (repeatable)\n"
-                     "   [--output NAME:QTY:UNIT]   (repeatable)\n";
+                     "   [--output NAME:QTY:UNIT]   (repeatable)\n"
+                     "   [--tool   HASH_PREFIX:USED] (repeatable — перенос стоимости, ИР-011)\n";
         return 1;
     }
     WorkRecord wr;
@@ -886,7 +1035,18 @@ static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
                   : static_cast<int64_t>(std::stoll(start_s));
     for (const auto& s : flag_all(argc, argv, "--input"))  wr.inputs.push_back(parse_rq(s));
     for (const auto& s : flag_all(argc, argv, "--output")) wr.outputs.push_back(parse_rq(s));
-    return cmd_write(data_dir, argc, argv,wr);
+
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+    const auto tool_specs = flag_all(argc, argv, "--tool");
+    if (!tool_specs.empty()) attach_carry(ctx, wr, tool_specs);
+
+    const Block block = append_record(ctx, Record{wr});
+    std::cout << "block #" << block.address.block_index
+              << "  hash: " << to_hex(Crypto::hash_block(block).bytes) << "\n";
+    const auto via = flag_val(argc, argv, "--via");
+    if (!via.empty()) upload_block(via, block);
+    return 0;
 }
 
 static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
@@ -950,13 +1110,258 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
         a.labor_units = std::stod(lu_s);
     }
 
+    // v2 (ИР-011): carried cost of the accepted work. carried_units must equal
+    // Σ carried of the WorkRecord's carry, or the acceptance is unrecognisable
+    // (records.md §9.5) — so it is always derived, never passed by hand.
+    if (const auto wblock = find_external_by_hash(ctx, a.work.hash)) {
+        if (wblock->type == BlockType::DATA) {
+            try {
+                const auto wrec = Codec::decode(wblock->payload.data(),
+                                                wblock->payload.size());
+                const auto* wr = std::get_if<WorkRecord>(&wrec);
+                if (wr && !wr->carry.empty()) {
+                    double carried = 0;
+                    for (const auto& ce : wr->carry) carried += ce.carried;
+                    a.carried_units = carried;
+                    std::cerr << "перенос средств производства: " << carried
+                              << "ч, позиции:\n";
+                    for (const auto& ce : wr->carry) {
+                        const auto ablock = find_external_by_hash(ctx, ce.src.hash);
+                        std::optional<AssetInfo> info;
+                        if (ablock && ablock->type == BlockType::DATA) {
+                            try {
+                                info = asset_info(Codec::decode(
+                                    ablock->payload.data(), ablock->payload.size()));
+                            } catch (const CodecError&) {}
+                        }
+                        if (!info) {
+                            std::cerr << "  " << short_hex(ce.src.hash) << ": "
+                                      << ce.carried << "ч — запись средства не "
+                                      "загружена, формула не проверена (bc fetch "
+                                      << to_hex(ce.src.chain) << "/"
+                                      << to_hex(ce.src.hash) << ")\n";
+                            continue;
+                        }
+                        const double expected = records::carry_step(
+                            info->cost, info->capacity, ce.used,
+                            ce.after - ce.carried);
+                        if (std::abs(expected - ce.carried) > 1e-6)
+                            std::cerr << "  ⚠ " << info->name << ": " << ce.carried
+                                      << "ч НЕ по формуле переноса (ожидалось "
+                                      << expected << "ч, §9.4) — вправе отклонить\n";
+                        else
+                            std::cerr << "  " << info->name << ": " << ce.carried
+                                      << "ч за " << ce.used
+                                      << (info->is_material ? " " + info->unit
+                                                            : "ч работы")
+                                      << (info->basis == "est"
+                                          ? "  [оценка владельца]" : "") << "\n";
+                    }
+                }
+            } catch (const CodecError&) {}
+        }
+    }
+
     const Block block = append_record(ctx, Record{a});
     std::cout << "acceptance ref: " << to_hex(ctx.user_id.bytes) << "/"
               << to_hex(Crypto::hash_block(block).bytes) << "\n";
     std::cerr << "appraised: " << a.labor_units << " labor-h  (raw " << a.hours_raw
-              << "h)\n(pay with: bc pay --acceptance <ref>)\n";
+              << "h)";
+    if (a.carried_units)
+        std::cerr << "  + перенос " << *a.carried_units << "ч  (к оплате "
+                  << a.labor_units + *a.carried_units << "ч)";
+    std::cerr << "\n(pay with: bc pay --acceptance <ref>)\n";
     const auto via = flag_val(argc, argv, "--via");
     if (!via.empty()) upload_block(via, block);
+    return 0;
+}
+
+// ── bc tool — средства производства (ИР-011, records.md §10.2) ────────────────
+
+// bc tool add ИМЯ --cost H --life HOURS [--serial S] [--desc T] [--note T]
+//             [--paid ACC_REF] [--origin TOOL_REF] [--leaf L] [--via URL]
+static int cmd_tool_add(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos    = get_positionals(argc, argv);
+    const auto cost_s = flag_val(argc, argv, "--cost");
+    const auto life_s = flag_val(argc, argv, "--life");
+    if (pos.size() < 3 || cost_s.empty() || life_s.empty()) {
+        std::cerr <<
+            "Usage: bc tool add ИМЯ --cost ТРУДОЧАСЫ --life ЧАСЫ_РЕСУРСА\n"
+            "   [--serial S] [--desc TEXT] [--note TEXT]\n"
+            "   [--paid ACCEPT_REF]   куплен в системе — приёмка покупки\n"
+            "   [--origin TOOL_REF]   перевыпуск: перепродажа / переоценка вниз /\n"
+            "                         повторный ввод (cost ≤ остатка предыдущей)\n"
+            "   [--leaf L] [--via URL]\n"
+            "Без --paid стоимость — оценка владельца (est): дайте --note с расчётом\n"
+            "(например: \"120000₽ / 380₽·ч ≈ 315ч\").\n";
+        return 1;
+    }
+    records::Tool t{};
+    t.name   = pos[2];
+    t.desc   = flag_val(argc, argv, "--desc");
+    t.serial = flag_val(argc, argv, "--serial");
+    t.cost   = std::stod(cost_s);
+    t.life   = std::stod(life_s);
+    t.note   = flag_val(argc, argv, "--note");
+    const auto paid_s   = flag_val(argc, argv, "--paid");
+    const auto origin_s = flag_val(argc, argv, "--origin");
+    t.basis = paid_s.empty() ? "est" : "paid";
+    if (!paid_s.empty())   t.src    = parse_ref(paid_s);
+    if (!origin_s.empty()) t.origin = parse_ref(origin_s);
+    if (t.cost <= 0 || t.life <= 0)
+        throw std::runtime_error("--cost и --life должны быть положительными");
+    if (t.basis == "est" && t.note.empty())
+        std::cerr << "предупреждение: est без --note — покупателю не из чего "
+                     "проверить оценку\n";
+
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+
+    // Reissue ceiling (records.md §10.2): new cost ≤ previous remainder.
+    // Enforceable locally only for an own origin; a foreign seller's thread
+    // is checked by whoever audits the chains.
+    if (t.origin) {
+        if (t.origin->chain == ctx.user_id.bytes) {
+            const auto prev = find_own_assets(ctx, to_hex(t.origin->hash));
+            if (prev.empty())
+                throw std::runtime_error("--origin не найден в своей цепи");
+            const auto   st        = carry_thread_state(ctx, prev[0].ref);
+            const double remainder = prev[0].info.cost - st.collected;
+            if (t.cost > remainder + 1e-9) {
+                std::cerr << "отказ: cost " << t.cost << "ч выше остатка "
+                          << remainder << "ч предыдущей записи — перевыпуск "
+                          "только вниз (records.md §10.2)\n";
+                return 1;
+            }
+        } else {
+            std::cerr << "предупреждение: origin в чужой цепи — остаток "
+                         "продавца локально не проверен\n";
+        }
+    }
+
+    const Block block = append_record(ctx, Record{t});
+    std::cout << "tool ref: " << to_hex(ctx.user_id.bytes) << "/"
+              << to_hex(Crypto::hash_block(block).bytes) << "\n";
+    std::cerr << "  " << t.name << "  " << t.cost << "ч, ресурс " << t.life
+              << "ч  [" << (t.basis == "paid" ? "куплен в системе"
+                                              : "оценка владельца") << "]\n"
+              << "  использование: bc work log ... --tool ПРЕФИКС_ХЕША:ЧАСЫ\n";
+    const auto via = flag_val(argc, argv, "--via");
+    if (!via.empty()) upload_block(via, block);
+    return 0;
+}
+
+// bc tool list [--leaf L] — own means of production with thread state
+static int cmd_tool_list(const fs::path& data_dir, int argc, char** argv) {
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+    const auto assets = find_own_assets(ctx, "");
+    if (assets.empty()) {
+        std::cout << "средств производства нет — заведите: bc tool add\n";
+        return 0;
+    }
+    for (const auto& a : assets) {
+        const auto   st        = carry_thread_state(ctx, a.ref);
+        const double remainder = std::max(0.0, a.info.cost - st.collected);
+        std::cout << short_hex(a.ref.hash) << "  " << a.info.name
+                  << "  " << a.info.cost << "ч"
+                  << "  собрано " << st.collected << "ч"
+                  << "  остаток " << remainder << "ч  ["
+                  << (a.info.is_material ? "партия " : "ресурс ")
+                  << a.info.capacity
+                  << (a.info.is_material ? " " + a.info.unit : "ч")
+                  << ", " << (a.info.basis == "paid" ? "куплен" : "оценка") << "]\n";
+        if (remainder <= 1e-9)
+            std::cout << "    стоимость возвращена полностью — дальше работает "
+                         "бесплатно (§9.4)\n";
+    }
+    return 0;
+}
+
+// bc tool show HASH_PREFIX [--leaf L] — audit one asset's carry thread
+static int cmd_tool_show(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);
+    if (pos.size() < 3) {
+        std::cerr << "Usage: bc tool show HASH_PREFIX [--leaf L]\n";
+        return 1;
+    }
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+    const auto matches = find_own_assets(ctx, pos[2]);
+    if (matches.empty()) { std::cerr << "не найдено: " << pos[2] << "\n"; return 1; }
+    if (matches.size() > 1) {
+        std::cerr << "префикс неоднозначен:\n";
+        for (const auto& m : matches)
+            std::cerr << "  " << short_hex(m.ref.hash) << "  " << m.info.name << "\n";
+        return 1;
+    }
+    const auto& a = matches[0];
+
+    // Every observed link of this asset over the local branches → the same
+    // digest a counterparty would run (records::carry_history).
+    std::vector<records::ObservedCarry> links;
+    for (const NodeIndex branch : ctx.local_branches()) {
+        std::vector<Block> blocks;
+        try { blocks = ctx.bc.get_branch(ctx.user_id, branch); }
+        catch (const BlockchainError&) { continue; }
+        for (const auto& b : blocks) {
+            if (b.type != BlockType::DATA) continue;
+            Record rec;
+            try { rec = Codec::decode(b.payload.data(), b.payload.size()); }
+            catch (const CodecError&) { continue; }
+            const auto* wr = std::get_if<WorkRecord>(&rec);
+            if (!wr) continue;
+            for (const auto& ce : wr->carry)
+                if (ce.src == a.ref) {
+                    records::ObservedCarry o{};
+                    o.entry      = ce;
+                    o.timestamp  = wr->start_ts;
+                    o.block_hash = Crypto::hash_block(b).bytes;
+                    links.push_back(o);
+                }
+        }
+    }
+    const auto h = records::carry_history(std::move(links),
+                                          a.info.cost, a.info.capacity);
+
+    std::cout << a.info.name << "\n  ref: " << to_hex(ctx.user_id.bytes) << "/"
+              << to_hex(a.ref.hash) << "\n"
+              << "  стоимость: " << a.info.cost << "ч  ["
+              << (a.info.basis == "paid" ? "куплен в системе"
+                                         : "оценка владельца") << "]\n"
+              << "  " << (a.info.is_material ? "партия: " : "ресурс: ")
+              << a.info.capacity
+              << (a.info.is_material ? " " + a.info.unit : "ч") << "\n"
+              << "  собрано: " << h.collected
+              << "ч   остаток (потолок перепродажи, economy.md §5б): "
+              << std::max(0.0, a.info.cost - h.collected) << "ч\n"
+              << "  звеньев нити: " << h.links_seen << "/" << h.links_expected
+              << (h.gaps ? "  — есть пропуски (картина неполная)" : "") << "\n";
+
+    bool clean = true;
+    if (!h.equivocated_seqs.empty()) {
+        clean = false;
+        std::cout << "  ⚠ ФОРК НИТИ — двойное списание по параллельным веткам, seq:";
+        for (const auto s : h.equivocated_seqs) std::cout << " " << s;
+        std::cout << "\n";
+    }
+    if (h.over_invariant) {
+        clean = false;
+        std::cout << "  ⚠ перенесено больше стоимости — денежный насос (§9.4)\n";
+    }
+    if (h.formula_mismatch) {
+        clean = false;
+        std::cout << "  ⚠ есть звено не по формуле переноса (§9.4)\n";
+    }
+    if (h.after_decreasing) {
+        clean = false;
+        std::cout << "  ⚠ собранная сумма убывает по нити\n";
+    }
+    if (h.thread_inconsistent) {
+        clean = false;
+        std::cout << "  ⚠ разрыв непрерывности между соседними звеньями\n";
+    }
+    if (clean) std::cout << "  нить чистая\n";
     return 0;
 }
 
@@ -1955,7 +2360,11 @@ static int do_pay(const fs::path& data_dir, NodeIndex leaf,
     if (!acceptance)
         throw std::runtime_error("acceptance not found in the own branch");
 
-    const double cap       = acceptance->labor_units;
+    // Ceiling (§12.8 "=", v2 §9.5): live labor + carried cost of the means
+    // of production. Rates take the labor part only (§11.2).
+    const double carried   = acceptance->carried_units
+                           ? *acceptance->carried_units : 0.0;
+    const double cap       = acceptance->labor_units + carried;
     const double remaining = cap - paid;
     if (remaining <= 1e-9) {
         std::cerr << "already paid in full: " << paid << "/" << cap
@@ -2529,7 +2938,8 @@ static int cmd_deal_work(const fs::path& data_dir, int argc, char** argv) {
     const auto action_s = flag_val(argc, argv, "--action");
     if (pos.size() < 3 || hours_s.empty() || action_s.empty()) {
         std::cerr << "Usage: bc deal work NEED_REF --hours H --action TEXT "
-                     "[--agent GRADE_REF] [--start TS] [--leaf L] [--via URL]\n";
+                     "[--agent GRADE_REF] [--tool HASH_PREFIX:USED]... "
+                     "[--start TS] [--leaf L] [--via URL]\n";
         return 1;
     }
     const NodeIndex leaf = parse_leaf_index(argc, argv);
@@ -2565,6 +2975,8 @@ static int cmd_deal_work(const fs::path& data_dir, int argc, char** argv) {
     const auto start_s = flag_val(argc, argv, "--start");
     wr.start_ts = start_s.empty() ? static_cast<int64_t>(std::time(nullptr))
                                   : static_cast<int64_t>(std::stoll(start_s));
+    const auto tool_specs = flag_all(argc, argv, "--tool");
+    if (!tool_specs.empty()) attach_carry(ctx, wr, tool_specs);
 
     const Block work_block = append_record(ctx, Record{wr});
     const auto  work_hash  = Crypto::hash_block(work_block);
@@ -2629,7 +3041,10 @@ static int cmd_deal_settle(const fs::path& data_dir, int argc, char** argv) {
             if (!w.is_object()) continue;
             const auto* accepted = records::json::find(w.object, "accepted");
             if (!accepted || !accepted->boolean) continue;
-            if (jnum(w.object, "paid") + 1e-9 >= jnum(w.object, "labor_units"))
+            // Payable = live labor + carried cost of tools/materials (§9.5 v2);
+            // an aggregator that predates carry simply reports carried = 0.
+            if (jnum(w.object, "paid") + 1e-9 >=
+                jnum(w.object, "labor_units") + jnum(w.object, "carried"))
                 continue;
             const auto acc_ref = jstr(w.object, "acceptance_ref");
             std::cout << "— оплата приёмки " << acc_ref << "\n";
@@ -3671,12 +4086,28 @@ Labor:
     [--start UNIX_TS]
     [--input  NAME:QTY:UNIT ...]   (repeatable)
     [--output NAME:QTY:UNIT ...]   (repeatable)
+    [--tool  HASH_PREFIX:USED ...] (repeatable) carry the cost of an own
+                                       tool/batch into this work (ИР-011):
+                                       the CLI runs the carry thread itself
   accept                           Appraise received work (records.md §9.5)
     --work        WORK_REF             (fetch it first: bc fetch <ref> --via URL)
     --quality     TEXT
     [--hours-raw FLOAT]                default: hours of the fetched WorkRecord
     [--via URL] [--k FLOAT]            appraisal = network rate * k * hours
     [--coef FLOAT] [--labor-units F]   manual rate / full manual appraisal
+                                       carried_units is derived automatically
+                                       from the work's carry — never by hand
+
+Means of production (ИР-011, records.md §10.2, §9.4):
+  tool add ИМЯ --cost H --life HRS Register a tool: cost in labor-hours,
+    [--serial S] [--desc T]            design life in tool-hours. Without
+    [--note "расчёт оценки"]           --paid the cost is the owner's estimate
+    [--paid ACCEPT_REF]                (est) — give --note with the arithmetic.
+    [--origin TOOL_REF]                Reissue: resale / downward revaluation /
+                                       re-entry; cost ≤ previous remainder.
+  tool list                        Own tools/batches: cost, collected, remainder
+  tool show HASH_PREFIX            Audit one carry thread: invariant, forks,
+                                       formula, resale ceiling (§5б)
   rates --via URL                  Today's specialty rates (signed DailyAggregate)
   pay --acceptance REF             Pay the worker up to the appraisal (§12.8)
     [--units N] [--via URL]            default: the unpaid remainder
@@ -3805,6 +4236,9 @@ int main(int argc, char** argv) {
         else if (cmd == "grade"     && subcmd == "add")     return cmd_grade_add(data_dir, argc, argv);
         else if (cmd == "work"      && subcmd == "log")     return cmd_work_log(data_dir, argc, argv);
         else if (cmd == "accept")                           return cmd_accept(data_dir, argc, argv);
+        else if (cmd == "tool"      && subcmd == "add")     return cmd_tool_add(data_dir, argc, argv);
+        else if (cmd == "tool"      && subcmd == "list")    return cmd_tool_list(data_dir, argc, argv);
+        else if (cmd == "tool"      && subcmd == "show")    return cmd_tool_show(data_dir, argc, argv);
         else if (cmd == "branch"    && subcmd == "init")    return cmd_branch_init(data_dir, argc, argv);
         else if (cmd == "block"     && subcmd == "stub")    return cmd_block_stub(data_dir, argc, argv);
         else if (cmd == "list")                             return cmd_list(data_dir, argc, argv);

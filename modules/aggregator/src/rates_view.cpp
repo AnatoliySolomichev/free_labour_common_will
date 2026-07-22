@@ -67,9 +67,14 @@ std::vector<records::RateEntry> build_daily_rates(
         // Filter (Б) + §12.8 "=": only exactly settled deals enter the
         // averaging — payment must equal the appraisal, an underpaid deal is
         // a hidden discount and must not move the rates (economy.md §4.2).
+        // v2 (§9.5): the appraisal is labor + carried cost of the means of
+        // production; the averaging below still takes labor_units only.
+        const double payable = deal.acc.labor_units
+                             + (deal.acc.carried_units ? *deal.acc.carried_units
+                                                       : 0.0);
         const auto pit = paid.find(acc_hash);
         if (pit == paid.end() ||
-            std::abs(pit->second - deal.acc.labor_units) > 1e-6) continue;
+            std::abs(pit->second - payable) > 1e-6) continue;
         if (deal.acc.work.chain == deal.payer.bytes) continue;     // self-deal
 
         const auto work_it = by_hash.find(deal.acc.work.hash);

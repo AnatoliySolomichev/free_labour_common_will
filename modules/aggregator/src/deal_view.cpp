@@ -29,14 +29,17 @@ struct AcceptInfo {
     UserId  owner{};      // the customer (receiver, spoof-guarded)
     RefHash work{};       // accepted WorkRecord's block hash
     double  labor_units = 0;
+    double  carried     = 0;  // carried cost of tools/materials (§9.5 v2)
 };
 
 } // namespace
 
 double Deal::appraised() const noexcept {
+    // Payable = live labor + carried cost (§9.5 v2) — the same ceiling
+    // bc pay enforces, so the Paid stage flips exactly at full settlement.
     double total = 0;
     for (const auto& w : works)
-        if (w.accepted) total += w.labor_units;
+        if (w.accepted) total += w.labor_units + w.carried;
     return total;
 }
 
@@ -126,7 +129,8 @@ DealView DealView::build(const AggregatorStorage& storage) {
         } else if (const auto* a = std::get_if<records::Acceptance>(&rec)) {
             if (a->receiver != owner.bytes) continue;   // spoofed receiver
             accept_infos[bh.bytes] =
-                AcceptInfo{owner, a->work.hash, a->labor_units};
+                AcceptInfo{owner, a->work.hash, a->labor_units,
+                           a->carried_units ? *a->carried_units : 0.0};
         } else if (const auto* p = std::get_if<records::Pledge>(&rec)) {
             UserId target_chain{};
             target_chain.bytes = p->target.chain;
@@ -177,6 +181,7 @@ DealView DealView::build(const AggregatorStorage& storage) {
             dw.acceptor        = ai.owner;
             dw.acceptance_hash = Hash{aw->second};
             dw.labor_units     = ai.labor_units;
+            dw.carried         = ai.carried;
             if (const auto paid = payments.find(aw->second);
                 paid != payments.end())
                 dw.paid = paid->second;
