@@ -135,6 +135,7 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--node", "--ancestor", "--since", "--out", "--cert", "--hex",
     "--skill", "--need", "--search",
     "--tool", "--cost", "--life", "--serial", "--desc", "--note", "--paid",
+    "--material", "--unit", "--qty",
 };
 
 // True when a standalone flag (no value) is present.
@@ -611,6 +612,16 @@ static void attach_carry(Context& ctx, WorkRecord& wr,
         const auto& a  = matches[0];
         const auto  st = carry_thread_state(ctx, a.ref);
 
+        // A batch can't yield more than its size; a tool outliving its rated
+        // life is legitimate (free machine-hours, ИР-011), so warn for the
+        // material only.
+        const double used_before = a.info.capacity > 0
+            ? st.collected / a.info.cost * a.info.capacity : 0;
+        if (a.info.is_material && used_before + used > a.info.capacity + 1e-9)
+            std::cerr << "  предупреждение: списано больше размера партии ("
+                      << a.info.name << ", партия " << a.info.capacity << " "
+                      << a.info.unit << ") — заведите новую партию для остатка\n";
+
         records::CarryEntry ce{};
         ce.src     = a.ref;
         ce.used    = used;
@@ -625,7 +636,9 @@ static void attach_carry(Context& ctx, WorkRecord& wr,
                   << ", собрано " << ce.after << "/" << a.info.cost << "ч"
                   << (a.info.basis == "est" ? ", оценка владельца" : "") << ")";
         if (ce.carried <= 1e-9)
-            std::cerr << "  — стоимость возвращена, работает бесплатно (§9.4)";
+            std::cerr << (a.info.is_material
+                          ? "  — партия исчерпана, заведите новую (§10.1)"
+                          : "  — стоимость возвращена, работает бесплатно (§9.4)");
         std::cerr << "\n";
     }
 }
@@ -1038,8 +1051,9 @@ static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
 
     const NodeIndex leaf = parse_leaf_index(argc, argv);
     Context ctx(data_dir, leaf);
-    const auto tool_specs = flag_all(argc, argv, "--tool");
-    if (!tool_specs.empty()) attach_carry(ctx, wr, tool_specs);
+    auto carry_specs = flag_all(argc, argv, "--tool");
+    for (const auto& s : flag_all(argc, argv, "--material")) carry_specs.push_back(s);
+    if (!carry_specs.empty()) attach_carry(ctx, wr, carry_specs);
 
     const Block block = append_record(ctx, Record{wr});
     std::cout << "block #" << block.address.block_index
@@ -1246,6 +1260,76 @@ static int cmd_tool_add(const fs::path& data_dir, int argc, char** argv) {
               << "ч  [" << (t.basis == "paid" ? "куплен в системе"
                                               : "оценка владельца") << "]\n"
               << "  использование: bc work log ... --tool ПРЕФИКС_ХЕША:ЧАСЫ\n";
+    const auto via = flag_val(argc, argv, "--via");
+    if (!via.empty()) upload_block(via, block);
+    return 0;
+}
+
+// bc material add ИМЯ --unit U --cost H --qty Q [--desc T] [--note T]
+//                 [--paid ACC_REF] [--origin MAT_REF] [--leaf L] [--via URL]
+// A batch of consumables (records.md §10.1 v2): cost flows into products as
+// the quantity is spent — the same carry thread as a tool.
+static int cmd_material_add(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos    = get_positionals(argc, argv);
+    const auto unit_s = flag_val(argc, argv, "--unit");
+    const auto cost_s = flag_val(argc, argv, "--cost");
+    const auto qty_s  = flag_val(argc, argv, "--qty");
+    if (pos.size() < 3 || unit_s.empty() || cost_s.empty() || qty_s.empty()) {
+        std::cerr <<
+            "Usage: bc material add ИМЯ --unit ЕД --cost ТРУДОЧАСЫ --qty РАЗМЕР\n"
+            "   [--desc TEXT] [--note TEXT]\n"
+            "   [--paid ACCEPT_REF]   куплена в системе — приёмка покупки\n"
+            "   [--origin MAT_REF]    перевыпуск (cost ≤ остатка предыдущей)\n"
+            "   [--leaf L] [--via URL]\n"
+            "Партия расходуется в работе флагом: bc work log ... "
+            "--material ПРЕФИКС_ХЕША:КОЛИЧЕСТВО\n"
+            "Без --paid стоимость — оценка (est): дайте --note (например \"чек "
+            "2100₽ / 525₽·ч\").\n";
+        return 1;
+    }
+    records::Material m{};
+    m.name = pos[2];
+    m.unit = unit_s;
+    m.desc = flag_val(argc, argv, "--desc");
+    m.cost = std::stod(cost_s);
+    m.qty  = std::stod(qty_s);
+    m.note = flag_val(argc, argv, "--note");
+    const auto paid_s   = flag_val(argc, argv, "--paid");
+    const auto origin_s = flag_val(argc, argv, "--origin");
+    m.basis = paid_s.empty() ? "est" : "paid";
+    if (!paid_s.empty())   m.src    = parse_ref(paid_s);
+    if (!origin_s.empty()) m.origin = parse_ref(origin_s);
+    if (m.cost <= 0 || m.qty <= 0)
+        throw std::runtime_error("--cost и --qty должны быть положительными");
+    if (m.basis == "est" && m.note.empty())
+        std::cerr << "предупреждение: est без --note — покупателю не из чего "
+                     "проверить оценку\n";
+
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+
+    // Reissue ceiling (records.md §10.2): new cost ≤ previous remainder —
+    // enforceable locally only for an own origin.
+    if (m.origin && m.origin->chain == ctx.user_id.bytes) {
+        const auto prev = find_own_assets(ctx, to_hex(m.origin->hash));
+        if (prev.empty())
+            throw std::runtime_error("--origin не найден в своей цепи");
+        const auto   st        = carry_thread_state(ctx, prev[0].ref);
+        const double remainder = prev[0].info.cost - st.collected;
+        if (m.cost > remainder + 1e-9) {
+            std::cerr << "отказ: cost " << m.cost << "ч выше остатка "
+                      << remainder << "ч предыдущей записи (§10.2)\n";
+            return 1;
+        }
+    }
+
+    const Block block = append_record(ctx, Record{m});
+    std::cout << "material ref: " << to_hex(ctx.user_id.bytes) << "/"
+              << to_hex(Crypto::hash_block(block).bytes) << "\n";
+    std::cerr << "  " << m.name << "  " << m.cost << "ч / партия " << m.qty
+              << " " << m.unit << "  [" << (m.basis == "paid" ? "куплена"
+                                                              : "оценка") << "]\n"
+              << "  расход: bc work log ... --material ПРЕФИКС_ХЕША:КОЛИЧЕСТВО\n";
     const auto via = flag_val(argc, argv, "--via");
     if (!via.empty()) upload_block(via, block);
     return 0;
@@ -2975,8 +3059,9 @@ static int cmd_deal_work(const fs::path& data_dir, int argc, char** argv) {
     const auto start_s = flag_val(argc, argv, "--start");
     wr.start_ts = start_s.empty() ? static_cast<int64_t>(std::time(nullptr))
                                   : static_cast<int64_t>(std::stoll(start_s));
-    const auto tool_specs = flag_all(argc, argv, "--tool");
-    if (!tool_specs.empty()) attach_carry(ctx, wr, tool_specs);
+    auto carry_specs = flag_all(argc, argv, "--tool");
+    for (const auto& s : flag_all(argc, argv, "--material")) carry_specs.push_back(s);
+    if (!carry_specs.empty()) attach_carry(ctx, wr, carry_specs);
 
     const Block work_block = append_record(ctx, Record{wr});
     const auto  work_hash  = Crypto::hash_block(work_block);
@@ -4087,8 +4172,9 @@ Labor:
     [--input  NAME:QTY:UNIT ...]   (repeatable)
     [--output NAME:QTY:UNIT ...]   (repeatable)
     [--tool  HASH_PREFIX:USED ...] (repeatable) carry the cost of an own
-                                       tool/batch into this work (ИР-011):
-                                       the CLI runs the carry thread itself
+    [--material HASH_PREFIX:QTY ...]   tool (tool-hours) or material batch
+                                       (units) into this work (ИР-011): the
+                                       CLI runs each carry thread itself
   accept                           Appraise received work (records.md §9.5)
     --work        WORK_REF             (fetch it first: bc fetch <ref> --via URL)
     --quality     TEXT
@@ -4105,8 +4191,12 @@ Means of production (ИР-011, records.md §10.2, §9.4):
     [--paid ACCEPT_REF]                (est) — give --note with the arithmetic.
     [--origin TOOL_REF]                Reissue: resale / downward revaluation /
                                        re-entry; cost ≤ previous remainder.
-  tool list                        Own tools/batches: cost, collected, remainder
-  tool show HASH_PREFIX            Audit one carry thread: invariant, forks,
+  material add ИМЯ --unit U        Register a consumables batch: cost in
+    --cost H --qty Q                   labor-hours, size in units. Spent by
+    [--note "расчёт"] [--paid REF]     --material in work log; est needs --note.
+    [--origin MAT_REF]
+  tool list / material list        Own tools/batches: cost, collected, remainder
+  tool show / material show PREFIX Audit one carry thread: invariant, forks,
                                        formula, resale ceiling (§5б)
   rates --via URL                  Today's specialty rates (signed DailyAggregate)
   pay --acceptance REF             Pay the worker up to the appraisal (§12.8)
@@ -4239,6 +4329,9 @@ int main(int argc, char** argv) {
         else if (cmd == "tool"      && subcmd == "add")     return cmd_tool_add(data_dir, argc, argv);
         else if (cmd == "tool"      && subcmd == "list")    return cmd_tool_list(data_dir, argc, argv);
         else if (cmd == "tool"      && subcmd == "show")    return cmd_tool_show(data_dir, argc, argv);
+        else if (cmd == "material"  && subcmd == "add")     return cmd_material_add(data_dir, argc, argv);
+        else if (cmd == "material"  && subcmd == "list")    return cmd_tool_list(data_dir, argc, argv);
+        else if (cmd == "material"  && subcmd == "show")    return cmd_tool_show(data_dir, argc, argv);
         else if (cmd == "branch"    && subcmd == "init")    return cmd_branch_init(data_dir, argc, argv);
         else if (cmd == "block"     && subcmd == "stub")    return cmd_block_stub(data_dir, argc, argv);
         else if (cmd == "list")                             return cmd_list(data_dir, argc, argv);

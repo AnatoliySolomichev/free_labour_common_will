@@ -570,6 +570,24 @@ TEST(RecordsCodec, MaterialBatchRoundtrip) {
     EXPECT_EQ(decoded.note, m.note);
 }
 
+TEST(RecordsCodec, MaterialBatchPaidWithOrigin) {
+    Material m{};
+    m.name   = "Мука пшеничная";
+    m.unit   = "кг";
+    m.cost   = 3.04;                      // купил остаток предыдущей партии
+    m.qty    = 38.0;
+    m.basis  = "paid";
+    m.src    = make_ref(0x31, 0x32);      // приёмка покупки
+    m.origin = make_ref(0x33, 0x34);      // предыдущая запись партии
+
+    const auto decoded = std::get<Material>(roundtrip(m));
+    ASSERT_TRUE(decoded.src.has_value());
+    ASSERT_TRUE(decoded.origin.has_value());
+    EXPECT_EQ(*decoded.src,    *m.src);
+    EXPECT_EQ(*decoded.origin, *m.origin);
+    EXPECT_EQ(decoded.basis, "paid");
+}
+
 TEST(RecordsCodec, WorkRecordV2CarryRoundtrip) {
     WorkRecord wr{};
     wr.agent    = make_ref(0x10, 0x11);
