@@ -3,6 +3,7 @@
 #include "aggregator/deal_view.h"
 #include "aggregator/discovery_view.h"
 #include "aggregator/economy_view.h"
+#include "aggregator/footprint_view.h"
 #include "aggregator/match_view.h"
 #include "aggregator/profile_view.h"
 #include "aggregator/rates_view.h"
@@ -744,6 +745,57 @@ void AggregatorServer::setup_routes() {
                 + ",\"pledges_expired\":"   + std::to_string(chain->pledges_expired)
                 + ",\"works_accepted\":"    + std::to_string(chain->works_accepted)
                 + ",\"labor_appraised\":"   + std::to_string(chain->labor_appraised)
+                + "}";
+            res.set_content(body, "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
+                            "application/json");
+        }
+    });
+
+    // Economic footprint, layers 2–3 (ИР-010, records.md §11.6). Served one
+    // chain per request on purpose: the pairwise "who owes whom" map is
+    // computable from the raw chains, but is not handed over on a plate.
+    svr.Get("/economy/footprint/:uid", [&](const httplib::Request& req,
+                                           httplib::Response& res) {
+        auto uid_hash = hex_to_hash(req.path_params.at("uid"));
+        if (!uid_hash) {
+            res.status = 400;
+            res.set_content("{\"error\":\"invalid uid\"}", "application/json");
+            return;
+        }
+        try {
+            const auto view = FootprintView::build(storage_);
+            UserId uid{};
+            uid.bytes = uid_hash->bytes;
+            const auto fp = view.chain(uid);
+            if (!fp) {
+                res.status = 404;
+                res.set_content("{\"error\":\"chain left no economic trace\"}",
+                                "application/json");
+                return;
+            }
+            std::string holders;
+            bool first = true;
+            for (const auto& h : fp->holders) {
+                if (!first) holders += ",";
+                first = false;
+                holders += "{\"chain\":\"" + to_hex(h.chain.bytes)
+                         + "\",\"units\":" + std::to_string(h.units) + "}";
+            }
+            const std::string body =
+                  "{\"holders\":["            + holders + "]"
+                + ",\"paper_outstanding\":"   + std::to_string(fp->paper_outstanding)
+                + ",\"redeemers\":"           + std::to_string(fp->redeemers)
+                + ",\"redeemed_to_others\":"  + std::to_string(fp->redeemed_to_others)
+                + ",\"acceptors\":"           + std::to_string(fp->acceptors)
+                + ",\"labor_outward\":"       + std::to_string(fp->labor_outward)
+                + ",\"counterparties\":"      + std::to_string(fp->counterparties)
+                + ",\"internal_turnover\":"   + std::to_string(fp->internal_turnover)
+                + ",\"boundary_turnover\":"   + std::to_string(fp->boundary_turnover)
+                + ",\"has_turnover\":"        + (fp->has_turnover() ? "true" : "false")
+                + ",\"closedness\":"          + std::to_string(fp->closedness())
                 + "}";
             res.set_content(body, "application/json");
         } catch (const std::exception& e) {

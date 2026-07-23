@@ -1863,6 +1863,36 @@ static int cmd_merge_serve(const fs::path& data_dir, int argc, char** argv) {
     }
 }
 
+// ── JSON over HTTP: shared by bc trust, bc deal, bc match ─────────────────────
+
+// GET a JSON endpoint and parse it. nullopt on any failure.
+static std::optional<records::json::Value> fetch_json(const std::string& via,
+                                                      const std::string& path) {
+    httplib::Client cli(via);  // scheme-aware: plain host:port, http:// or https://
+    cli.set_connection_timeout(5);
+    const auto res = cli.Get(path);
+    if (!res || res->status != 200) return std::nullopt;
+    try {
+        return records::json::Reader(res->body).read();
+    } catch (const records::json::JsonError&) {
+        return std::nullopt;
+    }
+}
+
+static std::string jstr(const records::json::Object& o, const char* k) {
+    const auto* v = records::json::find(o, k);
+    return (v && v->is_string()) ? v->string : std::string{};
+}
+static double jnum(const records::json::Object& o, const char* k) {
+    const auto* v = records::json::find(o, k);
+    return (v && v->is_number()) ? v->number : 0.0;
+}
+static const records::json::Value* jarr(const records::json::Object& o,
+                                        const char* k) {
+    const auto* v = records::json::find(o, k);
+    return (v && v->is_array()) ? v : nullptr;
+}
+
 // ── Economy: named labor-hours (records.md §11, §12.7) ────────────────────────
 
 static std::array<uint8_t, 32> uid_from_hex(const std::string& s) {
@@ -2131,11 +2161,110 @@ static std::vector<records::ObservedLink> observed_links(
     return out;
 }
 
-// bc trust CHAIN_HEX_OR_PREFIX [--leaf L]
+// bc trust CHAIN_HEX_OR_PREFIX [--via URL] [--leaf L]
+// Layers 2–3 of the footprint (ИР-010): computed by the aggregator over the
+// whole graph, so every figure is marked "со слов агрегатора" and carries its
+// own forging price. Reachability is judged HERE, from the asker's own view:
+// a holder whose blocks you already hold is someone you can actually ask.
+static void print_footprint(Context& ctx,
+                            const std::array<uint8_t, 32>& subject,
+                            const std::string& via) {
+    if (via.empty()) {
+        std::cout << "\n  (слои 2–3 — держатели бумаги и замкнутость — "
+                     "считает агрегатор: добавьте --via URL)\n";
+        return;
+    }
+    const auto doc = fetch_json(via, "/economy/footprint/" + to_hex(subject));
+    if (!doc || !doc->is_object()) {
+        std::cout << "\n  (агрегатор " << via << " не знает эту цепь либо "
+                     "недоступен — слои 2–3 пропущены)\n";
+        return;
+    }
+    const auto& o = doc->object;
+
+    // Chains whose blocks are in the local store: you have met them, so you
+    // can verify their side yourself instead of taking the aggregator's word.
+    std::set<std::string> seen_locally;
+    seen_locally.insert(to_hex(ctx.user_id.bytes));
+    ctx.storage.for_each_external_block([&](const Block& b) {
+        seen_locally.insert(to_hex(b.address.user_id.bytes));
+        return true;
+    });
+
+    std::cout << "\nСЛОЙ 2 — КТО ВЗЯЛ ЕЁ РИСК   [со слов агрегатора " << via << ";\n"
+                 "  перепроверяемо по сырым записям. Цена подделки: нужны "
+                 "живые\n  контрагенты, согласившиеся держать бумагу и "
+                 "принять труд]\n";
+
+    const auto* holders = jarr(o, "holders");
+    const std::size_t n_holders = holders ? holders->array.size() : 0;
+    if (n_holders == 0) {
+        std::cout << "  бумагу этой цепи сейчас не держит никто — ей ещё "
+                     "никто не поверил\n";
+    } else {
+        std::size_t reachable = 0;
+        for (const auto& hv : holders->array)
+            if (hv.is_object() && seen_locally.count(jstr(hv.object, "chain")))
+                ++reachable;
+        std::cout << "  держат её бумагу: " << n_holders << " цеп. на "
+                  << jnum(o, "paper_outstanding") << "h";
+        std::cout << "\n  из них в вашей досягаемости (их блоки у вас есть): "
+                  << reachable << "\n";
+        for (const auto& hv : holders->array) {
+            if (!hv.is_object()) continue;
+            const auto chain = jstr(hv.object, "chain");
+            std::cout << "    " << chain.substr(0, 16) << "…  "
+                      << jnum(hv.object, "units") << "h"
+                      << (seen_locally.count(chain) ? "  (знакома вам)" : "")
+                      << "\n";
+        }
+    }
+
+    const auto redeemers = jnum(o, "redeemers");
+    if (redeemers > 0)
+        std::cout << "  вернула трудом бумагу " << static_cast<int>(redeemers)
+                  << " цеп. на " << jnum(o, "redeemed_to_others")
+                  << "h — за это надо было работать\n";
+    else
+        std::cout << "  ни одна её бумага ещё не вернулась к ней трудом\n";
+
+    const auto acceptors = jnum(o, "acceptors");
+    if (acceptors > 0)
+        std::cout << "  её труд приняли " << static_cast<int>(acceptors)
+                  << " посторонних цеп. на " << jnum(o, "labor_outward")
+                  << "h — они получили что-то настоящее\n";
+    else
+        std::cout << "  её труд не принимал никто посторонний\n";
+
+    const auto* ht = records::json::find(o, "has_turnover");
+    if (!ht || !ht->boolean) {
+        std::cout << "\nСЛОЙ 3 — ЗАМКНУТОСТЬ: оборота нет, судить не о чем\n";
+        return;
+    }
+    const double closed  = jnum(o, "closedness");
+    const int    parties = static_cast<int>(jnum(o, "counterparties"));
+    std::cout << "\nСЛОЙ 3 — ЗАМКНУТОСТЬ ОБОРОТА  "
+              << static_cast<int>(std::round(100.0 * closed)) << "%"
+              << "  (внутри круга " << jnum(o, "internal_turnover")
+              << "h, наружу " << jnum(o, "boundary_turnover") << "h, "
+              << parties << " контрагент.)\n"
+                 "  [СКРИНИНГ, НЕ ДОКАЗАТЕЛЬСТВО: ловит только ленивую ферму —\n"
+                 "   умная добавит жертвенные связи наружу (ИР-009)]\n";
+    // Below a handful of counterparties there is no cluster to speak of: a
+    // healthy pair trading honestly is 100% closed by arithmetic, and flagging
+    // it would train people to ignore the flag.
+    if (parties < 3)
+        std::cout << "  контрагентов слишком мало, чтобы говорить о кластере —"
+                     " замкнутость\n  здесь ничего не значит\n";
+    else if (closed > 0.95)
+        std::cout << "  ФЛАГ: ценность не покидает её круг — так выглядит "
+                     "замкнутый кластер\n";
+}
+
 static int cmd_trust(const fs::path& data_dir, int argc, char** argv) {
     const auto pos = get_positionals(argc, argv);  // [trust, <chain>]
     if (pos.size() < 2) {
-        std::cerr << "Usage: bc trust CHAIN_HEX_OR_PREFIX [--leaf L]\n";
+        std::cerr << "Usage: bc trust CHAIN_HEX_OR_PREFIX [--via URL] [--leaf L]\n";
         return 1;
     }
     Context ctx(data_dir, parse_leaf_index(argc, argv));
@@ -2176,8 +2305,15 @@ static int cmd_trust(const fs::path& data_dir, int argc, char** argv) {
               << "   эквивокация нити — ловится при первом же расхождении]\n\n";
 
     if (h.links_seen == 0) {
-        std::cout << "  нить эмиссии в вашей картине пуста: вы не мержились с\n"
-                     "  этой цепью, либо она ещё ничего не самоэмитировала.\n";
+        // An empty thread is not silence and not innocence: it means only
+        // that YOUR copy has no links. Layers 2–3 below may still show a lot,
+        // including a debt this chain never showed you — so state the two
+        // possible causes and assert neither.
+        std::cout << "  нить эмиссии в вашей картине пуста — либо вы не "
+                     "мержились\n  с этой цепью и её звенья до вас не дошли, "
+                     "либо она ничего\n  не самоэмитировала. Что именно — "
+                     "отсюда не видно.\n";
+        print_footprint(ctx, subject, flag_val(argc, argv, "--via"));
         return 0;
     }
 
@@ -2213,6 +2349,8 @@ static int cmd_trust(const fs::path& data_dir, int argc, char** argv) {
         std::cout << "\n  ЭКВИВОКАЦИЯ: звено #" << seq
                   << " существует в двух разных блоках — объективное "
                      "доказательство обмана (§4.3)\n";
+
+    print_footprint(ctx, subject, flag_val(argc, argv, "--via"));
     return 0;
 }
 
@@ -2776,34 +2914,6 @@ static int cmd_match(int argc, char** argv) {
 // ref themselves: in the step-1 live run one deal took 12 commands and 7 manual
 // copies of 64-hex hashes — a human will not do that twice. The vocabulary is
 // ordinary ConceptLinks («берусь», «исполняет», «закрыто») — no new types.
-
-// GET a JSON endpoint and parse it. nullopt on any failure.
-static std::optional<records::json::Value> fetch_json(const std::string& via,
-                                                      const std::string& path) {
-    httplib::Client cli(via);  // scheme-aware: plain host:port, http:// or https://
-    cli.set_connection_timeout(5);
-    const auto res = cli.Get(path);
-    if (!res || res->status != 200) return std::nullopt;
-    try {
-        return records::json::Reader(res->body).read();
-    } catch (const records::json::JsonError&) {
-        return std::nullopt;
-    }
-}
-
-static std::string jstr(const records::json::Object& o, const char* k) {
-    const auto* v = records::json::find(o, k);
-    return (v && v->is_string()) ? v->string : std::string{};
-}
-static double jnum(const records::json::Object& o, const char* k) {
-    const auto* v = records::json::find(o, k);
-    return (v && v->is_number()) ? v->number : 0.0;
-}
-static const records::json::Value* jarr(const records::json::Object& o,
-                                        const char* k) {
-    const auto* v = records::json::find(o, k);
-    return (v && v->is_array()) ? v : nullptr;
-}
 
 // The deal for a need ref, out of GET /deals. nullopt when the aggregator
 // does not know it (not uploaded yet, or no such need).
@@ -4273,7 +4383,15 @@ Economy (records.md §11 — именные трудочасы, §12.7):
   pledge list                      Own pledges with settlement status
   ideas top --via URL              Funding board: pledged labor per idea (JSON)
   chain info UID_HEX --via URL     Economic dossier of a chain (JSON)
-  trust CHAIN_HEX_OR_PREFIX        Credit history off the emission thread (local view, ИР-010)
+  trust CHAIN_HEX_OR_PREFIX        Economic footprint (ИР-010). Layer 1: credit
+    [--via URL]                        history off the emission thread, computed
+                                       locally, trusting nobody. With --via also
+                                       layers 2–3 from the aggregator: who holds
+                                       its paper (and how many of them YOU can
+                                       reach), whose work it earned back, and how
+                                       much of its turnover ever left its circle.
+                                       Every figure carries its forging price;
+                                       no score is ever computed.
 
 Sync cache (sync.md §5; gossip §7.1):
   cache list                       List cached participant leaves and compositions

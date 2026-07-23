@@ -9,6 +9,7 @@ add_library(aggregator
     src/aggregator.cpp
     src/server.cpp
     src/economy_view.cpp
+    src/footprint_view.cpp
     src/discovery_view.cpp
     src/attestation_view.cpp
     src/deal_view.cpp
@@ -46,6 +47,7 @@ add_executable(aggregator_tests
     tests/test_aggregator.cpp
     tests/test_relay.cpp
     tests/test_economy_view.cpp
+    tests/test_footprint_view.cpp
     tests/test_discovery_view.cpp
     tests/test_attestation_view.cpp
     tests/test_deal_view.cpp
