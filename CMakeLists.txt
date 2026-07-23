@@ -12,3 +12,18 @@ add_subdirectory(modules/records)
 add_subdirectory(modules/sync)
 add_subdirectory(modules/cli)
 add_subdirectory(modules/aggregator)
+
+# End-to-end smoke test: the live "bread with oven and flour" demo, run against
+# a real aggregator over HTTP. Doubles as the human-readable demo (docs/pilot).
+# Guarded by TEST_E2E because it needs curl and a free TCP port; unit tests do
+# not. Enable with: cmake -DTEST_E2E=ON
+option(TEST_E2E "Run the end-to-end demo as a ctest" OFF)
+if(TEST_E2E)
+    add_test(
+        NAME e2e_demo
+        COMMAND ${CMAKE_COMMAND} -E env BUILD=${CMAKE_BINARY_DIR}
+                bash ${CMAKE_SOURCE_DIR}/docs/pilot/demo.sh
+    )
+    set_tests_properties(e2e_demo PROPERTIES
+        DEPENDS "bc;aggregator_server" TIMEOUT 120)
+endif()
