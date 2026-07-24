@@ -19,6 +19,8 @@ RUN apt-get update && apt-get install -y \
     libcbor-dev \
     libssl-dev \
     ca-certificates \
+    curl \
+    faketime \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace

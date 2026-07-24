@@ -1,0 +1,498 @@
+<title>Год жизни трудовой экономики</title>
+<style>
+:root{
+  color-scheme: light;
+  --paper:#f4f6f8; --surface:#ffffff; --ink:#101519; --muted:#5c6672;
+  --rule:#dfe4ea; --grid:#e7ebf0; --axis:#c4ccd5;
+  --accent:#2a78d6; --accent-2:#eb6834;
+  --good:#0ca30c; --tip-bg:#101519; --tip-ink:#ffffff;
+  --shadow:0 1px 2px rgba(16,21,25,.06), 0 8px 24px rgba(16,21,25,.05);
+}
+@media (prefers-color-scheme: dark){
+  :root:where(:not([data-theme="light"])){
+    color-scheme: dark;
+    --paper:#0f1216; --surface:#171b20; --ink:#e8edf2; --muted:#98a3b0;
+    --rule:#262b32; --grid:#242931; --axis:#39414b;
+    --accent:#3987e5; --accent-2:#d95926;
+    --good:#0ca30c; --tip-bg:#e8edf2; --tip-ink:#0f1216;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.3);
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --paper:#0f1216; --surface:#171b20; --ink:#e8edf2; --muted:#98a3b0;
+  --rule:#262b32; --grid:#242931; --axis:#39414b;
+  --accent:#3987e5; --accent-2:#d95926;
+  --good:#0ca30c; --tip-bg:#e8edf2; --tip-ink:#0f1216;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.3);
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--paper); color:var(--ink);
+  font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  font-size:17px; line-height:1.65; -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1080px; margin:0 auto; padding:0 24px 96px}
+.prose{max-width:68ch}
+h1,h2,h3{text-wrap:balance; line-height:1.2; margin:0}
+h1{font-size:clamp(2rem,4.6vw,3.1rem); font-weight:680; letter-spacing:-.022em}
+h2{font-size:clamp(1.35rem,2.4vw,1.7rem); font-weight:660; letter-spacing:-.015em}
+h3{font-size:1.02rem; font-weight:640}
+p{margin:0}
+a{color:var(--accent)}
+
+/* Голос «журнала учёта»: моноширинные метки и все цифры */
+.mono,.eyebrow,.tile .val,.tile .unit,table,.tick,.axis-label,.legend,.fp .num{
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-variant-numeric:tabular-nums;
+}
+.eyebrow{
+  font-size:.72rem; letter-spacing:.14em; text-transform:uppercase;
+  color:var(--muted); display:block; margin-bottom:10px;
+}
+
+header.head{padding:72px 0 40px; border-bottom:1px solid var(--rule)}
+header.head .sub{color:var(--muted); font-size:1.08rem; margin-top:16px; max-width:60ch}
+header.head .meta{
+  margin-top:24px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:.8rem; color:var(--muted); letter-spacing:.02em;
+}
+
+section{padding:56px 0; border-bottom:1px solid var(--rule)}
+section:last-of-type{border-bottom:0}
+.stack{display:flex; flex-direction:column; gap:18px}
+
+/* Плитки сводки */
+.tiles{display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:2px;
+  background:var(--rule); border:1px solid var(--rule); border-radius:10px; overflow:hidden}
+.tile{background:var(--surface); padding:22px 20px}
+.tile .lab{font-size:.78rem; color:var(--muted); letter-spacing:.02em}
+.tile .val{font-size:2.05rem; font-weight:650; letter-spacing:-.02em; margin-top:8px; display:block}
+.tile .unit{font-size:.9rem; color:var(--muted); font-weight:400; margin-left:4px}
+.tile .note{font-size:.8rem; color:var(--muted); margin-top:4px}
+
+/* Панели графиков */
+.panel{background:var(--surface); border:1px solid var(--rule); border-radius:10px;
+  padding:24px; box-shadow:var(--shadow); margin-top:24px}
+.panel .cap{font-size:.86rem; color:var(--muted); margin-top:14px; max-width:70ch}
+figure{margin:0}
+figcaption{font-size:.95rem; font-weight:620; margin-bottom:4px}
+.chart-scroll{overflow-x:auto}
+svg{display:block; width:100%; height:auto}
+.tick{font-size:11px; fill:var(--muted)}
+.axis-label{font-size:11px; fill:var(--muted)}
+.gridline{stroke:var(--grid); stroke-width:1}
+.baseline{stroke:var(--axis); stroke-width:1}
+.reference{stroke:var(--axis); stroke-width:1; stroke-dasharray:4 4}
+.datalabel{font-size:11px; fill:var(--ink); font-family:ui-monospace,Menlo,monospace;
+  font-variant-numeric:tabular-nums}
+/* Серии — через классы, чтобы графики перекрашивались при смене темы */
+.s1{fill:var(--accent)} .s2{fill:var(--accent-2)}
+.s1-line{fill:none; stroke:var(--accent); stroke-width:2; stroke-linejoin:round; stroke-linecap:round}
+.s1-dot{fill:var(--accent); stroke:var(--surface); stroke-width:2}
+.whisker{stroke:var(--axis); stroke-width:1}
+.sw-1{background:var(--accent)} .sw-2{background:var(--accent-2)}
+
+.legend{display:flex; gap:18px; flex-wrap:wrap; font-size:.8rem; color:var(--muted); margin-bottom:14px}
+.legend .k{display:inline-flex; align-items:center; gap:7px}
+.legend .sw{width:11px; height:11px; border-radius:3px; display:inline-block}
+
+/* Подсказка при наведении */
+.tip{position:fixed; pointer-events:none; z-index:50; background:var(--tip-bg); color:var(--tip-ink);
+  padding:8px 11px; border-radius:7px; font-size:.78rem; line-height:1.45; opacity:0;
+  transition:opacity .1s; font-family:ui-monospace,Menlo,monospace; font-variant-numeric:tabular-nums;
+  max-width:260px}
+.tip.on{opacity:1}
+
+table{width:100%; border-collapse:collapse; font-size:.83rem; margin-top:8px}
+th,td{text-align:right; padding:7px 10px; border-bottom:1px solid var(--rule)}
+th:first-child,td:first-child{text-align:left}
+th{color:var(--muted); font-weight:500; font-size:.76rem; letter-spacing:.04em; text-transform:uppercase}
+details{margin-top:16px}
+summary{cursor:pointer; font-size:.84rem; color:var(--accent); font-family:ui-monospace,Menlo,monospace}
+summary:focus-visible{outline:2px solid var(--accent); outline-offset:3px; border-radius:4px}
+
+/* Карточки следа */
+.fps{display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:16px; margin-top:24px}
+.fp{background:var(--surface); border:1px solid var(--rule); border-radius:10px; padding:20px}
+.fp .who{font-weight:640; font-size:1rem}
+.fp .role{color:var(--muted); font-size:.82rem; margin-top:2px}
+.fp dl{display:grid; grid-template-columns:1fr auto; gap:6px 12px; margin:14px 0 0; font-size:.85rem}
+.fp dt{color:var(--muted)} .fp dd{margin:0; text-align:right}
+.fp .num{font-weight:600}
+
+.deficit{display:inline-block; background:color-mix(in srgb,var(--accent-2) 14%, transparent);
+  color:var(--ink); border:1px solid color-mix(in srgb,var(--accent-2) 40%, transparent);
+  padding:3px 10px; border-radius:999px; font-size:.78rem; margin:4px 6px 0 0;
+  font-family:ui-monospace,Menlo,monospace}
+
+pre{background:var(--surface); border:1px solid var(--rule); border-radius:9px; padding:16px;
+  overflow-x:auto; font-size:.82rem; line-height:1.6; margin:0}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.lead{font-size:1.06rem}
+.muted{color:var(--muted)}
+footer{padding:48px 0 0; color:var(--muted); font-size:.85rem}
+@media (prefers-reduced-motion:reduce){*{transition:none!important; animation:none!important}}
+</style>
+
+<div class="wrap">
+<header class="head">
+  <span class="eyebrow">Симуляция · распределённая трудовая экономика</span>
+  <h1>Год жизни трудовой экономики</h1>
+  <p class="sub">Двести человек, у каждого — собственный блокчейн. Год работы, расчётов
+  трудочасами и взаимных заверений, без единого центра. Ниже — что из этого вышло.</p>
+  <p class="meta" id="headmeta"></p>
+</header>
+
+<section>
+  <span class="eyebrow">Итог года</span>
+  <div class="tiles" id="tiles"></div>
+  <div class="prose stack" style="margin-top:32px">
+    <p class="lead">Деньги здесь не выпускает никто отдельный. Когда человек заказывает
+    чужой труд, он <strong>сам эмитирует свою бумагу</strong> — обязательство, номинированное
+    в трудочасах. Гасит её тем, что работает сам. Поэтому у экономики есть естественная
+    мера здоровья: сколько выпущенного вернулось обратно трудом.</p>
+  </div>
+</section>
+
+<section>
+  <span class="eyebrow">Эмиссия и погашение</span>
+  <h2>Долг, который гасят работой</h2>
+  <div class="prose stack" style="margin-top:14px">
+    <p>За год участники выпустили <strong id="t-issued"></strong> часов собственной бумаги.
+    Обратно трудом вернулось <strong id="t-redeemed"></strong> часов. Это не «плохой» показатель:
+    оборот идёт, и часть обязательств живёт дальше — важно, что возврат происходит
+    у <strong id="t-withred"></strong> участников, а не у единиц.</p>
+  </div>
+  <div class="panel">
+    <figure>
+      <figcaption>Кто сколько вернул из доверенного</figcaption>
+      <div class="chart-scroll"><svg id="c-redeem" viewBox="0 0 720 300" role="img"
+        aria-label="Распределение доли погашения"></svg></div>
+      <p class="cap">Доля погашения — сколько своей бумаги человек вернул трудом
+      относительно выпущенного. Слева те, кто пока только брал; справа — почти замкнувшие круг.</p>
+    </figure>
+  </div>
+</section>
+
+<section>
+  <span class="eyebrow">Индекс</span>
+  <h2>Сколько стоит средний трудочас</h2>
+  <div class="prose stack" style="margin-top:14px">
+    <p>Ставка — сколько часов бумаги платят за час труда. Если взвесить все ставки месяца
+    по отработанным часам, получится <strong>индекс среднего трудочаса</strong>. Значение
+    <span class="mono">1.000</span> означает, что за час труда в сети создаётся ровно час
+    обязательств: эмиссия растёт <em>в ногу</em> с реально отработанным временем.</p>
+    <p>Выше единицы — инфляция трудочаса, ниже — дефляция. Величина считается из публичных
+    сделок, поэтому её может пересчитать кто угодно.</p>
+  </div>
+  <div class="panel">
+    <figure>
+      <figcaption>Индекс среднего трудочаса по месяцам</figcaption>
+      <div class="chart-scroll"><svg id="c-index" viewBox="0 0 720 320" role="img"
+        aria-label="Индекс среднего трудочаса по месяцам"></svg></div>
+      <p class="cap" id="index-cap"></p>
+    </figure>
+  </div>
+</section>
+
+<section>
+  <span class="eyebrow">Ставки</span>
+  <h2>Квалификация оплачивается — но баланс сохраняется</h2>
+  <div class="prose stack" style="margin-top:14px">
+    <p>Разряд от 3 до 6 задаёт премию к часу. Низкие разряды в среднем ниже единицы,
+    высокие — выше, и вместе они дают среднее около единицы. Разница в квалификации
+    оплачивается, но общий объём эмиссии остаётся привязан к отработанным часам.</p>
+  </div>
+  <div class="panel">
+    <figure>
+      <figcaption>Средняя ставка по разряду за год</figcaption>
+      <div class="chart-scroll"><svg id="c-grades" viewBox="0 0 720 280" role="img"
+        aria-label="Средняя ставка по разряду"></svg></div>
+      <p class="cap">Пунктир — единица: час бумаги за час труда. Усы показывают размах
+      ставок разряда за год.</p>
+    </figure>
+  </div>
+</section>
+
+<section>
+  <span class="eyebrow">Профессии</span>
+  <h2>Кому доверяли труд</h2>
+  <div class="prose stack" style="margin-top:14px">
+    <p>Две величины на одного человека: сколько его труда приняли (и заплатили за него)
+    и сколько он сам выпустил бумаги, заказывая чужой труд. Обе — в часах.</p>
+  </div>
+  <div class="panel">
+    <figure>
+      <figcaption>Средние часы на человека, по профессии</figcaption>
+      <div class="legend" id="l-prof"></div>
+      <div class="chart-scroll"><svg id="c-prof" viewBox="0 0 720 640" role="img"
+        aria-label="Средние принятая бумага и эмиссия по профессиям"></svg></div>
+    </figure>
+    <details>
+      <summary>Показать таблицей</summary>
+      <div class="chart-scroll"><table id="t-prof"></table></div>
+    </details>
+  </div>
+</section>
+
+<section>
+  <span class="eyebrow">Стыковка</span>
+  <h2>Потребности встречают навыки</h2>
+  <div class="prose stack" style="margin-top:14px">
+    <p id="match-text"></p>
+    <p>Дефицит виден сразу — и вместе с ним виден список тех, кто уже заявил готовность
+    переучиться, чтобы его закрыть.</p>
+    <p><span class="muted mono" style="font-size:.8rem">никем не закрывается:</span><br>
+      <span id="deficits"></span></p>
+  </div>
+</section>
+
+<section>
+  <span class="eyebrow">Экономический след</span>
+  <h2>Репутация как проверяемый факт</h2>
+  <div class="prose stack" style="margin-top:14px">
+    <p>Здесь нет рейтингов и баллов. Есть проверяемые числа: сколько человек выпустил,
+    сколько вернул трудом, сколько его труда приняли посторонние. Подделать это можно
+    только уговорив живых людей держать твою бумагу и принять твою работу.</p>
+  </div>
+  <div class="fps" id="fps"></div>
+</section>
+
+<section>
+  <span class="eyebrow">Воспроизведение</span>
+  <h2>Всё это считается одной командой</h2>
+  <div class="prose stack" style="margin-top:14px">
+    <p>Симуляция самодостаточна: поднимает свой агрегатор, работает во временной папке
+    и всё за собой убирает. Время идёт по-настоящему — блоки каждого месяца штампуются
+    своей датой.</p>
+  </div>
+  <pre style="margin-top:20px"><code>apt-get install -y faketime
+cmake --build build
+docs/pilot/sim-year.sh                     # ~4 минуты
+python3 docs/pilot/build-presentation.py   # эта страница</code></pre>
+</section>
+
+<footer>
+  <p>Данные: <code>docs/pilot/sim-out/sim-dataset.json</code> · таблицы:
+  <code>economy.csv</code>, <code>professions.csv</code>, <code>rates-index.csv</code></p>
+</footer>
+</div>
+<div class="tip" id="tip" role="status" aria-live="polite"></div>
+
+<script>
+const DATA = /*__DATA__*/null;
+const SVGNS = "http://www.w3.org/2000/svg";
+const el = (n, a = {}) => { const e = document.createElementNS(SVGNS, n);
+  for (const k in a) e.setAttribute(k, a[k]); return e; };
+
+/* Прямоугольник со скруглением ТОЛЬКО на конце данных, прижатый к базовой линии. */
+function barPath(x, y, w, h, r, dir) {
+  r = Math.max(0, Math.min(r, w / 2, h));
+  if (dir === "up")                       // растёт вверх — скругляем верх
+    return `M${x},${y+h} L${x},${y+r} Q${x},${y} ${x+r},${y} L${x+w-r},${y} Q${x+w},${y} ${x+w},${y+r} L${x+w},${y+h} Z`;
+  if (dir === "down")                     // растёт вниз — скругляем низ
+    return `M${x},${y} L${x+w},${y} L${x+w},${y+h-r} Q${x+w},${y+h} ${x+w-r},${y+h} L${x+r},${y+h} Q${x},${y+h} ${x},${y+h-r} Z`;
+  return `M${x},${y} L${x+w-r},${y} Q${x+w},${y} ${x+w},${y+r} L${x+w},${y+h-r} Q${x+w},${y+h} ${x+w-r},${y+h} L${x},${y+h} Z`;
+}
+
+/* Подсказка */
+const tip = document.getElementById("tip");
+function bindTip(node, html) {
+  const show = e => { tip.innerHTML = html; tip.classList.add("on");
+    const p = e.touches ? e.touches[0] : e;
+    let x = p.clientX + 14, y = p.clientY + 14;
+    const r = tip.getBoundingClientRect();
+    if (x + r.width > innerWidth - 8) x = p.clientX - r.width - 14;
+    if (y + r.height > innerHeight - 8) y = p.clientY - r.height - 14;
+    tip.style.left = x + "px"; tip.style.top = y + "px"; };
+  node.addEventListener("mouseenter", show);
+  node.addEventListener("mousemove", show);
+  node.addEventListener("mouseleave", () => tip.classList.remove("on"));
+}
+
+/* ── Шапка и плитки ─────────────────────────────────────────────────────── */
+const m = DATA.meta, t = DATA.totals;
+document.getElementById("headmeta").textContent =
+  `${m.population} человек · ${m.months} месяцев · ${m.deals_ok} сделок · прогон ${DATA.generated}`;
+
+const tiles = [
+  { lab: "Сделок за год", val: m.deals_ok.toLocaleString("ru"), unit: "", note: `сбоев ${m.deals_fail}` },
+  { lab: "Трудочасов проведено", val: m.labor_hours_transacted.toLocaleString("ru"), unit: "ч", note: "труд → приёмка → расчёт" },
+  { lab: "Погашено бумаги", val: t.redeem_pct, unit: "%", note: `${t.redeemed} из ${t.issued} ч` },
+  { lab: "Взаимных заверений", val: m.merges, unit: "", note: `пломб ${m.seals} · отзывов ${m.revocations}` },
+];
+document.getElementById("tiles").innerHTML = tiles.map(x => `
+  <div class="tile"><span class="lab">${x.lab}</span>
+    <span class="val">${x.val}<span class="unit">${x.unit}</span></span>
+    <div class="note">${x.note}</div></div>`).join("");
+
+document.getElementById("t-issued").textContent = t.issued.toLocaleString("ru");
+document.getElementById("t-redeemed").textContent = t.redeemed.toLocaleString("ru");
+document.getElementById("t-withred").textContent = `${t.with_redemption} из ${m.population}`;
+
+/* ── Гистограмма погашения ──────────────────────────────────────────────── */
+(function () {
+  const svg = document.getElementById("c-redeem");
+  const W = 720, H = 300, L = 44, R = 16, T = 18, B = 52;
+  const d = DATA.redeem_hist, n = d.counts.length;
+  const max = Math.max(...d.counts) || 1;
+  const iw = W - L - R, ih = H - T - B;
+  const gap = 2, bw = iw / n - gap;
+  for (let i = 0; i <= 4; i++) {                       // сетка
+    const y = T + ih - (ih * i / 4);
+    svg.appendChild(el("line", { x1: L, x2: W - R, y1: y, y2: y, class: i ? "gridline" : "baseline" }));
+    const tx = el("text", { x: L - 8, y: y + 4, class: "tick", "text-anchor": "end" });
+    tx.textContent = Math.round(max * i / 4); svg.appendChild(tx);
+  }
+  d.counts.forEach((c, i) => {
+    const h = ih * c / max, x = L + i * (bw + gap), y = T + ih - h;
+    const p = el("path", { d: barPath(x, y, bw, h, 4, "up"), class: "s1" });
+    bindTip(p, `<b>${c}</b> человек<br>доля погашения ${d.labels[i]}`);
+    svg.appendChild(p);
+    const lb = el("text", { x: x + bw / 2, y: H - B + 20, class: "tick", "text-anchor": "middle" });
+    lb.textContent = d.labels[i]; svg.appendChild(lb);
+    if (c > 0) { const v = el("text", { x: x + bw / 2, y: y - 7, class: "datalabel", "text-anchor": "middle" });
+      v.textContent = c; svg.appendChild(v); }
+  });
+  const al = el("text", { x: L, y: H - 8, class: "axis-label" });
+  al.textContent = "доля выпущенной бумаги, вернувшаяся трудом"; svg.appendChild(al);
+})();
+
+/* ── Индекс трудочаса (линия) ───────────────────────────────────────────── */
+(function () {
+  const svg = document.getElementById("c-index");
+  const W = 720, H = 320, L = 52, R = 20, T = 20, B = 56;
+  const pts = DATA.index, n = pts.length;
+  if (!n) return;
+  const vals = pts.map(p => p.value);
+  const lo = Math.min(0.97, Math.min(...vals) - .01), hi = Math.max(1.03, Math.max(...vals) + .01);
+  const iw = W - L - R, ih = H - T - B;
+  const X = i => L + (n === 1 ? iw / 2 : iw * i / (n - 1));
+  const Y = v => T + ih - ih * (v - lo) / (hi - lo);
+  for (let i = 0; i <= 4; i++) {
+    const v = lo + (hi - lo) * i / 4, y = Y(v);
+    svg.appendChild(el("line", { x1: L, x2: W - R, y1: y, y2: y, class: "gridline" }));
+    const tx = el("text", { x: L - 8, y: y + 4, class: "tick", "text-anchor": "end" });
+    tx.textContent = v.toFixed(3); svg.appendChild(tx);
+  }
+  svg.appendChild(el("line", { x1: L, x2: W - R, y1: Y(1), y2: Y(1), class: "reference" }));
+  const rl = el("text", { x: W - R, y: Y(1) - 8, class: "axis-label", "text-anchor": "end" });
+  rl.textContent = "1.000 — час бумаги за час труда"; svg.appendChild(rl);
+
+  svg.appendChild(el("path", {
+    d: pts.map((p, i) => `${i ? "L" : "M"}${X(i)},${Y(p.value)}`).join(" "),
+    class: "s1-line" }));
+
+  pts.forEach((p, i) => {
+    svg.appendChild(el("circle", { cx: X(i), cy: Y(p.value), r: 5, class: "s1-dot" }));
+    const hit = el("circle", { cx: X(i), cy: Y(p.value), r: 16, fill: "transparent" });
+    const pct = ((p.value - 1) * 100).toFixed(1);
+    bindTip(hit, `<b>${p.month}</b><br>индекс ${p.value.toFixed(3)}<br>${pct >= 0 ? "+" : ""}${pct}% к паритету`);
+    svg.appendChild(hit);
+    if (i % 2 === 0 || n <= 6) {
+      const lb = el("text", { x: X(i), y: H - B + 22, class: "tick", "text-anchor": "middle" });
+      lb.textContent = p.month.slice(5); svg.appendChild(lb);
+    }
+  });
+  const s = DATA.index_stats;
+  document.getElementById("index-cap").textContent =
+    `Среднее за год ${s.mean}, размах ${s.min}…${s.max}. Отклонения — доли процента: ` +
+    `объём выпущенных обязательств держится вплотную к объёму отработанного времени.`;
+})();
+
+/* ── Ставки по разрядам ─────────────────────────────────────────────────── */
+(function () {
+  const svg = document.getElementById("c-grades");
+  const W = 720, H = 280, L = 52, R = 20, T = 22, B = 52;
+  const g = DATA.grades; if (!g.length) return;
+  const lo = Math.min(0.75, Math.min(...g.map(x => x.min)) - .03);
+  const hi = Math.max(1.25, Math.max(...g.map(x => x.max)) + .03);
+  const iw = W - L - R, ih = H - T - B;
+  const Y = v => T + ih - ih * (v - lo) / (hi - lo);
+  const gap = 26, bw = iw / g.length - gap;
+  for (let i = 0; i <= 4; i++) {
+    const v = lo + (hi - lo) * i / 4, y = Y(v);
+    svg.appendChild(el("line", { x1: L, x2: W - R, y1: y, y2: y, class: "gridline" }));
+    const tx = el("text", { x: L - 8, y: y + 4, class: "tick", "text-anchor": "end" });
+    tx.textContent = v.toFixed(2); svg.appendChild(tx);
+  }
+  const y1 = Y(1);
+  g.forEach((x, i) => {
+    const cx = L + i * (bw + gap) + gap / 2, top = Y(x.mean);
+    const up = x.mean >= 1;
+    const y = up ? top : y1, h = Math.abs(y1 - top);
+    const p = el("path", { d: barPath(cx, y, bw, h, 4, up ? "up" : "down"),
+      class: up ? "s1" : "s2" });
+    bindTip(p, `<b>разряд ${x.level}</b><br>средняя ставка ${x.mean.toFixed(3)}<br>размах ${x.min}…${x.max}<br>наблюдений ${x.n}`);
+    svg.appendChild(p);
+    svg.appendChild(el("line", { x1: cx + bw / 2, x2: cx + bw / 2, y1: Y(x.min), y2: Y(x.max),
+      class: "whisker" }));
+    const v = el("text", { x: cx + bw / 2, y: (up ? top - 9 : Y(x.mean) + 17), class: "datalabel", "text-anchor": "middle" });
+    v.textContent = x.mean.toFixed(3); svg.appendChild(v);
+    const lb = el("text", { x: cx + bw / 2, y: H - B + 22, class: "tick", "text-anchor": "middle" });
+    lb.textContent = "разряд " + x.level; svg.appendChild(lb);
+  });
+  svg.appendChild(el("line", { x1: L, x2: W - R, y1: y1, y2: y1, class: "reference" }));
+})();
+
+/* ── Профессии: две серии ───────────────────────────────────────────────── */
+(function () {
+  const svg = document.getElementById("c-prof");
+  const rows = DATA.professions;
+  const W = 720, L = 132, R = 54, T = 10, rowH = 28, B = 34;
+  const H = T + rows.length * rowH + B;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  const iw = W - L - R;
+  const max = Math.max(...rows.map(r => Math.max(r.avg_received, r.avg_issued))) || 1;
+  const X = v => iw * v / max;
+  for (let i = 0; i <= 4; i++) {
+    const x = L + iw * i / 4;
+    svg.appendChild(el("line", { x1: x, x2: x, y1: T, y2: T + rows.length * rowH, class: i ? "gridline" : "baseline" }));
+    const tx = el("text", { x: x, y: H - 12, class: "tick", "text-anchor": "middle" });
+    tx.textContent = Math.round(max * i / 4); svg.appendChild(tx);
+  }
+  rows.forEach((r, i) => {
+    const y = T + i * rowH, bh = 9;
+    const nm = el("text", { x: L - 10, y: y + rowH / 2 + 4, class: "tick", "text-anchor": "end" });
+    nm.textContent = r.prof; svg.appendChild(nm);
+    const b1 = el("path", { d: barPath(L, y + 3, X(r.avg_received), bh, 4, "right"), class: "s1" });
+    bindTip(b1, `<b>${r.prof}</b> · ${r.n} чел.<br>принял в среднем ${r.avg_received} ч`);
+    svg.appendChild(b1);
+    const b2 = el("path", { d: barPath(L, y + 3 + bh + 2, X(r.avg_issued), bh, 4, "right"), class: "s2" });
+    bindTip(b2, `<b>${r.prof}</b> · ${r.n} чел.<br>эмитировал в среднем ${r.avg_issued} ч`);
+    svg.appendChild(b2);
+    const v = el("text", { x: L + X(r.avg_received) + 8, y: y + rowH / 2 + 3, class: "datalabel" });
+    v.textContent = r.avg_received.toFixed(1); svg.appendChild(v);
+  });
+  document.getElementById("l-prof").innerHTML = `
+    <span class="k"><i class="sw sw-1"></i>принял труда (ч)</span>
+    <span class="k"><i class="sw sw-2"></i>эмитировал бумаги (ч)</span>`;
+  document.getElementById("t-prof").innerHTML =
+    `<thead><tr><th>Профессия</th><th>Человек</th><th>Принял, ч</th><th>Эмитировал, ч</th></tr></thead><tbody>` +
+    rows.map(r => `<tr><td>${r.prof}</td><td>${r.n}</td><td>${r.avg_received}</td><td>${r.avg_issued}</td></tr>`).join("") +
+    `</tbody>`;
+})();
+
+/* ── Стыковка и след ────────────────────────────────────────────────────── */
+document.getElementById("match-text").innerHTML =
+  `Агрегатор сверил потребности с навыками и проверил досягаемость по координатам и радиусам.
+   Закрыто <strong>${DATA.match.closed} из ${DATA.match.total}</strong> потребностей.
+   Замкнутых цепочек помощи, где никто не остался должен наружу, нашлось
+   <strong>${DATA.match.rings.toLocaleString("ru")}</strong>.`;
+document.getElementById("deficits").innerHTML =
+  DATA.match.deficits.map(d => `<span class="deficit">${d}</span>`).join("") || "—";
+
+document.getElementById("fps").innerHTML = DATA.footprints.slice(0, 4).map(e => `
+  <div class="fp">
+    <div class="who">${e.name}</div>
+    <div class="role">${e.prof.replace("prof.", "")} · разряд ${e.grade}</div>
+    <dl>
+      <dt>выпустил бумаги</dt><dd class="num">${e.issued.toFixed(1)} ч</dd>
+      <dt>погасил трудом</dt><dd class="num">${e.redeemed.toFixed(1)} ч</dd>
+      <dt>его труд приняли на</dt><dd class="num">${e.received.toFixed(1)} ч</dd>
+      <dt>долг сейчас</dt><dd class="num">${e.debt.toFixed(1)} ч</dd>
+    </dl>
+  </div>`).join("");
+</script>

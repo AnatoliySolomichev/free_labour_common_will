@@ -35,3 +35,6 @@ Testing/
 *~
 .DS_Store
 .claude/settings.json
+
+# Артефакты симуляции (sim-year.sh) — не коммитим
+docs/pilot/sim-out/

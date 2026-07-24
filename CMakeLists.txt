@@ -26,4 +26,16 @@ if(TEST_E2E)
     )
     set_tests_properties(e2e_demo PROPERTIES
         DEPENDS "bc;aggregator_server" TIMEOUT 120)
+
+    # Big, diverse walkthrough: a whole townlet (~14 chains) exercising every
+    # command — matching, deals, amortization, paper circulation, merges (DAG),
+    # seals, pledges, footprint, revocation, fraud tooling. Own port to run
+    # alongside e2e_demo; longer timeout because of the pairwise merges.
+    add_test(
+        NAME e2e_grand_demo
+        COMMAND ${CMAKE_COMMAND} -E env BUILD=${CMAKE_BINARY_DIR} PORT=19191
+                bash ${CMAKE_SOURCE_DIR}/docs/pilot/grand-demo.sh
+    )
+    set_tests_properties(e2e_grand_demo PROPERTIES
+        DEPENDS "bc;aggregator_server" TIMEOUT 360)
 endif()
