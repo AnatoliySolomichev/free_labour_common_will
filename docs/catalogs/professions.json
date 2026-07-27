@@ -1,28 +1,303 @@
 {
-  "catalog": "professions",
-  "version": "2026.07",
-  "entries": [
-    { "slug": "prof.electrician",  "ru": "Электрик",        "group": "Ремонт и строительство", "aliases": ["электромонтёр", "электромонтажник"] },
-    { "slug": "prof.plumber",      "ru": "Сантехник",       "group": "Ремонт и строительство", "aliases": ["слесарь-сантехник"] },
-    { "slug": "prof.carpenter",    "ru": "Столяр",          "group": "Ремонт и строительство", "aliases": ["плотник"] },
-    { "slug": "prof.builder",      "ru": "Строитель",       "group": "Ремонт и строительство", "aliases": ["отделочник", "каменщик"] },
-    { "slug": "prof.welder",       "ru": "Сварщик",         "group": "Ремонт и строительство", "aliases": [] },
-    { "slug": "prof.appliance-repair", "ru": "Мастер по ремонту техники", "group": "Быт и услуги", "aliases": ["ремонт бытовой техники"] },
-    { "slug": "prof.auto-mechanic","ru": "Автослесарь",     "group": "Транспорт",              "aliases": ["автомеханик"] },
-    { "slug": "prof.driver",       "ru": "Водитель",        "group": "Транспорт",              "aliases": [] },
-    { "slug": "prof.tailor",       "ru": "Швея",            "group": "Быт и услуги",           "aliases": ["портной", "закройщик"] },
-    { "slug": "prof.cook",         "ru": "Повар",           "group": "Быт и услуги",           "aliases": ["кулинар"] },
-    { "slug": "prof.hairdresser",  "ru": "Парикмахер",      "group": "Быт и услуги",           "aliases": ["стилист"] },
-    { "slug": "prof.photographer", "ru": "Фотограф",        "group": "Творчество",             "aliases": ["видеограф"] },
-    { "slug": "prof.designer",     "ru": "Дизайнер",        "group": "Творчество",             "aliases": [] },
-    { "slug": "prof.accountant",   "ru": "Бухгалтер",       "group": "Финансы и право",        "aliases": ["финансист"] },
-    { "slug": "prof.lawyer",       "ru": "Юрист",           "group": "Финансы и право",        "aliases": ["адвокат"] },
-    { "slug": "prof.programmer",   "ru": "Программист",     "group": "ИТ",                     "aliases": ["разработчик"] },
-    { "slug": "prof.sysadmin",     "ru": "Системный администратор", "group": "ИТ",             "aliases": ["админ"] },
-    { "slug": "prof.teacher",      "ru": "Преподаватель",   "group": "Образование",            "aliases": ["учитель", "репетитор"] },
-    { "slug": "prof.doctor",       "ru": "Врач",            "group": "Здоровье",               "aliases": ["медик"] },
-    { "slug": "prof.nurse",        "ru": "Медсестра",       "group": "Здоровье",               "aliases": ["медбрат"] },
-    { "slug": "prof.farmer",       "ru": "Фермер",          "group": "Сельское хозяйство",     "aliases": ["агроном"] },
-    { "slug": "prof.scribe",       "ru": "Писарь / оператор данных", "group": "Услуги",        "aliases": ["помощник", "оператор блокчейна"] }
-  ]
+ "catalog": "professions",
+ "version": "2026.07-tree",
+ "entries": [
+  {
+   "slug": "prof",
+   "ru": "Всякий труд",
+   "group": "Каталог",
+   "kind": "root"
+  },
+  {
+   "slug": "prof.build",
+   "ru": "Ремонт и строительство",
+   "group": "Каталог",
+   "kind": "category",
+   "parent": "prof"
+  },
+  {
+   "slug": "prof.daily",
+   "ru": "Быт и услуги",
+   "group": "Каталог",
+   "kind": "category",
+   "parent": "prof"
+  },
+  {
+   "slug": "prof.move",
+   "ru": "Транспорт",
+   "group": "Каталог",
+   "kind": "category",
+   "parent": "prof"
+  },
+  {
+   "slug": "prof.create",
+   "ru": "Творчество",
+   "group": "Каталог",
+   "kind": "category",
+   "parent": "prof"
+  },
+  {
+   "slug": "prof.lawfin",
+   "ru": "Финансы и право",
+   "group": "Каталог",
+   "kind": "category",
+   "parent": "prof"
+  },
+  {
+   "slug": "prof.it",
+   "ru": "ИТ",
+   "group": "Каталог",
+   "kind": "category",
+   "parent": "prof"
+  },
+  {
+   "slug": "prof.teach",
+   "ru": "Образование",
+   "group": "Каталог",
+   "kind": "category",
+   "parent": "prof"
+  },
+  {
+   "slug": "prof.care",
+   "ru": "Здоровье",
+   "group": "Каталог",
+   "kind": "category",
+   "parent": "prof"
+  },
+  {
+   "slug": "prof.grow",
+   "ru": "Сельское хозяйство",
+   "group": "Каталог",
+   "kind": "category",
+   "parent": "prof"
+  },
+  {
+   "slug": "prof.data",
+   "ru": "Услуги",
+   "group": "Каталог",
+   "kind": "category",
+   "parent": "prof"
+  },
+  {
+   "slug": "prof.electrician",
+   "ru": "Электрик",
+   "group": "Ремонт и строительство",
+   "aliases": [
+    "электромонтёр",
+    "электромонтажник"
+   ],
+   "parent": "prof.build",
+   "kind": "specialty"
+  },
+  {
+   "slug": "prof.plumber",
+   "ru": "Сантехник",
+   "group": "Ремонт и строительство",
+   "aliases": [
+    "слесарь-сантехник"
+   ],
+   "parent": "prof.build",
+   "kind": "specialty"
+  },
+  {
+   "slug": "prof.carpenter",
+   "ru": "Столяр",
+   "group": "Ремонт и строительство",
+   "aliases": [
+    "плотник"
+   ],
+   "parent": "prof.build",
+   "kind": "specialty"
+  },
+  {
+   "slug": "prof.builder",
+   "ru": "Строитель",
+   "group": "Ремонт и строительство",
+   "aliases": [
+    "отделочник",
+    "каменщик"
+   ],
+   "parent": "prof.build",
+   "kind": "specialty"
+  },
+  {
+   "slug": "prof.welder",
+   "ru": "Сварщик",
+   "group": "Ремонт и строительство",
+   "aliases": [],
+   "parent": "prof.build",
+   "kind": "specialty"
+  },
+  {
+   "slug": "prof.appliance-repair",
+   "ru": "Мастер по ремонту техники",
+   "group": "Быт и услуги",
+   "aliases": [
+    "ремонт бытовой техники"
+   ],
+   "parent": "prof.daily",
+   "kind": "specialty"
+  },
+  {
+   "slug": "prof.auto-mechanic",
+   "ru": "Автослесарь",
+   "group": "Транспорт",
+   "aliases": [
+    "автомеханик"
+   ],
+   "parent": "prof.move",
+   "kind": "specialty"
+  },
+  {
+   "slug": "prof.driver",
+   "ru": "Водитель",
+   "group": "Транспорт",
+   "aliases": [],
+   "parent": "prof.move",
+   "kind": "specialty"
+  },
+  {
+   "slug": "prof.tailor",
+   "ru": "Швея",
+   "group": "Быт и услуги",
+   "aliases": [
+    "портной",
+    "закройщик"
+   ],
+   "parent": "prof.daily",
+   "kind": "specialty"
+  },
+  {
+   "slug": "prof.cook",
+   "ru": "Повар",
+   "group": "Быт и услуги",
+   "aliases": [
+    "кулинар"
+   ],
+   "parent": "prof.daily",
+   "kind": "specialty"
+  },
+  {
+   "slug": "prof.hairdresser",
+   "ru": "Парикмахер",
+   "group": "Быт и услуги",
+   "aliases": [
+    "стилист"
+   ],
+   "parent": "prof.daily",
+   "kind": "specialty"
+  },
+  {
+   "slug": "prof.photographer",
+   "ru": "Фотограф",
+   "group": "Творчество",
+   "aliases": [
+    "видеограф"
+   ],
+   "parent": "prof.create",
+   "kind": "specialty"
+  },
+  {
+   "slug": "prof.designer",
+   "ru": "Дизайнер",
+   "group": "Творчество",
+   "aliases": [],
+   "parent": "prof.create",
+   "kind": "specialty"
+  },
+  {
+   "slug": "prof.accountant",
+   "ru": "Бухгалтер",
+   "group": "Финансы и право",
+   "aliases": [
+    "финансист"
+   ],
+   "parent": "prof.lawfin",
+   "kind": "specialty"
+  },
+  {
+   "slug": "prof.lawyer",
+   "ru": "Юрист",
+   "group": "Финансы и право",
+   "aliases": [
+    "адвокат"
+   ],
+   "parent": "prof.lawfin",
+   "kind": "specialty"
+  },
+  {
+   "slug": "prof.programmer",
+   "ru": "Программист",
+   "group": "ИТ",
+   "aliases": [
+    "разработчик"
+   ],
+   "parent": "prof.it",
+   "kind": "specialty"
+  },
+  {
+   "slug": "prof.sysadmin",
+   "ru": "Системный администратор",
+   "group": "ИТ",
+   "aliases": [
+    "админ"
+   ],
+   "parent": "prof.it",
+   "kind": "specialty"
+  },
+  {
+   "slug": "prof.teacher",
+   "ru": "Преподаватель",
+   "group": "Образование",
+   "aliases": [
+    "учитель",
+    "репетитор"
+   ],
+   "parent": "prof.teach",
+   "kind": "specialty"
+  },
+  {
+   "slug": "prof.doctor",
+   "ru": "Врач",
+   "group": "Здоровье",
+   "aliases": [
+    "медик"
+   ],
+   "parent": "prof.care",
+   "kind": "specialty"
+  },
+  {
+   "slug": "prof.nurse",
+   "ru": "Медсестра",
+   "group": "Здоровье",
+   "aliases": [
+    "медбрат"
+   ],
+   "parent": "prof.care",
+   "kind": "specialty"
+  },
+  {
+   "slug": "prof.farmer",
+   "ru": "Фермер",
+   "group": "Сельское хозяйство",
+   "aliases": [
+    "агроном"
+   ],
+   "parent": "prof.grow",
+   "kind": "specialty"
+  },
+  {
+   "slug": "prof.scribe",
+   "ru": "Писарь / оператор данных",
+   "group": "Услуги",
+   "aliases": [
+    "помощник",
+    "оператор блокчейна"
+   ],
+   "parent": "prof.data",
+   "kind": "specialty"
+  }
+ ],
+ "root": "prof",
+ "_note": "дерево: root prof → категории prof.* → специальности; поле parent, синонимы в aliases (см. ИР-017)"
 }
