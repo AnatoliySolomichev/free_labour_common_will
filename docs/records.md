@@ -688,7 +688,12 @@ Acceptance = {
   "hours_raw":   Float,       // фактические часы из WorkRecord
   "labor_units": Float,       // hours_raw * coefficient(Grade) в день приёмки
   "timestamp":   Int,         // Unix timestamp
-  "carried_units": Float?     // v2 (ИР-011): перенесённая стоимость = Σ carried
+  "carried_units": Float?,    // v2 (ИР-011): перенесённая стоимость = Σ carried
+  "norm":        {            // v3 (economy.md §2б): нормировщик, при котором оценена
+    "agg":  Bytes(32),        //   работа — чтобы историческая оценка читалась однозначно
+    "date": Int,              //   (цепь агрегатора + дата + W использованного DailyAggregate)
+    "W":    Float
+  }?
 }
 ```
 
@@ -869,10 +874,14 @@ Transfer = {
 DailyAggregate = {
   "t":    0x71,
   "date": Int,                     // начало суток UTC (ts − ts mod 86400)
+  "W":    Float,                   // v3 (economy.md §2б): нормировщик = средневзвешенное
+                                   //   по часам сырых ставок дня; клиент делит rate/W,
+                                   //   чтобы средневзвешенная ставка = 1 («час бумаги за
+                                   //   час труда»). Публикуется сырьё + W, не готовое.
   "rates": [{
     "specialty": Text,             // имя специальности (глобальный ключ)
     "level":     Int,              // разряд 1–6
-    "rate":      Float,            // стч/час, после сглаживания
+    "rate":      Float,            // СЫРАЯ стч/час, после сглаживания (нормированная = rate/W)
     "hours":     Float,            // Σ hours_raw вошедших сделок дня
     "deals":     Int               // число вошедших сделок
   }, ...],

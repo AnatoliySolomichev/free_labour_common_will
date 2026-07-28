@@ -87,7 +87,13 @@
     "электромонтажник"
    ],
    "parent": "prof.build",
-   "kind": "specialty"
+   "kind": "specialty",
+   "axes": {
+    "material": 0.9,
+    "info": 0.1,
+    "people": 0,
+    "danger": 0.4
+   }
   },
   {
    "slug": "prof.plumber",
@@ -97,7 +103,13 @@
     "слесарь-сантехник"
    ],
    "parent": "prof.build",
-   "kind": "specialty"
+   "kind": "specialty",
+   "axes": {
+    "material": 0.95,
+    "info": 0.05,
+    "people": 0,
+    "danger": 0.2
+   }
   },
   {
    "slug": "prof.carpenter",
@@ -107,7 +119,13 @@
     "плотник"
    ],
    "parent": "prof.build",
-   "kind": "specialty"
+   "kind": "specialty",
+   "axes": {
+    "material": 1,
+    "info": 0,
+    "people": 0,
+    "danger": 0.2
+   }
   },
   {
    "slug": "prof.builder",
@@ -118,7 +136,13 @@
     "каменщик"
    ],
    "parent": "prof.build",
-   "kind": "specialty"
+   "kind": "specialty",
+   "axes": {
+    "material": 1,
+    "info": 0,
+    "people": 0,
+    "danger": 0.3
+   }
   },
   {
    "slug": "prof.welder",
@@ -126,7 +150,13 @@
    "group": "Ремонт и строительство",
    "aliases": [],
    "parent": "prof.build",
-   "kind": "specialty"
+   "kind": "specialty",
+   "axes": {
+    "material": 1,
+    "info": 0,
+    "people": 0,
+    "danger": 0.5
+   }
   },
   {
    "slug": "prof.appliance-repair",
@@ -136,7 +166,13 @@
     "ремонт бытовой техники"
    ],
    "parent": "prof.daily",
-   "kind": "specialty"
+   "kind": "specialty",
+   "axes": {
+    "material": 0.85,
+    "info": 0.15,
+    "people": 0,
+    "danger": 0.2
+   }
   },
   {
    "slug": "prof.auto-mechanic",
@@ -146,7 +182,13 @@
     "автомеханик"
    ],
    "parent": "prof.move",
-   "kind": "specialty"
+   "kind": "specialty",
+   "axes": {
+    "material": 0.9,
+    "info": 0.1,
+    "people": 0,
+    "danger": 0.2
+   }
   },
   {
    "slug": "prof.driver",
@@ -154,7 +196,13 @@
    "group": "Транспорт",
    "aliases": [],
    "parent": "prof.move",
-   "kind": "specialty"
+   "kind": "specialty",
+   "axes": {
+    "material": 0.4,
+    "info": 0.3,
+    "people": 0.3,
+    "danger": 0.3
+   }
   },
   {
    "slug": "prof.tailor",
@@ -165,7 +213,13 @@
     "закройщик"
    ],
    "parent": "prof.daily",
-   "kind": "specialty"
+   "kind": "specialty",
+   "axes": {
+    "material": 1,
+    "info": 0,
+    "people": 0,
+    "danger": 0.05
+   }
   },
   {
    "slug": "prof.cook",
@@ -175,7 +229,13 @@
     "кулинар"
    ],
    "parent": "prof.daily",
-   "kind": "specialty"
+   "kind": "specialty",
+   "axes": {
+    "material": 1,
+    "info": 0,
+    "people": 0,
+    "danger": 0.1
+   }
   },
   {
    "slug": "prof.hairdresser",
@@ -185,7 +245,13 @@
     "стилист"
    ],
    "parent": "prof.daily",
-   "kind": "specialty"
+   "kind": "specialty",
+   "axes": {
+    "material": 0.5,
+    "info": 0,
+    "people": 0.5,
+    "danger": 0.05
+   }
   },
   {
    "slug": "prof.photographer",
@@ -195,7 +261,13 @@
     "видеограф"
    ],
    "parent": "prof.create",
-   "kind": "specialty"
+   "kind": "specialty",
+   "axes": {
+    "material": 0,
+    "info": 0.7,
+    "people": 0.3,
+    "danger": 0.05
+   }
   },
   {
    "slug": "prof.designer",
@@ -203,7 +275,13 @@
    "group": "Творчество",
    "aliases": [],
    "parent": "prof.create",
-   "kind": "specialty"
+   "kind": "specialty",
+   "axes": {
+    "material": 0,
+    "info": 1,
+    "people": 0,
+    "danger": 0
+   }
   },
   {
    "slug": "prof.accountant",
@@ -213,7 +291,13 @@
     "финансист"
    ],
    "parent": "prof.lawfin",
-   "kind": "specialty"
+   "kind": "specialty",
+   "axes": {
+    "material": 0,
+    "info": 1,
+    "people": 0,
+    "danger": 0
+   }
   },
   {
    "slug": "prof.lawyer",
@@ -223,7 +307,13 @@
     "адвокат"
    ],
    "parent": "prof.lawfin",
-   "kind": "specialty"
+   "kind": "specialty",
+   "axes": {
+    "material": 0,
+    "info": 0.6,
+    "people": 0.4,
+    "danger": 0
+   }
   },
   {
    "slug": "prof.programmer",
@@ -233,7 +323,13 @@
     "разработчик"
    ],
    "parent": "prof.it",
-   "kind": "specialty"
+   "kind": "specialty",
+   "axes": {
+    "material": 0,
+    "info": 1,
+    "people": 0,
+    "danger": 0
+   }
   },
   {
    "slug": "prof.sysadmin",
@@ -243,7 +339,13 @@
     "админ"
    ],
    "parent": "prof.it",
-   "kind": "specialty"
+   "kind": "specialty",
+   "axes": {
+    "material": 0,
+    "info": 1,
+    "people": 0,
+    "danger": 0.02
+   }
   },
   {
    "slug": "prof.teacher",
@@ -254,7 +356,13 @@
     "репетитор"
    ],
    "parent": "prof.teach",
-   "kind": "specialty"
+   "kind": "specialty",
+   "axes": {
+    "material": 0,
+    "info": 0.3,
+    "people": 0.7,
+    "danger": 0.02
+   }
   },
   {
    "slug": "prof.doctor",
@@ -264,7 +372,13 @@
     "медик"
    ],
    "parent": "prof.care",
-   "kind": "specialty"
+   "kind": "specialty",
+   "axes": {
+    "material": 0,
+    "info": 0.4,
+    "people": 0.6,
+    "danger": 0.15
+   }
   },
   {
    "slug": "prof.nurse",
@@ -274,7 +388,13 @@
     "медбрат"
    ],
    "parent": "prof.care",
-   "kind": "specialty"
+   "kind": "specialty",
+   "axes": {
+    "material": 0,
+    "info": 0.2,
+    "people": 0.8,
+    "danger": 0.2
+   }
   },
   {
    "slug": "prof.farmer",
@@ -284,7 +404,13 @@
     "агроном"
    ],
    "parent": "prof.grow",
-   "kind": "specialty"
+   "kind": "specialty",
+   "axes": {
+    "material": 0.9,
+    "info": 0.1,
+    "people": 0,
+    "danger": 0.2
+   }
   },
   {
    "slug": "prof.scribe",
@@ -295,9 +421,16 @@
     "оператор блокчейна"
    ],
    "parent": "prof.data",
-   "kind": "specialty"
+   "kind": "specialty",
+   "axes": {
+    "material": 0,
+    "info": 1,
+    "people": 0,
+    "danger": 0
+   }
   }
  ],
  "root": "prof",
- "_note": "дерево: root prof → категории prof.* → специальности; поле parent, синонимы в aliases (см. ИР-017)"
+ "_note": "дерево: root prof → категории prof.* → специальности; поле parent, синонимы в aliases (см. ИР-017)",
+ "_axes_note": "axes: доли объекта труда (material+info+people≈1) + danger 0–1 — облако (ИР-018, specialty-axes.md); декларируемый bootstrap"
 }

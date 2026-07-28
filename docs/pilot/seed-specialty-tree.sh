@@ -57,14 +57,19 @@ echo "   служебная цепь: ${SID:0:16}…"
 # ── Записываю дерево из JSON в блоки цепи ─────────────────────────────────────
 hr "пишу дерево специальностей в блоки (kind:catalog-entry)"
 count=0
-# Каждая строка: слаг \t parent \t ru \t alias,alias,…
-while IFS=$'\t' read -r slug parent ru aliases; do
+# Каждая строка: слаг \t parent \t ru \t alias,alias,… \t axis=val,axis=val,…
+while IFS=$'\t' read -r slug parent ru aliases axes; do
     [[ -z "$slug" ]] && continue
     args=( --data-dir "$DIR" concept add "$ru" --tag kind:catalog-entry --tag "cat:$slug" )
     [[ -n "$parent" && "$parent" != "-" ]] && args+=( --tag "parent:$parent" )
     if [[ -n "$aliases" && "$aliases" != "-" ]]; then
         IFS=',' read -ra AL <<< "$aliases"
         for a in "${AL[@]}"; do [[ -n "$a" ]] && args+=( --tag "alias:$a" ); done
+    fi
+    # координаты облака: axis:material/info/people/danger (ИР-018)
+    if [[ -n "$axes" && "$axes" != "-" ]]; then
+        IFS=',' read -ra AX <<< "$axes"
+        for kv in "${AX[@]}"; do [[ -n "$kv" ]] && args+=( --tag "axis:$kv" ); done
     fi
     [[ -n "$VIA" ]] && args+=( --via "$VIA" )
     "$BC" "${args[@]}" >/dev/null
@@ -73,7 +78,9 @@ done < <(python3 -c '
 import json,sys
 d=json.load(open(sys.argv[1],encoding="utf-8"))
 for e in d["entries"]:
-    print("\t".join([e["slug"], e.get("parent","-"), e["ru"], ",".join(e.get("aliases",[])) or "-"]))
+    ax=e.get("axes")
+    axs=",".join(f"{k}={v}" for k,v in ax.items()) if ax else "-"
+    print("\t".join([e["slug"], e.get("parent","-"), e["ru"], ",".join(e.get("aliases",[])) or "-", axs]))
 ' "$CATALOG_JSON")
 echo "   записано узлов дерева: $count"
 
@@ -114,6 +121,39 @@ for ln in sys.stdin:
         print("   электрик:", " · ".join(tags)); break
 '
 echo "   → «электромонтёр», «электромонтажник» ведут к канону cat:prof.electrician"
+
+# ── Облако: читаю КООРДИНАТЫ из блоков и считаю ближайших соседей ─────────────
+hr "облако профессий из блоков цепи: координаты + ближайший сосед (ИР-018)"
+"$BC" --data-dir "$DIR" list | python3 -c '
+import sys,re,math
+pts={}
+for ln in sys.stdin:
+    if "catalog-entry" not in ln: continue
+    tags=re.search(r"tags:\[([^\]]*)\]", ln)
+    if not tags: continue
+    slug=None; ax={}
+    for x in tags.group(1).split(","):
+        if x.startswith("cat:"): slug=x[4:]
+        elif x.startswith("axis:") and "=" in x:
+            k,v=x[5:].split("=",1)
+            try: ax[k]=float(v)
+            except: pass
+    if slug and ax: pts[slug]=ax
+keys=["material","info","people","danger"]
+def vec(a): return [a.get(k,0.0) for k in keys]
+def dist(a,b): return math.sqrt(sum((x-y)**2 for x,y in zip(vec(a),vec(b))))
+print("   деятельность            материя инфо люди опас   ближайший сосед")
+for s in sorted(pts):
+    a=pts[s]
+    others=[(dist(a,pts[o]),o) for o in pts if o!=s]
+    nn=min(others)[1] if others else "-"
+    print("   %-22s  %.2f  %.2f  %.2f  %.2f   %s" % (
+        s.replace("prof.",""), a.get("material",0),a.get("info",0),a.get("people",0),a.get("danger",0),
+        nn.replace("prof.","")))
+print()
+print("   → врач рядом с преподавателем (люди+информация), программист — с бухгалтером/писарем")
+print("     (чистая информация), сварщик — с электриком (материя+опасность). Всё из блоков цепи.")
+'
 
 if [[ -n "$KEEP" ]]; then
     echo
