@@ -237,3 +237,32 @@ TEST_F(RatesViewTest, RatesEndpointPublishesSignedAggregateOnce) {
     th.join();
     ASSERT_TRUE(blk && blk->status == 200);
 }
+
+// Cloud prior (ИР-018, specialty-axes.md §10): a thin, previously-unseen bucket is
+// seeded from its cloud neighbour's rate instead of being skipped.
+TEST_F(RatesViewTest, CloudPriorSeedsThinNewSpecialty) {
+    settled_deal(bob_, 0.05, 5.0);            // "хлебопёк" level 3, thin, no previous
+
+    records::SpecialtyCloud cloud{};
+    records::CloudPoint p{};
+    p.slug = "хлебопёк";
+    p.neighbors.push_back({"prof.cook", 1.0});
+    cloud.points.push_back(p);
+
+    const std::vector<records::RateEntry> prev = {{"prof.cook", 3, 1.2, 0.0, 0}};
+
+    const auto rates = build_daily_rates(*storage_, kDay, prev, 0.3, 0.1, &cloud);
+    bool seeded = false;
+    for (const auto& r : rates)
+        if (r.specialty == "хлебопёк" && r.level == 3) {
+            EXPECT_DOUBLE_EQ(r.rate, 1.2);    // neighbour's rate
+            seeded = true;
+        }
+    EXPECT_TRUE(seeded);
+
+    // Without a cloud the thin bucket stays skipped (unchanged behaviour).
+    bool present = false;
+    for (const auto& r : build_daily_rates(*storage_, kDay, prev))
+        if (r.specialty == "хлебопёк") present = true;
+    EXPECT_FALSE(present);
+}

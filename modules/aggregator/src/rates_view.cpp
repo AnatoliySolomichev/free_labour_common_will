@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <optional>
 #include <set>
 
 namespace aggregator {
@@ -21,12 +22,40 @@ struct Accum {
 
 } // namespace
 
+// Prior for a thin, previously-unseen (specialty, level) bucket from the cloud
+// (specialty-axes.md §10): weighted mean of neighbours that already have a rate at
+// this level (a neighbour with none is "thin" and skipped) → tree parent's rate →
+// 1.0. `prev0` is the immutable yesterday-rate map (not the one being drained).
+static std::optional<double> cloud_prior(
+    const std::string& specialty, uint8_t level,
+    const records::SpecialtyCloud& cloud,
+    const std::map<std::pair<std::string, uint8_t>, double>& prev0) {
+    const records::CloudPoint* pt = nullptr;
+    for (const auto& p : cloud.points)
+        if (p.slug == specialty) { pt = &p; break; }
+    if (!pt) return std::nullopt;
+    double sw = 0.0, swr = 0.0;
+    for (const auto& n : pt->neighbors) {
+        const auto it = prev0.find({n.slug, level});
+        if (it == prev0.end()) continue;          // neighbour has no rate yet → skip
+        sw += n.weight;
+        swr += n.weight * it->second;
+    }
+    if (sw > 0.0) return swr / sw;
+    if (!pt->parent.empty()) {
+        const auto it = prev0.find({pt->parent, level});
+        if (it != prev0.end()) return it->second;
+    }
+    return 1.0;                                    // normalized par, last resort
+}
+
 std::vector<records::RateEntry> build_daily_rates(
     const AggregatorStorage&               storage,
     int64_t                                day_start,
     const std::vector<records::RateEntry>& previous,
     double                                 alpha,
-    double                                 min_hours) {
+    double                                 min_hours,
+    const records::SpecialtyCloud*         cloud) {
     const int64_t day_end = day_start + 86'400;
 
     // One scan: records by block hash (for provenance resolution), the day's
@@ -99,6 +128,7 @@ std::vector<records::RateEntry> build_daily_rates(
     // Smooth against yesterday; carry forward untouched specialties.
     std::map<std::pair<std::string, uint8_t>, double> prev_rate;
     for (const auto& p : previous) prev_rate[{p.specialty, p.level}] = p.rate;
+    const std::map<std::pair<std::string, uint8_t>, double> prev0 = prev_rate;
 
     std::vector<records::RateEntry> out;
     for (const auto& [key, acc] : day) {
@@ -109,8 +139,15 @@ std::vector<records::RateEntry> build_daily_rates(
         e.deals     = acc.deals;
         const auto prev = prev_rate.find(key);
         if (acc.hours < min_hours) {
-            if (prev == prev_rate.end()) continue;   // too little to seed a rate
-            e.rate = prev->second;                   // inherit unchanged
+            if (prev != prev_rate.end()) {
+                e.rate = prev->second;               // inherit unchanged
+            } else if (cloud) {                      // seed a prior from the cloud
+                const auto prior = cloud_prior(key.first, key.second, *cloud, prev0);
+                if (!prior) continue;
+                e.rate = *prior;
+            } else {
+                continue;                            // too little to seed a rate
+            }
         } else {
             const double day_avg = acc.units / acc.hours;
             e.rate = prev == prev_rate.end()

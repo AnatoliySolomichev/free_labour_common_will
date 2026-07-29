@@ -681,8 +681,28 @@ void AggregatorServer::setup_routes() {
                 d.date      = day;
                 d.timestamp = now;
                 // Today's rates derive from YESTERDAY's settled deals
-                // (main_ideas.pdf: коэффициенты этого дня → следующего).
-                d.rates     = build_daily_rates(storage_, day - 86'400, previous);
+                // (main_ideas.pdf: коэффициенты этого дня → следующего). If a
+                // catalog is served, the specialty cloud seeds priors for thin new
+                // activities (специальности-axes §10) — else nullptr, unchanged.
+                std::optional<records::SpecialtyCloud> cloud_opt;
+                if (!catalog_dir_.empty()) {
+                    if (const auto pt = read_file(catalog_dir_ / "professions.json")) {
+                        try {
+                            std::vector<records::Catalog> cc{records::parse_catalog(*pt)};
+                            std::string comb = *pt;
+                            if (const auto nt = read_file(catalog_dir_ / "needs.json")) {
+                                cc.push_back(records::parse_catalog(*nt));
+                                comb += *nt;
+                            }
+                            const Hash sn = Crypto::hash(
+                                reinterpret_cast<const uint8_t*>(comb.data()), comb.size());
+                            cloud_opt = build_specialty_cloud(cc, day, now, sn.bytes);
+                        } catch (const std::exception&) {}
+                    }
+                }
+                d.rates     = build_daily_rates(storage_, day - 86'400, previous,
+                                                0.3, 0.1,
+                                                cloud_opt ? &*cloud_opt : nullptr);
                 const Block block = own_chain_->append_data(
                     records::Codec::encode(records::Record{d}));
                 try { storage_.add_block(block); } catch (...) {}
