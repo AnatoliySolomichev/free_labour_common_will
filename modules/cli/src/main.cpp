@@ -2667,6 +2667,19 @@ static int cmd_rates(int argc, char** argv) {
     return economy_get(via, "/economy/rates");
 }
 
+// bc cloud --via URL [--slug SLUG] — the specialty cloud (ИР-018)
+static int cmd_cloud(int argc, char** argv) {
+    const auto via = flag_val(argc, argv, "--via");
+    if (via.empty()) {
+        std::cerr << "Usage: bc cloud --via URL [--slug SLUG]\n";
+        return 1;
+    }
+    std::string path = "/specialty/cloud";
+    const auto slug = flag_val(argc, argv, "--slug");
+    if (!slug.empty()) path += "?slug=" + slug;
+    return economy_get(via, path);
+}
+
 // bc ideas top --via URL
 static int cmd_ideas_top(int argc, char** argv) {
     const auto via = flag_val(argc, argv, "--via");
@@ -4309,6 +4322,9 @@ Means of production (ИР-011, records.md §10.2, §9.4):
   tool show / material show PREFIX Audit one carry thread: invariant, forks,
                                        formula, resale ceiling (§5б)
   rates --via URL                  Today's specialty rates (signed DailyAggregate)
+  cloud --via URL [--slug SLUG]    Specialty cloud: each activity's tree parent and
+                                       k nearest neighbours (signed SpecialtyCloud,
+                                       ИР-018) — the geometry rate priors read
   pay --acceptance REF             Pay the worker up to the appraisal (§12.8)
     [--units N] [--via URL]            default: the unpaid remainder
     [--pledge REF]                     Transfer v4 (§11.1): --acceptance says
@@ -4476,6 +4492,7 @@ int main(int argc, char** argv) {
         else if (cmd == "trust")                            return cmd_trust(data_dir, argc, argv);
         else if (cmd == "ideas"     && subcmd == "top")     return cmd_ideas_top(argc, argv);
         else if (cmd == "rates")                            return cmd_rates(argc, argv);
+        else if (cmd == "cloud")                            return cmd_cloud(argc, argv);
         else if (cmd == "discover")                         return cmd_discover(data_dir, argc, argv);
         else if (cmd == "chain"     && subcmd == "info")    return cmd_chain_info(argc, argv);
         else if (cmd == "export"    && subcmd == "profiles")return cmd_export_profiles(argc, argv);

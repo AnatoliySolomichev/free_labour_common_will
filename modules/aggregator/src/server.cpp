@@ -7,6 +7,7 @@
 #include "aggregator/match_view.h"
 #include "aggregator/profile_view.h"
 #include "aggregator/rates_view.h"
+#include "aggregator/cloud_view.h"
 #include "blockchain/serializer.h"
 #include "blockchain/errors.h"
 #include <records/catalog.h>
@@ -703,6 +704,100 @@ void AggregatorServer::setup_routes() {
                      + ",\"hours\":"   + std::to_string(r.hours)
                      + ",\"deals\":"   + std::to_string(r.deals)
                      + "}";
+            }
+            body += "]}";
+            res.set_content(body, "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
+                            "application/json");
+        }
+    });
+
+    // GET /specialty/cloud — the specialty cloud (ИР-018, specialty-axes.md §10):
+    // per activity, its tree parent + k nearest neighbours. Computed from the
+    // catalog's declared axes + closed_by (phase 1), published once/day as a
+    // signed SpecialtyCloud in the aggregator's own chain and re-checkable via the
+    // committed `snapshot`. ?slug=... returns one activity; ?day=TS previews.
+    svr.Get("/specialty/cloud", [&](const httplib::Request& req, httplib::Response& res) {
+        if (catalog_dir_.empty()) {
+            res.status = 501;
+            res.set_content("{\"error\":\"cloud needs a catalog: start with --catalog PATH\"}",
+                            "application/json");
+            return;
+        }
+        try {
+            const auto prof_text = read_file(catalog_dir_ / "professions.json");
+            if (!prof_text) {
+                res.status = 501;
+                res.set_content("{\"error\":\"professions.json not found in catalog dir\"}",
+                                "application/json");
+                return;
+            }
+            std::vector<records::Catalog> cats{records::parse_catalog(*prof_text)};
+            std::string combined = *prof_text;
+            if (const auto needs_text = read_file(catalog_dir_ / "needs.json")) {
+                cats.push_back(records::parse_catalog(*needs_text));
+                combined += *needs_text;
+            }
+            // snapshot commits the input; phase 1 the input is the catalog itself.
+            const Hash snap = Crypto::hash(
+                reinterpret_cast<const uint8_t*>(combined.data()), combined.size());
+
+            const auto    now = static_cast<int64_t>(std::time(nullptr));
+            const int64_t day = now - now % 86'400;
+            std::vector<std::array<uint8_t, 32>> sources;
+            if (own_chain_) sources.push_back(own_chain_->uid().bytes);
+
+            const auto cloud = build_specialty_cloud(cats, day, now, snap.bytes, sources);
+
+            // Publish once/day (dedupe by scanning the branch), like DailyAggregate.
+            std::string block_hex;
+            if (own_chain_) {
+                std::lock_guard<std::mutex> lock(rates_mutex_);
+                bool have_today = false;
+                for (const Block& b : own_chain_->branch()) {
+                    if (b.type != BlockType::DATA) continue;
+                    try {
+                        const auto rec = records::Codec::decode(b.payload.data(),
+                                                                b.payload.size());
+                        if (const auto* c = std::get_if<records::SpecialtyCloud>(&rec))
+                            if (c->date == day) {
+                                have_today = true;
+                                block_hex  = to_hex(Crypto::hash_block(b).bytes);
+                            }
+                    } catch (const records::CodecError&) {}
+                }
+                if (!have_today) {
+                    const Block block = own_chain_->append_data(
+                        records::Codec::encode(records::Record{cloud}));
+                    try { storage_.add_block(block); } catch (...) {}
+                    block_hex = to_hex(Crypto::hash_block(block).bytes);
+                }
+            }
+
+            const std::string want = req.has_param("slug") ? req.get_param_value("slug") : "";
+            std::string body = "{\"date\":" + std::to_string(cloud.date)
+                + ",\"snapshot\":\"" + to_hex(cloud.snapshot)
+                + "\",\"block\":\"" + block_hex
+                + "\",\"params\":\"" + json_escape(cloud.params)
+                + "\",\"points\":[";
+            bool first = true;
+            for (const auto& p : cloud.points) {
+                if (!want.empty() && p.slug != want) continue;
+                if (!first) body += ',';
+                first = false;
+                body += "{\"slug\":\"" + json_escape(p.slug)
+                     + "\",\"parent\":\"" + json_escape(p.parent)
+                     + "\",\"neighbors\":[";
+                bool nf = true;
+                for (const auto& n : p.neighbors) {
+                    if (!nf) body += ',';
+                    nf = false;
+                    body += "{\"slug\":\"" + json_escape(n.slug)
+                         + "\",\"w\":" + std::to_string(n.weight) + "}";
+                }
+                body += "]}";
             }
             body += "]}";
             res.set_content(body, "application/json");
