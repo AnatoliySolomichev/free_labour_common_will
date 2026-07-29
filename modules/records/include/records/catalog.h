@@ -24,11 +24,24 @@ public:
     explicit CatalogError(const std::string& msg) : std::runtime_error(msg) {}
 };
 
+// Declared cloud coordinates of a specialty (ИР-018, specialty-axes.md): object of
+// labour as fractional membership (material+info+people ≈ 1) + danger 0..1. Present
+// only for leaf specialties; used to place activities in the specialty cloud.
+struct CatalogAxes {
+    double material = 0.0;
+    double info     = 0.0;
+    double people   = 0.0;
+    double danger   = 0.0;
+    bool   present  = false;   // true iff the entry declared an "axes" object
+};
+
 struct CatalogEntry {
     std::string              slug;       // "prof.electrician" — stable, never renamed
     std::string              ru;         // display name
     std::string              group;      // section, for grouping in a picker
     std::vector<std::string> aliases;    // synonyms, for search only
+    std::string              parent;     // tree parent slug ("" = root/none), ИР-017
+    CatalogAxes              axes;       // cloud coordinates, ИР-018
     // Needs only: professions that close this need ("need.electrical" →
     // ["prof.electrician"]). Without it matching cannot be mechanised — a person
     // knows an electrician fixes wiring, a program does not. Empty = closed by no

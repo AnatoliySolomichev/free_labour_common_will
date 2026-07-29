@@ -54,6 +54,19 @@ Catalog catalog_from(const Value& root, const std::string& where) {
         e.ru        = require_string(item.object, "ru",   ew);
         if (const Value* g = json::find(item.object, "group"); g && g->is_string())
             e.group = g->string;
+        if (const Value* p = json::find(item.object, "parent"); p && p->is_string())
+            e.parent = p->string;
+        if (const Value* ax = json::find(item.object, "axes"); ax && ax->is_object()) {
+            auto num = [&](const char* k, double& dst) {
+                if (const Value* v = json::find(ax->object, k); v && v->is_number())
+                    dst = v->number;
+            };
+            num("material", e.axes.material);
+            num("info",     e.axes.info);
+            num("people",   e.axes.people);
+            num("danger",   e.axes.danger);
+            e.axes.present = true;
+        }
         e.aliases   = optional_strings(item.object, "aliases",   ew);
         e.closed_by = optional_strings(item.object, "closed_by", ew);
         cat.entries.push_back(std::move(e));
