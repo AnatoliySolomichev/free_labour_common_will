@@ -305,6 +305,29 @@ void enc_daily_aggregate(Buf& out, const DailyAggregate& d) {
     w_uint(out, 3); w_int64(out, d.timestamp);
 }
 
+void enc_specialty_cloud(Buf& out, const SpecialtyCloud& c) {
+    w_map(out, 7);
+    w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::SpecialtyCloud));
+    w_uint(out, 1); w_int64(out, c.date);
+    w_uint(out, 2); w_fixed(out, c.snapshot);
+    w_uint(out, 3); w_text(out, c.params);
+    w_uint(out, 4); w_arr(out, c.sources.size());
+    for (const auto& s : c.sources) w_fixed(out, s);
+    w_uint(out, 5); w_arr(out, c.points.size());
+    for (const auto& p : c.points) {
+        w_map(out, 3);
+        w_uint(out, 0); w_text(out, p.slug);
+        w_uint(out, 1); w_text(out, p.parent);
+        w_uint(out, 2); w_arr(out, p.neighbors.size());
+        for (const auto& n : p.neighbors) {
+            w_map(out, 2);
+            w_uint(out, 0); w_text(out, n.slug);
+            w_uint(out, 1); w_float64(out, n.weight);
+        }
+    }
+    w_uint(out, 6); w_int64(out, c.timestamp);
+}
+
 // ── CBOR reader ───────────────────────────────────────────────────────────────
 
 class CborReader {
@@ -762,6 +785,47 @@ DailyAggregate dec_daily_aggregate_fields(CborReader& r) {
     return d;
 }
 
+SpecialtyCloud dec_specialty_cloud_fields(CborReader& r) {
+    SpecialtyCloud c{};
+    expect_key(r, 1); c.date = r.r_int();
+    expect_key(r, 2); r.r_fixed(c.snapshot);
+    expect_key(r, 3); c.params = r.r_text();
+    expect_key(r, 4);
+    {
+        const uint64_t n = r.r_arr();
+        c.sources.reserve(static_cast<size_t>(n));
+        for (uint64_t i = 0; i < n; ++i) {
+            std::array<uint8_t, 32> s{};
+            r.r_fixed(s);
+            c.sources.push_back(s);
+        }
+    }
+    expect_key(r, 5);
+    {
+        const uint64_t n = r.r_arr();
+        c.points.reserve(static_cast<size_t>(n));
+        for (uint64_t i = 0; i < n; ++i) {
+            if (r.r_map() != 3) throw CodecError("CloudPoint: expected 3 fields");
+            CloudPoint p{};
+            expect_key(r, 0); p.slug   = r.r_text();
+            expect_key(r, 1); p.parent = r.r_text();
+            expect_key(r, 2);
+            const uint64_t m = r.r_arr();
+            p.neighbors.reserve(static_cast<size_t>(m));
+            for (uint64_t j = 0; j < m; ++j) {
+                if (r.r_map() != 2) throw CodecError("CloudNeighbor: expected 2 fields");
+                CloudNeighbor nb{};
+                expect_key(r, 0); nb.slug   = r.r_text();
+                expect_key(r, 1); nb.weight = r.r_float64();
+                p.neighbors.push_back(std::move(nb));
+            }
+            c.points.push_back(std::move(p));
+        }
+    }
+    expect_key(r, 6); c.timestamp = r.r_int();
+    return c;
+}
+
 } // namespace (anonymous)
 
 // ── Codec public methods ──────────────────────────────────────────────────────
@@ -788,6 +852,7 @@ std::vector<uint8_t> Codec::encode(const Record& rec) {
         else if constexpr (std::is_same_v<T, PledgeRevoke>) enc_pledge_revoke(out, r);
         else if constexpr (std::is_same_v<T, DailyAggregate>) enc_daily_aggregate(out, r);
         else if constexpr (std::is_same_v<T, Redemption>)  enc_redemption(out, r);
+        else if constexpr (std::is_same_v<T, SpecialtyCloud>) enc_specialty_cloud(out, r);
     }, rec);
     return out;
 }
@@ -819,6 +884,7 @@ Record Codec::decode(const uint8_t* data, size_t len) {
         case RecordType::PledgeRevoke: return dec_pledge_revoke_fields(r);
         case RecordType::DailyAggregate: return dec_daily_aggregate_fields(r);
         case RecordType::Redemption: return dec_redemption_fields(r);
+        case RecordType::SpecialtyCloud: return dec_specialty_cloud_fields(r);
         default:
             throw CodecError("CBOR: unknown record type discriminator");
     }

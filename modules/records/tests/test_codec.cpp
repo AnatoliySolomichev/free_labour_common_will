@@ -657,3 +657,49 @@ TEST(RecordsCodec, AcceptanceV2CarriedUnits) {
     const auto d1 = std::get<Acceptance>(Codec::decode(bytes));
     EXPECT_FALSE(d1.carried_units.has_value());
 }
+
+// ── SpecialtyCloud (0x75) — облако специальностей (ИР-018, specialty-axes.md §10)
+TEST(RecordsCodec, SpecialtyCloudRoundtrip) {
+    SpecialtyCloud c{};
+    c.date      = 1'700'000'000LL - (1'700'000'000LL % 86'400);
+    c.snapshot.fill(0xAB);
+    c.params    = "v1;k=5;danger_w=1.0";
+    std::array<uint8_t, 32> src{}; src.fill(0x11);
+    c.sources.push_back(src);
+
+    CloudPoint p{};
+    p.slug   = "prof.electrician.live-line";
+    p.parent = "prof.electrician";
+    p.neighbors.push_back({"prof.welder", 0.82});
+    p.neighbors.push_back({"prof.electrician.install", 0.61});
+    c.points.push_back(p);
+
+    CloudPoint q{};   // activity with no parent, no neighbours
+    q.slug = "prof.scribe";
+    c.points.push_back(q);
+
+    c.timestamp = 1'700'000'050LL;
+
+    const auto d = std::get<SpecialtyCloud>(roundtrip(Record{c}));
+    EXPECT_EQ(d.date, c.date);
+    EXPECT_EQ(d.snapshot, c.snapshot);
+    EXPECT_EQ(d.params, "v1;k=5;danger_w=1.0");
+    ASSERT_EQ(d.sources.size(), 1u);
+    EXPECT_EQ(d.sources[0], src);
+    ASSERT_EQ(d.points.size(), 2u);
+    EXPECT_EQ(d.points[0].slug, "prof.electrician.live-line");
+    EXPECT_EQ(d.points[0].parent, "prof.electrician");
+    ASSERT_EQ(d.points[0].neighbors.size(), 2u);
+    EXPECT_EQ(d.points[0].neighbors[0].slug, "prof.welder");
+    EXPECT_DOUBLE_EQ(d.points[0].neighbors[0].weight, 0.82);
+    EXPECT_EQ(d.points[1].slug, "prof.scribe");
+    EXPECT_EQ(d.points[1].parent, "");
+    EXPECT_TRUE(d.points[1].neighbors.empty());
+    EXPECT_EQ(d.timestamp, 1'700'000'050LL);
+}
+
+TEST(RecordsCodec, SpecialtyCloudDeterminism) {
+    SpecialtyCloud c{};
+    c.date = 86'400; c.snapshot.fill(1); c.params = "v1"; c.timestamp = 100;
+    EXPECT_EQ(Codec::encode(Record{c}), Codec::encode(Record{c}));
+}

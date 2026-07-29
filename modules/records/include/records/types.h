@@ -35,6 +35,7 @@ enum class RecordType : uint8_t {
     Pledge         = 0x72,
     PledgeRevoke   = 0x73,
     Redemption     = 0x74,
+    SpecialtyCloud = 0x75,
 };
 
 // ── Cross-chain reference (records.md §4) ────────────────────────────────────
@@ -335,6 +336,41 @@ struct DailyAggregate {
     int64_t                timestamp;  // Unix timestamp UTC
 };
 
+// One neighbour of an activity in the specialty cloud (ИР-018, specialty-axes.md
+// §10): a nearby (specialty, activity) slug and the proximity weight.
+struct CloudNeighbor {
+    std::string slug;   // neighbour activity slug (global rate key)
+    double      weight; // proximity 0..1 (closer → larger), used for rate priors
+
+    bool operator==(const CloudNeighbor& o) const noexcept {
+        return slug == o.slug && weight == o.weight;
+    }
+};
+
+// One point of the specialty cloud: an activity, its tree parent (for drift) and
+// its k nearest neighbours. Coordinates are NOT published (they live in the
+// catalog; the full map is a preview) — only what the rate prior needs.
+struct CloudPoint {
+    std::string                slug;      // activity = rate key (§11.2, §14.8)
+    std::string                parent;    // tree parent slug ("" = none) — drift target
+    std::vector<CloudNeighbor> neighbors; // k nearest, by cloud distance
+};
+
+// Signed specialty cloud, written into the aggregator's own chain — twin of
+// DailyAggregate (specialty-axes.md §10, ИР-018). Neighbours + parents drive rate
+// priors for thin/new activities; `snapshot` commits the input block set so anyone
+// recomputes and verifies. Every figure is re-checkable against the chains.
+struct SpecialtyCloud {
+    static constexpr RecordType TYPE = RecordType::SpecialtyCloud;
+
+    int64_t                             date;      // UTC day start
+    std::array<uint8_t, 32>             snapshot;  // Merkle root of the input block set
+    std::string                         params;    // algorithm version + parameters
+    std::vector<std::array<uint8_t, 32>> sources;  // catalog source chains used
+    std::vector<CloudPoint>             points;
+    int64_t                             timestamp; // Unix timestamp UTC
+};
+
 // ── Record variant ────────────────────────────────────────────────────────────
 
 using Record = std::variant<
@@ -355,7 +391,8 @@ using Record = std::variant<
     DailyAggregate,
     Pledge,
     PledgeRevoke,
-    Redemption
+    Redemption,
+    SpecialtyCloud
 >;
 
 } // namespace records
