@@ -633,10 +633,15 @@ void AggregatorServer::setup_routes() {
             // the published aggregate).
             if (req.has_param("day")) {
                 const int64_t d = std::stoll(req.get_param_value("day"));
+                const auto rr = build_daily_rates(storage_, d - d % 86'400, {});
+                double sw = 0.0, swr = 0.0;
+                for (const auto& r : rr) { sw += r.hours; swr += r.rate * r.hours; }
+                const double W = sw > 0.0 ? swr / sw : 1.0;
                 std::string body = "{\"preview_day\":" + std::to_string(d)
+                                 + ",\"W\":" + std::to_string(W)
                                  + ",\"rates\":[";
                 bool first = true;
-                for (const auto& r : build_daily_rates(storage_, d - d % 86'400, {})) {
+                for (const auto& r : rr) {
                     if (!first) body += ',';
                     first = false;
                     body += "{\"specialty\":\"" + json_escape(r.specialty)
@@ -703,6 +708,11 @@ void AggregatorServer::setup_routes() {
                 d.rates     = build_daily_rates(storage_, day - 86'400, previous,
                                                 0.3, 0.1,
                                                 cloud_opt ? &*cloud_opt : nullptr);
+                // W = hours-weighted mean of raw rates (economy.md §2б): the client
+                // divides by it so the average labour-hour equals 1.
+                double sw = 0.0, swr = 0.0;
+                for (const auto& r : d.rates) { sw += r.hours; swr += r.rate * r.hours; }
+                d.W = sw > 0.0 ? swr / sw : 1.0;
                 const Block block = own_chain_->append_data(
                     records::Codec::encode(records::Record{d}));
                 try { storage_.add_block(block); } catch (...) {}
@@ -713,7 +723,8 @@ void AggregatorServer::setup_routes() {
             std::string body = "{\"date\":" + std::to_string(today->date)
                 + ",\"chain\":\"" + to_hex(own_chain_->uid().bytes)
                 + "\",\"block\":\"" + to_hex(today_hash.bytes)
-                + "\",\"rates\":[";
+                + "\",\"W\":" + std::to_string(today->W)
+                + ",\"rates\":[";
             bool first = true;
             for (const auto& r : today->rates) {
                 if (!first) body += ',';

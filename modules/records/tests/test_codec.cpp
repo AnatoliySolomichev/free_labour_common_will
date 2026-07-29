@@ -363,16 +363,35 @@ TEST(RecordsCodec, DailyAggregateRoundtrip) {
     d.rates     = { {"хлебопёк", 3, 1.333, 0.6, 2},
                     {"кардиохирург", 3, 14.0, 0.75, 1} };
 
+    d.W         = 1.0509;   // v3 (economy.md §2б): нормировщик
+
     const auto decoded = std::get<DailyAggregate>(roundtrip(d));
     EXPECT_EQ(decoded.date,      d.date);
     EXPECT_EQ(decoded.timestamp, d.timestamp);
+    EXPECT_DOUBLE_EQ(decoded.W,  1.0509);
     ASSERT_EQ(decoded.rates.size(), 2u);
     EXPECT_EQ(decoded.rates[0], d.rates[0]);
     EXPECT_EQ(decoded.rates[1], d.rates[1]);
 
     DailyAggregate empty{};
     empty.date = 0;
-    EXPECT_TRUE(std::get<DailyAggregate>(roundtrip(empty)).rates.empty());
+    const auto de = std::get<DailyAggregate>(roundtrip(empty));
+    EXPECT_TRUE(de.rates.empty());
+    EXPECT_DOUBLE_EQ(de.W, 1.0);    // default par
+}
+
+// A pre-v3 aggregate (4 fields, no W) still decodes, with W defaulting to 1.0.
+TEST(RecordsCodec, DailyAggregateLegacyFourFieldsDecodesWithParW) {
+    // Hand-encode the old layout: map(4){0:type,1:date,2:[],3:timestamp}.
+    std::vector<uint8_t> b;
+    b.push_back(0xA4);                          // map(4)
+    b.push_back(0x00); b.push_back(0x18); b.push_back(0x71);  // 0: 0x71
+    b.push_back(0x01); b.push_back(0x00);       // 1: date 0
+    b.push_back(0x02); b.push_back(0x80);       // 2: [] (empty rates)
+    b.push_back(0x03); b.push_back(0x00);       // 3: timestamp 0
+    const auto d = std::get<DailyAggregate>(Codec::decode(b));
+    EXPECT_TRUE(d.rates.empty());
+    EXPECT_DOUBLE_EQ(d.W, 1.0);
 }
 
 TEST(RecordsCodec, EconomyDeterminism) {

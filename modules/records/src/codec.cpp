@@ -290,7 +290,7 @@ void enc_pledge_revoke(Buf& out, const PledgeRevoke& pr) {
 }
 
 void enc_daily_aggregate(Buf& out, const DailyAggregate& d) {
-    w_map(out, 4);
+    w_map(out, 5);
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::DailyAggregate));
     w_uint(out, 1); w_int64(out, d.date);
     w_uint(out, 2); w_arr(out, d.rates.size());
@@ -303,6 +303,7 @@ void enc_daily_aggregate(Buf& out, const DailyAggregate& d) {
         w_uint(out, 4); w_uint(out, r.deals);
     }
     w_uint(out, 3); w_int64(out, d.timestamp);
+    w_uint(out, 4); w_float64(out, d.W);        // v3 (economy.md §2б)
 }
 
 void enc_specialty_cloud(Buf& out, const SpecialtyCloud& c) {
@@ -763,7 +764,7 @@ PledgeRevoke dec_pledge_revoke_fields(CborReader& r) {
     return pr;
 }
 
-DailyAggregate dec_daily_aggregate_fields(CborReader& r) {
+DailyAggregate dec_daily_aggregate_fields(CborReader& r, uint64_t field_count) {
     DailyAggregate d{};
     expect_key(r, 1); d.date = r.r_int();
     expect_key(r, 2);
@@ -782,6 +783,7 @@ DailyAggregate dec_daily_aggregate_fields(CborReader& r) {
         }
     }
     expect_key(r, 3); d.timestamp = r.r_int();
+    if (field_count >= 5) { expect_key(r, 4); d.W = r.r_float64(); }  // v3 §2б
     return d;
 }
 
@@ -882,7 +884,7 @@ Record Codec::decode(const uint8_t* data, size_t len) {
         case RecordType::Transfer:    return dec_transfer_fields(r, field_count);
         case RecordType::Pledge:      return dec_pledge_fields(r);
         case RecordType::PledgeRevoke: return dec_pledge_revoke_fields(r);
-        case RecordType::DailyAggregate: return dec_daily_aggregate_fields(r);
+        case RecordType::DailyAggregate: return dec_daily_aggregate_fields(r, field_count);
         case RecordType::Redemption: return dec_redemption_fields(r);
         case RecordType::SpecialtyCloud: return dec_specialty_cloud_fields(r);
         default:

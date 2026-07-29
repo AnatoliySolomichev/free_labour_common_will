@@ -332,8 +332,13 @@ struct DailyAggregate {
     static constexpr RecordType TYPE = RecordType::DailyAggregate;
 
     int64_t                date;       // UTC day start (ts − ts mod 86400)
-    std::vector<RateEntry> rates;
+    std::vector<RateEntry> rates;      // RAW rates (normalized = rate / W)
     int64_t                timestamp;  // Unix timestamp UTC
+    // v3 (economy.md §2б): hours-weighted mean of the day's raw rates. The client
+    // divides each rate by W so the network's average labour-hour equals 1 — the
+    // money supply grows in step with hours actually worked. Old (4-field) blocks
+    // decode with W = 1.0 (no normalization).
+    double                 W = 1.0;
 };
 
 // One neighbour of an activity in the specialty cloud (ИР-018, specialty-axes.md
