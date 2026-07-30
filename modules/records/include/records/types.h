@@ -171,6 +171,19 @@ struct WorkRecord {
 };
 
 // Acceptance = the moment labor-hours come into existence (records.md §9.5)
+// v3 (economy.md §2б): the normalizer this appraisal was made against, so a
+// historical оценка reads unambiguously ("10.5 стч at W=1.03") after the method
+// changes. Points at the DailyAggregate used: aggregator chain + its date + W.
+struct AcceptanceNorm {
+    std::array<uint8_t, 32> agg;   // aggregator chain UID
+    int64_t                 date;  // DailyAggregate date used
+    double                  W;     // its normalizer
+
+    bool operator==(const AcceptanceNorm& o) const noexcept {
+        return agg == o.agg && date == o.date && W == o.W;
+    }
+};
+
 struct Acceptance {
     static constexpr RecordType TYPE = RecordType::Acceptance;
 
@@ -182,7 +195,9 @@ struct Acceptance {
     int64_t                 timestamp;    // Unix timestamp UTC
     // v2 (ИР-011): Σ carried of the accepted work. Payment ceiling is
     // labor_units + carried_units; rates take labor_units only (§11.2).
-    std::optional<double>   carried_units;
+    std::optional<double>          carried_units;
+    // v3 (economy.md §2б): normalizer provenance, best-effort at accept time.
+    std::optional<AcceptanceNorm>  norm;
 };
 
 // ── Production records (records.md §10, v2 — ИР-011) ─────────────────────────

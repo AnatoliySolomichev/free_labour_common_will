@@ -186,8 +186,9 @@ void enc_work_record(Buf& out, const WorkRecord& wr) {
 }
 
 void enc_acceptance(Buf& out, const Acceptance& a) {
-    // v1 = map(7); v2 adds carried_units (key 7) when present.
-    w_map(out, 7 + (a.carried_units ? 1 : 0));
+    // v1 = map(7); v2 adds carried_units (key 7); v3 adds norm (key 8). Optional
+    // keys are written in ascending order, each present only when set.
+    w_map(out, 7 + (a.carried_units ? 1 : 0) + (a.norm ? 1 : 0));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Acceptance));
     w_uint(out, 1); w_ref(out, a.work);
     w_uint(out, 2); w_fixed(out, a.receiver);
@@ -196,6 +197,13 @@ void enc_acceptance(Buf& out, const Acceptance& a) {
     w_uint(out, 5); w_float64(out, a.labor_units);
     w_uint(out, 6); w_int64(out, a.timestamp);
     if (a.carried_units) { w_uint(out, 7); w_float64(out, *a.carried_units); }
+    if (a.norm) {
+        w_uint(out, 8);
+        w_map(out, 3);
+        w_uint(out, 0); w_fixed(out, a.norm->agg);
+        w_uint(out, 1); w_int64(out, a.norm->date);
+        w_uint(out, 2); w_float64(out, a.norm->W);
+    }
 }
 
 void enc_material(Buf& out, const Material& m) {
@@ -651,9 +659,10 @@ WorkRecord dec_work_record_fields(CborReader& r, uint64_t field_count) {
 }
 
 Acceptance dec_acceptance_fields(CborReader& r, uint64_t field_count) {
-    // 7 = v1; 8 = v2 with carried_units (records.md §9.5).
-    if (field_count != 7 && field_count != 8)
-        throw CodecError("Acceptance: expected 7 or 8 fields");
+    // 7 = v1; +carried_units (key 7, v2); +norm (key 8, v3). Optional keys read
+    // generically so any subset/order (ascending, deterministic CBOR) decodes.
+    if (field_count < 7 || field_count > 9)
+        throw CodecError("Acceptance: expected 7..9 fields");
     Acceptance a{};
     expect_key(r, 1); a.work         = dec_ref(r);
     expect_key(r, 2); r.r_fixed(a.receiver);
@@ -661,8 +670,20 @@ Acceptance dec_acceptance_fields(CborReader& r, uint64_t field_count) {
     expect_key(r, 4); a.hours_raw    = r.r_float64();
     expect_key(r, 5); a.labor_units  = r.r_float64();
     expect_key(r, 6); a.timestamp    = r.r_int();
-    if (field_count == 8) {
-        expect_key(r, 7); a.carried_units = r.r_float64();
+    for (uint64_t i = 7; i < field_count; ++i) {
+        const uint64_t key = r.r_uint();
+        if (key == 7) {
+            a.carried_units = r.r_float64();
+        } else if (key == 8) {
+            AcceptanceNorm n{};
+            if (r.r_map() != 3) throw CodecError("AcceptanceNorm: expected 3 fields");
+            expect_key(r, 0); r.r_fixed(n.agg);
+            expect_key(r, 1); n.date = r.r_int();
+            expect_key(r, 2); n.W    = r.r_float64();
+            a.norm = n;
+        } else {
+            throw CodecError("Acceptance: unexpected optional key");
+        }
     }
     return a;
 }

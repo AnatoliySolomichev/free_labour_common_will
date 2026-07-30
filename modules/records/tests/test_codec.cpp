@@ -722,3 +722,39 @@ TEST(RecordsCodec, SpecialtyCloudDeterminism) {
     c.date = 86'400; c.snapshot.fill(1); c.params = "v1"; c.timestamp = 100;
     EXPECT_EQ(Codec::encode(Record{c}), Codec::encode(Record{c}));
 }
+
+// Acceptance v3: norm{agg,date,W} provenance (economy.md §2б), independent of v2.
+TEST(RecordsCodec, AcceptanceV3NormRoundtrip) {
+    records::Acceptance a{};
+    a.work        = records::Ref{};
+    a.receiver.fill(0x22);
+    a.quality     = "пройдено";
+    a.hours_raw   = 6.0;
+    a.labor_units = 6.0;
+    a.timestamp   = 1'700'000'000LL;
+    records::AcceptanceNorm n{};
+    n.agg.fill(0x33); n.date = 86'400; n.W = 1.0509;
+    a.norm = n;
+
+    // norm WITHOUT carried_units → map(8) with key 8 (not 7).
+    const auto d = std::get<records::Acceptance>(roundtrip(Record{a}));
+    EXPECT_FALSE(d.carried_units.has_value());
+    ASSERT_TRUE(d.norm.has_value());
+    EXPECT_EQ(d.norm->agg, n.agg);
+    EXPECT_EQ(d.norm->date, 86'400);
+    EXPECT_DOUBLE_EQ(d.norm->W, 1.0509);
+
+    // Both carried_units AND norm → map(9), keys 7 and 8.
+    a.carried_units = 1.2;
+    const auto both = std::get<records::Acceptance>(roundtrip(Record{a}));
+    ASSERT_TRUE(both.carried_units.has_value());
+    EXPECT_DOUBLE_EQ(*both.carried_units, 1.2);
+    ASSERT_TRUE(both.norm.has_value());
+    EXPECT_DOUBLE_EQ(both.norm->W, 1.0509);
+
+    // Neither → map(7), classic v1, both nullopt.
+    a.carried_units.reset(); a.norm.reset();
+    const auto v1 = std::get<records::Acceptance>(roundtrip(Record{a}));
+    EXPECT_FALSE(v1.carried_units.has_value());
+    EXPECT_FALSE(v1.norm.has_value());
+}

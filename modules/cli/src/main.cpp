@@ -499,6 +499,32 @@ static std::optional<double> lookup_rate(Context& ctx, const std::string& via,
     catch (...) { return std::nullopt; }
 }
 
+// Best-effort normalizer provenance for an acceptance (economy.md §2б): the W the
+// aggregator publishes today + which aggregate it is (chain + date). Failure to
+// reach it is fine — the acceptance is signed anyway, just without norm.
+static std::optional<AcceptanceNorm> fetch_norm(const std::string& via) {
+    if (via.empty()) return std::nullopt;
+    httplib::Client cli(via);
+    cli.set_connection_timeout(5);
+    const auto res = cli.Get("/economy/rates");
+    if (!res || res->status != 200) return std::nullopt;
+    try {
+        const auto root = records::json::Reader(res->body).read();
+        if (!root.is_object()) return std::nullopt;
+        const auto* w  = records::json::find(root.object, "W");
+        const auto* ch = records::json::find(root.object, "chain");
+        const auto* dt = records::json::find(root.object, "date");
+        if (!w || !w->is_number() || !ch || !ch->is_string() ||
+            !dt || !dt->is_number())
+            return std::nullopt;
+        AcceptanceNorm n{};
+        n.W    = w->number;
+        n.date = static_cast<int64_t>(dt->number);
+        if (!from_hex(ch->string, n.agg.data(), 32)) return std::nullopt;
+        return n;
+    } catch (...) { return std::nullopt; }
+}
+
 // ── Carry: перенос стоимости средств производства (ИР-011, records.md §9.4) ──
 
 // The fields the carry logic needs from a Tool or Material record.
@@ -1174,6 +1200,13 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
                 }
             } catch (const CodecError&) {}
         }
+    }
+
+    // v3 (economy.md §2б): record the normalizer this appraisal was made against,
+    // best-effort — so the оценка reads unambiguously later. Never blocks signing.
+    if (const auto nm = fetch_norm(flag_val(argc, argv, "--via"))) {
+        a.norm = *nm;
+        std::cerr << "нормировщик W=" << nm->W << " (из агрегатора, для истории)\n";
     }
 
     const Block block = append_record(ctx, Record{a});
