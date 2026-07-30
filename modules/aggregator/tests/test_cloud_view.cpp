@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <map>
 #include <string>
 
 using namespace aggregator;
@@ -104,4 +105,22 @@ TEST(CloudView, Deterministic) {
                              b.points[i].neighbors[j].weight);
         }
     }
+}
+
+// Derived capital-intensity axis (ИР-018 phase 2): with a strong capital weight, a
+// capital-heavy activity is pulled toward other capital-heavy ones, overriding the
+// declared-axis nearest.
+TEST(CloudView, CapitalIntensityShiftsNeighbours) {
+    std::array<uint8_t, 32> snap{};
+    // Without capital: cook (material, low danger) is nearest the electrician.
+    const auto base = build_specialty_cloud(tiny_catalog(), 0, 0, snap);
+    EXPECT_EQ(point(base, "prof.cook")->neighbors.front().slug, "prof.electrician");
+
+    // Give cook & welder high capital-intensity, electrician low. A strong weight
+    // makes cook's nearest the welder (both capital-heavy).
+    std::map<std::string, double> cap = {
+        {"prof.cook", 0.9}, {"prof.welder", 0.85}, {"prof.electrician", 0.1}};
+    const auto withcap =
+        build_specialty_cloud(tiny_catalog(), 0, 0, snap, {}, 5, 1.0, &cap, 8.0);
+    EXPECT_EQ(point(withcap, "prof.cook")->neighbors.front().slug, "prof.welder");
 }

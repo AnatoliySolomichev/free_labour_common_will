@@ -343,6 +343,11 @@ prof.electrician                         профессия (родитель, �
 
 ## 11. История
 
+- **2026-07-28 (фаза 2 + провенанс)** — капиталоёмкость: выводимая ось в облаке
+  (`build_capital_intensity` из carry-нити заверённых сделок; вес `capital_w`
+  публичный параметр в `params`, витрина стала `v2;phase=2`; snapshot коммитит и
+  набор блоков). `norm{agg,date,W}` в `Acceptance` (v3) — провенанс нормировки,
+  `bc accept` тянет `W` best-effort. Опасность — число (финал). Все тесты зелёные.
 - **2026-07-28 (реализация, фаза 1)** — витрина облака реализована в коде: тип записи
   `SpecialtyCloud (0x75)` (records, CBOR-codec); `CatalogEntry` расширен `parent`/`axes`;
   `aggregator/cloud_view` (соседи по декларируемым осям + `closed_by`, danger в

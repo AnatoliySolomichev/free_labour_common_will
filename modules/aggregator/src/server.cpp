@@ -701,7 +701,9 @@ void AggregatorServer::setup_routes() {
                             }
                             const Hash sn = Crypto::hash(
                                 reinterpret_cast<const uint8_t*>(comb.data()), comb.size());
-                            cloud_opt = build_specialty_cloud(cc, day, now, sn.bytes);
+                            const auto cap = build_capital_intensity(storage_);
+                            cloud_opt = build_specialty_cloud(cc, day, now, sn.bytes, {},
+                                                              5, 1.0, &cap, 0.5);
                         } catch (const std::exception&) {}
                     }
                 }
@@ -771,16 +773,30 @@ void AggregatorServer::setup_routes() {
                 cats.push_back(records::parse_catalog(*needs_text));
                 combined += *needs_text;
             }
-            // snapshot commits the input; phase 1 the input is the catalog itself.
+            // Derived axis (phase 2): capital-intensity from settled deals.
+            const auto capital = build_capital_intensity(storage_);
+            constexpr double kCapitalWeight = 0.5;
+
+            // snapshot commits the input: the catalog AND the block set the derived
+            // axis was computed over (sorted block hashes → deterministic).
+            std::string combined2 = combined;
+            {
+                auto hs = storage_.all_block_hashes();
+                std::sort(hs.begin(), hs.end(),
+                          [](const Hash& a, const Hash& b) { return a.bytes < b.bytes; });
+                for (const Hash& h : hs)
+                    combined2.append(reinterpret_cast<const char*>(h.bytes.data()), 32);
+            }
             const Hash snap = Crypto::hash(
-                reinterpret_cast<const uint8_t*>(combined.data()), combined.size());
+                reinterpret_cast<const uint8_t*>(combined2.data()), combined2.size());
 
             const auto    now = static_cast<int64_t>(std::time(nullptr));
             const int64_t day = now - now % 86'400;
             std::vector<std::array<uint8_t, 32>> sources;
             if (own_chain_) sources.push_back(own_chain_->uid().bytes);
 
-            const auto cloud = build_specialty_cloud(cats, day, now, snap.bytes, sources);
+            const auto cloud = build_specialty_cloud(cats, day, now, snap.bytes, sources,
+                                                     5, 1.0, &capital, kCapitalWeight);
 
             // Publish once/day (dedupe by scanning the branch), like DailyAggregate.
             std::string block_hex;
