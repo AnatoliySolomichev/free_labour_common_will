@@ -869,6 +869,35 @@ void AggregatorServer::setup_routes() {
         }
     });
 
+    // GET /specialty/attestations — declared-axis values set by practitioners
+    // (ИР-019): per (activity, axis) the grade-weighted median, the number of
+    // distinct attesters, and whether it is still `preliminary` (below the N
+    // threshold — the same open N as records.md §14.8 п.11). ?slug=... filters.
+    svr.Get("/specialty/attestations", [&](const httplib::Request& req,
+                                           httplib::Response& res) {
+        // Pilot threshold: any attestation overrides bootstrap; below it a value is
+        // preliminary. The value of N is the shared open question (§14.8 п.11).
+        constexpr int kMinAttesters = 1;
+        const std::string want = req.has_param("slug") ? req.get_param_value("slug") : "";
+        const auto summary = build_axis_attestation_summary(storage_);
+        std::string body = "{\"min_attesters\":" + std::to_string(kMinAttesters)
+                         + ",\"axes\":[";
+        bool first = true;
+        for (const auto& [key, stat] : summary) {
+            if (!want.empty() && key.first != want) continue;
+            if (!first) body += ',';
+            first = false;
+            body += "{\"activity\":\"" + json_escape(key.first)
+                 + "\",\"axis\":\"" + json_escape(key.second)
+                 + "\",\"value\":" + std::to_string(stat.median)
+                 + ",\"attesters\":" + std::to_string(stat.attesters)
+                 + ",\"preliminary\":" + (stat.attesters < kMinAttesters ? "true" : "false")
+                 + "}";
+        }
+        body += "]}";
+        res.set_content(body, "application/json");
+    });
+
     svr.Get("/economy/chain/:uid", [&](const httplib::Request& req,
                                        httplib::Response& res) {
         auto uid_hash = hex_to_hash(req.path_params.at("uid"));

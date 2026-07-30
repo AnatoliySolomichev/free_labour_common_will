@@ -288,3 +288,21 @@ TEST_F(RatesViewTest, AxisAttestationWeightedMedian) {
     // Below the threshold → not published (bootstrap stands).
     EXPECT_TRUE(build_axis_attestations(*storage_, 4).empty());
 }
+
+// build_axis_attestation_summary (ИР-019 A4): median + attester count, so a value's
+// support (preliminary vs solid) is visible.
+TEST_F(RatesViewTest, AxisAttestationSummaryCounts) {
+    auto attest = [&](const UserId& who, double v) {
+        records::AxisAttestation a{};
+        a.activity = "хлебопёк"; a.axis = "danger"; a.value = v; a.timestamp = kDay;
+        a.grade.chain = who.bytes;
+        add(who, a);
+    };
+    attest(alice_, 0.02);
+    attest(bob_,   0.04);
+    const auto sum = build_axis_attestation_summary(*storage_);
+    const auto it = sum.find({"хлебопёк", "danger"});
+    ASSERT_NE(it, sum.end());
+    EXPECT_EQ(it->second.attesters, 2);
+    EXPECT_DOUBLE_EQ(it->second.median, 0.02);   // lower weighted median of 2 (weights 1)
+}

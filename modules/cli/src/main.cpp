@@ -2716,6 +2716,19 @@ static int cmd_cloud(int argc, char** argv) {
     return economy_get(via, path);
 }
 
+// bc attestations --via URL [--slug SLUG] — attested axis values + support (ИР-019)
+static int cmd_attestations(int argc, char** argv) {
+    const auto via = flag_val(argc, argv, "--via");
+    if (via.empty()) {
+        std::cerr << "Usage: bc attestations --via URL [--slug SLUG]\n";
+        return 1;
+    }
+    std::string path = "/specialty/attestations";
+    if (const auto slug = flag_val(argc, argv, "--slug"); !slug.empty())
+        path += "?slug=" + slug;
+    return economy_get(via, path);
+}
+
 // bc attest --activity SLUG --axis danger --value 0.02 [--grade REF] [--via URL]
 // Attest a declared cloud axis value (ИР-019). The aggregator takes the
 // grade-weighted median over practitioners; --grade gives your standing/weight.
@@ -4389,6 +4402,8 @@ Means of production (ИР-011, records.md §10.2, §9.4):
   attest --activity SLUG           Attest a declared axis value, e.g. danger (ИР-019):
     --axis danger --value 0.02         the aggregator takes the grade-weighted median
     [--grade REF] [--via URL]          over practitioners — value set by who does it
+  attestations --via URL           Attested axis values: median, how many attesters,
+    [--slug SLUG]                      and whether still preliminary (below N)
   pay --acceptance REF             Pay the worker up to the appraisal (§12.8)
     [--units N] [--via URL]            default: the unpaid remainder
     [--pledge REF]                     Transfer v4 (§11.1): --acceptance says
@@ -4558,6 +4573,7 @@ int main(int argc, char** argv) {
         else if (cmd == "rates")                            return cmd_rates(argc, argv);
         else if (cmd == "cloud")                            return cmd_cloud(argc, argv);
         else if (cmd == "attest")                           return cmd_attest(data_dir, argc, argv);
+        else if (cmd == "attestations")                     return cmd_attestations(argc, argv);
         else if (cmd == "discover")                         return cmd_discover(data_dir, argc, argv);
         else if (cmd == "chain"     && subcmd == "info")    return cmd_chain_info(argc, argv);
         else if (cmd == "export"    && subcmd == "profiles")return cmd_export_profiles(argc, argv);

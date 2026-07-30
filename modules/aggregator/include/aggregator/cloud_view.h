@@ -19,6 +19,16 @@ namespace aggregator {
 // who do the work, not by decree. Below `min_attesters` the value is left out
 // (preliminary) and the catalog's bootstrap value stands. Deterministic over the
 // block set. Weight = the attester's Grade level in the activity (unresolved → 1).
+// Full attestation picture per (activity, axis): the grade-weighted median AND how
+// many distinct practitioners attested — so a consumer sees whether a value is
+// well-supported or still preliminary (below the N threshold — ИР-019 A4, the same
+// open N as records.md §14.8 п.11).
+struct AttestationStat { double median; int attesters; };
+std::map<std::pair<std::string, std::string>, AttestationStat>
+build_axis_attestation_summary(const AggregatorStorage& storage);
+
+// Attested overrides used by the cloud: the summary filtered to entries with at
+// least `min_attesters` practitioners (below → preliminary, bootstrap stands).
 std::map<std::pair<std::string, std::string>, double> build_axis_attestations(
     const AggregatorStorage& storage, unsigned min_attesters = 1);
 

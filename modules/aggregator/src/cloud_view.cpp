@@ -149,8 +149,8 @@ void jacobi_eigen(std::vector<std::vector<double>> a,
 
 }  // namespace
 
-std::map<std::pair<std::string, std::string>, double> build_axis_attestations(
-    const AggregatorStorage& storage, unsigned min_attesters) {
+std::map<std::pair<std::string, std::string>, AttestationStat>
+build_axis_attestation_summary(const AggregatorStorage& storage) {
     using RefHash = std::array<uint8_t, 32>;
     std::map<RefHash, records::Record> by_hash;
     for (const Hash& bh : storage.all_block_hashes()) {
@@ -179,9 +179,8 @@ std::map<std::pair<std::string, std::string>, double> build_axis_attestations(
             per = Att{a->value, weight, a->timestamp};
     }
 
-    std::map<std::pair<std::string, std::string>, double> out;
+    std::map<std::pair<std::string, std::string>, AttestationStat> out;
     for (auto& [key, per] : groups) {
-        if (per.size() < min_attesters) continue;   // preliminary — bootstrap stands
         std::vector<Att> v;
         v.reserve(per.size());
         for (const auto& [chain, a] : per) v.push_back(a);
@@ -191,8 +190,17 @@ std::map<std::pair<std::string, std::string>, double> build_axis_attestations(
         for (const auto& e : v) total += e.weight;
         double cum = 0.0, med = v.back().value;
         for (const auto& e : v) { cum += e.weight; if (cum >= total / 2.0) { med = e.value; break; } }
-        out[key] = med;
+        out[key] = AttestationStat{med, static_cast<int>(per.size())};
     }
+    return out;
+}
+
+std::map<std::pair<std::string, std::string>, double> build_axis_attestations(
+    const AggregatorStorage& storage, unsigned min_attesters) {
+    std::map<std::pair<std::string, std::string>, double> out;
+    for (const auto& [key, stat] : build_axis_attestation_summary(storage))
+        if (static_cast<unsigned>(stat.attesters) >= min_attesters)  // else preliminary
+            out[key] = stat.median;
     return out;
 }
 
