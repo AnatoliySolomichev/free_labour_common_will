@@ -2708,8 +2708,11 @@ static int cmd_cloud(int argc, char** argv) {
         return 1;
     }
     std::string path = "/specialty/cloud";
-    const auto slug = flag_val(argc, argv, "--slug");
-    if (!slug.empty()) path += "?slug=" + slug;
+    std::vector<std::string> q;
+    if (const auto slug = flag_val(argc, argv, "--slug"); !slug.empty())
+        q.push_back("slug=" + slug);
+    if (flag_present(argc, argv, "--coords")) q.push_back("coords=1");
+    for (std::size_t i = 0; i < q.size(); ++i) path += (i ? "&" : "?") + q[i];
     return economy_get(via, path);
 }
 
@@ -4380,8 +4383,9 @@ Means of production (ИР-011, records.md §10.2, §9.4):
                                        formula, resale ceiling (§5б)
   rates --via URL                  Today's specialty rates (signed DailyAggregate)
   cloud --via URL [--slug SLUG]    Specialty cloud: each activity's tree parent and
-                                       k nearest neighbours (signed SpecialtyCloud,
-                                       ИР-018) — the geometry rate priors read
+    [--coords]                         k nearest neighbours (signed SpecialtyCloud,
+                                       ИР-018) — the geometry rate priors read;
+                                       --coords adds the 2D spectral map coordinates
   attest --activity SLUG           Attest a declared axis value, e.g. danger (ИР-019):
     --axis danger --value 0.02         the aggregator takes the grade-weighted median
     [--grade REF] [--via URL]          over practitioners — value set by who does it

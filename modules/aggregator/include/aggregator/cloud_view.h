@@ -63,4 +63,16 @@ records::SpecialtyCloud build_specialty_cloud(
     // present, replaces the catalog's bootstrap value for that axis.
     const std::map<std::pair<std::string, std::string>, double>* attested = nullptr);
 
+// Spectral coordinates for the cloud (ИР-018, phase 3 — the map/picture). Laplacian
+// eigenmaps over the same affinity as the neighbours: each specialty gets a 2D point
+// where near = similar, revealing indirect similarity (friend-of-friend) the raw
+// neighbour list does not. Deterministic; NOT stored in the SpecialtyCloud record
+// (kept compact, §10) — served on demand via /specialty/cloud?coords=1.
+std::map<std::string, std::array<double, 2>> compute_spectral_coords(
+    const std::vector<records::Catalog>&        catalogs,
+    double                                      danger_weight  = 1.0,
+    const std::map<std::string, double>*        capital        = nullptr,
+    double                                      capital_weight = 0.0,
+    const std::map<std::pair<std::string, std::string>, double>* attested = nullptr);
+
 }  // namespace aggregator

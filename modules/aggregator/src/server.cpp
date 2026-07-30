@@ -827,6 +827,13 @@ void AggregatorServer::setup_routes() {
                 }
             }
 
+            // ?coords=1 — spectral map coordinates on demand (ИР-018 phase 3), not
+            // stored in the record (kept compact, §10).
+            std::map<std::string, std::array<double, 2>> coords;
+            if (req.has_param("coords"))
+                coords = compute_spectral_coords(cats, 1.0, &capital,
+                                                 kCapitalWeight, &attested);
+
             const std::string want = req.has_param("slug") ? req.get_param_value("slug") : "";
             std::string body = "{\"date\":" + std::to_string(cloud.date)
                 + ",\"snapshot\":\"" + to_hex(cloud.snapshot)
@@ -839,8 +846,11 @@ void AggregatorServer::setup_routes() {
                 if (!first) body += ',';
                 first = false;
                 body += "{\"slug\":\"" + json_escape(p.slug)
-                     + "\",\"parent\":\"" + json_escape(p.parent)
-                     + "\",\"neighbors\":[";
+                     + "\",\"parent\":\"" + json_escape(p.parent) + "\"";
+                if (const auto it = coords.find(p.slug); it != coords.end())
+                    body += ",\"coord\":[" + std::to_string(it->second[0]) + ","
+                         + std::to_string(it->second[1]) + "]";
+                body += ",\"neighbors\":[";
                 bool nf = true;
                 for (const auto& n : p.neighbors) {
                     if (!nf) body += ',';

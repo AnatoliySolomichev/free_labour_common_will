@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cmath>
 #include <map>
 #include <string>
 
@@ -157,4 +158,24 @@ TEST(CloudView, AttestationOverrideAtUnitDangerWeight) {
     const auto over = build_specialty_cloud(cats, 0, 0, snap, {}, 5, 1.0,
                                             nullptr, 0.0, &att);
     EXPECT_EQ(point(over, "prof.cook")->neighbors.front().slug, "prof.welder");
+}
+
+// Spectral coordinates (ИР-018 phase 3): deterministic, and similar specialties
+// (pure-info) land nearer each other than a material one.
+TEST(CloudView, SpectralCoordsClusterAndDeterministic) {
+    const auto a = compute_spectral_coords(tiny_catalog());
+    const auto b = compute_spectral_coords(tiny_catalog());
+    ASSERT_FALSE(a.empty());
+    for (const auto& [slug, c] : a) {
+        ASSERT_TRUE(b.count(slug));
+        EXPECT_DOUBLE_EQ(c[0], b.at(slug)[0]);
+        EXPECT_DOUBLE_EQ(c[1], b.at(slug)[1]);
+    }
+    auto dist = [&](const std::string& x, const std::string& y) {
+        const double dx = a.at(x)[0] - a.at(y)[0];
+        const double dy = a.at(x)[1] - a.at(y)[1];
+        return std::sqrt(dx * dx + dy * dy);
+    };
+    EXPECT_LT(dist("prof.programmer", "prof.accountant"),
+              dist("prof.programmer", "prof.welder"));
 }
