@@ -2713,6 +2713,30 @@ static int cmd_cloud(int argc, char** argv) {
     return economy_get(via, path);
 }
 
+// bc attest --activity SLUG --axis danger --value 0.02 [--grade REF] [--via URL]
+// Attest a declared cloud axis value (ИР-019). The aggregator takes the
+// grade-weighted median over practitioners; --grade gives your standing/weight.
+static int cmd_attest(const fs::path& data_dir, int argc, char** argv) {
+    const auto activity = flag_val(argc, argv, "--activity");
+    const auto axis     = flag_val(argc, argv, "--axis");
+    const auto value_s  = flag_val(argc, argv, "--value");
+    if (activity.empty() || axis.empty() || value_s.empty()) {
+        std::cerr << "Usage: bc attest --activity SLUG --axis danger --value 0.02\n"
+                     "    [--grade GRADE_CHAIN/HASH]   your Grade in this activity "
+                     "(weight; default weight 1)\n"
+                     "    [--via URL]                  publish to the aggregator\n";
+        return 1;
+    }
+    AxisAttestation a{};
+    a.activity  = activity;
+    a.axis      = axis;
+    a.value     = std::stod(value_s);
+    a.timestamp = static_cast<int64_t>(std::time(nullptr));
+    const auto grade_s = flag_val(argc, argv, "--grade");
+    if (!grade_s.empty()) a.grade = parse_ref(grade_s);
+    return cmd_write(data_dir, argc, argv, a);
+}
+
 // bc ideas top --via URL
 static int cmd_ideas_top(int argc, char** argv) {
     const auto via = flag_val(argc, argv, "--via");
@@ -4358,6 +4382,9 @@ Means of production (ИР-011, records.md §10.2, §9.4):
   cloud --via URL [--slug SLUG]    Specialty cloud: each activity's tree parent and
                                        k nearest neighbours (signed SpecialtyCloud,
                                        ИР-018) — the geometry rate priors read
+  attest --activity SLUG           Attest a declared axis value, e.g. danger (ИР-019):
+    --axis danger --value 0.02         the aggregator takes the grade-weighted median
+    [--grade REF] [--via URL]          over practitioners — value set by who does it
   pay --acceptance REF             Pay the worker up to the appraisal (§12.8)
     [--units N] [--via URL]            default: the unpaid remainder
     [--pledge REF]                     Transfer v4 (§11.1): --acceptance says
@@ -4526,6 +4553,7 @@ int main(int argc, char** argv) {
         else if (cmd == "ideas"     && subcmd == "top")     return cmd_ideas_top(argc, argv);
         else if (cmd == "rates")                            return cmd_rates(argc, argv);
         else if (cmd == "cloud")                            return cmd_cloud(argc, argv);
+        else if (cmd == "attest")                           return cmd_attest(data_dir, argc, argv);
         else if (cmd == "discover")                         return cmd_discover(data_dir, argc, argv);
         else if (cmd == "chain"     && subcmd == "info")    return cmd_chain_info(argc, argv);
         else if (cmd == "export"    && subcmd == "profiles")return cmd_export_profiles(argc, argv);

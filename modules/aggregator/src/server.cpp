@@ -702,8 +702,9 @@ void AggregatorServer::setup_routes() {
                             const Hash sn = Crypto::hash(
                                 reinterpret_cast<const uint8_t*>(comb.data()), comb.size());
                             const auto cap = build_capital_intensity(storage_);
+                            const auto att = build_axis_attestations(storage_);
                             cloud_opt = build_specialty_cloud(cc, day, now, sn.bytes, {},
-                                                              5, 1.0, &cap, 0.5);
+                                                              5, 1.0, &cap, 0.5, &att);
                         } catch (const std::exception&) {}
                     }
                 }
@@ -773,8 +774,10 @@ void AggregatorServer::setup_routes() {
                 cats.push_back(records::parse_catalog(*needs_text));
                 combined += *needs_text;
             }
-            // Derived axis (phase 2): capital-intensity from settled deals.
-            const auto capital = build_capital_intensity(storage_);
+            // Derived axis (phase 2): capital-intensity from settled deals; and
+            // attested declared axes (ИР-019) that override the catalog bootstrap.
+            const auto capital  = build_capital_intensity(storage_);
+            const auto attested = build_axis_attestations(storage_);
             constexpr double kCapitalWeight = 0.5;
 
             // snapshot commits the input: the catalog AND the block set the derived
@@ -796,7 +799,8 @@ void AggregatorServer::setup_routes() {
             if (own_chain_) sources.push_back(own_chain_->uid().bytes);
 
             const auto cloud = build_specialty_cloud(cats, day, now, snap.bytes, sources,
-                                                     5, 1.0, &capital, kCapitalWeight);
+                                                     5, 1.0, &capital, kCapitalWeight,
+                                                     &attested);
 
             // Publish once/day (dedupe by scanning the branch), like DailyAggregate.
             std::string block_hex;

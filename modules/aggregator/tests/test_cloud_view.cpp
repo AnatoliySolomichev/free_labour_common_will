@@ -140,3 +140,21 @@ TEST(CloudView, AttestationOverridesBootstrapDanger) {
                                             nullptr, 0.0, &att);
     EXPECT_EQ(point(over, "prof.cook")->neighbors.front().slug, "prof.welder");
 }
+
+// Reproduce the live scenario at the server's danger_weight=1.0 with the real
+// cook/welder/farmer danger values: attestation must flip cook's nearest.
+TEST(CloudView, AttestationOverrideAtUnitDangerWeight) {
+    std::array<uint8_t, 32> snap{};
+    Catalog c; c.name = "professions";
+    c.entries = { spec("prof.cook",   "", 1.0, 0.0, 0.0, 0.1),
+                  spec("prof.welder", "", 1.0, 0.0, 0.0, 0.5),
+                  spec("prof.farmer", "", 0.9, 0.1, 0.0, 0.2) };
+    std::vector<Catalog> cats{c};
+    const auto base = build_specialty_cloud(cats, 0, 0, snap);   // dw=1.0
+    EXPECT_EQ(point(base, "prof.cook")->neighbors.front().slug, "prof.farmer");
+    std::map<std::pair<std::string, std::string>, double> att = {
+        {{"prof.cook", "danger"}, 0.5}};
+    const auto over = build_specialty_cloud(cats, 0, 0, snap, {}, 5, 1.0,
+                                            nullptr, 0.0, &att);
+    EXPECT_EQ(point(over, "prof.cook")->neighbors.front().slug, "prof.welder");
+}

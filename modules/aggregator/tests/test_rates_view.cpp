@@ -1,4 +1,5 @@
 #include "aggregator/rates_view.h"
+#include "aggregator/cloud_view.h"
 #include "aggregator/server.h"
 
 #include <blockchain/crypto.h>
@@ -265,4 +266,25 @@ TEST_F(RatesViewTest, CloudPriorSeedsThinNewSpecialty) {
     for (const auto& r : build_daily_rates(*storage_, kDay, prev))
         if (r.specialty == "хлебопёк") present = true;
     EXPECT_FALSE(present);
+}
+
+// build_axis_attestations (ИР-019): grade-weighted median over attesters, one
+// (latest) per attester chain; outlier trimmed by the median.
+TEST_F(RatesViewTest, AxisAttestationWeightedMedian) {
+    auto attest = [&](const UserId& who, double v) {
+        records::AxisAttestation a{};
+        a.activity = "хлебопёк"; a.axis = "danger"; a.value = v; a.timestamp = kDay;
+        a.grade.chain = who.bytes;   // attester chain = dedup key; no grade → weight 1
+        add(who, a);
+    };
+    attest(alice_, 0.02);
+    attest(bob_,   0.03);
+    attest(make_chain(0x77), 0.20);        // outlier
+    const auto att = build_axis_attestations(*storage_, 1);
+    const auto it = att.find({"хлебопёк", "danger"});
+    ASSERT_NE(it, att.end());
+    EXPECT_DOUBLE_EQ(it->second, 0.03);    // median of 3 (weights 1), outlier trimmed
+
+    // Below the threshold → not published (bootstrap stands).
+    EXPECT_TRUE(build_axis_attestations(*storage_, 4).empty());
 }
