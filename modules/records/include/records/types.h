@@ -36,6 +36,7 @@ enum class RecordType : uint8_t {
     PledgeRevoke   = 0x73,
     Redemption     = 0x74,
     SpecialtyCloud = 0x75,
+    AxisAttestation = 0x76,
 };
 
 // ── Cross-chain reference (records.md §4) ────────────────────────────────────
@@ -391,6 +392,20 @@ struct SpecialtyCloud {
     int64_t                             timestamp; // Unix timestamp UTC
 };
 
+// Attestation of a declared cloud axis value (ИР-019): a practitioner states, on a
+// signed record, that an activity's axis (e.g. danger) is `value`. The aggregator
+// takes the grade-weighted median over practitioners — the value is set by the
+// people who do the work, not by decree, and re-checkable against the chains.
+struct AxisAttestation {
+    static constexpr RecordType TYPE = RecordType::AxisAttestation;
+
+    std::string activity;   // activity slug (cloud/rate key)
+    std::string axis;       // axis name ("danger", ...)
+    double      value;      // attested value, 0..1
+    Ref         grade;      // attester's Grade IN this activity (weight + standing)
+    int64_t     timestamp;  // Unix timestamp UTC
+};
+
 // ── Record variant ────────────────────────────────────────────────────────────
 
 using Record = std::variant<
@@ -412,7 +427,8 @@ using Record = std::variant<
     Pledge,
     PledgeRevoke,
     Redemption,
-    SpecialtyCloud
+    SpecialtyCloud,
+    AxisAttestation
 >;
 
 } // namespace records

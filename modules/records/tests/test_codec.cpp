@@ -758,3 +758,20 @@ TEST(RecordsCodec, AcceptanceV3NormRoundtrip) {
     EXPECT_FALSE(v1.carried_units.has_value());
     EXPECT_FALSE(v1.norm.has_value());
 }
+
+// AxisAttestation (0x76) — заверение значения оси (ИР-019)
+TEST(RecordsCodec, AxisAttestationRoundtrip) {
+    records::AxisAttestation a{};
+    a.activity  = "prof.teacher";
+    a.axis      = "danger";
+    a.value     = 0.02;
+    a.grade     = make_ref(0x51, 0x52);
+    a.timestamp = 1'700'000'000LL;
+
+    const auto d = std::get<records::AxisAttestation>(roundtrip(Record{a}));
+    EXPECT_EQ(d.activity, "prof.teacher");
+    EXPECT_EQ(d.axis, "danger");
+    EXPECT_DOUBLE_EQ(d.value, 0.02);
+    EXPECT_EQ(d.grade, a.grade);
+    EXPECT_EQ(d.timestamp, 1'700'000'000LL);
+}

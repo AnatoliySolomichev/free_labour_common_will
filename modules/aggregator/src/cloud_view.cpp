@@ -71,13 +71,14 @@ std::map<std::string, double> build_capital_intensity(const AggregatorStorage& s
 
 namespace {
 
+// Effective declared axes of an activity (bootstrap ⊕ attestation overrides).
+struct AxisVec { double material = 0, info = 0, people = 0, danger = 0; };
+
 // Proximity 0..1 on the declared axes (1 = identical). Danger scaled by weight so
 // same-craft-but-different-danger activities are pulled apart; capital-intensity
 // (derived, phase 2) added as a further axis scaled by capital_weight.
-double axis_proximity(const CatalogEntry& a, const CatalogEntry& b, double dw,
+double axis_proximity(const AxisVec& x, const AxisVec& y, double dw,
                       double ci_a, double ci_b, double cw) {
-    const auto& x = a.axes;
-    const auto& y = b.axes;
     const double d2 = (x.material - y.material) * (x.material - y.material)
                     + (x.info     - y.info)     * (x.info     - y.info)
                     + (x.people   - y.people)   * (x.people   - y.people)
@@ -88,6 +89,53 @@ double axis_proximity(const CatalogEntry& a, const CatalogEntry& b, double dw,
 
 }  // namespace
 
+std::map<std::pair<std::string, std::string>, double> build_axis_attestations(
+    const AggregatorStorage& storage, unsigned min_attesters) {
+    using RefHash = std::array<uint8_t, 32>;
+    std::map<RefHash, records::Record> by_hash;
+    for (const Hash& bh : storage.all_block_hashes()) {
+        const auto block = storage.get_block_by_hash(bh);
+        if (!block || block->type != BlockType::DATA) continue;
+        try { by_hash[bh.bytes] = records::Codec::decode(block->payload.data(),
+                                                         block->payload.size()); }
+        catch (const records::CodecError&) {}
+    }
+
+    // Per (activity, axis): keep one entry per attester chain — the latest — so a
+    // single person cannot ballot-stuff. weight = attester's grade level here.
+    struct Att { double value; double weight; int64_t ts; };
+    std::map<std::pair<std::string, std::string>,
+             std::map<RefHash, Att>> groups;
+    for (const auto& [h, rec] : by_hash) {
+        const auto* a = std::get_if<records::AxisAttestation>(&rec);
+        if (!a) continue;
+        double weight = 1.0;
+        const auto git = by_hash.find(a->grade.hash);
+        if (git != by_hash.end())
+            if (const auto* g = std::get_if<records::Grade>(&git->second))
+                weight = static_cast<double>(g->level);
+        auto& per = groups[{a->activity, a->axis}][a->grade.chain];
+        if (a->timestamp >= per.ts)              // latest attestation of this attester
+            per = Att{a->value, weight, a->timestamp};
+    }
+
+    std::map<std::pair<std::string, std::string>, double> out;
+    for (auto& [key, per] : groups) {
+        if (per.size() < min_attesters) continue;   // preliminary — bootstrap stands
+        std::vector<Att> v;
+        v.reserve(per.size());
+        for (const auto& [chain, a] : per) v.push_back(a);
+        std::sort(v.begin(), v.end(),
+                  [](const Att& x, const Att& y) { return x.value < y.value; });
+        double total = 0.0;
+        for (const auto& e : v) total += e.weight;
+        double cum = 0.0, med = v.back().value;
+        for (const auto& e : v) { cum += e.weight; if (cum >= total / 2.0) { med = e.value; break; } }
+        out[key] = med;
+    }
+    return out;
+}
+
 records::SpecialtyCloud build_specialty_cloud(
     const std::vector<records::Catalog>&        catalogs,
     int64_t                                     date,
@@ -97,7 +145,21 @@ records::SpecialtyCloud build_specialty_cloud(
     unsigned                                    k,
     double                                      danger_weight,
     const std::map<std::string, double>*        capital,
-    double                                      capital_weight) {
+    double                                      capital_weight,
+    const std::map<std::pair<std::string, std::string>, double>* attested) {
+    // Effective declared axes: catalog bootstrap, overridden by attestations (ИР-019).
+    auto eff = [&](const CatalogEntry& e) -> AxisVec {
+        AxisVec v{e.axes.material, e.axes.info, e.axes.people, e.axes.danger};
+        if (attested) {
+            auto ov = [&](const char* ax, double& dst) {
+                const auto it = attested->find({e.slug, ax});
+                if (it != attested->end()) dst = it->second;
+            };
+            ov("material", v.material); ov("info", v.info);
+            ov("people", v.people);     ov("danger", v.danger);
+        }
+        return v;
+    };
     auto cap = [&](const std::string& slug) -> double {
         if (!capital) return 0.0;
         const auto it = capital->find(slug);
@@ -139,10 +201,11 @@ records::SpecialtyCloud build_specialty_cloud(
         const auto sit = subs.find(a->slug);
         std::vector<records::CloudNeighbor> cand;
         cand.reserve(specs.size());
-        const double ci_a = cap(a->slug);
+        const double  ci_a  = cap(a->slug);
+        const AxisVec eff_a = eff(*a);
         for (const auto* b : specs) {
             if (b == a) continue;
-            double sim = axis_proximity(*a, *b, danger_weight,
+            double sim = axis_proximity(eff_a, eff(*b), danger_weight,
                                         ci_a, cap(b->slug), capital_weight);
             if (sit != subs.end() && sit->second.count(b->slug))
                 sim = std::min(1.0, sim + 0.5);  // substitution boost

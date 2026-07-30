@@ -337,6 +337,16 @@ void enc_specialty_cloud(Buf& out, const SpecialtyCloud& c) {
     w_uint(out, 6); w_int64(out, c.timestamp);
 }
 
+void enc_axis_attestation(Buf& out, const AxisAttestation& a) {
+    w_map(out, 6);
+    w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::AxisAttestation));
+    w_uint(out, 1); w_text(out, a.activity);
+    w_uint(out, 2); w_text(out, a.axis);
+    w_uint(out, 3); w_float64(out, a.value);
+    w_uint(out, 4); w_ref(out, a.grade);
+    w_uint(out, 5); w_int64(out, a.timestamp);
+}
+
 // ── CBOR reader ───────────────────────────────────────────────────────────────
 
 class CborReader {
@@ -849,6 +859,16 @@ SpecialtyCloud dec_specialty_cloud_fields(CborReader& r) {
     return c;
 }
 
+AxisAttestation dec_axis_attestation_fields(CborReader& r) {
+    AxisAttestation a{};
+    expect_key(r, 1); a.activity  = r.r_text();
+    expect_key(r, 2); a.axis      = r.r_text();
+    expect_key(r, 3); a.value     = r.r_float64();
+    expect_key(r, 4); a.grade     = dec_ref(r);
+    expect_key(r, 5); a.timestamp = r.r_int();
+    return a;
+}
+
 } // namespace (anonymous)
 
 // ── Codec public methods ──────────────────────────────────────────────────────
@@ -876,6 +896,7 @@ std::vector<uint8_t> Codec::encode(const Record& rec) {
         else if constexpr (std::is_same_v<T, DailyAggregate>) enc_daily_aggregate(out, r);
         else if constexpr (std::is_same_v<T, Redemption>)  enc_redemption(out, r);
         else if constexpr (std::is_same_v<T, SpecialtyCloud>) enc_specialty_cloud(out, r);
+        else if constexpr (std::is_same_v<T, AxisAttestation>) enc_axis_attestation(out, r);
     }, rec);
     return out;
 }
@@ -908,6 +929,7 @@ Record Codec::decode(const uint8_t* data, size_t len) {
         case RecordType::DailyAggregate: return dec_daily_aggregate_fields(r, field_count);
         case RecordType::Redemption: return dec_redemption_fields(r);
         case RecordType::SpecialtyCloud: return dec_specialty_cloud_fields(r);
+        case RecordType::AxisAttestation: return dec_axis_attestation_fields(r);
         default:
             throw CodecError("CBOR: unknown record type discriminator");
     }

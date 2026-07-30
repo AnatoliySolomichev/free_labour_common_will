@@ -9,9 +9,18 @@
 #include <cstdint>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace aggregator {
+
+// Attested declared-axis values (ИР-019): per (activity, axis), the grade-weighted
+// median of practitioners' AxisAttestation records — the value set by the people
+// who do the work, not by decree. Below `min_attesters` the value is left out
+// (preliminary) and the catalog's bootstrap value stands. Deterministic over the
+// block set. Weight = the attester's Grade level in the activity (unresolved → 1).
+std::map<std::pair<std::string, std::string>, double> build_axis_attestations(
+    const AggregatorStorage& storage, unsigned min_attesters = 1);
 
 // Derived axis: capital-intensity per specialty (ИР-018 phase 2). For each
 // specialty (activity slug), the mean over its SETTLED accepted works of
@@ -49,6 +58,9 @@ records::SpecialtyCloud build_specialty_cloud(
     unsigned                                    k              = 5,
     double                                      danger_weight  = 1.0,
     const std::map<std::string, double>*        capital        = nullptr,
-    double                                      capital_weight = 0.0);
+    double                                      capital_weight = 0.0,
+    // Attested declared-axis overrides (ИР-019): (activity, axis) → value; when
+    // present, replaces the catalog's bootstrap value for that axis.
+    const std::map<std::pair<std::string, std::string>, double>* attested = nullptr);
 
 }  // namespace aggregator

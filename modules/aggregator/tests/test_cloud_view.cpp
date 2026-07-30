@@ -124,3 +124,19 @@ TEST(CloudView, CapitalIntensityShiftsNeighbours) {
         build_specialty_cloud(tiny_catalog(), 0, 0, snap, {}, 5, 1.0, &cap, 8.0);
     EXPECT_EQ(point(withcap, "prof.cook")->neighbors.front().slug, "prof.welder");
 }
+
+// Attested axis value (ИР-019) overrides the catalog bootstrap in the cloud.
+TEST(CloudView, AttestationOverridesBootstrapDanger) {
+    std::array<uint8_t, 32> snap{};
+    // Bootstrap: cook danger 0.1, welder 0.5, electrician 0.4. By danger-weighted
+    // distance cook is near electrician (see NearestNeighboursFromAxes -> cook nn
+    // electrician). Attest cook's danger up to 0.5 → it moves toward welder (0.5).
+    std::map<std::pair<std::string, std::string>, double> att = {
+        {{"prof.cook", "danger"}, 0.5}};
+    const auto base = build_specialty_cloud(tiny_catalog(), 0, 0, snap, {}, 5, 4.0);
+    EXPECT_EQ(point(base, "prof.cook")->neighbors.front().slug, "prof.electrician");
+
+    const auto over = build_specialty_cloud(tiny_catalog(), 0, 0, snap, {}, 5, 4.0,
+                                            nullptr, 0.0, &att);
+    EXPECT_EQ(point(over, "prof.cook")->neighbors.front().slug, "prof.welder");
+}
