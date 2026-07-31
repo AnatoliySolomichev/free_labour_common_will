@@ -25,7 +25,7 @@ public:
     // Compute witnessed_time: the latest upper bound on when the block existed.
     // Derived from MERGE blocks that reference this block. Returns nullopt if no
     // external witnesses are known.
-    // [OPEN §11.3] gossip propagation of revocations not implemented in MVP.
+    // [OPEN blockchain.md §11.3] gossip propagation of revocations not implemented in MVP.
     std::optional<Timestamp> compute_witnessed_time(const BlockAddress& address) const;
 
 private:

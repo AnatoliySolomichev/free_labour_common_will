@@ -2,8 +2,8 @@
 
 // ── Minimal JSON reader (internal to the records module) ──────────────────────
 //
-// Hand-written, no extra dependency — the schemas it serves (drafts §8.8,
-// catalogs §8.7) are small and fixed, so a full JSON library would be a large
+// Hand-written, no extra dependency — the schemas it serves (drafts records.md §8.8,
+// catalogs records.md §8.7) are small and fixed, so a full JSON library would be a large
 // dependency bought for very little. Strings carry UTF-8 through verbatim and
 // decode \uXXXX escapes including surrogate pairs: a model writing Cyrillic
 // commonly emits them.

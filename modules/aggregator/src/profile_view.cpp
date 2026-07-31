@@ -14,7 +14,7 @@ namespace {
 
 constexpr const char* FACET_PREFIX   = "kind:";
 constexpr const char* CATALOG_PREFIX = "cat:";
-// ConceptLink kind that retires a fact — authored by the fact's owner (§8.6).
+// ConceptLink kind that retires a fact — authored by the fact's owner (records.md §8.6).
 constexpr const char* CLOSE_KIND     = "закрыто";
 
 using RefHash = std::array<uint8_t, 32>;

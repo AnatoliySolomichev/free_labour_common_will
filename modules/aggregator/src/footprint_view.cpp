@@ -19,7 +19,7 @@ FootprintView FootprintView::build(const AggregatorStorage& storage) {
     FootprintView view;
 
     // issuer → (holder → units). Self-issue creates paper in the receiver's
-    // hands, endorsement moves it, redemption annihilates it (§11.1).
+    // hands, endorsement moves it, redemption annihilates it (records.md §11.1).
     std::map<UserId, Holdings> paper;
     // Undirected exchange graph: chain → (counterparty → volume).
     std::map<UserId, std::map<UserId, double>> adj;
@@ -56,7 +56,7 @@ FootprintView FootprintView::build(const AggregatorStorage& storage) {
                 if (o.issuer == t->to) {
                     // Redemption: the payer returns the receiver's own paper,
                     // and it dies. Someone worked to earn it back — the dearest
-                    // signal a chain can leave (§12.10).
+                    // signal a chain can leave (records.md §12.10).
                     paper[issuer][from] -= o.units;
                     redeemer_sets[to].insert(from);
                     redeemed_to_others[to] += o.units;

@@ -22,7 +22,7 @@
 namespace aggregator {
 
 // A chain currently holding the subject's paper — it took the subject's risk
-// and can only get its hours back if the subject works (§12.7).
+// and can only get its hours back if the subject works (records.md §12.7).
 struct PaperHolder {
     UserId chain{};
     double units = 0;   // subject's paper held now (issued to them, not returned)

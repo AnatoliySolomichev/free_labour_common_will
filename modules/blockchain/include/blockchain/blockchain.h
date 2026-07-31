@@ -23,13 +23,13 @@ class Blockchain {
 public:
     Blockchain(IStorage& storage, Validator& validator);
 
-    // ── Identity (§6.1) ───────────────────────────────────────────────────────
+    // ── Identity (blockchain.md §6.1) ───────────────────────────────────────────────────────
 
     // Create root node (index 0) with self-signature and store it.
     // Throws: CryptoError, StorageError, InvalidArgumentError (already exists).
     Node create_identity(const KeyPair& root_keypair);
 
-    // ── Node tree (§6.2) ──────────────────────────────────────────────────────
+    // ── Node tree (blockchain.md §6.2) ──────────────────────────────────────────────────────
 
     // Ensure every node on the path from root to leaf_index exists.
     // For each missing node, calls key_for(node_index) to obtain a KeyPair,
@@ -68,8 +68,8 @@ public:
     );
 
     // Append a "stub" DATA block: empty CBOR array payload, no user records.
-    // Two uses (§5.4): (1) bootstrap an empty branch so it can take part in a
-    // merge (§6.4 requires a block-0); (2) create a fresh tip to anchor time after
+    // Two uses (blockchain.md §5.4): (1) bootstrap an empty branch so it can take part in a
+    // merge (blockchain.md §6.4 requires a block-0); (2) create a fresh tip to anchor time after
     // a long idle period — once witnessed via merge, subsequent work is provably
     // later.
     // Throws: CryptoError, StorageError, NodeNotFoundError, InvalidArgumentError.
@@ -80,7 +80,7 @@ public:
         Timestamp      timestamp
     );
 
-    // Append a KEY_ROTATION block (§6.6). Signs with old_working_keypair.
+    // Append a KEY_ROTATION block (blockchain.md §6.6). Signs with old_working_keypair.
     // Throws: CryptoError, StorageError, NodeNotFoundError.
     Block rotate_key(
         const UserId&  user_id,
@@ -90,11 +90,11 @@ public:
         Timestamp      timestamp
     );
 
-    // Append a REVOCATION block (§6.7) to the branch of ancestor_index.
+    // Append a REVOCATION block (blockchain.md §6.7) to the branch of ancestor_index.
     // ancestor_index must be a strict ancestor of revoked_node_index; the default
     // radius is the parent (N-1)/2, higher ancestors — by choice or escalation.
     // replacement_pubkey == nullopt is the emergency stop; a replacement may be
-    // assigned later by a second REVOCATION (§6.7 rule 3, "последнее слово").
+    // assigned later by a second REVOCATION (blockchain.md §6.7 rule 3, "последнее слово").
     // revoked_pubkey is filled from the revoked branch's current effective
     // working key (node key + KEY_ROTATION history).
     // Throws: CryptoError, StorageError, NodeNotFoundError,
@@ -111,7 +111,7 @@ public:
     );
 
     // Current effective working key of a branch: the node's working_pubkey,
-    // advanced by KEY_ROTATION blocks in the branch (§6.6).
+    // advanced by KEY_ROTATION blocks in the branch (blockchain.md §6.6).
     // Throws: NodeNotFoundError, BlockNotFoundError.
     PublicKey effective_working_pubkey(const UserId& user_id, NodeIndex node_index) const;
 
@@ -134,7 +134,7 @@ public:
     void validate_branch(const UserId& user_id, NodeIndex leaf_index) const;
 
 private:
-    // §6.7: refuse to extend a FROZEN branch, or a REPLACED one with a key other
+    // blockchain.md §6.7: refuse to extend a FROZEN branch, or a REPLACED one with a key other
     // than the authorized replacement lineage. ACTIVE branches are not checked
     // here (invariant 7 is validation's job).
     void ensure_branch_writable(const UserId& user_id, NodeIndex node_index,

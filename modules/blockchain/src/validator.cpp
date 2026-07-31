@@ -69,7 +69,7 @@ void Validator::validate_branch(const UserId& user_id, NodeIndex leaf_index) con
     PublicKey work_key = leaf.working_pubkey;
     Timestamp prev_ts  = std::numeric_limits<Timestamp>::min();
 
-    // A replacement assigned by revocation (§6.7 rules 3/9) may take over the
+    // A replacement assigned by revocation (blockchain.md §6.7 rules 3/9) may take over the
     // branch at first use; after the switch the old lineage may not sign.
     auto rev = effective_revocation(user_id, leaf_index);
     bool switched = false;
@@ -82,7 +82,7 @@ void Validator::validate_branch(const UserId& user_id, NodeIndex leaf_index) con
         } catch (const SignatureError&) {
             if (switched || !rev.has_value() || !rev->replacement_pubkey.has_value())
                 throw;
-            // §6.7 rule 9: first use of the replacement switches the key.
+            // blockchain.md §6.7 rule 9: first use of the replacement switches the key.
             validate_block(b, prev_hash, *rev->replacement_pubkey);
             work_key = *rev->replacement_pubkey;
             switched = true;
@@ -145,7 +145,7 @@ BranchRevocationStatus Validator::branch_revocation_status(
                         std::copy(b.payload.begin(), b.payload.begin() + 32,
                                   current.bytes.begin());
                 } else if (block_signed_by(b, lineage)) {
-                    // §6.7 rule 9: the old key resurfacing after the switch.
+                    // blockchain.md §6.7 rule 9: the old key resurfacing after the switch.
                     out.blocks.push_back(BlockRevocationStatus::INVALID_AFTER_REPLACEMENT);
                     // do not follow its rotations
                 } else {
@@ -179,7 +179,7 @@ bool Validator::node_invalidated_by_revocation(
         if (!st.has_value()) continue;
         Node c = storage_.get_node(user_id, child);
         // created_at is author-claimed; anti-backdating of node creation is the
-        // witnessing-based finalization (§11.2).
+        // witnessing-based finalization (blockchain.md §11.2).
         if (c.created_at > st->compromised_since) return true;
     }
     return false;
@@ -194,7 +194,7 @@ Validator::collect_revocations(const UserId& user_id, NodeIndex target) const {
         if (!is_ancestor(addr.node_index, target)) continue;
 
         // Own chains live in `blocks`; partners' revocations arrive as imported
-        // certificates and live in `external_blocks` (§6.7 rule 8).
+        // certificates and live in `external_blocks` (blockchain.md §6.7 rule 8).
         Block b;
         if      (storage_.has_block(addr))          b = storage_.get_block(addr);
         else if (storage_.has_external_block(addr)) b = storage_.get_external_block(addr);
@@ -206,7 +206,7 @@ Validator::collect_revocations(const UserId& user_id, NodeIndex target) const {
         } catch (const SerializationError&) { continue; }
         if (rp.revoked_node_index != target) continue;
 
-        // §6.7 rule 10: a record from an author that was itself under revocation
+        // blockchain.md §6.7 rule 10: a record from an author that was itself under revocation
         // at writing time does not count — a revocation is a one-sided action and
         // loses weight in the suspect zone. Recursion is finite: authors are
         // strictly shallower, the root is unrevocable. Post-replacement records
@@ -224,7 +224,7 @@ Validator::collect_revocations(const UserId& user_id, NodeIndex target) const {
         found.emplace_back(b.address, std::move(rp));
     }
 
-    // Root-most author first, then branch order (§4.4 gradient + "last word").
+    // Root-most author first, then branch order (blockchain.md §4.4 gradient + "last word").
     std::sort(found.begin(), found.end(),
               [](const auto& a, const auto& b) {
                   const uint32_t da = node_depth(a.first.node_index);
@@ -246,10 +246,10 @@ void Validator::validate_revocation(const Block& block) const {
     const UserId& uid = block.address.user_id;
 
     if (rp.revoked_node_index == 0)
-        throw RevocationError("root cannot be revoked — it has no ancestor (§11.5)");
+        throw RevocationError("root cannot be revoked — it has no ancestor (blockchain.md §11.5)");
     if (!is_valid_node(rp.revoked_node_index))
         throw RevocationError("revoked node index is invalid");
-    // Strict ancestry also rules out self-revocation (§6.7 rule 2).
+    // Strict ancestry also rules out self-revocation (blockchain.md §6.7 rule 2).
     if (!is_ancestor(block.address.node_index, rp.revoked_node_index))
         throw RevocationError("revocation author is not a strict ancestor of the revoked node");
 
@@ -287,7 +287,7 @@ std::optional<RevocationState> Validator::effective_revocation(
     auto found = collect_revocations(user_id, node_index);
     if (found.empty()) return std::nullopt;
 
-    // Highest ancestor wins (§4.4): collect_revocations returns ancestors in
+    // Highest ancestor wins (blockchain.md §4.4): collect_revocations returns ancestors in
     // root→parent order, so the winning branch is the node_index of found[0].
     const NodeIndex winner = found[0].first.node_index;
 
@@ -306,26 +306,26 @@ void Validator::check_tip_against_revocations(const BranchTipInfo& tip) const {
     if (tip.path.empty()) return;
     const UserId chain = tip.path.front().structural_pubkey;
 
-    // Fake subtrees (§6.7 rule 6): an edge created under a revoked parent key
+    // Fake subtrees (blockchain.md §6.7 rule 6): an edge created under a revoked parent key
     // after its compromise poisons everything below. Nodes come from the tip
     // itself — the partner's tree need not be in storage.
     for (size_t k = 1; k < tip.path.size(); ++k) {
         auto st = effective_revocation(chain, tip.path[k - 1].index);
         if (st.has_value() && tip.path[k].created_at > st->compromised_since)
             throw RevocationError(
-                "partner path node was created under a revoked key (§6.7 rule 6)");
+                "partner path node was created under a revoked key (blockchain.md §6.7 rule 6)");
     }
 
-    // The branch itself (§6.7 rules 3/9): frozen → no new bilateral acts;
+    // The branch itself (blockchain.md §6.7 rules 3/9): frozen → no new bilateral acts;
     // replaced → the tip must already run under the replacement key.
     auto st = effective_revocation(chain, tip.tip_address.node_index);
     if (!st.has_value()) return;
     if (!st->replacement_pubkey.has_value())
-        throw RevocationError("partner branch is frozen by revocation (§6.7)");
+        throw RevocationError("partner branch is frozen by revocation (blockchain.md §6.7)");
     if (tip.tip_block.has_value() &&
         !block_signed_by(*tip.tip_block, *st->replacement_pubkey))
         throw RevocationError(
-            "partner tip is not signed by the revocation replacement key (§6.7)");
+            "partner tip is not signed by the revocation replacement key (blockchain.md §6.7)");
 }
 
 void Validator::validate_seal(const Seal& seal) const {

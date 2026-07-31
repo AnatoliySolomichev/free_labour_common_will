@@ -38,7 +38,7 @@ struct Participant {
 };
 
 // Several independent participant chains in one storage; a ParticipantCache
-// is filled from them the way the merge orchestrator would (§5.2).
+// is filled from them the way the merge orchestrator would (sync.md §5.2).
 class ParticipantCacheTest : public ::testing::Test {
 protected:
     std::filesystem::path        db_;
@@ -92,7 +92,7 @@ TEST_F(ParticipantCacheTest, SingleLeafBadSigConfirmed) {
     Block bad = p.bad_block();
     Hash leaf = cache_leaf(p, p.bad_ref(), bad);
 
-    // For a fresh participant the snapshot root IS the leaf hash (§5.1).
+    // For a fresh participant the snapshot root IS the leaf hash (sync.md §5.1).
     EXPECT_EQ(leaf, MergeSnapshot::leaf(p.bad_ref()).merkle_root);
 
     auto proof = cache_.build_proof(leaf, leaf);
@@ -290,7 +290,7 @@ TEST_F(ParticipantCacheTest, PersistentCacheSurvivesReopen) {
     std::filesystem::remove_all(dir);
 }
 
-// ── record_merge (§5.2 fill rule) ─────────────────────────────────────────────
+// ── record_merge (sync.md §5.2 fill rule) ─────────────────────────────────────────────
 
 TEST_F(ParticipantCacheTest, RecordMergeCachesFreshLeavesAndComposition) {
     Participant a = make_participant(18);

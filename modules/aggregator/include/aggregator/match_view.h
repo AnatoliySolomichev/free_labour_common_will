@@ -8,13 +8,13 @@
 
 namespace aggregator {
 
-// ── Match view (records.md §8.6/§8.7; ИР-005) ─────────────────────────────────
+// ── Match view (records.md §8.6/records.md §8.7; ИР-005) ─────────────────────────────────
 //
 // The point of the whole thing: whose needs are closed by whose skills.
 //
 // It joins three sources the aggregator already has:
 //   ProfileView — who can do what, who needs what (tagged Concepts);
-//   the catalog — which profession closes which need (closed_by, §8.7);
+//   the catalog — which profession closes which need (closed_by, records.md §8.7);
 //   the tags    — where and how far each party will act (geo, r, remote).
 //
 // Advisory and re-checkable, like every derived view: it proposes, people decide.

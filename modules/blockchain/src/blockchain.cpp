@@ -127,7 +127,7 @@ void Blockchain::ensure_branch_writable(const UserId& user_id, NodeIndex node_in
     auto st = validator_.branch_revocation_status(user_id, node_index);
     if (st.state == BranchRevocationState::FROZEN)
         throw RevocationError(
-            "branch is frozen by revocation — no replacement assigned (§6.7)");
+            "branch is frozen by revocation — no replacement assigned (blockchain.md §6.7)");
     if (st.state == BranchRevocationState::REPLACED
         && st.next_key.has_value() && signing_pubkey != *st.next_key)
         throw RevocationError(
@@ -216,10 +216,10 @@ Block Blockchain::revoke_node(
     Timestamp                       timestamp)
 {
     if (revoked_node_index == 0)
-        throw RevocationError("root cannot be revoked — it has no ancestor (§11.5)");
+        throw RevocationError("root cannot be revoked — it has no ancestor (blockchain.md §11.5)");
     if (!is_valid_node(revoked_node_index))
         throw InvalidArgumentError("revoke_node: invalid revoked node index");
-    // Covers self-revocation: a key cannot revoke itself (§6.7 rule 2).
+    // Covers self-revocation: a key cannot revoke itself (blockchain.md §6.7 rule 2).
     if (!is_ancestor(ancestor_index, revoked_node_index))
         throw RevocationError("revocation author is not a strict ancestor of the revoked node");
 

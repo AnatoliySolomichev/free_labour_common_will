@@ -5,7 +5,7 @@
 namespace blockchain {
 
 // Effective revocation state of a node, resolved over all REVOCATION blocks
-// found in its ancestors' branches (§6.7): the highest ancestor wins (§4.4);
+// found in its ancestors' branches (blockchain.md §6.7): the highest ancestor wins (blockchain.md §4.4);
 // within the winning branch, the earliest compromised_since applies and the
 // latest block has the last word on replacement ("stop now, replace later").
 struct RevocationState {
@@ -14,14 +14,14 @@ struct RevocationState {
     BlockAddress             latest;             // block that had the last word
 };
 
-// Branch-level effect of the effective revocation (§6.7 rules 3, 9).
+// Branch-level effect of the effective revocation (blockchain.md §6.7 rules 3, 9).
 enum class BranchRevocationState : uint8_t {
     ACTIVE,    // no effective revocation
     FROZEN,    // revoked, no replacement assigned — no key may extend the branch
     REPLACED,  // revoked with a replacement key
 };
 
-// Per-block classification relative to the revocation zones (§6.7 rules 5, 9).
+// Per-block classification relative to the revocation zones (blockchain.md §6.7 rules 5, 9).
 // Structure ≠ weight: SUSPECT blocks are structurally valid — bilateral records
 // in that zone legally stand, one-sided ones lose weight; the economic layer
 // (wallet, merge acceptance) applies that split.
@@ -45,7 +45,7 @@ struct BranchRevocationStatus {
 // with the signature zeroed).
 bool block_signed_by(const Block& block, const PublicKey& key);
 
-// Checks invariants (§9). Read-only access to storage; no state mutation.
+// Checks invariants (blockchain.md §9). Read-only access to storage; no state mutation.
 class Validator {
 public:
     explicit Validator(const IStorage& storage);
@@ -73,7 +73,7 @@ public:
     //         BlockNotFoundError, NodeNotFoundError.
     void validate_branch(const UserId& user_id, NodeIndex leaf_index) const;
 
-    // ── Revocation checks (§6.7) ──────────────────────────────────────────────
+    // ── Revocation checks (blockchain.md §6.7) ──────────────────────────────────────────────
 
     // Semantic validation of a REVOCATION block stored in an ancestor branch:
     // payload decodes, the author node is a strict ancestor of the revoked node,
@@ -87,27 +87,27 @@ public:
 
     // Resolve the effective revocation state of a node over the revocation index.
     // Records whose author was itself under revocation at writing time are
-    // ignored (§6.7 rule 10, recursive author-validity filter). nullopt = not
+    // ignored (blockchain.md §6.7 rule 10, recursive author-validity filter). nullopt = not
     // revoked.
     std::optional<RevocationState> effective_revocation(
         const UserId& user_id, NodeIndex node_index) const;
 
     // Classify a branch and each of its blocks against the effective revocation
-    // (§6.7 rules 5, 9, 11). Throws: NodeNotFoundError, BlockNotFoundError,
+    // (blockchain.md §6.7 rules 5, 9, 11). Throws: NodeNotFoundError, BlockNotFoundError,
     // SignatureError (block signed by neither the key lineage nor the
     // replacement — structurally broken branch).
     BranchRevocationStatus branch_revocation_status(
         const UserId& user_id, NodeIndex node_index) const;
 
-    // §6.7 rule 6: true if any edge on the path root→node was created under a
+    // blockchain.md §6.7 rule 6: true if any edge on the path root→node was created under a
     // revoked parent key after its compromised_since. created_at is
     // author-claimed — anti-backdating of node creation is the witnessing-based
-    // finalization (§11.2), out of scope here.
+    // finalization (blockchain.md §11.2), out of scope here.
     // Throws: NodeNotFoundError.
     bool node_invalidated_by_revocation(
         const UserId& user_id, NodeIndex node_index) const;
 
-    // §6.7 rule 11 — the acceptance-time check: match a partner's branch tip
+    // blockchain.md §6.7 rule 11 — the acceptance-time check: match a partner's branch tip
     // against local revocation knowledge (own records + imported certificates).
     // Uses the nodes carried by the tip itself — the partner's tree need not be
     // in storage. Refuses: a frozen branch; a tip of a replaced branch not
@@ -133,7 +133,7 @@ public:
 
 private:
     // REVOCATION records targeting `target`, from the storage index, filtered by
-    // ancestry and author validity (§6.7 rule 10), ordered root-most first, then
+    // ancestry and author validity (blockchain.md §6.7 rule 10), ordered root-most first, then
     // by block index.
     std::vector<std::pair<BlockAddress, RevocationPayload>> collect_revocations(
         const UserId& user_id, NodeIndex target) const;

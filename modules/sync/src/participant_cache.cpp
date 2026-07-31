@@ -247,7 +247,7 @@ std::vector<std::pair<Hash, Composition>> ParticipantCache::compositions() const
     return {compositions_.begin(), compositions_.end()};
 }
 
-// ── §5.2 fill rule ────────────────────────────────────────────────────────────
+// ── sync.md §5.2 fill rule ────────────────────────────────────────────────────────────
 
 Hash record_merge(ParticipantCache&    cache,
                   const BranchTipInfo& own_tip,

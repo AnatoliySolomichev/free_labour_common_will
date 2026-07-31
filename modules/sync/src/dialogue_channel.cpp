@@ -63,7 +63,7 @@ RelayEnvelope decode_relay_envelope(const uint8_t* data, size_t len) {
 
 SessionId make_session_id() {
     // std::random_device, not crypto::: only collision-freedom matters — the
-    // relay is untrusted anyway and the blobs are self-protected (§4.1).
+    // relay is untrusted anyway and the blobs are self-protected (sync.md §4.1).
     std::random_device rd;
     SessionId id{};
     for (auto& b : id) b = static_cast<uint8_t>(rd());

@@ -41,7 +41,7 @@ RelayEnvelope decode_relay_envelope(const uint8_t* data, size_t len);
 // Random session id (uniqueness, not secrecy — envelopes are self-protected).
 SessionId make_session_id();
 
-// ── Channel abstraction (§4.1) ────────────────────────────────────────────────
+// ── Channel abstraction (sync.md §4.1) ────────────────────────────────────────────────
 //
 // A mailbox per user on some relay. poll() drains the own mailbox
 // (at-most-once): a lost envelope only stalls the dialogue, which the merge
@@ -101,7 +101,7 @@ private:
     std::map<uint64_t, std::vector<uint8_t>> reorder_;   // buffered out-of-order
 };
 
-// ── HTTP channel over the aggregator mailbox relay (§4.1) ─────────────────────
+// ── HTTP channel over the aggregator mailbox relay (sync.md §4.1) ─────────────────────
 //
 //   POST /dialogue/{to_uid_hex}        body: CBOR envelope
 //   GET  /dialogue/{my_uid_hex}/inbox  → CBOR array(bstr envelope), drains

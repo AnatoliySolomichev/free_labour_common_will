@@ -188,7 +188,7 @@ TEST_F(RatesViewTest, CarriedCostSettlesAtFullPayableButAveragesLaborOnly) {
     a.timestamp     = kDay + 100;
     const Block acc = add(bob_, a);
 
-    // Paying the labor part alone leaves the deal unsettled («=» §12.8 is
+    // Paying the labor part alone leaves the deal unsettled («=» records.md §12.8 is
     // now labor + carried) — it must not move the rates.
     records::Transfer t{};
     t.from    = bob_.bytes;
@@ -199,7 +199,7 @@ TEST_F(RatesViewTest, CarriedCostSettlesAtFullPayableButAveragesLaborOnly) {
     EXPECT_TRUE(build_daily_rates(*storage_, kDay, {}).empty());
 
     // Topping up the carried part settles it. The rate is labor/hours = 1.0:
-    // carried cost must NOT distort the price of live labor (§11.2 v2).
+    // carried cost must NOT distort the price of live labor (records.md §11.2 v2).
     records::Transfer t2 = t;
     t2.origins = { {bob_.bytes, 0.23625} };
     add(bob_, t2);

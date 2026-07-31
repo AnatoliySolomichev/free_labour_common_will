@@ -33,11 +33,11 @@ namespace chainsync {
 // (leaf_hash(ref)) and composition parents are recomputed from the children
 // (MerkleTree::combine), so an entry can never disagree with its own key.
 //
-// Filled by the merge orchestrator (§5.2), not by MergeSession — sync depends
+// Filled by the merge orchestrator (sync.md §5.2), not by MergeSession — sync depends
 // on blockchain, never the reverse. Eviction policy is an open question
-// (§10.1); this first slice keeps everything in memory.
+// (sync.md §10.1); this first slice keeps everything in memory.
 
-// Everything the snapshot commitment omits about one participant (§5.1).
+// Everything the snapshot commitment omits about one participant (sync.md §5.1).
 struct LeafRecord {
     blockchain::ExternalRef       ref;        // (chain, node, block, committed hash)
     std::vector<blockchain::Node> node_path;  // root..ref.node of ref.chain
@@ -45,7 +45,7 @@ struct LeafRecord {
 };
 
 // One hierarchical-merge step: parent_root = combine(left_child, right_child).
-// Children are stored in canonical order (smaller root = left, §6.5.1).
+// Children are stored in canonical order (smaller root = left, blockchain.md §6.5.1).
 struct Composition {
     blockchain::Hash left_child;
     blockchain::Hash right_child;
@@ -53,7 +53,7 @@ struct Composition {
 
 // LeafRecord wire/persistence codec: a FraudProofData with an empty Merkle
 // path (reuses the blockchain Serializer). Shared by the persistent cache and
-// the snapshot exchange (§7.1).
+// the snapshot exchange (sync.md §7.1).
 // Throws: SerializationError.
 std::vector<uint8_t> encode_leaf_record(const LeafRecord& record);
 LeafRecord decode_leaf_record(const uint8_t* data, std::size_t len);
@@ -65,7 +65,7 @@ public:
 
     // Persistent cache backed by LMDB at `dir` (created if missing): existing
     // entries are loaded eagerly, every put is written through. Everything is
-    // retained — eviction policy is the open question §10.1.
+    // retained — eviction policy is the open question sync.md §10.1.
     // Throws: StorageError, SerializationError (corrupt store).
     explicit ParticipantCache(const std::filesystem::path& dir);
 
@@ -89,7 +89,7 @@ public:
     std::optional<LeafRecord>  get_leaf(const blockchain::Hash& leaf_hash) const;
     std::optional<Composition> get_composition(const blockchain::Hash& parent_root) const;
 
-    // Merkle inclusion path from target_root down to leaf_hash (§5.3): walks
+    // Merkle inclusion path from target_root down to leaf_hash (sync.md §5.3): walks
     // the composition table, collecting siblings bottom-up. target_root ==
     // leaf_hash yields an empty proof (single-leaf snapshot). nullopt when no
     // composition chain connects the two — the leaf is not in that snapshot.
@@ -98,7 +98,7 @@ public:
         const blockchain::Hash& target_root,
         const blockchain::Hash& leaf_hash) const;
 
-    // Assemble the full FraudProofData for a cached participant (§5.3):
+    // Assemble the full FraudProofData for a cached participant (sync.md §5.3):
     // merkle_path(target_root, leaf_hash) + the cached LeafRecord. nullopt if
     // either piece is missing. By construction the result satisfies
     // MerkleTree::verify(leaf_hash, .merkle_path, target_root).
@@ -137,10 +137,10 @@ private:
     std::unordered_map<blockchain::Hash, Composition, HashKey> compositions_;
 };
 
-// Feed one completed bilateral merge into the cache (§5.2): both single-leaf
+// Feed one completed bilateral merge into the cache (sync.md §5.2): both single-leaf
 // records — when a side merges for the first time its snapshot is still that
 // leaf and the exchanged tip carries everything; a composite snapshot does not
-// reveal its leaves (they arrive via gossip, §7) — plus the composition
+// reveal its leaves (they arrive via gossip, sync.md §7) — plus the composition
 // own_root × partner_root. Snapshots must be the PRE-merge ones the sides
 // exchanged. Returns the union root (== the committed merkle_root).
 // Throws: SerializationError, StorageError (persistent cache).

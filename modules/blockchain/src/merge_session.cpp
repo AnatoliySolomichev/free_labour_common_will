@@ -74,7 +74,7 @@ void MergeSession::verify_partner_tip(const BranchTipInfo& partner_tip) const {
             throw ChainIntegrityError("partner tip_block address does not match tip_address");
     }
 
-    // Local revocation knowledge (§6.7 rule 11 — rules apply when accepting
+    // Local revocation knowledge (blockchain.md §6.7 rule 11 — rules apply when accepting
     // the new): refuse frozen branches, stale tips of replaced branches and
     // fake subtrees. Knowledge = own records + imported certificates; keeping
     // it fresh is the caller's policy (sync.md §10.3).
@@ -92,7 +92,7 @@ MergeSnapshot MergeSession::snapshot_for(const UserId& user_id,
     auto tip_opt = storage_.branch_tip_index(user_id, leaf_index);
     if (!tip_opt.has_value())
         throw InvalidArgumentError(
-            "snapshot_for: empty branch has no snapshot; append a block first (§6.4)");
+            "snapshot_for: empty branch has no snapshot; append a block first (blockchain.md §6.4)");
     Block tip = storage_.get_block({user_id, leaf_index, *tip_opt});
     ExternalRef ref{{user_id, leaf_index, *tip_opt}, Crypto::hash_block(tip)};
     return MergeSnapshot::leaf(ref);
@@ -109,31 +109,31 @@ PendingMergeBlock MergeSession::create_pending(
     Timestamp            merge_timestamp,
     uint32_t             validated_depth)
 {
-    // A merge participant must have at least one block (§6.4): both the own branch
+    // A merge participant must have at least one block (blockchain.md §6.4): both the own branch
     // and the partner branch need a block-0 to appear as snapshot leaves. An empty
-    // branch must append a stub block first (§5.4).
+    // branch must append a stub block first (blockchain.md §5.4).
     auto tip_opt = storage_.branch_tip_index(user_id, leaf_index);
     if (!tip_opt.has_value())
         throw InvalidArgumentError(
-            "cannot merge from an empty branch; append a block first (§6.4)");
+            "cannot merge from an empty branch; append a block first (blockchain.md §6.4)");
     if (partner_tip.tip_address.block_index == EMPTY_BRANCH_INDEX)
         throw InvalidArgumentError(
-            "cannot merge with an empty-branch partner (§6.4)");
+            "cannot merge with an empty-branch partner (blockchain.md §6.4)");
 
-    // §6.7: a revoked own branch may not open new bilateral acts — frozen at
+    // blockchain.md §6.7: a revoked own branch may not open new bilateral acts — frozen at
     // all, replaced only under the authorized key (mirrors
     // Blockchain::ensure_branch_writable; merges bypass the facade).
     if (validator_.effective_revocation(user_id, leaf_index).has_value()) {
         const auto own_st = validator_.branch_revocation_status(user_id, leaf_index);
         if (own_st.state == BranchRevocationState::FROZEN)
-            throw RevocationError("own branch is frozen by revocation (§6.7)");
+            throw RevocationError("own branch is frozen by revocation (blockchain.md §6.7)");
         if (own_st.next_key.has_value() && own_working_keypair.pub != *own_st.next_key)
             throw RevocationError(
-                "own branch key was replaced by revocation; use the replacement key (§6.7)");
+                "own branch key was replaced by revocation; use the replacement key (blockchain.md §6.7)");
     }
 
     // Union own snapshot with the partner's → the packet's new snapshot and the
-    // in-block commitments (§6.5.1).
+    // in-block commitments (blockchain.md §6.5.1).
     MergeSnapshot own_snapshot = snapshot_for(user_id, leaf_index);
     MergeSnapshot merged       = MergeSnapshot::merge(own_snapshot, partner_snapshot);
 

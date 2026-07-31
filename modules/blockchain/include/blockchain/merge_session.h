@@ -5,7 +5,7 @@
 
 namespace blockchain {
 
-// Two-round bilateral merge protocol (§6.4).
+// Two-round bilateral merge protocol (blockchain.md §6.4).
 //
 // Typical call order:
 //
@@ -38,10 +38,10 @@ public:
     // Unions the own snapshot with the partner's, commits the resulting
     // merkle_root + hll_hash into the block, and retains the grown snapshot for
     // the branch. validated_depth is the author's self-declared verification
-    // depth (§6.5.5). The draft is saved to storage immediately (without
+    // depth (blockchain.md §6.5.5). The draft is saved to storage immediately (without
     // co_signature); call finalize() once the partner's co-signature arrives.
     // Throws: CryptoError, StorageError, NodeNotFoundError,
-    //         InvalidArgumentError (own or partner branch empty, §6.4).
+    //         InvalidArgumentError (own or partner branch empty, blockchain.md §6.4).
     PendingMergeBlock create_pending(
         const UserId&        user_id,
         NodeIndex            leaf_index,

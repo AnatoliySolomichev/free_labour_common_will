@@ -9,7 +9,7 @@
 
 namespace aggregator {
 
-// ── Profile view (records.md §8.6/§8.7; role: §13) ────────────────────────────
+// ── Profile view (records.md §8.6/records.md §8.7; role: records.md §13) ────────────────────────────
 //
 // Participants' self-description: skills, needs, aspirations, industries.
 // It lives at the level of ideas, NOT the protocol — there is no dedicated

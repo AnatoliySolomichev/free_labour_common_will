@@ -688,7 +688,7 @@ void AggregatorServer::setup_routes() {
                 // Today's rates derive from YESTERDAY's settled deals
                 // (main_ideas.pdf: коэффициенты этого дня → следующего). If a
                 // catalog is served, the specialty cloud seeds priors for thin new
-                // activities (специальности-axes §10) — else nullptr, unchanged.
+                // activities (специальности-axes specialty-axes.md §10) — else nullptr, unchanged.
                 std::optional<records::SpecialtyCloud> cloud_opt;
                 if (!catalog_dir_.empty()) {
                     if (const auto pt = read_file(catalog_dir_ / "professions.json")) {
@@ -828,7 +828,7 @@ void AggregatorServer::setup_routes() {
             }
 
             // ?coords=1 — spectral map coordinates on demand (ИР-018 phase 3), not
-            // stored in the record (kept compact, §10).
+            // stored in the record (kept compact, specialty-axes.md §10).
             std::map<std::string, std::array<double, 2>> coords;
             if (req.has_param("coords"))
                 coords = compute_spectral_coords(cats, 1.0, &capital,
@@ -876,7 +876,7 @@ void AggregatorServer::setup_routes() {
     svr.Get("/specialty/attestations", [&](const httplib::Request& req,
                                            httplib::Response& res) {
         // Pilot threshold: any attestation overrides bootstrap; below it a value is
-        // preliminary. The value of N is the shared open question (§14.8 п.11).
+        // preliminary. The value of N is the shared open question (records.md §14.8 п.11).
         constexpr int kMinAttesters = 1;
         const std::string want = req.has_param("slug") ? req.get_param_value("slug") : "";
         const auto summary = build_axis_attestation_summary(storage_);
@@ -1029,7 +1029,7 @@ void AggregatorServer::setup_routes() {
         }
     });
 
-    // ── Profiles (records.md §8.6/§8.7, §13) ──────────────────────────────────
+    // ── Profiles (records.md §8.6/records.md §8.7, records.md §13) ──────────────────────────────────
     //
     // Participants' self-description, decoded from ordinary tagged Concepts —
     // skills, needs, aspirations, industries. Feeds manual need↔skill matching

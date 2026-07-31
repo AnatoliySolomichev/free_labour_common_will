@@ -186,21 +186,21 @@ struct MergePayload {
     // Snapshot commitments (blockchain.md §6.5.1). All part of the signed block.
     Hash         merkle_root;      // hierarchical Merkle root over the participant set
     Hash         hll_hash;         // BLAKE2b of the HLL register array (unique-count commitment)
-    uint32_t     validated_depth;  // self-declared full-validation depth (§6.5.5)
+    uint32_t     validated_depth;  // self-declared full-validation depth (blockchain.md §6.5.5)
 };
 
 struct KeyRotationPayload {
     PublicKey new_working_pubkey;
 };
 
-// Key revocation (§6.7). Lives in a branch of a strict ancestor of the revoked
-// node; signed by that ancestor branch's working key (priority gradient §4.4).
+// Key revocation (blockchain.md §6.7). Lives in a branch of a strict ancestor of the revoked
+// node; signed by that ancestor branch's working key (priority gradient blockchain.md §4.4).
 struct RevocationPayload {
     NodeIndex                revoked_node_index;
     PublicKey                revoked_pubkey;     // the exact key being revoked
     Timestamp                compromised_since;
     // absent = emergency stop; a replacement may be assigned later by a second
-    // REVOCATION block (§6.7 rule 3)
+    // REVOCATION block (blockchain.md §6.7 rule 3)
     std::optional<PublicKey> replacement_pubkey;
 };
 
@@ -222,7 +222,7 @@ struct Seal {
     }
 };
 
-// ── Branch tip info (used in merge protocol §6.4) ─────────────────────────────
+// ── Branch tip info (used in merge protocol blockchain.md §6.4) ─────────────────────────────
 
 struct BranchTipInfo {
     BlockAddress         tip_address;  // block_index == EMPTY_BRANCH_INDEX if branch is empty

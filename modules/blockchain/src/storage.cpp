@@ -228,7 +228,7 @@ bool LmdbStorage::has_node(const UserId& user_id, NodeIndex index) const noexcep
 
 // ── Blocks ────────────────────────────────────────────────────────────────────
 
-// Revocation index (§6.7): revoked_node → 8-byte entries (author node BE4 +
+// Revocation index (blockchain.md §6.7): revoked_node → 8-byte entries (author node BE4 +
 // block index BE4), maintained inside the caller's write transaction for both
 // own and external REVOCATION blocks. Malformed payload is skipped — the block
 // stays stored, validators reject it later. Returns MDB_SUCCESS or an LMDB rc.
@@ -462,7 +462,7 @@ void LmdbStorage::put_external_block(const Block& block) {
     }
     if (rc != MDB_SUCCESS) { mdb_txn_abort(txn); lcheck(rc, "put_external_block: mdb_put"); }
 
-    // Foreign REVOCATION blocks (imported certificates, §6.7 rule 8) feed the
+    // Foreign REVOCATION blocks (imported certificates, blockchain.md §6.7 rule 8) feed the
     // same index, so effective_revocation works for partners' chains too.
     int irc = index_revocation_in_txn(txn, impl_->dbi_revocations, block);
     if (irc != MDB_SUCCESS) { mdb_txn_abort(txn); lcheck(irc, "put_external_block: rev_index"); }

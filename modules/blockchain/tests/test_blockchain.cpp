@@ -284,7 +284,7 @@ TEST_F(BlockchainTest, ValidateBranchFullPathAndBlocks) {
     EXPECT_NO_THROW(bc_->validate_branch(root_kp_.pub, LEAF));
 }
 
-// ── revoke_node / validate_revocation / effective_revocation (§6.7) ──────────
+// ── revoke_node / validate_revocation / effective_revocation (blockchain.md §6.7) ──────────
 
 // Fixture with the path 0 → 1 → 3 → 7 created (branches may grow from any
 // node, v0.7). Node 7 plays the compromised branch; 3 — parent, 1 — grandparent.
@@ -411,7 +411,7 @@ TEST_F(RevocationTest, HigherAncestorWins) {
 
     auto st = validator_->effective_revocation(root_kp_.pub, 7);
     ASSERT_TRUE(st.has_value());
-    // Grandparent's branch decides, parent's replacement is ignored (§4.4).
+    // Grandparent's branch decides, parent's replacement is ignored (blockchain.md §4.4).
     EXPECT_EQ(st->latest.node_index, 1u);
     ASSERT_TRUE(st->replacement_pubkey.has_value());
     EXPECT_EQ(*st->replacement_pubkey, repl_grand.pub);
@@ -476,7 +476,7 @@ TEST_F(RevocationTest, ReplacementKeyIsRevocableAgain) {
     EXPECT_FALSE(st->replacement_pubkey.has_value());
 }
 
-// ── Step 2: revocation effects in validation (§6.7 rules 9–11) ────────────────
+// ── Step 2: revocation effects in validation (blockchain.md §6.7 rules 9–11) ────────────────
 
 TEST_F(RevocationTest, StatusCleanSuspectSplit) {
     bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 1'000LL);
@@ -526,7 +526,7 @@ TEST_F(RevocationTest, ReplacedBranchAcceptsOnlyReplacement) {
     ASSERT_TRUE(st.next_key.has_value());
     EXPECT_EQ(*st.next_key, repl.pub);
 
-    // validate_branch follows the out-of-branch key switch (§6.7 rule 9).
+    // validate_branch follows the out-of-branch key switch (blockchain.md §6.7 rule 9).
     EXPECT_NO_THROW(bc_->validate_branch(root_kp_.pub, 7));
 }
 
@@ -591,7 +591,7 @@ TEST_F(RevocationTest, HijackedAuthorRecordIsFiltered) {
 
     // The owner escalates: node 1 revokes node 3 as compromised since 5'000 —
     // earlier than the thief's record (ts 9'000), so that record loses weight
-    // (§6.7 rule 10).
+    // (blockchain.md §6.7 rule 10).
     bc_->revoke_node(root_kp_.pub, 3, 5'000LL, std::nullopt, 1, kp1_, 10'000LL);
 
     EXPECT_FALSE(validator_->effective_revocation(root_kp_.pub, 7).has_value());
@@ -609,7 +609,7 @@ TEST_F(RevocationTest, PreCompromiseAuthorRecordStillCounts) {
 
 TEST_F(RevocationTest, ReplacedAuthorRevokesWithNewKey) {
     // Node 3 was revoked and replaced; the owner keeps administering 7 from 3 —
-    // records signed by the replacement count (§6.7 rule 10).
+    // records signed by the replacement count (blockchain.md §6.7 rule 10).
     KeyPair repl3 = Crypto::generate_keypair();
     bc_->revoke_node(root_kp_.pub, 3, 5'000LL, repl3.pub, 1, kp1_, 6'000LL);
     bc_->revoke_node(root_kp_.pub, 7, 7'000LL, std::nullopt, 3, repl3, 8'000LL);
@@ -663,7 +663,7 @@ TEST_F(RevocationTest, StorageIndexReturnsAddresses) {
     EXPECT_TRUE(storage_->get_revocation_addresses(root_kp_.pub, 15).empty());
 }
 
-// ── Step 3: self-verifying revocation certificate (§6.7 rule 8) ───────────────
+// ── Step 3: self-verifying revocation certificate (blockchain.md §6.7 rule 8) ───────────────
 
 TEST_F(RevocationTest, CertificateBuildAndVerify) {
     KeyPair repl = Crypto::generate_keypair();
@@ -740,7 +740,7 @@ TEST_F(RevocationTest, CertificateNonAncestorRejected) {
     EXPECT_THROW(RevocationCert::verify(cert), RevocationError);
 }
 
-// ── Step 4: imported foreign revocations feed the local index (§6.7 rule 8) ───
+// ── Step 4: imported foreign revocations feed the local index (blockchain.md §6.7 rule 8) ───
 
 TEST_F(RevocationTest, ImportedForeignRevocationIsEffective) {
     // A partner's chain lives in its own storage; we receive its revocation as
@@ -787,7 +787,7 @@ TEST_F(RevocationTest, ImportedForeignRevocationIsEffective) {
     std::filesystem::remove_all(foreign_db);
 }
 
-// ── Step 5: acceptance-time revocation checks (§6.7 rule 11) ──────────────────
+// ── Step 5: acceptance-time revocation checks (blockchain.md §6.7 rule 11) ──────────────────
 
 // Partner chain living in its own storage; exposes tips the way sync would.
 struct ForeignChain {
@@ -881,7 +881,7 @@ TEST_F(RevocationTest, TipCheckSilentWithoutLocalKnowledge) {
 
 TEST_F(RevocationTest, TipCheckRefusesFakeSubtreeNode) {
     ForeignChain f("fake");
-    // Node 15 under 7, "created" after the compromise moment (§6.7 rule 6).
+    // Node 15 under 7, "created" after the compromise moment (blockchain.md §6.7 rule 6).
     KeyPair kp15 = Crypto::generate_keypair();
     Node n7 = f.bc->get_node(f.uid(), 7);
     Node n{};

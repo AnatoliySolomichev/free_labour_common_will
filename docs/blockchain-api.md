@@ -102,12 +102,12 @@ namespace blockchain {
 
 enum class BlockType : uint8_t {
     DATA,          // пользовательский блок с произвольными данными
-    MERGE,         // блок слияния двух веток (§6.4)
-    KEY_ROTATION,  // ротация рабочего ключа (§6.6)
-    REVOCATION,    // отзыв скомпрометированного узла (§6.7)
+    MERGE,         // блок слияния двух веток (blockchain.md §6.4)
+    KEY_ROTATION,  // ротация рабочего ключа (blockchain.md §6.6)
+    REVOCATION,    // отзыв скомпрометированного узла (blockchain.md §6.7)
 };
 
-// Тип пломбы (§7.1)
+// Тип пломбы (blockchain.md §7.1)
 enum class SealMode : uint8_t {
     BLIND,   // подписан только хеш блока (содержимое не раскрывалось)
     OPEN,    // подписаны и хеш, и содержимое
@@ -145,7 +145,7 @@ struct ExternalRef {
 
 ### 5.3. Узел дерева
 
-Служебная сущность; пользовательских данных не содержит (§3.3).
+Служебная сущность; пользовательских данных не содержит (blockchain.md §3.3).
 
 ```cpp
 struct Node {
@@ -218,7 +218,7 @@ struct RevocationPayload {
     NodeIndex revoked_node_index;    // отзываемый узел
     Timestamp compromised_since;    // с какого момента считать блоки недействительными
     PublicKey replacement_pubkey;   // новый публичный ключ (для информирования)
-    // [OPEN §11.1] размещение этого блока в дереве — открытый вопрос
+    // [OPEN blockchain.md §11.1] размещение этого блока в дереве — открытый вопрос
 };
 ```
 
@@ -236,7 +236,7 @@ struct Seal {
 
 ### 5.9. Информация о верхушке ветки
 
-Передаётся при инициации слияния (§6.4, шаг 1).
+Передаётся при инициации слияния (blockchain.md §6.4, шаг 1).
 
 ```cpp
 struct BranchTipInfo {
@@ -262,7 +262,7 @@ public:
 // Ошибка криптографической операции (подпись, верификация, генерация ключей)
 class CryptoError : public BlockchainError { /* ... */ };
 
-// Нарушение одного из инвариантов (§9)
+// Нарушение одного из инвариантов (blockchain-api.md §9)
 class InvariantError : public BlockchainError {
 public:
     // Номер нарушенного инварианта (1–7)
@@ -552,7 +552,7 @@ public:
     // Анализирует граф MERGE-блоков: если блок B ссылается на наш блок A,
     // то A точно существовал не позже B.timestamp_claimed.
     // Возвращает std::nullopt, если внешних свидетелей нет.
-    // [OPEN §11.3] распространение знания об отзывах при gossip не реализовано в MVP
+    // [OPEN blockchain.md §11.3] распространение знания об отзывах при gossip не реализовано в MVP
     std::optional<Timestamp> compute_witnessed_time(const BlockAddress& address) const;
 };
 ```
@@ -561,7 +561,7 @@ public:
 
 ## 12. `MergeSession` — протокол двустороннего слияния
 
-Инкапсулирует состояние двухраундового протокола (§6.4).
+Инкапсулирует состояние двухраундового протокола (blockchain.md §6.4).
 
 ```cpp
 // Промежуточное состояние после первого раунда
@@ -635,14 +635,14 @@ public:
     // storage и validator должны жить не меньше Blockchain
     Blockchain(IStorage& storage, Validator& validator);
 
-    // ─── Идентичность (§6.1) ──────────────────────────────────────────────
+    // ─── Идентичность (blockchain.md §6.1) ──────────────────────────────────────────────
 
     // Создать корневой узел (index 0) с самоподписью.
     // Сохраняет узел в хранилище.
     // Бросает: CryptoError, StorageError, InvalidArgumentError (уже существует)
     Node create_identity(const KeyPair& root_keypair);
 
-    // ─── Дерево узлов (§6.2) ──────────────────────────────────────────────
+    // ─── Дерево узлов (blockchain.md §6.2) ──────────────────────────────────────────────
 
     // Убедиться, что все узлы от корня до leaf_index существуют.
     // Для отсутствующих узлов вызывает key_for(node_index) → KeyPair, создаёт и сохраняет узел.
@@ -668,7 +668,7 @@ public:
     // Бросает: NodeNotFoundError
     Hash branch_tip_hash(const UserId& user_id, NodeIndex leaf_index) const;
 
-    // Добавить DATA-блок в ветку (§6.3).
+    // Добавить DATA-блок в ветку (blockchain.md §6.3).
     // Определяет prev_hash автоматически через branch_tip_hash().
     // Подписывает рабочим ключом; отслеживает KEY_ROTATION в ветке.
     // Бросает: CryptoError, StorageError, NodeNotFoundError,
@@ -681,7 +681,7 @@ public:
         Timestamp               timestamp
     );
 
-    // Ротация рабочего ключа (§6.6): добавляет KEY_ROTATION-блок.
+    // Ротация рабочего ключа (blockchain.md §6.6): добавляет KEY_ROTATION-блок.
     // Подписывается old_working_keypair; все следующие блоки должны использовать new_keypair.
     // Бросает: CryptoError, StorageError, NodeNotFoundError
     Block rotate_key(
@@ -692,9 +692,9 @@ public:
         Timestamp      timestamp
     );
 
-    // Отзыв скомпрометированного узла (§6.7).
+    // Отзыв скомпрометированного узла (blockchain.md §6.7).
     // parent_keypair — ключ родительского узла (node_index−1)/2.
-    // [OPEN §11.1] размещение REVOCATION-блока в дереве не определено в MVP;
+    // [OPEN blockchain.md §11.1] размещение REVOCATION-блока в дереве не определено в MVP;
     // текущая реализация добавляет его в служебную ветку родительского узла.
     // Бросает: CryptoError, StorageError, NodeNotFoundError
     Block revoke_node(

@@ -25,7 +25,7 @@ namespace aggregator {
 //
 // Chain of custody, every hop spoof-guarded to the worker's own chain:
 //   Acceptance(receiver == author) → WorkRecord(owner) → agent: Grade(owner ==
-//   worker) → specialty: Specialty(owner == worker, name = catalog slug §9.1).
+//   worker) → specialty: Specialty(owner == worker, name = catalog slug records.md §9.1).
 //
 // Derived and re-checkable, like every aggregator view. The display rule from
 // the discussion: «разряд 4 (заявлен)» vs «разряд 3 (заверен: 5 цепей, 112 ч)»

@@ -150,7 +150,7 @@ TEST_F(DialogueChannelTest, FullMergeOverInMemoryRelay) {
     ASSERT_TRUE(db.done()) << db.error();
     EXPECT_EQ(alice_->committed_root(*da.merge_block()),
               bob_->committed_root(*db.merge_block()));
-    // The dialogue fed both caches, exactly as with direct delivery (§5.2).
+    // The dialogue fed both caches, exactly as with direct delivery (sync.md §5.2).
     EXPECT_EQ(alice_->cache.leaf_count(), 2u);
     EXPECT_EQ(bob_->cache.leaf_count(), 2u);
 }

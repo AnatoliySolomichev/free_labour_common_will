@@ -211,7 +211,7 @@ MergeDialogue::Messages MergeDialogue::handle_cosig(const std::vector<uint8_t>& 
 }
 
 void MergeDialogue::fill_cache() noexcept {
-    // Best-effort (§5.2): a cache hiccup must not invalidate a finalized merge —
+    // Best-effort (sync.md §5.2): a cache hiccup must not invalidate a finalized merge —
     // a missing entry only means build_proof returns nullopt later.
     try {
         record_merge(cache_, own_tip_, own_snapshot_, partner_tip_, partner_snapshot_);

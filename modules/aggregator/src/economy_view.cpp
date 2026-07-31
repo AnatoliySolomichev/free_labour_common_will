@@ -86,7 +86,7 @@ EconomyView EconomyView::build(const AggregatorStorage& storage, int64_t now) {
             view.chains_[to].received += total;
             // A pledge is settled by `settles`, never by `reason` (Transfer v4,
             // records.md §11.1): reason must point at the Acceptance being paid
-            // for (§12.9), so it could never also name the pledge being closed.
+            // for (records.md §12.9), so it could never also name the pledge being closed.
             if (t->settles) settlements[t->settles->hash] += total;
         } else if (const auto* a = std::get_if<records::Acceptance>(&rec)) {
             UserId worker{};

@@ -56,7 +56,7 @@ TEST_F(MergeDialogueTest, FullMergeFillsBothCaches) {
     EXPECT_TRUE(bob_->storage->has_node(alice_->root_kp.pub, LEAF));
     EXPECT_TRUE(alice_->storage->has_external_block(bob_b0.address));
 
-    // §5.2: each cache holds both single-leaf records + the composition, and
+    // sync.md §5.2: each cache holds both single-leaf records + the composition, and
     // can prove either participant against the committed root.
     for (UserCtx* u : {alice_.get(), bob_.get()}) {
         EXPECT_EQ(u->cache.leaf_count(), 2u);
@@ -105,7 +105,7 @@ TEST_F(MergeDialogueTest, SecondMergeGrowsDagAndDeepensProofs) {
     EXPECT_EQ(FraudProof::verify_bad_sig(top, *proof), FraudVerdict::REFUTED_HONEST);
 
     // Carol met Alice's already-composite snapshot: she can cache only her own
-    // leaf and the composition — Bob's leaf must come via gossip later (§7).
+    // leaf and the composition — Bob's leaf must come via gossip later (sync.md §7).
     EXPECT_EQ(carol->cache.leaf_count(), 1u);
     EXPECT_EQ(carol->cache.composition_count(), 1u);
     EXPECT_FALSE(carol->cache.build_proof(top, bob_leaf).has_value());
@@ -153,7 +153,7 @@ TEST_F(MergeDialogueTest, FourChainsPairwiseMergeLinkIntoOneDag) {
                 (comp->left_child == r_cd && comp->right_child == r_ab));
 
     // Each side of round 1 cached both leaves of its pair; round 2 added only
-    // the composition — a composite snapshot does not reveal its leaves (§5.2).
+    // the composition — a composite snapshot does not reveal its leaves (sync.md §5.2).
     EXPECT_EQ(alice_->cache.leaf_count(), 2u);
     EXPECT_EQ(alice_->cache.composition_count(), 2u);
     EXPECT_EQ(bob_->cache.leaf_count(), 2u);
@@ -164,7 +164,7 @@ TEST_F(MergeDialogueTest, FourChainsPairwiseMergeLinkIntoOneDag) {
     EXPECT_EQ(dave->cache.composition_count(), 1u);
 
     // Alice proves her own pair against the top root; Carol's half must
-    // arrive via gossip (§7) before she can prove those leaves.
+    // arrive via gossip (sync.md §7) before she can prove those leaves.
     for (const Block* b0 : {&alice_b0, &bob_b0}) {
         Hash leaf = MerkleTree::leaf_hash(alice_->leaf_ref_of(*b0));
         auto proof = alice_->cache.build_proof(top, leaf);
@@ -180,7 +180,7 @@ TEST_F(MergeDialogueTest, FourChainsPairwiseMergeLinkIntoOneDag) {
     }
 }
 
-// Internal merge (blockchain.md §3.2/§5.3 v0.7): two branches of the SAME
+// Internal merge (blockchain.md §3.2/blockchain.md §5.3 v0.7): two branches of the SAME
 // chain merge — the mid-depth "public vertex" branch absorbs the leaf branch,
 // so one external merge later commits the whole tree.
 TEST_F(MergeDialogueTest, InternalMergeOfOwnBranches) {
@@ -264,7 +264,7 @@ TEST_F(MergeDialogueTest, EmptyResponderBranchFailsAndInitiatorStalls) {
     MergeDialogue b = bob_->dialogue(2'000LL);
     pump(a, b);
     EXPECT_TRUE(b.failed());
-    // Alice never hears back — a stalled attempt, not a failure (§11.4).
+    // Alice never hears back — a stalled attempt, not a failure (blockchain.md §11.4).
     EXPECT_FALSE(a.done());
     EXPECT_FALSE(a.failed());
     EXPECT_EQ(a.state(), MergeDialogue::State::WAIT_ACCEPT);

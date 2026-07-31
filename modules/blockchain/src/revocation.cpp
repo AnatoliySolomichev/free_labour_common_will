@@ -70,10 +70,10 @@ void RevocationCert::verify(const RevocationCertificate& cert) {
                         cert.block.signature, author.working_pubkey))
         throw SignatureError("certificate: block signature by author key invalid");
 
-    // Payload semantics (§6.7 rule 2).
+    // Payload semantics (blockchain.md §6.7 rule 2).
     const RevocationPayload rp = payload(cert); // SerializationError
     if (rp.revoked_node_index == 0)
-        throw RevocationError("certificate: root cannot be revoked (§11.5)");
+        throw RevocationError("certificate: root cannot be revoked (blockchain.md §11.5)");
     if (!is_valid_node(rp.revoked_node_index))
         throw RevocationError("certificate: revoked node index is invalid");
     if (!is_ancestor(author.index, rp.revoked_node_index))

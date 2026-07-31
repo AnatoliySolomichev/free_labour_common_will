@@ -29,13 +29,13 @@ struct AcceptInfo {
     UserId  owner{};      // the customer (receiver, spoof-guarded)
     RefHash work{};       // accepted WorkRecord's block hash
     double  labor_units = 0;
-    double  carried     = 0;  // carried cost of tools/materials (§9.5 v2)
+    double  carried     = 0;  // carried cost of tools/materials (records.md §9.5 v2)
 };
 
 } // namespace
 
 double Deal::appraised() const noexcept {
-    // Payable = live labor + carried cost (§9.5 v2) — the same ceiling
+    // Payable = live labor + carried cost (records.md §9.5 v2) — the same ceiling
     // bc pay enforces, so the Paid stage flips exactly at full settlement.
     double total = 0;
     for (const auto& w : works)
@@ -79,7 +79,7 @@ const char* DealView::stage_name(DealStage stage) noexcept {
 DealView DealView::build(const AggregatorStorage& storage) {
     DealView view;
 
-    // Pass 1: profiles give the needs and their closed flags (§8.6 rules,
+    // Pass 1: profiles give the needs and their closed flags (records.md §8.6 rules,
     // including the acceptance-based close — its to.chain == owner holds).
     const auto profiles = ProfileView::build(storage);
 

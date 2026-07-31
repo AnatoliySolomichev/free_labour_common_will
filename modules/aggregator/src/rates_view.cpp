@@ -93,10 +93,10 @@ std::vector<records::RateEntry> build_daily_rates(
     // Fold settled, fully-resolvable, non-self deals per (specialty, level).
     std::map<std::pair<std::string, uint8_t>, Accum> day;
     for (const auto& [acc_hash, deal] : day_deals) {
-        // Filter (Б) + §12.8 "=": only exactly settled deals enter the
+        // Filter (Б) + records.md §12.8 "=": only exactly settled deals enter the
         // averaging — payment must equal the appraisal, an underpaid deal is
         // a hidden discount and must not move the rates (economy.md §4.2).
-        // v2 (§9.5): the appraisal is labor + carried cost of the means of
+        // v2 (records.md §9.5): the appraisal is labor + carried cost of the means of
         // production; the averaging below still takes labor_units only.
         const double payable = deal.acc.labor_units
                              + (deal.acc.carried_units ? *deal.acc.carried_units

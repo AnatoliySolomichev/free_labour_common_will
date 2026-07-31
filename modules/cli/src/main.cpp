@@ -663,14 +663,14 @@ static void attach_carry(Context& ctx, WorkRecord& wr,
                   << (a.info.basis == "est" ? ", оценка владельца" : "") << ")";
         if (ce.carried <= 1e-9)
             std::cerr << (a.info.is_material
-                          ? "  — партия исчерпана, заведите новую (§10.1)"
-                          : "  — стоимость возвращена, работает бесплатно (§9.4)");
+                          ? "  — партия исчерпана, заведите новую (records.md §10.1)"
+                          : "  — стоимость возвращена, работает бесплатно (records.md §9.4)");
         std::cerr << "\n";
     }
 }
 
 // bc block stub [--leaf L]
-// Appends an empty stub DATA block: bootstrap for merge (§6.4) or time anchor (§5.4).
+// Appends an empty stub DATA block: bootstrap for merge (blockchain.md §6.4) or time anchor (blockchain.md §5.4).
 static int cmd_block_stub(const fs::path& data_dir, int argc, char** argv) {
     const NodeIndex leaf = parse_leaf_index(argc, argv);
     Context ctx(data_dir, leaf);
@@ -1011,7 +1011,7 @@ static int cmd_react(const fs::path& data_dir, int argc, char** argv) {
 }
 
 // bc specialty add <slug> — the name IS the catalog slug (records.md §9.1).
-// It is the network-wide key rates are computed on (§11.2): while it was free
+// It is the network-wide key rates are computed on (records.md §11.2): while it was free
 // text, "Электрик" / "электрик" / "Электромонтёр" produced three different rates
 // and tore the statistics apart. The slug is also what the profile already uses
 // (cat:prof.electrician), so a person and their labour speak one key.
@@ -1188,7 +1188,7 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
                         if (std::abs(expected - ce.carried) > 1e-6)
                             std::cerr << "  ⚠ " << info->name << ": " << ce.carried
                                       << "ч НЕ по формуле переноса (ожидалось "
-                                      << expected << "ч, §9.4) — вправе отклонить\n";
+                                      << expected << "ч, records.md §9.4) — вправе отклонить\n";
                         else
                             std::cerr << "  " << info->name << ": " << ce.carried
                                       << "ч за " << ce.used
@@ -1351,7 +1351,7 @@ static int cmd_material_add(const fs::path& data_dir, int argc, char** argv) {
         const double remainder = prev[0].info.cost - st.collected;
         if (m.cost > remainder + 1e-9) {
             std::cerr << "отказ: cost " << m.cost << "ч выше остатка "
-                      << remainder << "ч предыдущей записи (§10.2)\n";
+                      << remainder << "ч предыдущей записи (records.md §10.2)\n";
             return 1;
         }
     }
@@ -1390,7 +1390,7 @@ static int cmd_tool_list(const fs::path& data_dir, int argc, char** argv) {
                   << ", " << (a.info.basis == "paid" ? "куплен" : "оценка") << "]\n";
         if (remainder <= 1e-9)
             std::cout << "    стоимость возвращена полностью — дальше работает "
-                         "бесплатно (§9.4)\n";
+                         "бесплатно (records.md §9.4)\n";
     }
     return 0;
 }
@@ -1464,11 +1464,11 @@ static int cmd_tool_show(const fs::path& data_dir, int argc, char** argv) {
     }
     if (h.over_invariant) {
         clean = false;
-        std::cout << "  ⚠ перенесено больше стоимости — денежный насос (§9.4)\n";
+        std::cout << "  ⚠ перенесено больше стоимости — денежный насос (records.md §9.4)\n";
     }
     if (h.formula_mismatch) {
         clean = false;
-        std::cout << "  ⚠ есть звено не по формуле переноса (§9.4)\n";
+        std::cout << "  ⚠ есть звено не по формуле переноса (records.md §9.4)\n";
     }
     if (h.after_decreasing) {
         clean = false;
@@ -1534,7 +1534,7 @@ static int cmd_merge_create(const fs::path& data_dir, int argc, char** argv) {
         dep_s.empty() ? 1u : static_cast<uint32_t>(std::stoul(dep_s));
 
     // Pre-merge view of the own branch — create_pending replaces the stored
-    // snapshot with the union, so capture both for the cache fill (§5.2).
+    // snapshot with the union, so capture both for the cache fill (sync.md §5.2).
     const auto own_tip  = session.prepare_tip(ctx.user_id, leaf);
     const auto own_snap = session.snapshot_for(ctx.user_id, leaf);
 
@@ -1615,7 +1615,7 @@ static int cmd_merge_finalize(const fs::path& data_dir, int argc, char** argv) {
         session.import_partner_data(partner_tip);
 
         // Feed the completed merge into the persistent participant cache
-        // (sync.md §5.2) — the raw material for fraud claims (§11.9).
+        // (sync.md §5.2) — the raw material for fraud claims (blockchain.md §11.9).
         if (!state.own_tip_cbor.empty()) {
             chainsync::ParticipantCache cache(data_dir / "sync_cache");
             const auto own_tip = Serializer::decode_tip(
@@ -1691,7 +1691,7 @@ static int cmd_merge_run(const fs::path& data_dir, int argc, char** argv) {
 
     Context ctx(data_dir, leaf);
 
-    // Freshness (§6.7 rule 11, sync.md §10.3): refresh the peer's revocations
+    // Freshness (blockchain.md §6.7 rule 11, sync.md §10.3): refresh the peer's revocations
     // from the same aggregator before opening a bilateral act.
     const auto rf = fetch_import_revocations(ctx.storage, peer, via);
     if (rf.imported > 0)
@@ -1730,7 +1730,7 @@ static int cmd_merge_run(const fs::path& data_dir, int argc, char** argv) {
     if (dialogue.done()) {
         print_merge_result(*dialogue.merge_block());
         publish_cache_via(via, cache);
-        upload_block(via, *dialogue.merge_block());   // feeds discovery (§8)
+        upload_block(via, *dialogue.merge_block());   // feeds discovery (sync.md §8)
         return 0;
     }
     if (dialogue.failed()) { std::cerr << "merge failed: " << dialogue.error() << "\n"; return 1; }
@@ -1740,7 +1740,7 @@ static int cmd_merge_run(const fs::path& data_dir, int argc, char** argv) {
 }
 
 // bc merge own --with NODE [--leaf L] [--depth N]
-// Internal merge (blockchain.md §3.2/§5.3): the --leaf branch (public vertex)
+// Internal merge (blockchain.md §3.2/blockchain.md §5.3): the --leaf branch (public vertex)
 // merges with own branch NODE in-process; both branches append co-signed
 // MERGE blocks and the vertex snapshot commits both.
 static int cmd_merge_own(const fs::path& data_dir, int argc, char** argv) {
@@ -1877,7 +1877,7 @@ static int cmd_merge_serve(const fs::path& data_dir, int argc, char** argv) {
             if (d.done()) {
                 print_merge_result(*d.merge_block());
                 publish_cache_via(via, cache);
-                upload_block(via, *d.merge_block());   // feeds discovery (§8)
+                upload_block(via, *d.merge_block());   // feeds discovery (sync.md §8)
                 if (once) return 0;
                 it = serving.erase(it);
             } else if (d.failed()) {
@@ -1926,7 +1926,7 @@ static const records::json::Value* jarr(const records::json::Object& o,
     return (v && v->is_array()) ? v : nullptr;
 }
 
-// ── Economy: named labor-hours (records.md §11, §12.7) ────────────────────────
+// ── Economy: named labor-hours (records.md §11, records.md §12.7) ────────────────────────
 
 static std::array<uint8_t, 32> uid_from_hex(const std::string& s) {
     std::array<uint8_t, 32> a{};
@@ -2111,11 +2111,11 @@ static int cmd_wallet(const fs::path& data_dir, int argc, char** argv) {
     Context ctx(data_dir, leaf);
     const auto w = compute_wallet(ctx);
 
-    // §6.7: surface the purse branch's own revocation state.
+    // blockchain.md §6.7: surface the purse branch's own revocation state.
     if (auto rst = ctx.validator.effective_revocation(ctx.user_id, ctx.leaf))
         std::cout << (rst->replacement_pubkey.has_value()
-                          ? "note: this branch was revoked and REPLACED (§6.7)\n"
-                          : "WARNING: this branch is FROZEN by revocation (§6.7)\n");
+                          ? "note: this branch was revoked and REPLACED (blockchain.md §6.7)\n"
+                          : "WARNING: this branch is FROZEN by revocation (blockchain.md §6.7)\n");
 
     double held = 0;
     std::cout << "purse of branch 0x" << std::hex << ctx.leaf << std::dec
@@ -2381,7 +2381,7 @@ static int cmd_trust(const fs::path& data_dir, int argc, char** argv) {
     for (const auto seq : h.equivocated_seqs)
         std::cout << "\n  ЭКВИВОКАЦИЯ: звено #" << seq
                   << " существует в двух разных блоках — объективное "
-                     "доказательство обмана (§4.3)\n";
+                     "доказательство обмана (economy.md §4.3)\n";
 
     print_footprint(ctx, subject, flag_val(argc, argv, "--via"));
     return 0;
@@ -2435,7 +2435,7 @@ static int cmd_transfer_send(const fs::path& data_dir, int argc, char** argv) {
     } else {
         t.origins = pick_portions(ctx, to_s, std::stod(units_s));
     }
-    attach_emission_link(ctx, t);   // Transfer v3: self-issues are threaded (§4.3)
+    attach_emission_link(ctx, t);   // Transfer v3: self-issues are threaded (economy.md §4.3)
 
     const Block block = append_record(ctx, Record{t});
     print_portions(t, me_hex, to_s);
@@ -2460,7 +2460,7 @@ static int cmd_transfer_recv(const fs::path& data_dir, int argc, char** argv) {
     const NodeIndex leaf = parse_leaf_index(argc, argv);
     Context ctx(data_dir, leaf);
 
-    // Freshness (§6.7 rule 11, sync.md §10.3): refresh the sender's revocations
+    // Freshness (blockchain.md §6.7 rule 11, sync.md §10.3): refresh the sender's revocations
     // before accepting value — the zones apply at acceptance time.
     UserId sender{};
     sender.bytes = src.chain;
@@ -2471,7 +2471,7 @@ static int cmd_transfer_recv(const fs::path& data_dir, int argc, char** argv) {
         throw std::runtime_error("referenced block is not a DATA block");
 
     // Refuse paper from a revoked paying branch unless the transfer block runs
-    // under the replacement key (§6.7: frozen/stolen purses cannot pay anew).
+    // under the replacement key (blockchain.md §6.7: frozen/stolen purses cannot pay anew).
     if (auto rst = ctx.validator.effective_revocation(sender, block.address.node_index)) {
         const bool under_replacement = rst->replacement_pubkey.has_value()
             && block_signed_by(block, *rst->replacement_pubkey);
@@ -2510,7 +2510,7 @@ static int cmd_transfer_recv(const fs::path& data_dir, int argc, char** argv) {
     ctx.storage.put_external_block(block);
     append_record(ctx, Record{Copy{src}});   // on-chain acknowledgment (двусторонность)
 
-    // Own paper returned → the "+" link of the emission thread (§4.3): write
+    // Own paper returned → the "+" link of the emission thread (economy.md §4.3): write
     // the redemption receipt; the debt shrinks and the whole credit history
     // stays readable off the thread.
     double returned = 0;
@@ -2579,7 +2579,7 @@ static int cmd_fetch(const fs::path& data_dir, int argc, char** argv) {
 // bc pay --acceptance REF [--units N] [--via URL] [--leaf L]
 // Pays (the remainder of) an own acceptance's appraisal to the worker
 // (records.md §9.5). Refuses to exceed the appraised value — payments for one
-// work never outgrow its labor_units (§12.8).
+// work never outgrow its labor_units (records.md §12.8).
 // Core of paying an own acceptance — shared by `bc pay` and `bc deal settle`
 // (the deal verbs resolve the refs so nobody copies 64-hex hashes by hand).
 static int do_pay(const fs::path& data_dir, NodeIndex leaf,
@@ -2615,22 +2615,22 @@ static int do_pay(const fs::path& data_dir, NodeIndex leaf,
     if (!acceptance)
         throw std::runtime_error("acceptance not found in the own branch");
 
-    // Ceiling (§12.8 "=", v2 §9.5): live labor + carried cost of the means
-    // of production. Rates take the labor part only (§11.2).
+    // Ceiling (records.md §12.8 "=", v2 records.md §9.5): live labor + carried cost of the means
+    // of production. Rates take the labor part only (records.md §11.2).
     const double carried   = acceptance->carried_units
                            ? *acceptance->carried_units : 0.0;
     const double cap       = acceptance->labor_units + carried;
     const double remaining = cap - paid;
     if (remaining <= 1e-9) {
         std::cerr << "already paid in full: " << paid << "/" << cap
-                  << " labor-h — payments must not exceed the appraisal (§12.8)\n";
+                  << " labor-h — payments must not exceed the appraisal (records.md §12.8)\n";
         return 1;
     }
     const double units   = units_s.empty() ? remaining : std::stod(units_s);
     if (units > remaining + 1e-9) {
         std::cerr << "refused: " << units << "h would exceed the appraisal — paid "
                   << paid << "/" << cap << " labor-h, payable " << remaining
-                  << "h (§12.8)\n";
+                  << "h (records.md §12.8)\n";
         return 1;
     }
 
@@ -2644,14 +2644,14 @@ static int do_pay(const fs::path& data_dir, NodeIndex leaf,
     t.origins   = pick_portions(ctx, to_s, units);
     t.reason    = acc_ref;
     t.timestamp = static_cast<int64_t>(std::time(nullptr));
-    // Transfer v4 (§11.1): reason says WHAT is paid for, settles says WHICH
+    // Transfer v4 (records.md §11.1): reason says WHAT is paid for, settles says WHICH
     // promise this closes. Without it a pledge honestly paid off by labour would
     // stay "active" forever and expire.
     if (!pledge_s.empty()) t.settles = parse_ref(pledge_s);
     // Pay into the purse of the branch that did the work (economy.md §5а).
     if (const auto work_block = find_external_by_hash(ctx, acceptance->work.hash))
         t.to_node = work_block->address.node_index;
-    attach_emission_link(ctx, t);   // Transfer v3: self-issues are threaded (§4.3)
+    attach_emission_link(ctx, t);   // Transfer v3: self-issues are threaded (economy.md §4.3)
 
     const Block block = append_record(ctx, Record{t});
     print_portions(t, me_hex, to_s);
@@ -2914,7 +2914,7 @@ static int cmd_match(int argc, char** argv) {
                 const Value* d = records::json::find(c.object, "distance_km");
                 std::cout << "      закроет " << short_hex_str(str(c.object, "chain"))
                           << "  " << str(c.object, "slug");
-                // The claim next to its attestation (§14.4): a bare claim reads
+                // The claim next to its attestation (records.md §14.4): a bare claim reads
                 // «заявлен», an earned one names its witnesses — the reader
                 // decides, nothing is scored.
                 const auto grade = str(c.object, "grade");
@@ -3166,7 +3166,7 @@ static int cmd_deal_take(const fs::path& data_dir, int argc, char** argv) {
     cl.kind = "берусь";
     if (cl.from.chain != ctx.user_id.bytes)
         throw std::runtime_error("--skill must reference your own record — "
-                                 "you volunteer with YOUR skill (§8.6)");
+                                 "you volunteer with YOUR skill (records.md §8.6)");
     const Block block = append_record(ctx, Record{cl});
     std::cout << "взялись: " << skill_ref << " → " << pos[2] << "\n";
     const auto via = flag_val(argc, argv, "--via");
@@ -3196,7 +3196,7 @@ static int cmd_deal_hire(const fs::path& data_dir, int argc, char** argv) {
     if (p.units <= 0) throw std::runtime_error("--units must be positive");
     if (p.target.chain != ctx.user_id.bytes)
         throw std::runtime_error("NEED_REF must be your own need — the "
-                                 "customer hires (§8.6)");
+                                 "customer hires (records.md §8.6)");
     const auto exp_s = flag_val(argc, argv, "--expires");
     if (!exp_s.empty()) p.expires = static_cast<int64_t>(std::stoll(exp_s));
 
@@ -3280,7 +3280,7 @@ static int cmd_deal_work(const fs::path& data_dir, int argc, char** argv) {
 // bc deal settle NEED_REF --via URL [--leaf L] [--yes]
 // Pays every accepted-but-unpaid work of the deal (settling the own pledge,
 // Transfer v4), then OFFERS to close: payment ≠ need closed — partial pay and
-// multi-stage needs are real, so the owner is asked, never overruled (§8.6).
+// multi-stage needs are real, so the owner is asked, never overruled (records.md §8.6).
 static int cmd_deal_settle(const fs::path& data_dir, int argc, char** argv) {
     const auto pos = get_positionals(argc, argv);
     const auto via = flag_val(argc, argv, "--via");
@@ -3322,7 +3322,7 @@ static int cmd_deal_settle(const fs::path& data_dir, int argc, char** argv) {
             if (!w.is_object()) continue;
             const auto* accepted = records::json::find(w.object, "accepted");
             if (!accepted || !accepted->boolean) continue;
-            // Payable = live labor + carried cost of tools/materials (§9.5 v2);
+            // Payable = live labor + carried cost of tools/materials (records.md §9.5 v2);
             // an aggregator that predates carry simply reports carried = 0.
             if (jnum(w.object, "paid") + 1e-9 >=
                 jnum(w.object, "labor_units") + jnum(w.object, "carried"))
@@ -3336,7 +3336,7 @@ static int cmd_deal_settle(const fs::path& data_dir, int argc, char** argv) {
     if (paid_now == 0) std::cout << "неоплаченных приёмок нет\n";
 
     // offer to close — the owner decides, the tool never does
-    std::string close_from;   // the acceptance the need was closed BY (§8.6)
+    std::string close_from;   // the acceptance the need was closed BY (records.md §8.6)
     if (const auto* ws = jarr(deal->object, "works"))
         for (const auto& w : ws->array)
             if (w.is_object() && !jstr(w.object, "acceptance_ref").empty())
@@ -3457,7 +3457,7 @@ static int cmd_apply(const fs::path& data_dir, int argc, char** argv) {
 }
 
 // bc export profiles --via URL [--out FILE] [--chain UID_HEX]
-// The aggregator's decoded self-descriptions (records.md §8.6, §13): skills,
+// The aggregator's decoded self-descriptions (records.md §8.6, records.md §13): skills,
 // needs, aspirations of every known chain, tags verbatim. This is the JSON that
 // feeds manual need↔skill matching or an external AI — the project embeds none.
 static int cmd_export_profiles(int argc, char** argv) {
@@ -3534,9 +3534,9 @@ static int cmd_pledge_add(const fs::path& data_dir, int argc, char** argv) {
     const Block block = append_record(ctx, Record{p});
     std::cout << "pledge ref: " << to_hex(ctx.user_id.bytes) << "/"
               << to_hex(Crypto::hash_block(block).bytes) << "\n";
-    // Transfer v4 (§11.1): a pledge is closed by paying for ACCEPTED work and
+    // Transfer v4 (records.md §11.1): a pledge is closed by paying for ACCEPTED work and
     // naming the pledge in --pledge. Paying "against the pledge itself" was the
-    // old dead path — §12.9 refuses a transfer whose reason is not an acceptance.
+    // old dead path — records.md §12.9 refuses a transfer whose reason is not an acceptance.
     std::cerr << "(settle with: bc pay --acceptance <acc ref> --pledge <pledge ref>; "
                  "revoke with: bc pledge revoke)\n";
     const auto via = flag_val(argc, argv, "--via");
@@ -3599,7 +3599,7 @@ static int cmd_pledge_list(const fs::path& data_dir, int argc, char** argv) {
         } else if (const auto* t = std::get_if<records::Transfer>(&rec)) {
             // Settlement is named by `settles`, never by `reason` (Transfer v4,
             // records.md §11.1): reason must point at the Acceptance being paid
-            // for (§12.9), so it could never also name the pledge being closed.
+            // for (records.md §12.9), so it could never also name the pledge being closed.
             if (!t->settles || t->settles->chain != ctx.user_id.bytes) continue;
             auto it = pledges.find(to_hex(t->settles->hash.data(), 32));
             if (it == pledges.end()) continue;
@@ -4036,7 +4036,7 @@ static int cmd_revoke_create(const fs::path& data_dir, int argc, char** argv) {
                                  "(recovery: blockchain.md §11.5)");
     const auto anc_s = flag_val(argc, argv, "--ancestor");
     const NodeIndex ancestor = anc_s.empty()
-        ? (revoked - 1) / 2  // default radius: parent (§6.7 rule 1)
+        ? (revoked - 1) / 2  // default radius: parent (blockchain.md §6.7 rule 1)
         : static_cast<NodeIndex>(std::stoull(anc_s, nullptr, 0));
 
     const auto now     = static_cast<Timestamp>(std::time(nullptr));
@@ -4089,7 +4089,7 @@ static int cmd_revoke_create(const fs::path& data_dir, int argc, char** argv) {
     }
 
     // Speed of propagation comes from the warehouse, not the record's height
-    // (§6.7 rule 1) — publish right away when an aggregator is given.
+    // (blockchain.md §6.7 rule 1) — publish right away when an aggregator is given.
     const auto via = flag_val(argc, argv, "--via");
     if (!via.empty())
         std::cerr << (post_revocation_cert(via, uid, bytes)
@@ -4273,7 +4273,7 @@ static int cmd_revoke_status(const fs::path& data_dir, int argc, char** argv) {
               << ", invalid-after-replacement " << invalid << ")\n";
     if (validator.node_invalidated_by_revocation(uid, node))
         std::cout << "  node itself is invalidated by an ancestor's revocation "
-                     "(§6.7 rule 6)\n";
+                     "(blockchain.md §6.7 rule 6)\n";
     return 0;
 }
 
@@ -4297,7 +4297,7 @@ type; catalogs: docs/catalogs.md):
     [--tag horizon:now]              cat:  an entry from the catalogs
     [--tag retrain:yes]
   catalog --via URL                Browse the catalogs — find the cat: slug to
-    [--search TEXT]                    write, instead of inventing one (§8.7)
+    [--search TEXT]                    write, instead of inventing one (records.md §8.7)
   export profiles --via URL        Dump decoded profiles of every known chain
     [--out FILE] [--chain UID_HEX]     (JSON: skills, needs, tags verbatim) —
                                        for need↔skill matching, by hand or by
@@ -4356,7 +4356,7 @@ Knowledge graph:
 Labor:
   specialty add <slug>             Add a specialty — the name IS the catalog slug
     [--via URL] [--force]              (prof.electrician). It is the network-wide
-                                       key rates are keyed on (§11.2): free text
+                                       key rates are keyed on (records.md §11.2): free text
                                        tore the statistics into "Электрик" /
                                        "электрик" / "Электромонтёр".
   grade add <spec_ref> <level>     Add a grade (level 1-6)
@@ -4380,7 +4380,7 @@ Labor:
                                        carried_units is derived automatically
                                        from the work's carry — never by hand
 
-Means of production (ИР-011, records.md §10.2, §9.4):
+Means of production (ИР-011, records.md §10.2, records.md §9.4):
   tool add ИМЯ --cost H --life HRS Register a tool: cost in labor-hours,
     [--serial S] [--desc T]            design life in tool-hours. Without
     [--note "расчёт оценки"]           --paid the cost is the owner's estimate
@@ -4393,7 +4393,7 @@ Means of production (ИР-011, records.md §10.2, §9.4):
     [--origin MAT_REF]
   tool list / material list        Own tools/batches: cost, collected, remainder
   tool show / material show PREFIX Audit one carry thread: invariant, forks,
-                                       formula, resale ceiling (§5б)
+                                       formula, resale ceiling (economy.md §5б)
   rates --via URL                  Today's specialty rates (signed DailyAggregate)
   cloud --via URL [--slug SLUG]    Specialty cloud: each activity's tree parent and
     [--coords]                         k nearest neighbours (signed SpecialtyCloud,
@@ -4404,9 +4404,9 @@ Means of production (ИР-011, records.md §10.2, §9.4):
     [--grade REF] [--via URL]          over practitioners — value set by who does it
   attestations --via URL           Attested axis values: median, how many attesters,
     [--slug SLUG]                      and whether still preliminary (below N)
-  pay --acceptance REF             Pay the worker up to the appraisal (§12.8)
+  pay --acceptance REF             Pay the worker up to the appraisal (records.md §12.8)
     [--units N] [--via URL]            default: the unpaid remainder
-    [--pledge REF]                     Transfer v4 (§11.1): --acceptance says
+    [--pledge REF]                     Transfer v4 (records.md §11.1): --acceptance says
                                        WHAT is paid for, --pledge says WHICH
                                        promise this closes. Without it a pledge
                                        paid off by labour stays "active" forever.
@@ -4424,14 +4424,14 @@ Merge over a relay (sync.md §4.1):
     [--depth N] [--timeout SEC]        SEC=0: run forever
     [--once]                           exit after the first completed merge
 
-Merge, manual relay (§6.4 bilateral two-round protocol):
+Merge, manual relay (blockchain.md §6.4 bilateral two-round protocol):
   merge prepare                    Step 1: print own tip + snapshot blobs (send to partner)
   merge create --peer-tip HEX      Step 2: verify tip, union snapshots, create draft
                --peer-snapshot HEX          print draft_hash [--depth N: declared depth]
   merge cosign --draft HASH        Step 3: co-sign partner's draft_hash, print co_signature
   merge finalize --co-sig HEX      Step 4: attach partner co_sig, complete merge block
 
-Seals (§7; gossip sync.md §7.2):
+Seals (blockchain.md §7; gossip sync.md §7.2):
   seal add BLOCK_HASH_HEX          Create a BLIND seal on a block hash
     [--via URL]                        (--via publishes it to the warehouse)
   seal add --mode open             Create an OPEN seal (loads block from storage)
@@ -4462,7 +4462,7 @@ Key revocation (blockchain.md §6.7; warehouse — sync.md §7.2):
     (--node N | --cert FILE)
   revoke fetch CHAIN_HEX --via URL Pull, verify and import a chain's certificates
 
-Economy (records.md §11 — именные трудочасы, §12.7):
+Economy (records.md §11 — именные трудочасы, records.md §12.7):
   wallet [--leaf N]                Branch purse (economy.md §5а: the --leaf
                                        branch's holdings) + chain-wide debt
   transfer send                    Move labor-hours; spends from the --leaf
@@ -4488,7 +4488,7 @@ Economy (records.md §11 — именные трудочасы, §12.7):
                                        Every figure carries its forging price;
                                        no score is ever computed.
 
-Sync cache (sync.md §5; gossip §7.1):
+Sync cache (sync.md §5; gossip sync.md §7.1):
   cache list                       List cached participant leaves and compositions
   cache publish --via URL          Push the local cache to an aggregator warehouse
   cache complete --via URL         Pull everything missing under a snapshot root

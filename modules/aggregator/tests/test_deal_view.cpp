@@ -179,7 +179,7 @@ TEST_F(DealViewTest, StagesDeriveFromWhicheverLinksExist) {
         EXPECT_FALSE(d.pledges[0].active());
     }
 
-    // Closed: Vera retires the need, pointing at the acceptance (§8.6).
+    // Closed: Vera retires the need, pointing at the acceptance (records.md §8.6).
     add(vera, link(ref_of(vera, acc_hash), ref_of(vera, need), "закрыто"));
     {
         const auto view = DealView::build(*storage_);

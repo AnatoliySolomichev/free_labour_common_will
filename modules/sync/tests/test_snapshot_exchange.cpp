@@ -104,7 +104,7 @@ protected:
     }
 };
 
-// ── The gap gossip closes (§7.1) ──────────────────────────────────────────────
+// ── The gap gossip closes (sync.md §7.1) ──────────────────────────────────────────────
 
 TEST_F(SnapshotExchangeTest, CompleteCacheMakesEveryParticipantProvable) {
     merge_all();

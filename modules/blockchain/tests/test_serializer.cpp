@@ -334,7 +334,7 @@ TEST(Serializer, DecodeBlockWrongType) {
         SerializationError);
 }
 
-// ── RevocationPayload round-trip (§6.7) ───────────────────────────────────────
+// ── RevocationPayload round-trip (blockchain.md §6.7) ───────────────────────────────────────
 
 TEST(Serializer, RevocationPayloadRoundTripStop) {
     RevocationPayload rp{};

@@ -125,7 +125,7 @@ void enc_merge_payload(Buf& out, const MergePayload& mp) {
 }
 
 void enc_revocation_payload(Buf& out, const RevocationPayload& rp) {
-    // Map of 3 fields (emergency stop) or 4 (with replacement) — §6.7.
+    // Map of 3 fields (emergency stop) or 4 (with replacement) — blockchain.md §6.7.
     w_map(out, rp.replacement_pubkey.has_value() ? 4 : 3);
     w_uint(out, 0); w_uint(out, rp.revoked_node_index);
     w_uint(out, 1); w_fixed(out, rp.revoked_pubkey.bytes);

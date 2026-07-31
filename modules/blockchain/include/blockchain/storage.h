@@ -40,7 +40,7 @@ public:
     virtual std::optional<BlockIndex> branch_tip_index(
         const UserId& user_id, NodeIndex leaf_index) const noexcept = 0;
 
-    // ── Revocation index (§6.7) ───────────────────────────────────────────────
+    // ── Revocation index (blockchain.md §6.7) ───────────────────────────────────────────────
 
     // Addresses of REVOCATION blocks targeting revoked_node in this user's tree,
     // in insertion order. Maintained automatically by put_block. Entries are not
@@ -67,7 +67,7 @@ public:
     virtual void for_each_external_block(
         std::function<bool(const Block&)> visitor) const = 0;
 
-    // ── Merge snapshots (one per branch, §6.5) ────────────────────────────────
+    // ── Merge snapshots (one per branch, blockchain.md §6.5) ────────────────────────────────
 
     // Store/replace the accumulated snapshot of a branch (overwrite allowed).
     // Throws: StorageError.

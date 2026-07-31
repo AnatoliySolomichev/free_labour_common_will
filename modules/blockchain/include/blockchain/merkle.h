@@ -43,7 +43,7 @@ public:
     // Empty set → Hash::zero(). Single leaf → that leaf unchanged.
     static Hash root(const std::vector<Hash>& leaves) noexcept;
 
-    // Combine two child roots into a parent (hierarchical DAG composition, §6.5.1).
+    // Combine two child roots into a parent (hierarchical DAG composition, blockchain.md §6.5.1).
     // Equivalent to root({left, right}); exposed for MergeSnapshot.
     static Hash combine(const Hash& left, const Hash& right) noexcept;
 

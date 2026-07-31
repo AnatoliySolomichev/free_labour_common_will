@@ -138,7 +138,7 @@ TEST_F(MergeSessionTest, VerifyPartnerTipEmptyPathThrows) {
     EXPECT_THROW(bob_->ms->verify_partner_tip(tip), ChainIntegrityError);
 }
 
-// ── Full bilateral merge protocol (§6.4) ──────────────────────────────────────
+// ── Full bilateral merge protocol (blockchain.md §6.4) ──────────────────────────────────────
 
 TEST_F(MergeSessionTest, FullMergeProtocol) {
     KeyPair alice_leaf = alice_->setup_leaf();
@@ -259,7 +259,7 @@ TEST_F(MergeSessionTest, ImportPartnerDataIdempotent) {
     EXPECT_NO_THROW(bob_->ms->import_partner_data(alice_tip));
 }
 
-// ── DAG snapshot accumulation across merges (§6.5) ────────────────────────────
+// ── DAG snapshot accumulation across merges (blockchain.md §6.5) ────────────────────────────
 
 TEST_F(MergeSessionTest, DagSnapshotAccumulatesUniqueParticipants) {
     auto carol = std::make_unique<UserCtx>(base_dir_, 3);
@@ -290,7 +290,7 @@ TEST_F(MergeSessionTest, DagSnapshotAccumulatesUniqueParticipants) {
     carol.reset();
 }
 
-// ── merge precondition: both branches must be non-empty (§6.4) ─────────────────
+// ── merge precondition: both branches must be non-empty (blockchain.md §6.4) ─────────────────
 
 TEST_F(MergeSessionTest, CreatePendingEmptyOwnBranchThrows) {
     KeyPair alice_leaf = alice_->setup_leaf();

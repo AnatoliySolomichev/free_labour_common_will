@@ -47,7 +47,7 @@ CreditHistory credit_history(std::vector<ObservedLink> links) {
                 h.last_selfissue_ts = o.timestamp;
         }
 
-        // The thread declares debt as a non-positive debt_after (§4.3).
+        // The thread declares debt as a non-positive debt_after (economy.md §4.3).
         const double outstanding = -o.link.debt_after;
         peak          = std::max(peak, outstanding);
         h.max_repaid  = std::max(h.max_repaid, peak - outstanding);

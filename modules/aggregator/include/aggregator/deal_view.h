@@ -62,7 +62,7 @@ struct DealWork {
     UserId      acceptor{};          // acceptance owner (the customer)
     Hash        acceptance_hash{};
     double      labor_units = 0;     // appraisal of the live labor
-    double      carried = 0;         // carried cost of tools/materials (§9.5 v2)
+    double      carried = 0;         // carried cost of tools/materials (records.md §9.5 v2)
     double      paid = 0;            // transfers whose reason names the acceptance
 };
 

@@ -527,7 +527,7 @@ TEST(RecordsCodec, RedemptionFirstLinkNoPrev) {
     EXPECT_FALSE(decoded.link.prev.has_value());
 }
 
-// ── Production v2: Tool / Material / carry (records.md §9.4, §10, ИР-011) ─────
+// ── Production v2: Tool / Material / carry (records.md §9.4, records.md §10, ИР-011) ─────
 
 TEST(RecordsCodec, ToolRoundtripEstNoRefs) {
     Tool t{};

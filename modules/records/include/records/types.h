@@ -145,7 +145,7 @@ struct ResourceQty {
 // a Ref, it crosses branches); two links with one prev = equivocation =
 // double-charging one asset over parallel branches.
 struct CarryEntry {
-    Ref                src;      // Tool (§10.2) or Material batch (§10.1)
+    Ref                src;      // Tool (records.md §10.2) or Material batch (records.md §10.1)
     double             used;     // tool-hours worked / material quantity spent
     double             carried;  // labor-hours transferred into this work
     uint64_t           seq;      // link counter of the asset's carry thread
@@ -195,7 +195,7 @@ struct Acceptance {
     double                  labor_units;  // hours_raw * coefficient(grade) on acceptance day
     int64_t                 timestamp;    // Unix timestamp UTC
     // v2 (ИР-011): Σ carried of the accepted work. Payment ceiling is
-    // labor_units + carried_units; rates take labor_units only (§11.2).
+    // labor_units + carried_units; rates take labor_units only (records.md §11.2).
     std::optional<double>          carried_units;
     // v3 (economy.md §2б): normalizer provenance, best-effort at accept time.
     std::optional<AcceptanceNorm>  norm;
@@ -203,7 +203,7 @@ struct Acceptance {
 
 // ── Production records (records.md §10, v2 — ИР-011) ─────────────────────────
 
-// A batch of consumables with a carryable remainder (§10.1): the batch cost
+// A batch of consumables with a carryable remainder (records.md §10.1): the batch cost
 // flows into products as the quantity is spent. Field layout mirrors Tool;
 // the thread capacity is the batch size qty.
 struct Material {
@@ -220,7 +220,7 @@ struct Material {
     std::string        note;    // est: how the estimate was made; may be empty
 };
 
-// A tool/equipment instance with cost and design life (§10.2). Wear carries
+// A tool/equipment instance with cost and design life (records.md §10.2). Wear carries
 // cost into products via WorkRecord.carry. Reissue (origin) covers resale,
 // downward revaluation and re-entry: new cost ≤ previous remainder.
 struct Tool {
@@ -268,15 +268,15 @@ struct EmissionLink {
 // The only way value moves (records.md §11.1). Lives in the sender's chain;
 // the SPENDING branch is the branch the block is written into (its key signs
 // the spend — per-branch purses, economy.md §5а). Debt stays chain-level:
-// issuer == from → self-issue: a new debt/claim pair is born (§12.2);
+// issuer == from → self-issue: a new debt/claim pair is born (records.md §12.2);
 // issuer == to   → redemption: the paper returns to its debtor and annihilates;
 // otherwise      → endorsement: someone else's paper passed along.
-// v3 (economy.md §4.2/§4.3): reason is mandatory for recognition (strict
+// v3 (economy.md §4.2/economy.md §4.3): reason is mandatory for recognition (strict
 // equivalence — hours move only against accepted labor); a self-issuing
 // transfer must carry its emission-thread link.
 //
 // v4 (records.md §11.1, ИР-006): `reason` and `settles` answer two different
-// questions and so must be two fields. One `reason` could not do both: §12.9
+// questions and so must be two fields. One `reason` could not do both: records.md §12.9
 // demands it point at an Acceptance ("what am I paying for"), which left a
 // Pledge honestly paid off by labour marked active forever.
 struct Transfer {
@@ -286,7 +286,7 @@ struct Transfer {
     std::array<uint8_t, 32> to;        // receiver chain
     uint32_t                to_node;   // receiver branch — whose purse is credited
     std::vector<OriginQty>  origins;   // named portions; total = transfer amount
-    std::optional<Ref>      reason;    // WHAT for: Acceptance (mandatory, §12.9)
+    std::optional<Ref>      reason;    // WHAT for: Acceptance (mandatory, records.md §12.9)
     std::optional<Ref>      settles;   // WHICH promise this closes: Pledge (v4)
     int64_t                 timestamp; // Unix timestamp UTC
     // Present iff origins contain a self-issued portion (issuer == from).
@@ -372,7 +372,7 @@ struct CloudNeighbor {
 // its k nearest neighbours. Coordinates are NOT published (they live in the
 // catalog; the full map is a preview) — only what the rate prior needs.
 struct CloudPoint {
-    std::string                slug;      // activity = rate key (§11.2, §14.8)
+    std::string                slug;      // activity = rate key (records.md §11.2, records.md §14.8)
     std::string                parent;    // tree parent slug ("" = none) — drift target
     std::vector<CloudNeighbor> neighbors; // k nearest, by cloud distance
 };

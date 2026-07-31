@@ -50,7 +50,7 @@ AttestationView AttestationView::build(const AggregatorStorage& storage) {
         }
 
         if (const auto* s = std::get_if<records::Specialty>(&rec)) {
-            specialties[bh.bytes] = {owner, s->name};   // name = catalog slug (§9.1)
+            specialties[bh.bytes] = {owner, s->name};   // name = catalog slug (records.md §9.1)
         } else if (const auto* g = std::get_if<records::Grade>(&rec)) {
             grades[bh.bytes] =
                 GradeInfo{owner, g->level, g->specialty.hash, g->specialty.chain};

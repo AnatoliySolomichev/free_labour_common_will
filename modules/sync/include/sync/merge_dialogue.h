@@ -26,11 +26,11 @@ struct MergeConfig {
 
 // One bilateral merge as a transport-agnostic state machine (sync.md §6).
 //
-// Wraps the blockchain::MergeSession protocol (§6.4: prepare_tip →
+// Wraps the blockchain::MergeSession protocol (blockchain.md §6.4: prepare_tip →
 // verify_partner_tip → create_pending → co_sign → finalize) into opaque byte
 // messages, replacing the manual hex relay in the CLI. Any carrier that can
 // deliver byte blobs between the two parties in order can run it; delivery,
-// activity timeouts and retries are the transport's concern (§10.2) — a
+// activity timeouts and retries are the transport's concern (sync.md §10.2) — a
 // stalled dialogue is simply abandoned, which the merge DAG tolerates
 // (blockchain.md §11.4).
 //
@@ -47,7 +47,7 @@ struct MergeConfig {
 // Both sides exchange pre-merge snapshots, so both commit the same union root
 // (MergeSnapshot::merge is commutative). On success each side finalizes its
 // own MERGE block, imports the partner's path/tip and feeds the participant
-// cache (§5.2): both single-leaf records when derivable from the exchanged
+// cache (sync.md §5.2): both single-leaf records when derivable from the exchanged
 // tips, plus the composition own_root × partner_root.
 //
 // Failure semantics mirror FraudProof: start()/on_message never throw — any
@@ -75,7 +75,7 @@ public:
 
     // Initiator entry point: returns the OFFER to deliver to the partner.
     // Only valid once, from IDLE. Empty result means the dialogue FAILED
-    // (e.g. own branch is empty, §6.4).
+    // (e.g. own branch is empty, blockchain.md §6.4).
     Messages start() noexcept;
 
     // Feed one received message; returns the messages to send back (possibly
@@ -102,7 +102,7 @@ private:
 
     void prepare_own_side();          // own tip + pre-merge snapshot
     void accept_partner(const std::vector<uint8_t>& payload);
-    void fill_cache() noexcept;       // best-effort, §5.2
+    void fill_cache() noexcept;       // best-effort, sync.md §5.2
     void fail(const std::string& why) noexcept;
 
     blockchain::MergeSession& session_;

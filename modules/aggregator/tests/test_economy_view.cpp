@@ -107,7 +107,7 @@ TEST_F(EconomyViewTest, IdeasBoardAndChainDossiers) {
     acc.labor_units = 4.2;
     const Block acc_block = add(bob, acc);
 
-    // Transfer v4 (§11.1): `reason` says WHAT is paid for (the acceptance),
+    // Transfer v4 (records.md §11.1): `reason` says WHAT is paid for (the acceptance),
     // `settles` says WHICH promise this closes. A pledge is settled only by
     // `settles` — `reason` must name the acceptance, so it never could.
     records::Transfer settle{};

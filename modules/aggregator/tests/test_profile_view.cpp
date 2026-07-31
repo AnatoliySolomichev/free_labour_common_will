@@ -143,7 +143,7 @@ TEST_F(ProfileViewTest, BySlugStitchesDemandToSupply) {
     EXPECT_TRUE(view.by_slug(ProfileFacet::Skill, "").empty());
 }
 
-// ── Lifecycle: only the owner retires their own fact (§8.6) ───────────────────
+// ── Lifecycle: only the owner retires their own fact (records.md §8.6) ───────────────────
 
 TEST_F(ProfileViewTest, OwnerClosesOwnNeedForeignLinkIgnored) {
     const UserId alice   = make_owner(0xA1);

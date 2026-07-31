@@ -86,7 +86,7 @@ DiscoveryView::candidates_for(const UserId& uid, std::size_t limit) const {
             c.degree = m->second.size();
         c.neighbor = is_neighbor(chain);
 
-        // §8 preference order as weights; a chain we already merged with
+        // sync.md §8 preference order as weights; a chain we already merged with
         // ranks lower — coverage grows faster through new partners.
         c.score = 3.0 * c.econ_volume
                 + (c.neighbor ? 2.0 : 0.0)

@@ -13,7 +13,7 @@ double carry_step(double cost, double capacity, double used,
                   double collected_before) noexcept {
     if (cost <= 0 || capacity <= 0 || used <= 0) return 0;
     const double remainder = cost - collected_before;
-    if (remainder <= 0) return 0;   // fully recovered — forcibly free (§9.4)
+    if (remainder <= 0) return 0;   // fully recovered — forcibly free (records.md §9.4)
     return std::min(used / capacity * cost, remainder);
 }
 

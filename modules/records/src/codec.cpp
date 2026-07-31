@@ -814,7 +814,7 @@ DailyAggregate dec_daily_aggregate_fields(CborReader& r, uint64_t field_count) {
         }
     }
     expect_key(r, 3); d.timestamp = r.r_int();
-    if (field_count >= 5) { expect_key(r, 4); d.W = r.r_float64(); }  // v3 §2б
+    if (field_count >= 5) { expect_key(r, 4); d.W = r.r_float64(); }  // v3 economy.md §2б
     return d;
 }
 
