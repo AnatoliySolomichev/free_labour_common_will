@@ -7,6 +7,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <vector>
 
 namespace aggregator {
 
@@ -35,9 +36,69 @@ struct ResolvedDeal {
     bool        in_day = false;
 };
 
-// Unordered key for a pair of chains, so both directions land on one entry.
-std::pair<RefHash, RefHash> pair_key(const RefHash& a, const RefHash& b) {
-    return a < b ? std::make_pair(a, b) : std::make_pair(b, a);
+// Directed edge of the payment graph: who paid whom.
+using Edge = std::pair<RefHash, RefHash>;
+
+constexpr double kFlowEps = 1e-9;
+
+// One cycle start→…→start of exactly `remaining`+path.size() edges, taking
+// neighbours in canonical (sorted) order and never revisiting a node.
+bool find_cycle(const std::map<Edge, double>& resid,
+                const std::map<RefHash, std::vector<RefHash>>& out,
+                const RefHash& start, const RefHash& node, size_t remaining,
+                std::set<RefHash>& visited, std::vector<Edge>& path) {
+    if (remaining == 1) {                       // last hop must close the ring
+        const auto it = resid.find({node, start});
+        if (it == resid.end() || it->second <= kFlowEps) return false;
+        path.push_back({node, start});
+        return true;
+    }
+    const auto oit = out.find(node);
+    if (oit == out.end()) return false;
+    for (const RefHash& nxt : oit->second) {
+        if (nxt == start || visited.count(nxt)) continue;
+        const auto it = resid.find({node, nxt});
+        if (it == resid.end() || it->second <= kFlowEps) continue;
+        visited.insert(nxt);
+        path.push_back({node, nxt});
+        if (find_cycle(resid, out, start, nxt, remaining - 1, visited, path))
+            return true;
+        path.pop_back();
+        visited.erase(nxt);
+    }
+    return false;
+}
+
+// How much of each edge's flow returns through a cycle of length ≤ max_len.
+// Greedy cancelling, shortest cycles first. Greedy decomposition depends on the
+// order cycles are cancelled in, so the order is fixed and derivable from the
+// data alone (std::map iterates sorted; adjacency lists inherit that order) —
+// otherwise two witnesses would compute different weights from the same blocks.
+std::map<Edge, double> circulation(std::map<Edge, double> resid,
+                                   size_t max_len) {
+    std::map<Edge, double> circ;
+    std::map<RefHash, std::vector<RefHash>> out;
+    std::vector<Edge> order;
+    for (const auto& [e, v] : resid) {
+        circ[e] = 0.0;
+        out[e.first].push_back(e.second);
+        order.push_back(e);
+    }
+    for (size_t len = 2; len <= max_len; ++len) {
+        for (const Edge& e0 : order) {
+            while (resid[e0] > kFlowEps) {
+                std::set<RefHash> visited{e0.first, e0.second};
+                std::vector<Edge>  path{e0};
+                if (!find_cycle(resid, out, e0.first, e0.second, len - 1,
+                                visited, path))
+                    break;
+                double m = resid[path.front()];
+                for (const Edge& e : path) m = std::min(m, resid[e]);
+                for (const Edge& e : path) { resid[e] -= m; circ[e] += m; }
+            }
+        }
+    }
+    return circ;
 }
 
 // Linear-interpolated quantile of an already sorted, non-empty sample.
@@ -172,27 +233,26 @@ std::vector<records::RateEntry> build_daily_rates(
     // ── ИР-021: counterparty independence over the window ────────────────────
     // Two ingredients, and the discount needs BOTH: how mutual the pair is, and
     // how far above its own basket the deal is priced.
-    std::map<std::pair<RefHash, RefHash>, std::array<double, 2>> flow;
+    std::map<Edge, double> flow, circ;
     std::map<std::pair<std::string, uint8_t>, std::vector<double>> basket;
     if (weighted) {
         for (const auto& d : resolved) {
-            auto& f = flow[pair_key(d.payer, d.worker)];
-            f[d.payer < d.worker ? 0 : 1] += d.units;
+            flow[{d.payer, d.worker}] += d.units;
             if (d.rate > 0.0) basket[{d.specialty, d.level}].push_back(d.rate);
         }
         for (auto& [key, rates] : basket) std::sort(rates.begin(), rates.end());
+        circ = circulation(flow, std::max<size_t>(2, indep->max_cycle));
     }
 
     // Weight of one deal: 1 − R·excess (see rates_view.h). Honest villages are
     // mutual but priced normally, so excess = 0 keeps their weight at 1.
     const auto weight_of = [&](const ResolvedDeal& d) -> double {
         if (!weighted) return 1.0;
-        const auto fit = flow.find(pair_key(d.payer, d.worker));
-        if (fit == flow.end()) return 1.0;
-        const double ab = fit->second[0], ba = fit->second[1];
-        const double gross = ab + ba;
-        if (gross <= 0.0) return 1.0;
-        const double R = 1.0 - std::abs(ab - ba) / gross;
+        const auto fit = flow.find({d.payer, d.worker});
+        const auto cit = circ.find({d.payer, d.worker});
+        if (fit == flow.end() || cit == circ.end() ||
+            fit->second <= 0.0) return 1.0;
+        const double R = std::clamp(cit->second / fit->second, 0.0, 1.0);
 
         const auto bit = basket.find({d.specialty, d.level});
         if (bit == basket.end() || bit->second.empty()) return 1.0;

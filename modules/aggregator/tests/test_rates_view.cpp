@@ -321,6 +321,7 @@ protected:
 
     UserId alice_ = make_chain(0xA1);
     UserId carol_ = make_chain(0xC3);
+    UserId dave_  = make_chain(0xD4);
 
     void SetUp() override {
         static int cnt = 0;
@@ -376,8 +377,8 @@ protected:
 
     // Фон корзины: десять односторонних сделок разных пар по обычной цене 1.0.
     // Задают медиану, относительно которой меряется аномалия.
-    void honest_background(int64_t ts) {
-        for (uint8_t i = 0; i < 10; ++i)
+    void honest_background(int64_t ts, uint8_t n = 10) {
+        for (uint8_t i = 0; i < n; ++i)
             deal(make_chain(static_cast<uint8_t>(0x10 + i)),
                  make_chain(static_cast<uint8_t>(0x30 + i)), 1.0, 1.0, ts);
     }
@@ -426,11 +427,11 @@ TEST_F(IndependenceTest, CollusiveReciprocalPairIsDiscounted) {
     ASSERT_EQ(plain.size(), 1u);
     ASSERT_EQ(weighted.size(), 1u);
     EXPECT_NEAR(plain[0].rate, 2.0, 1e-9);      // (3.0 + 1.0) / 2 — сговор прошёл
-    // Дисконт МЯГКИЙ (развилка B3), а не отсечение: потоки пары 15 против 12,
-    // R = 1 − 3/27 = 0.889, аномалия втрое выше медианы корзины → вес 0.111.
-    // Среднее дня = (0.111·3 + 1·1) / (0.111 + 1) = 1.2 вместо 2.0: четыре
-    // пятых накрутки снято.
-    EXPECT_NEAR(weighted[0].rate, 1.2, 1e-3);
+    // Дисконт МЯГКИЙ (развилка B3), а не отсечение: потоки пары 15 и 12, по
+    // циклу длины 2 вернулось 12, значит R = 12/15 = 0.8; аномалия втрое выше
+    // медианы корзины → вес 0.2. Среднее дня = (0.2·3 + 1·1) / (0.2 + 1) = 1.333
+    // вместо 2.0: две трети накрутки снято.
+    EXPECT_NEAR(weighted[0].rate, 4.0 / 3.0, 1e-3);
     // Часы остаются сырыми: труд-то был, под вопросом его оценка.
     EXPECT_NEAR(weighted[0].hours, 2.0, 1e-9);
     EXPECT_EQ(weighted[0].deals, 2u);
@@ -481,8 +482,38 @@ TEST_F(IndependenceTest, ShortWindowMissesAlternatingCollusion) {
     // Короткое окно слепо: пара выглядит односторонней, доверие ко дню полное →
     // обычное сглаживание 0.3·3.0 + 0.7·1.0 = 1.6.
     EXPECT_NEAR(s[0].rate, 1.6, 1e-9);
-    // Длинное окно видит взаимность: доверие ко дню падает, и вчерашняя ставка
-    // почти не двигается.
-    EXPECT_LT(l[0].rate, 1.1);
-    EXPECT_GT(l[0].rate, 1.0);
+    // Длинное окно видит взаимность: R = 12/15 = 0.8 → вес 0.2, доверие ко дню
+    // 0.2, сглаживание 0.3·0.2 = 0.06, и вчерашняя ставка почти не двигается:
+    // 0.06·3.0 + 0.94·1.0 = 1.12.
+    EXPECT_NEAR(l[0].rate, 1.12, 1e-9);
+}
+
+TEST_F(IndependenceTest, ThreeChainRingIsCaughtOnlyByCycleSearch) {
+    // B5: кольцо A→B→C→A невидимо любой парной мере — между каждой парой поток
+    // строго односторонний, — а вредит ровно так же. Ловит только поиск циклов.
+    const int64_t before = kDay - 86'400 * 30;
+    honest_background(before, 20);
+    for (int i = 0; i < 4; ++i) {
+        deal(alice_, carol_, 1.0, 3.0, before);   // carol платит alice
+        deal(carol_, dave_,  1.0, 3.0, before);   // dave платит carol
+        deal(dave_,  alice_, 1.0, 3.0, before);   // alice платит dave
+    }
+    deal(alice_, carol_, 1.0, 3.0, kDay + 100);                     // кольцевая
+    deal(make_chain(0x71), make_chain(0x81), 1.0, 1.0, kDay + 100); // честная
+
+    IndependenceParams pairs_only{};
+    pairs_only.max_cycle = 2;                  // только пары, как было до B5
+    IndependenceParams rings{};                // max_cycle = 4 по умолчанию
+
+    const auto p = build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr,
+                                     &pairs_only);
+    const auto r = build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr,
+                                     &rings);
+    ASSERT_EQ(p.size(), 1u);
+    ASSERT_EQ(r.size(), 1u);
+    // Парная мера слепа: двухзвенных циклов в кольце нет, вес полный.
+    EXPECT_NEAR(p[0].rate, 2.0, 1e-9);
+    // Поиск циклов находит треугольник: потоки 15/12/12, узкое место 12,
+    // R = 12/15 = 0.8 → вес 0.2, среднее дня (0.2·3 + 1·1)/(0.2 + 1) = 1.333.
+    EXPECT_NEAR(r[0].rate, 4.0 / 3.0, 1e-3);
 }

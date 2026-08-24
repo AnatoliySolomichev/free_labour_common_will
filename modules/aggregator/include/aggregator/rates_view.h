@@ -35,15 +35,28 @@ namespace aggregator {
 // price moves the network rate of their specialty while their mutual self-issued
 // debts cancel out. Excluding self-deals (payer == worker) does not catch it.
 //
-// The discount is a CONJUNCTION, never reciprocity alone: honest villages are
-// reciprocal too, and discounting reciprocity as such costs a quarter of the
-// honest volume (measured on sim-year data — ИР-021). A pair is discounted only
-// when it is both mutual AND priced above its own basket:
+// A pair is only the SHORTEST cycle. A ring A→B→C→A is invisible to any pairwise
+// measure — every pair's flow in it is strictly one-way — and does the same
+// damage (ИР-021 B5). So the mutuality term is not reciprocity but CIRCULATION:
+// how much of an edge's flow comes back through a cycle of length ≤ max_cycle,
+// found by greedy cycle cancelling, shortest cycles first.
 //
-//   R      = 1 − |flow(a→b) − flow(b→a)| / (flow(a→b) + flow(b→a))   over window
+// The discount is a CONJUNCTION, never circulation alone: honest economies
+// circulate by nature (A works for B, B for C, C for A), and discounting
+// circulation as such costs a quarter of the honest volume (measured on
+// sim-year data — ИР-021). A deal is discounted only when its flow is both
+// circular AND priced above its own basket:
+//
+//   R      = circulating part of flow(payer→worker) / flow(payer→worker)
 //   anom   = deal rate / median rate of its (specialty, level) basket
 //   excess = clamp((anom − 1) / (kappa − 1), 0, 1)
 //   weight = 1 − R · excess
+//
+// max_cycle is a dial, not a wall: a conspiracy can always use a ring one longer.
+// Each extra link costs the conspirators another accomplice who can defect and
+// expose them, and each increment of max_cycle costs a little honest volume
+// (measured: 1.0% at 2, 2.1% at 3, 2.4% at 4, 2.5% at 5) and exponential search
+// time. What longer rings still evade is left to the rent map of ИР-020.
 //
 // This is not merely empirical: collusion only pays when its price is above the
 // basket's standing rate — below it the pair drags its own rate down. A
@@ -55,6 +68,7 @@ namespace aggregator {
 // alternates months — it escapes entirely.
 struct IndependenceParams {
     int64_t window_days     = 365;   // B2: rolling window; 0 disables entirely
+    size_t  max_cycle       = 4;     // B5: longest ring cancelled; 2 = pairs only
     double  kappa           = 1.15;  // B1: fallback anomaly threshold
     bool    self_calibrate  = true;  // derive kappa from the basket's own spread
     size_t  calib_min_deals = 8;     // below this the basket uses `kappa`

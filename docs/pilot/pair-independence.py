@@ -25,6 +25,8 @@ ap.add_argument('--out')
 ap.add_argument('--kappa', type=float, default=1.25,
                 help='порог ценовой аномалии для конъюнктивной метрики')
 ap.add_argument('--attack-hours', type=float, default=6.0)
+ap.add_argument('--max-len', type=int, default=4,
+                help='наибольшая длина гасимого цикла в кольцевой метрике')
 args = ap.parse_args()
 OUT = args.out or os.path.dirname(os.path.abspath(args.deals))
 
@@ -43,28 +45,43 @@ for d in BASE:
     d['units'] = d['hours'] * d['coef']
 
 MONTHS = sorted({d['month'] for d in BASE})
+ATTACK_DEALS = 24        # объём внедряемого сговора, одинаковый у всех топологий
 VSPEC = st.mode([d['spec'] for d in BASE])
 VLEVEL = st.mode([d['level'] for d in BASE if d['spec'] == VSPEC])
 HONEST_K = [d['coef'] for d in BASE]
 
 
-def build(k, pattern):
-    """Копия мира с внедрённой парой-сговором.
+def build(k, pattern, ring=2):
+    """Копия мира с внедрённым сговором из `ring` участников.
 
-    pattern='both'      — оба направления каждый месяц (наивный сговор);
-    pattern='alternate' — роли чередуются по месяцам, как у честной деревни
-                          (сговор, маскирующийся под обычную взаимность).
+    ring=2 — пара; pattern='both' гоняет оба направления каждый месяц (наивно),
+    pattern='alternate' чередует роли, маскируясь под честную деревню.
+    ring≥3 — кольцо A→B→C→…→A, всегда в одну сторону: между каждой парой поток
+    строго односторонний, поэтому парная метрика слепа к нему по построению.
     """
     deals = [dict(d) for d in BASE]
-    A, B = 'ATK-A', 'ATK-B'
-    for m in MONTHS:
-        pairs = ((A, B), (B, A)) if pattern == 'both' else \
-                (((A, B),) if m % 2 == 0 else ((B, A),))
-        for payer, worker in pairs:
-            deals.append({'month': m, 'payer': payer, 'worker': worker,
-                          'spec': VSPEC, 'level': VLEVEL,
-                          'hours': args.attack_hours, 'coef': k,
-                          'units': args.attack_hours * k, 'attack': True})
+    names = [f'ATK-{chr(ord("A") + i)}' for i in range(ring)]
+
+    def add(payer, worker, m):
+        deals.append({'month': m, 'payer': payer, 'worker': worker,
+                      'spec': VSPEC, 'level': VLEVEL,
+                      'hours': args.attack_hours, 'coef': k,
+                      'units': args.attack_hours * k, 'attack': True})
+
+    # Объём атаки уравнен по топологиям (≈ATTACK_DEALS сделок), иначе кольцо
+    # из четверых просто заливает корзину числом, и сравнивается размер, а не
+    # форма. Заодно сговор остаётся меньшинством корзины — см. предел ниже.
+    active = MONTHS[:max(1, round(ATTACK_DEALS / ring))]
+    for m in active:
+        if ring == 2:
+            A, B = names
+            edges = ((A, B), (B, A)) if pattern == 'both' else \
+                    (((A, B),) if m % 2 == 0 else ((B, A),))
+        else:
+            edges = tuple((names[i], names[(i + 1) % ring])
+                          for i in range(ring))
+        for payer, worker in edges:
+            add(payer, worker, m)
     return deals
 
 
@@ -77,6 +94,75 @@ def rate_of(deals, weights=None):
         num += d['units'] * w
         den += d['hours'] * w
     return num / den if den else 0.0
+
+
+def circulation(flow, max_len):
+    """Доля потока каждого ребра, возвращающаяся по циклу длины ≤ max_len.
+
+    Обобщение взаимности с пар на кольца (ИР-021 B5): пара — это цикл длины 2,
+    кольцо A→B→C→A — длины 3, и парная метрика его не видит вовсе (между каждой
+    парой поток односторонний, R=0).
+
+    Жадное гашение циклов, короткие раньше длинных. Порядок обхода канонический
+    (рёбра и соседи отсортированы), иначе разложение неоднозначно и свидетели
+    не сойдутся в пересчёте.
+    """
+    resid = dict(flow)
+    circ = {e: 0.0 for e in flow}
+    out = defaultdict(list)
+    for (a, b) in sorted(flow):
+        out[a].append(b)
+
+    def find_cycle(a, b, length):
+        """Цикл a→b→…→a ровно из `length` рёбер; возвращает список рёбер."""
+        def dfs(node, path, visited):
+            if len(path) == length - 1:
+                return path + [(node, a)] if resid.get((node, a), 0) > 1e-12 else None
+            for nxt in out[node]:
+                if nxt == a or nxt in visited:
+                    continue
+                if resid.get((node, nxt), 0) <= 1e-12:
+                    continue
+                got = dfs(nxt, path + [(node, nxt)], visited | {nxt})
+                if got:
+                    return got
+            return None
+        if resid.get((a, b), 0) <= 1e-12:
+            return None
+        if length == 2:
+            return [(a, b), (b, a)] if resid.get((b, a), 0) > 1e-12 else None
+        return dfs(b, [(a, b)], {a, b})
+
+    for length in range(2, max_len + 1):
+        for (a, b) in sorted(resid):
+            while resid.get((a, b), 0) > 1e-12:
+                cyc = find_cycle(a, b, length)
+                if not cyc:
+                    break
+                m = min(resid[e] for e in cyc)
+                for e in cyc:
+                    resid[e] -= m
+                    circ[e] += m
+    return circ
+
+
+def ring_R(deals, window, max_len):
+    """R по кольцам: на сделку — доля её ребра, ушедшая в циркуляцию."""
+    per = [0.0] * len(deals)
+    for start in range(0, max(MONTHS) + 1, window):
+        stop = start + window
+        flow = defaultdict(float)
+        idx = defaultdict(list)
+        for i, d in enumerate(deals):
+            if start <= d['month'] < stop:
+                flow[(d['payer'], d['worker'])] += d['units']
+                idx[(d['payer'], d['worker'])].append(i)
+        circ = circulation(dict(flow), max_len)
+        for e, ii in idx.items():
+            r = circ[e] / flow[e] if flow[e] > 0 else 0.0
+            for i in ii:
+                per[i] = min(1.0, r)
+    return per
 
 
 def reciprocity(deals, window):
@@ -143,40 +229,35 @@ print(f'честных сделок {len(BASE)} · корзина-жертва {
 print(f'k честных сделок: {min(HONEST_K):.2f}…{max(HONEST_K):.2f} '
       f'(медиана {st.median(HONEST_K):.2f}) — вот на каком фоне прячется сговор')
 print()
-hdr = (f'{"сговор k":>9} {"схема":>10} {"ущерб":>8} │ '
-       f'{"наив@1":>13} {"наив@12":>13} │ {"конъ@1":>13} {"конъ@12":>13}')
+hdr = (f'{"сговор":>18} {"ущерб":>8} │ {"парная":>14} │ '
+       f'{"кольцевая L≤" + str(args.max_len):>14}')
 print(hdr)
-print(f'{"":>9} {"":>10} {"ставке":>8} │ '
-      f'{"пойм/задето":>13} {"пойм/задето":>13} │ '
-      f'{"пойм/задето":>13} {"пойм/задето":>13}')
+print(f'{"":>18} {"ставке":>8} │ {"пойм/задето":>14} │ {"пойм/задето":>14}')
 print('─' * len(hdr))
 
-for k in (5.0, 2.0, 1.5, 1.3, 1.2, 1.1):
-    for pattern in ('both', 'alternate'):
-        deals = build(k, pattern)
-        anom = anomalies(deals)
-        dmg = 100 * (rate_of(deals) - rate_clean) / rate_clean
-        row = {'k': k, 'pattern': pattern, 'damage_pct': round(dmg, 1),
-               'cells': {}}
-        cells = []
-        for metric in ('naive', 'conj'):
-            for window in (1, 12):
-                r = reciprocity(deals, window)
-                if metric == 'naive':
-                    w = [1.0 - x for x in r]
-                else:
-                    w = [1.0 - x * min(1.0, max(0.0, (a - 1.0) /
-                                                (args.kappa - 1.0)))
-                         for x, a in zip(r, anom)]
-                caught, hurt, resid = evaluate(deals, w)
-                row['cells'][f'{metric}@{window}'] = {
-                    'caught_pct': caught, 'false_pct': hurt,
-                    'residual_damage_pct': round(
-                        100 * (resid - rate_clean) / rate_clean, 1)}
-                cells.append(f'{caught:>5.0f}%/{hurt:>5.1f}%')
-        report['scenarios'].append(row)
-        print(f'{k:>9.2f} {pattern:>10} {dmg:>+7.1f}% │ '
-              f'{cells[0]:>13} {cells[1]:>13} │ {cells[2]:>13} {cells[3]:>13}')
+SCEN = [(5.0, 'both', 2), (5.0, 'alternate', 2), (1.5, 'alternate', 2),
+        (5.0, '-', 3), (2.0, '-', 3), (1.5, '-', 3),
+        (5.0, '-', 4), (5.0, '-', 5), (5.0, '-', 6)]
+for k, pattern, ring in SCEN:
+    deals = build(k, pattern, ring)
+    anom = anomalies(deals)
+    dmg = 100 * (rate_of(deals) - rate_clean) / rate_clean
+    cells = []
+    for kind in ('pair', 'ring'):
+        r = reciprocity(deals, 12) if kind == 'pair' else ring_R(deals, 12, args.max_len)
+        w = [1.0 - x * min(1.0, max(0.0, (a - 1.0) / (args.kappa - 1.0)))
+             for x, a in zip(r, anom)]
+        caught, hurt, resid = evaluate(deals, w)
+        cells.append(f'{caught:>5.0f}%/{hurt:>5.1f}%')
+        report.setdefault('scenarios', []).append(
+            {'k': k, 'pattern': pattern, 'ring': ring, 'metric': kind,
+             'damage_pct': round(dmg, 1), 'caught_pct': caught,
+             'false_pct': hurt,
+             'residual_damage_pct': round(
+                 100 * (resid - rate_clean) / rate_clean, 1)})
+    label = (f'пара, {pattern}' if ring == 2 else f'кольцо из {ring}')
+    print(f'{label:>12} k={k:<4.1f} {dmg:>+7.1f}% │ {cells[0]:>14} │ '
+          f'{cells[1]:>14}')
 
 path = os.path.join(OUT, 'pair-independence.json')
 json.dump(report, open(path, 'w'), ensure_ascii=False, indent=1)
