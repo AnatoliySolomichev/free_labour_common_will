@@ -1,0 +1,671 @@
+<title>Оси труда и стандартный трудочас</title>
+<style>
+:root{
+  color-scheme: light;
+  --paper:#f4f6f8; --surface:#ffffff; --ink:#101519; --muted:#5c6672;
+  --rule:#dfe4ea; --grid:#e7ebf0; --axis:#c4ccd5;
+  --accent:#2a78d6; --accent-2:#eb6834;
+  --good:#0ca30c; --tip-bg:#101519; --tip-ink:#ffffff;
+  --shadow:0 1px 2px rgba(16,21,25,.06), 0 8px 24px rgba(16,21,25,.05);
+}
+@media (prefers-color-scheme: dark){
+  :root:where(:not([data-theme="light"])){
+    color-scheme: dark;
+    --paper:#0f1216; --surface:#171b20; --ink:#e8edf2; --muted:#98a3b0;
+    --rule:#262b32; --grid:#242931; --axis:#39414b;
+    --accent:#3987e5; --accent-2:#d95926;
+    --good:#0ca30c; --tip-bg:#e8edf2; --tip-ink:#0f1216;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.3);
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --paper:#0f1216; --surface:#171b20; --ink:#e8edf2; --muted:#98a3b0;
+  --rule:#262b32; --grid:#242931; --axis:#39414b;
+  --accent:#3987e5; --accent-2:#d95926;
+  --good:#0ca30c; --tip-bg:#e8edf2; --tip-ink:#0f1216;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.3);
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--paper); color:var(--ink);
+  font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  font-size:17px; line-height:1.65; -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1080px; margin:0 auto; padding:0 24px 96px}
+.prose{max-width:68ch}
+h1,h2,h3{text-wrap:balance; line-height:1.2; margin:0}
+h1{font-size:clamp(2rem,4.6vw,3.1rem); font-weight:680; letter-spacing:-.022em}
+h2{font-size:clamp(1.35rem,2.4vw,1.7rem); font-weight:660; letter-spacing:-.015em}
+h3{font-size:1.02rem; font-weight:640}
+p{margin:0}
+a{color:var(--accent)}
+
+.mono,.eyebrow,.tile .val,.tile .unit,table,.tick,.axis-label,.legend,.eq .num{
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-variant-numeric:tabular-nums;
+}
+.eyebrow{
+  font-size:.72rem; letter-spacing:.14em; text-transform:uppercase;
+  color:var(--muted); display:block; margin-bottom:10px;
+}
+
+header.head{padding:72px 0 40px; border-bottom:1px solid var(--rule)}
+header.head .sub{color:var(--muted); font-size:1.08rem; margin-top:16px; max-width:60ch}
+header.head .meta{
+  margin-top:24px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:.8rem; color:var(--muted); letter-spacing:.02em;
+}
+
+section{padding:56px 0; border-bottom:1px solid var(--rule)}
+section:last-of-type{border-bottom:0}
+.stack{display:flex; flex-direction:column; gap:18px}
+
+.tiles{display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:2px;
+  background:var(--rule); border:1px solid var(--rule); border-radius:10px; overflow:hidden}
+.tile{background:var(--surface); padding:22px 20px}
+.tile .lab{font-size:.78rem; color:var(--muted); letter-spacing:.02em}
+.tile .val{font-size:2.05rem; font-weight:650; letter-spacing:-.02em; margin-top:8px; display:block}
+.tile .unit{font-size:.9rem; color:var(--muted); font-weight:400; margin-left:4px}
+.tile .note{font-size:.8rem; color:var(--muted); margin-top:4px}
+
+.panel{background:var(--surface); border:1px solid var(--rule); border-radius:10px;
+  padding:24px; box-shadow:var(--shadow); margin-top:24px}
+.panel .cap{font-size:.86rem; color:var(--muted); margin-top:14px; max-width:70ch}
+figure{margin:0}
+figcaption{font-size:.95rem; font-weight:620; margin-bottom:4px}
+.chart-scroll{overflow-x:auto}
+svg{display:block; width:100%; height:auto}
+.tick{font-size:11px; fill:var(--muted)}
+.axis-label{font-size:11px; fill:var(--muted)}
+.gridline{stroke:var(--grid); stroke-width:1}
+.baseline{stroke:var(--axis); stroke-width:1}
+.reference{stroke:var(--axis); stroke-width:1; stroke-dasharray:4 4}
+.datalabel{font-size:11px; fill:var(--ink); font-family:ui-monospace,Menlo,monospace;
+  font-variant-numeric:tabular-nums}
+.maplabel{font-size:10.5px; fill:var(--ink)}
+.s1{fill:var(--accent)} .s2{fill:var(--accent-2)}
+.s1-dot{fill:var(--accent); stroke:var(--surface); stroke-width:2}
+.s2-dot{fill:var(--accent-2); stroke:var(--surface); stroke-width:2}
+.db-link{stroke:var(--axis); stroke-width:1.5}
+.sw-1{background:var(--accent)} .sw-2{background:var(--accent-2)}
+
+.legend{display:flex; gap:18px; flex-wrap:wrap; font-size:.8rem; color:var(--muted); margin-bottom:14px}
+.legend .k{display:inline-flex; align-items:center; gap:7px}
+.legend .sw{width:11px; height:11px; border-radius:3px; display:inline-block}
+
+.tip{position:fixed; pointer-events:none; z-index:50; background:var(--tip-bg); color:var(--tip-ink);
+  padding:8px 11px; border-radius:7px; font-size:.78rem; line-height:1.45; opacity:0;
+  transition:opacity .1s; font-family:ui-monospace,Menlo,monospace; font-variant-numeric:tabular-nums;
+  max-width:260px}
+.tip.on{opacity:1}
+
+table{width:100%; border-collapse:collapse; font-size:.83rem; margin-top:8px}
+th,td{text-align:right; padding:7px 10px; border-bottom:1px solid var(--rule)}
+th:first-child,td:first-child{text-align:left}
+th{color:var(--muted); font-weight:500; font-size:.76rem; letter-spacing:.04em; text-transform:uppercase}
+details{margin-top:16px}
+summary{cursor:pointer; font-size:.84rem; color:var(--accent); font-family:ui-monospace,Menlo,monospace}
+summary:focus-visible{outline:2px solid var(--accent); outline-offset:3px; border-radius:4px}
+
+/* Эквалайзеры профилей */
+.eqs{display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:16px; margin-top:24px}
+.eq{background:var(--surface); border:1px solid var(--rule); border-radius:10px; padding:20px}
+.eq .who{font-weight:640; font-size:.98rem}
+.eq .rate{color:var(--muted); font-size:.8rem; margin-top:2px;
+  font-family:ui-monospace,Menlo,monospace}
+.eq .row{display:grid; grid-template-columns:86px 1fr 38px; align-items:center;
+  gap:10px; margin-top:10px; font-size:.8rem}
+.eq .axname{color:var(--muted)}
+.eq .track{height:8px; background:var(--grid); border-radius:4px; overflow:hidden}
+.eq .fill{height:100%; background:var(--accent); border-radius:4px}
+.eq .num{text-align:right; font-size:.78rem}
+
+.callout{background:var(--surface); border:1px solid var(--rule);
+  border-left:3px solid var(--accent-2); border-radius:10px; padding:18px 22px;
+  margin-top:24px; max-width:70ch}
+.callout b{font-weight:660}
+
+pre{background:var(--surface); border:1px solid var(--rule); border-radius:9px; padding:16px;
+  overflow-x:auto; font-size:.82rem; line-height:1.6; margin:0}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.lead{font-size:1.06rem}
+.muted{color:var(--muted)}
+footer{padding:48px 0 0; color:var(--muted); font-size:.85rem}
+@media (prefers-reduced-motion:reduce){*{transition:none!important; animation:none!important}}
+</style>
+
+<div class="wrap">
+<header class="head">
+  <span class="eyebrow">Пилот · оценка труда без центра</span>
+  <h1>Сколько стоит час труда — если это не решает никто?</h1>
+  <p class="sub">Как сообщество равных участников само оценивает работу: ставки из сделок,
+  стандартный трудочас, оси труда и считалка, которая находит цену опасности, знаний и
+  мастерства — не спрашивая ни одно министерство.</p>
+  <p class="meta" id="headmeta"></p>
+</header>
+
+<section>
+  <span class="eyebrow">Шаг 1 · ставка</span>
+  <h2>Цену труда называют сделки, а не начальник</h2>
+  <div class="prose stack" style="margin-top:14px">
+    <p class="lead">В этой системе нет тарифной сетки и нет работодателя. Каждая работа
+    заканчивается <strong>приёмкой</strong>: заказчик и работник вместе подписывают,
+    что сделано, за сколько часов и почём. Цена часа — предмет обычного торга.</p>
+    <p>Из всех вчерашних подписанных сделок складывается <strong>ставка</strong> —
+    средняя цена часа каждой специальности. Сегодня она служит ориентиром для новых
+    сделок, завтра новые сделки подвинут её снова. Никто не назначает — все голосуют
+    собственными сделками.</p>
+  </div>
+</section>
+
+<section>
+  <span class="eyebrow">Шаг 2 · якорь</span>
+  <h2>Стандартный трудочас: средний час равен единице</h2>
+  <div class="prose stack" style="margin-top:14px">
+    <p>Если все разом попросят «на 10% дороже», все ставки вырастут на 10% — и никто не
+    станет богаче, просто бумаги на каждый час будет больше. Чтобы этого не было, все
+    ставки измеряются относительно <strong>среднего часа по всей сети</strong>: он по
+    определению равен единице. За час труда в среднем рождается ровно час обязательств —
+    встроенной инфляции нет.</p>
+    <p>Дорогие часы остаются дорогими, дешёвые — дешёвыми: якорь держит середину, а не
+    сжимает разброс. Хирургический час может стоить много часов уборки — это честный
+    результат сделок, а не чьё-то мнение.</p>
+  </div>
+  <div class="tiles" id="tiles-w" style="margin-top:24px"></div>
+</section>
+
+<section>
+  <span class="eyebrow">Шаг 3 · оси</span>
+  <h2>Труд многомерен: профиль вместо ярлыка</h2>
+  <div class="prose stack" style="margin-top:14px">
+    <p>«Электрик» — ярлык, который прячет главное: монтаж обесточенного щита и работа под
+    напряжением — очень разные работы. Поэтому каждая <strong>деятельность</strong>
+    описывается профилем по осям: сколько в ней знаний, опасности, работы с людьми,
+    какого мастерства она требует. Профиль — как эквалайзер: у каждой работы свой рисунок.</p>
+    <p>Значения профиля не назначает комиссия — их <strong>заверяют сами практики</strong>
+    этой работы, итог — медиана заверений. Одинокий лжец на общем фоне не виден вовсе.</p>
+  </div>
+  <div class="eqs" id="eqs"></div>
+</section>
+
+<section>
+  <span class="eyebrow">Шаг 4 · карта</span>
+  <h2>Похожие работы — рядом: облако вместо списка профессий</h2>
+  <div class="prose stack" style="margin-top:14px">
+    <p>Разложите все деятельности по осям — получится карта, где <strong>близко значит
+    похоже</strong>. «Профессия» на такой карте — просто сгусток соседних точек.
+    Родилась новая деятельность, по которой ещё нет сделок? Её первую цену подсказывают
+    соседи по карте. Исчезла нужда в работе — её ставка плавно дрейфует к соседям,
+    а не к нулю.</p>
+  </div>
+  <div class="panel">
+    <figure>
+      <figcaption>Учебный мир из 13 деятельностей: срез карты по двум осям</figcaption>
+      <div class="chart-scroll"><svg id="c-map" viewBox="0 0 720 430" role="img"
+        aria-label="Карта деятельностей по осям знание и опасность"></svg></div>
+      <p class="cap">Каждая точка — деятельность; показан срез по осям «знание» и
+      «опасность» (всего осей четыре). Сварщик и электрик под напряжением — соседи;
+      уборка и хирургия — дальние углы карты. Наведите курсор — виден полный профиль.</p>
+    </figure>
+  </div>
+</section>
+
+<section>
+  <span class="eyebrow">Шаг 5 · считалка</span>
+  <h2>Цены осей: сколько платят за опасность как таковую</h2>
+  <div class="prose stack" style="margin-top:14px">
+    <p>Теперь главное. У нас есть ставки (из сделок) и профили (от практиков). Считалка
+    задаёт вопрос: <strong>какие цены осей лучше всего объясняют все ставки разом?</strong>
+    Так оценщики раскладывают цену квартиры на «метры + район + этаж» — только здесь
+    вместо квартир работы, и цены выводятся из публичных сделок, а не назначаются.</p>
+    <p>В учебном мире считалка нашла: час «просто присутствия» стоит меньше половины
+    стандартного, полная шкала опасности добавляет к часу заметно больше, чем полная
+    шкала работы с людьми, дороже всего — мастерство. Это <em>измерение</em> того, что
+    сообщество уже сказало сделками, — у него нет автора, и каждый может пересчитать.</p>
+  </div>
+  <div class="panel">
+    <figure>
+      <figcaption>Цены осей учебного мира (в долях стандартного часа)</figcaption>
+      <div class="chart-scroll"><svg id="c-beta" viewBox="0 0 720 250" role="img"
+        aria-label="Цены осей учебного мира"></svg></div>
+      <p class="cap" id="beta-cap"></p>
+    </figure>
+  </div>
+</section>
+
+<section>
+  <span class="eyebrow">Шаг 6 · невязка</span>
+  <h2>Невязка: не доплата, а лампочка на приборной панели</h2>
+  <div class="prose stack" style="margin-top:14px">
+    <p>Модель «цена = сумма осей» почти никогда не сходится идеально. Разница между
+    настоящей ставкой и предсказанием называется <strong>невязкой</strong>. Важно:
+    невязку <em>никто не платит и не получает</em> — все деньги по-прежнему движутся
+    только по подписанным сделкам. Невязка — это показание прибора.</p>
+    <p>Показания читаются так. Мы нарочно спрятали от считалки ось «мастерство» — и
+    невязки тут же выстроились вдоль неё: мастер-столяр оказался «необъяснимо дорог»,
+    стажёр-программист — «необъяснимо дёшев». Система сама говорит:
+    <strong>в словаре не хватает оси</strong>. Возвращаем ось — невязки схлопываются
+    в ноль. В платежах при этом не изменилось ничего.</p>
+  </div>
+  <div class="panel">
+    <figure>
+      <figcaption>Невязки: без оси мастерства → с осью мастерства</figcaption>
+      <div class="legend" id="l-resid"></div>
+      <div class="chart-scroll"><svg id="c-resid" viewBox="0 0 720 470" role="img"
+        aria-label="Невязки деятельностей до и после добавления оси мастерства"></svg></div>
+      <p class="cap">Ноль — «ставка полностью объяснена профилем». Оранжевая точка —
+      невязка, когда считалка не знала про мастерство; синяя — когда узнала.</p>
+    </figure>
+  </div>
+  <div class="prose stack" style="margin-top:32px">
+    <h3>Но кто помешает выдумать ось под свою ренту?</h3>
+    <p>Ничто не мешает <em>предложить</em> — и почти всё мешает такой оси
+    прижиться. Ось не принимается за то, что она «лучше описывает» уже известные
+    ставки: подогнать можно что угодно, задним числом любой набор чисел объясним.
+    Ось принимается, только если она <strong>улучшает предсказание ставки, которой
+    модель не видела</strong>. Считалка по очереди прячет от себя каждую
+    деятельность, подгоняется на остальных и проверяет, насколько промахнулась по
+    спрятанной.</p>
+    <p>Ниже — этот экзамен для настоящей оси (мастерство) и для оси-пустышки:
+    числа, взятые из имени работы и не значащие ровно ничего. Пустышка объясняет
+    прошлое не хуже прочих — и проваливает экзамен на будущем.</p>
+  </div>
+  <div class="chart-scroll"><table id="t-gate"></table></div>
+</section>
+
+<section>
+  <span class="eyebrow">Шаг 7 · дефицит</span>
+  <h2>Дефицит виден как рента — и лечится людьми, а не формулой</h2>
+  <div class="prose stack" style="margin-top:14px">
+    <p>Второе чтение невязки. Пусть электриков для работы под напряжением вдруг не
+    хватает: заказчики соглашаются платить дороже, ставка ползёт вверх. Профиль работы
+    не изменился — изменился рынок. На табло это видно как <strong>рента дефицита</strong>:
+    часть ставки, которую оси не объясняют.</p>
+    <p>Рента — не надбавка по формуле, а сигнал всем: тут не хватает рук, а карта
+    подсказывает, кому проще всего переучиться — соседям. Люди приходят, предложение
+    растёт, ставка садится, рента тает. Балансирует не алгоритм — балансируют люди,
+    которым алгоритм честно показал, куда идти.</p>
+  </div>
+  <div class="panel">
+    <figure>
+      <figcaption id="def-title"></figcaption>
+      <div class="legend" id="l-def"></div>
+      <div class="chart-scroll"><svg id="c-def" viewBox="0 0 720 280" role="img"
+        aria-label="Структурная цена и рента дефицита"></svg></div>
+      <p class="cap" id="def-cap"></p>
+    </figure>
+  </div>
+  <div class="callout"><b>Почему это не «взятка сверх нормы».</b> Невязка — строка в
+  публичной витрине, а не платёж. Завысить кому-то ставку можно только настоящими
+  завышенными сделками — а они требуют свидетелей, входят в статистику и теперь ещё и
+  светятся на карте ренты: необъяснимо дорогая узкая деятельность с одним и тем же
+  плательщиком — готовый маркер приписки, видный каждому.</div>
+</section>
+
+<section id="sec-sim">
+  <span class="eyebrow">Шаг 8 · проверка</span>
+  <h2>Прогон на симуляции года: считалка не выдумывает</h2>
+  <div class="prose stack" style="margin-top:14px">
+    <p>Тот же инструмент запустили на данных годовой симуляции: два десятка
+    специальностей, сотни сделок помесячно. В том смоделированном мире труд оплачивался
+    <em>только по разряду</em> — осям опасности и знаний генератор цен не давал.</p>
+    <p>Считалка это честно показала: без оси разряда она объяснила меньше процента
+    разброса ставок и <strong>отказалась приписывать осям цену, которой нет</strong>.
+    С осью разряда — объяснила почти всё и восстановила размер премии за разряд,
+    заложенный в симулятор, хотя закона генератора она не знала. Инструмент измеряет,
+    а не сочиняет.</p>
+  </div>
+  <div class="tiles" id="tiles-sim" style="margin-top:24px"></div>
+  <div class="panel">
+    <figure>
+      <figcaption>Цены осей на данных симуляции (с осью разряда)</figcaption>
+      <div class="chart-scroll"><svg id="c-simbeta" viewBox="0 0 720 250" role="img"
+        aria-label="Цены осей на данных симуляции"></svg></div>
+      <p class="cap" id="simbeta-cap"></p>
+    </figure>
+  </div>
+</section>
+
+<section>
+  <span class="eyebrow">Шаг 9 · доверие</span>
+  <h2>Почему всей этой арифметике можно верить</h2>
+  <div class="prose stack" style="margin-top:14px">
+    <p><strong>Всё пересчитываемо.</strong> Ставки, профили, цены осей и невязки считаются
+    из публичных подписанных записей. Любой участник может взять те же блоки и получить
+    те же числа — «поверьте нам» здесь не существует как жанр.</p>
+    <p><strong>Сделка первична.</strong> Цены осей и предсказания никогда не диктуют цену
+    сделки — они лишь подсказывают ориентир там, где сделок ещё мало. Стоило бы сделать
+    формулу законом — профили начали бы рисовать. Поэтому последнее слово всегда за
+    двумя подписями: работника и заказчика.</p>
+    <p><strong>Врать дорого и бессмысленно.</strong> Профиль работы заверяется медианой
+    практиков; согласованный сторонами профиль в приёмке не меняет цену самой этой
+    сделки — выгоды от вранья нет, а подпись остаётся навсегда. Приписки требуют
+    сообщников-свидетелей и светятся на карте ренты.</p>
+  </div>
+  <details>
+    <summary>таблица учебного мира: профили, ставки, предсказания, невязки</summary>
+    <div class="chart-scroll"><table id="t-demo"></table></div>
+  </details>
+</section>
+
+<section>
+  <span class="eyebrow">Словарик</span>
+  <h2>Короткий словарь</h2>
+  <div class="chart-scroll"><table id="t-gloss"></table></div>
+</section>
+
+<section>
+  <span class="eyebrow">Повторить у себя</span>
+  <h2>Как пересчитать самому</h2>
+  <pre style="margin-top:20px"><code>docs/pilot/sim-year.sh                    # год симуляции (~4 минуты, если нужен свой прогон)
+python3 docs/pilot/axis-prices.py --html  # считалка цен осей + эта страница</code></pre>
+</section>
+
+<footer>
+  <p>Данные: <code>docs/pilot/sim-out/axis-prices.json</code> · идея: ИР-020 в
+  <code>docs/dev-ideas.md</code> · оси: <code>docs/specialty-axes.md</code> ·
+  нормировка: <code>economy.md §2б</code></p>
+</footer>
+</div>
+<div class="tip" id="tip" role="status" aria-live="polite"></div>
+
+<script>
+const DATA = __DATA__;
+const SVGNS = "http://www.w3.org/2000/svg";
+const el = (n, a = {}) => { const e = document.createElementNS(SVGNS, n);
+  for (const k in a) e.setAttribute(k, a[k]); return e; };
+
+/* Прямоугольник со скруглением ТОЛЬКО на конце данных, прижатый к базовой линии. */
+function barPath(x, y, w, h, r, dir) {
+  r = Math.max(0, Math.min(r, w / 2, h));
+  if (dir === "up")
+    return `M${x},${y+h} L${x},${y+r} Q${x},${y} ${x+r},${y} L${x+w-r},${y} Q${x+w},${y} ${x+w},${y+r} L${x+w},${y+h} Z`;
+  if (dir === "down")
+    return `M${x},${y} L${x+w},${y} L${x+w},${y+h-r} Q${x+w},${y+h} ${x+w-r},${y+h} L${x+r},${y+h} Q${x},${y+h} ${x},${y+h-r} Z`;
+  return `M${x},${y} L${x+w-r},${y} Q${x+w},${y} ${x+w},${y+r} L${x+w},${y+h-r} Q${x+w},${y+h} ${x+w-r},${y+h} L${x},${y+h} Z`;
+}
+
+const tip = document.getElementById("tip");
+function bindTip(node, html) {
+  const show = e => { tip.innerHTML = html; tip.classList.add("on");
+    const p = e.touches ? e.touches[0] : e;
+    let x = p.clientX + 14, y = p.clientY + 14;
+    const r = tip.getBoundingClientRect();
+    if (x + r.width > innerWidth - 8) x = p.clientX - r.width - 14;
+    if (y + r.height > innerHeight - 8) y = p.clientY - r.height - 14;
+    tip.style.left = x + "px"; tip.style.top = y + "px"; };
+  node.addEventListener("mouseenter", show);
+  node.addEventListener("mousemove", show);
+  node.addEventListener("mouseleave", () => tip.classList.remove("on"));
+}
+const fmt = v => (v >= 0 ? "+" : "") + v.toFixed(2);
+
+const demo = DATA.demo, sim = DATA.sim;
+const AX = demo.axes; // ["знание","опасность","люди","мастерство"]
+
+document.getElementById("headmeta").textContent =
+  `учебный мир: ${demo.rows.length} деятельностей` +
+  (sim ? ` · симуляция: ${sim.n_spec} специальностей, ${sim.months} мес.` : "") +
+  ` · расчёт ${DATA.generated} · python3 docs/pilot/axis-prices.py`;
+
+/* ── Плитка W ───────────────────────────────────────────────────────────── */
+document.getElementById("tiles-w").innerHTML = [
+  { lab: "Средний час по определению", val: "1.000", unit: "стч", note: "якорь: час бумаги за час труда" },
+  sim && { lab: "Нормировщик W в симуляции", val: sim.W.toFixed(4), unit: "", note: "сырые ставки делятся на W" },
+  { lab: "Уборка в учебном мире", val: demo.rows[0].fact.toFixed(2), unit: "стч/ч", note: "простой труд — около середины" },
+  { lab: "Хирургия в учебном мире", val: demo.rows.find(r => r.name.startsWith("хирург")).fact.toFixed(2), unit: "стч/ч", note: "разброс никто не сжимает" },
+].filter(Boolean).map(x => `
+  <div class="tile"><span class="lab">${x.lab}</span>
+    <span class="val">${x.val}<span class="unit">${x.unit}</span></span>
+    <div class="note">${x.note}</div></div>`).join("");
+
+/* ── Эквалайзеры профилей ───────────────────────────────────────────────── */
+const eqNames = ["уборка помещений", "электрик / под напряжением", "хирург / операция"];
+document.getElementById("eqs").innerHTML = eqNames.map(nm => {
+  const r = demo.rows.find(x => x.name === nm);
+  return `<div class="eq"><div class="who">${r.name}</div>
+    <div class="rate">ставка ${r.fact.toFixed(2)} стч/ч · ${r.hours} ч в сделках</div>` +
+    AX.map(a => `<div class="row"><span class="axname">${a}</span>
+      <span class="track"><span class="fill" style="width:${Math.round(r.axes[a]*100)}%"></span></span>
+      <span class="num">${r.axes[a].toFixed(2)}</span></div>`).join("") +
+  `</div>`;
+}).join("");
+
+/* ── Карта: знание × опасность ──────────────────────────────────────────── */
+(function () {
+  const svg = document.getElementById("c-map");
+  const W = 720, H = 430, L = 56, R = 24, T = 22, B = 56;
+  const iw = W - L - R, ih = H - T - B;
+  const X = v => L + iw * v, Y = v => T + ih - ih * v;
+  for (let i = 0; i <= 4; i++) {
+    const gx = L + iw * i / 4, gy = T + ih - ih * i / 4, v = (i / 4).toFixed(2);
+    svg.appendChild(el("line", { x1: gx, x2: gx, y1: T, y2: T + ih, class: i ? "gridline" : "baseline" }));
+    svg.appendChild(el("line", { x1: L, x2: W - R, y1: gy, y2: gy, class: i === 0 ? "baseline" : "gridline" }));
+    const tx = el("text", { x: gx, y: H - B + 20, class: "tick", "text-anchor": "middle" });
+    tx.textContent = v; svg.appendChild(tx);
+    const ty = el("text", { x: L - 8, y: gy + 4, class: "tick", "text-anchor": "end" });
+    ty.textContent = v; svg.appendChild(ty);
+  }
+  const xl = el("text", { x: W - R, y: H - 10, class: "axis-label", "text-anchor": "end" });
+  xl.textContent = "знание →"; svg.appendChild(xl);
+  const yl = el("text", { x: L, y: T - 8, class: "axis-label" });
+  yl.textContent = "опасность ↑"; svg.appendChild(yl);
+
+  const short = { "уборка помещений": "уборка", "электрик / монтаж": "монтаж",
+    "электрик / под напряжением": "под напряжением", "преподаватель / лекция": "лекция",
+    "хирург / операция": "хирург", "стажёр-программист": "стажёр-прог.",
+    "мастер-столяр": "столяр", "ввод данных": "ввод данных" };
+  // ручные сдвиги подписей там, где точки у нижнего края толпятся
+  const nudge = { "бухгалтер": [0, -10], "преподаватель / лекция": [-6, 14],
+    "стажёр-программист": [10, -10], "ввод данных": [0, -10], "грузчик": [0, 14],
+    "уборка помещений": [0, -10], "водитель": [0, -10], "мастер-столяр": [0, 14] };
+  demo.rows.forEach(r => {
+    const cx = X(r.axes["знание"]), cy = Y(r.axes["опасность"]);
+    svg.appendChild(el("circle", { cx, cy, r: 6, class: "s1-dot" }));
+    const hit = el("circle", { cx, cy, r: 15, fill: "transparent" });
+    bindTip(hit, `<b>${r.name}</b><br>` +
+      AX.map(a => `${a} ${r.axes[a].toFixed(2)}`).join("<br>") +
+      `<br>ставка ${r.fact.toFixed(2)} стч/ч`);
+    svg.appendChild(hit);
+    const [dx, dy] = nudge[r.name] || [0, -10];
+    const lb = el("text", { x: cx + dx, y: cy + dy + (dy > 0 ? 8 : 0), class: "maplabel",
+      "text-anchor": "middle" });
+    lb.textContent = short[r.name] || r.name; svg.appendChild(lb);
+  });
+})();
+
+/* ── Цены осей (горизонтальные бары) ────────────────────────────────────── */
+function betaChart(svgId, beta, capId, capText) {
+  const svg = document.getElementById(svgId);
+  const names = Object.keys(beta);
+  const W = 720, L = 130, R = 60, T = 12, rowH = 36, B = 40;
+  const H = T + names.length * rowH + B;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  const iw = W - L - R;
+  const max = Math.max(...names.map(n => Math.abs(beta[n]))) * 1.12 || 1;
+  const X = v => iw * Math.abs(v) / max;
+  for (let i = 0; i <= 4; i++) {
+    const x = L + iw * i / 4;
+    svg.appendChild(el("line", { x1: x, x2: x, y1: T, y2: T + names.length * rowH,
+      class: i ? "gridline" : "baseline" }));
+    const tx = el("text", { x, y: H - 12, class: "tick", "text-anchor": "middle" });
+    tx.textContent = (max * i / 4).toFixed(2); svg.appendChild(tx);
+  }
+  names.forEach((n, i) => {
+    const y = T + i * rowH + 8, bh = 14, v = beta[n];
+    const nm = el("text", { x: L - 10, y: y + bh - 2, class: "tick", "text-anchor": "end" });
+    nm.textContent = n; svg.appendChild(nm);
+    const b = el("path", { d: barPath(L + 1, y, Math.max(X(v), 2), bh, 4, "right"), class: "s1" });
+    bindTip(b, `<b>${n}</b><br>${v >= 0 ? "+" : ""}${v.toFixed(3)} стч за полную шкалу` +
+      (n === "базовый час" ? "<br>(свободный член: час при нулях всех осей)" : ""));
+    svg.appendChild(b);
+    const dl = el("text", { x: L + X(v) + 8, y: y + bh - 2, class: "datalabel" });
+    dl.textContent = (v >= 0 ? "+" : "") + v.toFixed(2); svg.appendChild(dl);
+  });
+  const al = el("text", { x: L, y: H - 12, class: "axis-label" });
+  al.textContent = "стч за полную шкалу оси"; svg.appendChild(al);
+  if (capId) document.getElementById(capId).textContent = capText;
+}
+betaChart("c-beta", demo.passB.beta, "beta-cap",
+  `Считалка объясняет ${(demo.passB.r2 * 100).toFixed(1)}% разброса ставок учебного мира. ` +
+  `«Базовый час» — цена часа при нулевых осях; остальное — добавка за полную шкалу оси. ` +
+  `Цены никем не назначены: это разложение реальных ставок.`);
+
+/* ── Невязки: гантели до/после ──────────────────────────────────────────── */
+(function () {
+  const svg = document.getElementById("c-resid");
+  const rows = [...demo.rows].sort((a, b) => b.resid_a - a.resid_a);
+  const W = 720, L = 190, R = 30, T = 16, rowH = 30, B = 48;
+  const H = T + rows.length * rowH + B;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  const iw = W - L - R;
+  const lo = Math.min(-0.25, ...rows.map(r => r.resid_a)) - 0.04;
+  const hi = Math.max(0.25, ...rows.map(r => r.resid_a)) + 0.06;
+  const X = v => L + iw * (v - lo) / (hi - lo);
+  for (let i = 0; i <= 4; i++) {
+    const v = lo + (hi - lo) * i / 4, x = X(v);
+    svg.appendChild(el("line", { x1: x, x2: x, y1: T, y2: T + rows.length * rowH, class: "gridline" }));
+    const tx = el("text", { x, y: H - 24, class: "tick", "text-anchor": "middle" });
+    tx.textContent = fmt(v); svg.appendChild(tx);
+  }
+  svg.appendChild(el("line", { x1: X(0), x2: X(0), y1: T, y2: T + rows.length * rowH, class: "reference" }));
+  const zl = el("text", { x: X(0), y: H - 8, class: "axis-label", "text-anchor": "middle" });
+  zl.textContent = "0 — ставка объяснена профилем"; svg.appendChild(zl);
+  rows.forEach((r, i) => {
+    const y = T + i * rowH + rowH / 2;
+    const nm = el("text", { x: L - 10, y: y + 4, class: "tick", "text-anchor": "end" });
+    nm.textContent = r.name; svg.appendChild(nm);
+    svg.appendChild(el("line", { x1: X(r.resid_a), x2: X(r.resid_b), y1: y, y2: y, class: "db-link" }));
+    const dA = el("circle", { cx: X(r.resid_a), cy: y, r: 6, class: "s2-dot" });
+    bindTip(dA, `<b>${r.name}</b><br>без оси мастерства: ${fmt(r.resid_a)}<br>факт ${r.fact.toFixed(2)}, предсказание ${r.pred_a.toFixed(2)}`);
+    svg.appendChild(dA);
+    const dB = el("circle", { cx: X(r.resid_b), cy: y, r: 6, class: "s1-dot" });
+    bindTip(dB, `<b>${r.name}</b><br>с осью мастерства: ${fmt(r.resid_b)}<br>факт ${r.fact.toFixed(2)}, предсказание ${r.pred_b.toFixed(2)}`);
+    svg.appendChild(dB);
+    if (Math.abs(r.resid_a) >= 0.2) {
+      const dl = el("text", { x: X(r.resid_a) + (r.resid_a > 0 ? 12 : -12), y: y + 4,
+        class: "datalabel", "text-anchor": r.resid_a > 0 ? "start" : "end" });
+      dl.textContent = fmt(r.resid_a); svg.appendChild(dl);
+    }
+  });
+  document.getElementById("l-resid").innerHTML = `
+    <span class="k"><i class="sw sw-2"></i>невязка без оси мастерства</span>
+    <span class="k"><i class="sw sw-1"></i>невязка с осью мастерства</span>`;
+})();
+
+/* ── Дефицит: структура + рента ─────────────────────────────────────────── */
+(function () {
+  const d = demo.deficit;
+  document.getElementById("def-title").textContent =
+    `Эксперимент: «${d.name}» в день нехватки рук (ставка ×${d.factor})`;
+  const svg = document.getElementById("c-def");
+  const W = 720, H = 280, L = 240, R = 40, T = 24, B = 48;
+  const iw = W - L - R, ih = H - T - B;
+  const max = d.fact_bumped * 1.15;
+  const bars = [
+    { lab: "обычный день (факт)", parts: [{ v: d.fact_normal, cls: "s1", tip: `ставка ${d.fact_normal.toFixed(2)} стч/ч` }] },
+    { lab: "структурная цена (по осям)", parts: [{ v: d.pred, cls: "s1", tip: `предсказание по профилю: ${d.pred.toFixed(2)} стч/ч` }] },
+    { lab: "день дефицита (факт)", parts: [
+      { v: d.pred, cls: "s1", tip: `объяснено осями: ${d.pred.toFixed(2)} стч/ч` },
+      { v: d.fact_bumped - d.pred, cls: "s2", tip: `рента дефицита: ${fmt(d.rent)} стч/ч (${d.rent_pct >= 0 ? "+" : ""}${d.rent_pct}%)<br>видна всем; тает с притоком людей` }] },
+  ];
+  const gap = 70, bw = (iw - gap * (bars.length - 1)) / bars.length;
+  for (let i = 0; i <= 4; i++) {
+    const v = max * i / 4, y = T + ih - ih * v / max;
+    svg.appendChild(el("line", { x1: L, x2: W - R, y1: y, y2: y, class: i ? "gridline" : "baseline" }));
+    const tx = el("text", { x: L - 8, y: y + 4, class: "tick", "text-anchor": "end" });
+    tx.textContent = v.toFixed(1); svg.appendChild(tx);
+  }
+  bars.forEach((b, i) => {
+    const x = L + i * (bw + gap);
+    let acc = 0;
+    b.parts.forEach((p, j) => {
+      const h = ih * p.v / max, y = T + ih - ih * (acc + p.v) / max;
+      const isTop = j === b.parts.length - 1;
+      const seg = isTop
+        ? el("path", { d: barPath(x, y, bw, Math.max(h, 2), 4, "up"), class: p.cls })
+        // нижний сегмент стопки: 2px зазор поверхности сверху, под верхним
+        : el("path", { d: `M${x},${y + 2} h${bw} v${Math.max(h - 2, 2)} h${-bw} Z`, class: p.cls });
+      bindTip(seg, `<b>${b.lab}</b><br>${p.tip}`);
+      svg.appendChild(seg);
+      acc += p.v;
+    });
+    const total = acc;
+    const vl = el("text", { x: x + bw / 2, y: T + ih - ih * total / max - 8,
+      class: "datalabel", "text-anchor": "middle" });
+    vl.textContent = total.toFixed(2); svg.appendChild(vl);
+    const lb = el("text", { x: x + bw / 2, y: H - B + 20, class: "tick", "text-anchor": "middle" });
+    lb.textContent = b.lab; svg.appendChild(lb);
+  });
+  document.getElementById("l-def").innerHTML = `
+    <span class="k"><i class="sw sw-1"></i>объяснено профилем осей</span>
+    <span class="k"><i class="sw sw-2"></i>рента дефицита (сигнал, не платёж)</span>`;
+  document.getElementById("def-cap").textContent =
+    `Ставка дня дефицита ${d.fact_bumped.toFixed(2)} стч/ч при структурной цене ${d.pred.toFixed(2)}: ` +
+    `рента ${fmt(d.rent)} стч/ч (${d.rent_pct >= 0 ? "+" : ""}${d.rent_pct}%). ` +
+    `Деньги идут по сделкам как обычно; рента — публичное показание прибора.`;
+})();
+
+/* ── Симуляция ──────────────────────────────────────────────────────────── */
+if (sim) {
+  document.getElementById("tiles-sim").innerHTML = [
+    { lab: "Специальностей", val: String(sim.n_spec), unit: "", note: `${sim.n_obs} корзин специальность×разряд` },
+    { lab: "Объяснено без оси разряда", val: (sim.passA.r2 * 100).toFixed(1), unit: "%", note: "осям без цены цена не приписана" },
+    { lab: "Объяснено с осью разряда", val: (sim.passB.r2 * 100).toFixed(1), unit: "%", note: "невязки почти нулевые" },
+    { lab: "Найденная премия за разряд", val: "+" + sim.passB.beta["разряд"].toFixed(3), unit: "стч", note: `в симулятор заложено +0.30 — закон восстановлен` },
+  ].map(x => `
+    <div class="tile"><span class="lab">${x.lab}</span>
+      <span class="val">${x.val}<span class="unit">${x.unit}</span></span>
+      <div class="note">${x.note}</div></div>`).join("");
+  const d = sim.deficit;
+  betaChart("c-simbeta", sim.passB.beta, "simbeta-cap",
+    `Оси информации, людей и опасности получили цену ≈0 — в мире симулятора за них и не платили. ` +
+    (d ? `Дефицит-эксперимент: «${d.ru}» (разряд ${d.level}) при ставке ×${d.factor} даёт ренту ` +
+      `${fmt(d.rent)} стч/ч (${d.rent_pct >= 0 ? "+" : ""}${d.rent_pct}%) — прибор работает и на живых данных.` : ""));
+} else {
+  document.getElementById("sec-sim").style.display = "none";
+}
+
+/* ── Экзамен оси: скользящий контроль ───────────────────────────────────── */
+(function () {
+  const g = demo.gate;
+  const rows = [
+    ["только знание, опасность, люди", g.loo_a, "—"],
+    ["+ мастерство (настоящая ось)", g.loo_b, g.verdict_b],
+    ["+ ось-пустышка (числа из имени)", g.loo_c, g.verdict_c],
+  ];
+  const best = Math.min(g.loo_a, g.loo_b, g.loo_c);
+  document.getElementById("t-gate").innerHTML =
+    `<thead><tr><th>Набор осей</th><th>Ошибка на невиданном (меньше — лучше)</th>` +
+    `<th>Вердикт</th></tr></thead><tbody>` +
+    rows.map(([n, v, verd]) => `<tr><td>${n}</td>` +
+      `<td>${v.toFixed(4)}${v === best ? " ★" : ""}</td>` +
+      `<td>${verd}</td></tr>`).join("") + `</tbody>`;
+})();
+
+/* ── Таблица учебного мира ──────────────────────────────────────────────── */
+document.getElementById("t-demo").innerHTML =
+  `<thead><tr><th>Деятельность</th>` + AX.map(a => `<th>${a}</th>`).join("") +
+  `<th>Часы</th><th>Ставка</th><th>Прогноз (все оси)</th><th>Невязка</th></tr></thead><tbody>` +
+  demo.rows.map(r => `<tr><td>${r.name}</td>` +
+    AX.map(a => `<td>${r.axes[a].toFixed(2)}</td>`).join("") +
+    `<td>${r.hours}</td><td>${r.fact.toFixed(2)}</td><td>${r.pred_b.toFixed(2)}</td>` +
+    `<td>${fmt(r.resid_b)}</td></tr>`).join("") + `</tbody>`;
+
+/* ── Словарик ───────────────────────────────────────────────────────────── */
+document.getElementById("t-gloss").innerHTML =
+  `<thead><tr><th>Термин</th><th>Смысл</th></tr></thead><tbody>` + [
+    ["трудочас (стч)", "единица расчётов: обязательство, обеспеченное будущим трудом должника"],
+    ["ставка", "средняя цена часа деятельности по вчерашним подписанным сделкам"],
+    ["коэффициент k", "личная надбавка/скидка в конкретной сделке — предмет торга, назавтра входит в ставку"],
+    ["стандартный трудочас", "якорь: средневзвешенный час по всей сети равен 1 — эмиссия идёт в ногу с трудом"],
+    ["ось", "измеримая сторона труда: знание, опасность, работа с людьми, мастерство…"],
+    ["профиль деятельности", "набор значений осей у конкретной работы; заверяется практиками, итог — медиана"],
+    ["цена оси", "сколько стандартного часа добавляет полная шкала оси; выводится из сделок, не назначается"],
+    ["невязка", "разница «факт − предсказание по осям»: показание прибора, не платёж"],
+    ["рента дефицита", "устойчивая невязка одной деятельности: сигнал «не хватает рук», тает с притоком людей"],
+  ].map(([t, s]) => `<tr><td>${t}</td><td style="text-align:left">${s}</td></tr>`).join("") +
+  `</tbody>`;
+</script>

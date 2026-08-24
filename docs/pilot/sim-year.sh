@@ -159,6 +159,7 @@ done
 
 # ── Одна сделка: заказчик c нанимает работника w на h часов ──────────────────
 ok_deals=0; fail_deals=0; total_hours=0
+printf 'month\tpayer\tworker\tspecialty\tlevel\thours\tcoef\n' > "$OUT/deals.tsv" 
 do_deal(){
     local c="$1" w="$2" h="$3"
     [[ -z "${PROF[$c]}" || -z "${PROF[$w]}" || "$c" == "$w" ]] && return
@@ -180,6 +181,10 @@ do_deal(){
     [[ -z "$xf" ]] && { ((fail_deals++)); return; }
     ftbc "p$w" transfer recv "$xf" --via "$VIA" >/dev/null 2>&1
     ((ok_deals++)); total_hours=$(( total_hours + h ))
+    # журнал сделок для анализа независимости контрагентов (ИР-021):
+    # кто кому платил, за какую специальность/разряд, сколько часов и по какому k
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "${m:-0}" "$c" "$w" "${PROF[$w]}" "${LVL[$w]}" "$h" "$coef" >> "$OUT/deals.tsv"
 }
 
 # ── Одно слияние: b слушает раз, a инициирует ────────────────────────────────
