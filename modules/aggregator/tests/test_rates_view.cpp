@@ -306,3 +306,183 @@ TEST_F(RatesViewTest, AxisAttestationSummaryCounts) {
     EXPECT_EQ(it->second.attesters, 2);
     EXPECT_DOUBLE_EQ(it->second.median, 0.02);   // lower weighted median of 2 (weights 1)
 }
+
+// ── ИР-021: вес сделки по независимости контрагентов ─────────────────────────
+//
+// Проверяем именно КОНЪЮНКЦИЮ: дисконт обязан требовать обе половины сразу.
+// Честная деревня взаимна, но торгует по обычной цене; одинокая премия дорога,
+// но не взаимна. Наказывать нужно только совпадение того и другого.
+class IndependenceTest : public ::testing::Test {
+protected:
+    std::filesystem::path              db_path_;
+    std::unique_ptr<AggregatorStorage> storage_;
+    BlockIndex                         next_index_ = 0;
+    records::Ref                       grade_ref_{};
+
+    UserId alice_ = make_chain(0xA1);
+    UserId carol_ = make_chain(0xC3);
+
+    void SetUp() override {
+        static int cnt = 0;
+        db_path_ = std::filesystem::temp_directory_path() /
+                   ("bc_indep_test_" + std::to_string(++cnt));
+        std::filesystem::remove_all(db_path_);
+        storage_ = std::make_unique<AggregatorStorage>(db_path_);
+
+        // Одна специальность и один разряд на всех: все сделки попадают в одну
+        // корзину, значит у аномалии есть общая опора-медиана.
+        const Block spec = add(alice_, records::Specialty{"хлебопёк"});
+        records::Grade g{};
+        g.specialty = ref_to(alice_, spec);
+        g.level     = 3;
+        grade_ref_  = ref_to(alice_, add(alice_, g));
+    }
+
+    void TearDown() override {
+        storage_.reset();
+        std::filesystem::remove_all(db_path_);
+    }
+
+    Block add(const UserId& owner, const records::Record& rec) {
+        const Block b = make_record_block(owner, next_index_++, rec);
+        EXPECT_TRUE(storage_->add_block(b));
+        return b;
+    }
+
+    // Рассчитанная сделка: worker отработал `hours` по цене `rate` за час,
+    // payer принял и заплатил ровно оценку.
+    void deal(const UserId& worker, const UserId& payer,
+              double hours, double rate, int64_t ts) {
+        records::WorkRecord wr{};
+        wr.agent = grade_ref_;
+        wr.hours = hours;
+        const Block work = add(worker, wr);
+
+        records::Acceptance a{};
+        a.work        = ref_to(worker, work);
+        a.receiver    = payer.bytes;
+        a.hours_raw   = hours;
+        a.labor_units = hours * rate;
+        a.timestamp   = ts;
+        const Block acc = add(payer, a);
+
+        records::Transfer t{};
+        t.from    = payer.bytes;
+        t.to      = worker.bytes;
+        t.origins = { {payer.bytes, hours * rate} };
+        t.reason  = ref_to(payer, acc);
+        add(payer, t);
+    }
+
+    // Фон корзины: десять односторонних сделок разных пар по обычной цене 1.0.
+    // Задают медиану, относительно которой меряется аномалия.
+    void honest_background(int64_t ts) {
+        for (uint8_t i = 0; i < 10; ++i)
+            deal(make_chain(static_cast<uint8_t>(0x10 + i)),
+                 make_chain(static_cast<uint8_t>(0x30 + i)), 1.0, 1.0, ts);
+    }
+};
+
+TEST_F(IndependenceTest, HonestReciprocalVillageKeepsFullWeight) {
+    const int64_t before = kDay - 86'400 * 30;
+    honest_background(before);
+    // Двое соседей весь месяц работают друг на друга по ОБЫЧНОЙ цене.
+    for (int i = 0; i < 4; ++i) {
+        deal(alice_, carol_, 1.0, 1.0, before);
+        deal(carol_, alice_, 1.0, 1.0, before);
+    }
+    deal(alice_, carol_, 1.0, 1.0, kDay + 100);          // сделка дня
+
+    const IndependenceParams indep{};
+    const auto plain = build_daily_rates(*storage_, kDay, {});
+    const auto weighted =
+        build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr, &indep);
+
+    ASSERT_EQ(plain.size(), 1u);
+    ASSERT_EQ(weighted.size(), 1u);
+    // Взаимность есть, аномалии нет → вес полный, ставка не шелохнулась.
+    EXPECT_NEAR(weighted[0].rate, plain[0].rate, 1e-9);
+    EXPECT_NEAR(weighted[0].rate, 1.0, 1e-9);
+    EXPECT_NEAR(weighted[0].hours, plain[0].hours, 1e-9);
+}
+
+TEST_F(IndependenceTest, CollusiveReciprocalPairIsDiscounted) {
+    const int64_t before = kDay - 86'400 * 30;
+    honest_background(before);
+    // Пара накручивает k втрое, гоняя бумагу туда-обратно: работа может быть
+    // настоящей, слоты не пересекаются — накручена ОЦЕНКА.
+    for (int i = 0; i < 4; ++i) {
+        deal(alice_, carol_, 1.0, 3.0, before);
+        deal(carol_, alice_, 1.0, 3.0, before);
+    }
+    deal(alice_, carol_, 1.0, 3.0, kDay + 100);          // сговорная сделка дня
+    deal(make_chain(0x41), make_chain(0x51), 1.0, 1.0, kDay + 100);  // честная
+
+    const IndependenceParams indep{};
+    const auto plain = build_daily_rates(*storage_, kDay, {});
+    const auto weighted =
+        build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr, &indep);
+
+    ASSERT_EQ(plain.size(), 1u);
+    ASSERT_EQ(weighted.size(), 1u);
+    EXPECT_NEAR(plain[0].rate, 2.0, 1e-9);      // (3.0 + 1.0) / 2 — сговор прошёл
+    // Дисконт МЯГКИЙ (развилка B3), а не отсечение: потоки пары 15 против 12,
+    // R = 1 − 3/27 = 0.889, аномалия втрое выше медианы корзины → вес 0.111.
+    // Среднее дня = (0.111·3 + 1·1) / (0.111 + 1) = 1.2 вместо 2.0: четыре
+    // пятых накрутки снято.
+    EXPECT_NEAR(weighted[0].rate, 1.2, 1e-3);
+    // Часы остаются сырыми: труд-то был, под вопросом его оценка.
+    EXPECT_NEAR(weighted[0].hours, 2.0, 1e-9);
+    EXPECT_EQ(weighted[0].deals, 2u);
+}
+
+TEST_F(IndependenceTest, OneSidedPremiumIsNotDiscounted) {
+    const int64_t before = kDay - 86'400 * 30;
+    honest_background(before);
+    // Дорогая, но ОДНОСТОРОННЯЯ сделка: заказчик у работника ничего не покупал
+    // в ответ. Это законная премия (срочность, дефицит) — трогать её нельзя.
+    deal(alice_, carol_, 1.0, 3.0, kDay + 100);
+
+    const IndependenceParams indep{};
+    const auto plain = build_daily_rates(*storage_, kDay, {});
+    const auto weighted =
+        build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr, &indep);
+
+    ASSERT_EQ(plain.size(), 1u);
+    ASSERT_EQ(weighted.size(), 1u);
+    EXPECT_NEAR(weighted[0].rate, plain[0].rate, 1e-9);
+    EXPECT_NEAR(weighted[0].rate, 3.0, 1e-9);
+}
+
+TEST_F(IndependenceTest, ShortWindowMissesAlternatingCollusion) {
+    // Почему окно обязано быть длинным (B2): пара, чередующая роли по месяцам,
+    // внутри короткого окна выглядит односторонней и ускользает целиком.
+    const int64_t month = 86'400 * 30;
+    honest_background(kDay - month * 2);
+    for (int i = 0; i < 4; ++i) {
+        deal(alice_, carol_, 1.0, 3.0, kDay - month * 2);   // позапрошлый месяц
+        deal(carol_, alice_, 1.0, 3.0, kDay - month);       // прошлый: роли сменились
+    }
+    deal(alice_, carol_, 1.0, 3.0, kDay + 100);
+
+    IndependenceParams short_win{};
+    short_win.window_days = 20;                 // короче периода чередования
+    IndependenceParams long_win{};              // 365 дней по умолчанию
+
+    // Вчерашняя ставка корзины — 1.0: за день торговала одна лишь пара, так что
+    // разница видна в том, насколько ей позволено сдвинуть ставку.
+    const std::vector<records::RateEntry> prev = {{"хлебопёк", 3, 1.0, 0.0, 0}};
+    const auto s = build_daily_rates(*storage_, kDay, prev, 0.3, 0.1, nullptr,
+                                     &short_win);
+    const auto l = build_daily_rates(*storage_, kDay, prev, 0.3, 0.1, nullptr,
+                                     &long_win);
+    ASSERT_EQ(s.size(), 1u);
+    ASSERT_EQ(l.size(), 1u);
+    // Короткое окно слепо: пара выглядит односторонней, доверие ко дню полное →
+    // обычное сглаживание 0.3·3.0 + 0.7·1.0 = 1.6.
+    EXPECT_NEAR(s[0].rate, 1.6, 1e-9);
+    // Длинное окно видит взаимность: доверие ко дню падает, и вчерашняя ставка
+    // почти не двигается.
+    EXPECT_LT(l[0].rate, 1.1);
+    EXPECT_GT(l[0].rate, 1.0);
+}

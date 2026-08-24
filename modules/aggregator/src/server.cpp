@@ -616,6 +616,11 @@ void AggregatorServer::setup_routes() {
         }
     });
 
+    // Counterparty independence for the averaging (ИР-021). Same parameters on
+    // both paths below — the ?day= preview must recompute by exactly the
+    // methodology the published aggregate used, or re-checking is meaningless.
+    static const IndependenceParams kIndependence{};
+
     // GET /economy/rates — today's specialty rates (records.md §11.2).
     // Computed lazily once per day and published as a signed DailyAggregate
     // block in the aggregator's own chain; the block also enters the block
@@ -633,7 +638,9 @@ void AggregatorServer::setup_routes() {
             // the published aggregate).
             if (req.has_param("day")) {
                 const int64_t d = std::stoll(req.get_param_value("day"));
-                const auto rr = build_daily_rates(storage_, d - d % 86'400, {});
+                const auto rr = build_daily_rates(storage_, d - d % 86'400, {},
+                                                  0.3, 0.1, nullptr,
+                                                  &kIndependence);
                 double sw = 0.0, swr = 0.0;
                 for (const auto& r : rr) { sw += r.hours; swr += r.rate * r.hours; }
                 const double W = sw > 0.0 ? swr / sw : 1.0;
@@ -710,7 +717,8 @@ void AggregatorServer::setup_routes() {
                 }
                 d.rates     = build_daily_rates(storage_, day - 86'400, previous,
                                                 0.3, 0.1,
-                                                cloud_opt ? &*cloud_opt : nullptr);
+                                                cloud_opt ? &*cloud_opt : nullptr,
+                                                &kIndependence);
                 // W = hours-weighted mean of raw rates (economy.md §2б): the client
                 // divides by it so the average labour-hour equals 1.
                 double sw = 0.0, swr = 0.0;
