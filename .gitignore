@@ -38,3 +38,9 @@ Testing/
 
 # Артефакты симуляции (sim-year.sh) — не коммитим
 docs/pilot/sim-out/
+
+# ── Архив переписки с Claude (скрипты — в git, данные — только локально) ──────
+claude-history/raw/
+claude-history/md/
+claude-history/html/
+claude-history/INDEX.md
