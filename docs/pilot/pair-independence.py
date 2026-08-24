@@ -25,6 +25,10 @@ ap.add_argument('--out')
 ap.add_argument('--kappa', type=float, default=1.25,
                 help='порог ценовой аномалии для конъюнктивной метрики')
 ap.add_argument('--attack-hours', type=float, default=6.0)
+ap.add_argument('--ref', choices=('deals', 'edges'), default='edges',
+                help='опора аномалии: по сделкам или схлопнутая по рёбрам')
+ap.add_argument('--full-cadence', action='store_true',
+                help='сговор торгует каждый месяц (объём не уравнивается)')
 ap.add_argument('--max-len', type=int, default=4,
                 help='наибольшая длина гасимого цикла в кольцевой метрике')
 args = ap.parse_args()
@@ -71,7 +75,8 @@ def build(k, pattern, ring=2):
     # Объём атаки уравнен по топологиям (≈ATTACK_DEALS сделок), иначе кольцо
     # из четверых просто заливает корзину числом, и сравнивается размер, а не
     # форма. Заодно сговор остаётся меньшинством корзины — см. предел ниже.
-    active = MONTHS[:max(1, round(ATTACK_DEALS / ring))]
+    active = MONTHS if args.full_cadence \
+        else MONTHS[:max(1, round(ATTACK_DEALS / ring))]
     for m in active:
         if ring == 2:
             A, B = names
@@ -187,17 +192,30 @@ def reciprocity(deals, window):
     return per
 
 
-def anomalies(deals):
-    """Во сколько раз цена часа сделки выше медианы своей корзины.
+def anomalies(deals, ref='deals'):
+    """Во сколько раз цена часа сделки выше медианы-опоры своей корзины.
 
-    Медиана берётся по ВСЕМ сделкам корзины, включая сговорные: в жизни
-    пометки «это сговор» нет. Медиана держится, пока сговор — меньше
-    половины корзины по числу сделок; отсюда требование к минимальному
-    размеру корзины (см. отчёт).
+    Опора считается по ВСЕМ сделкам, включая сговорные: в жизни пометки
+    «это сговор» нет. Отсюда слом: у медианы точка отказа 50%, и сговор,
+    набравший больше половины сделок корзины, становится сам себе опорой.
+
+    ref='edges' лечит это: сделки одного ребра (плательщик→работник)
+    схлопываются в одну точку со средней ценой. Кольцо из троих даёт три
+    точки, сколько бы сделок оно ни провело, — чтобы утопить опору, нужно
+    большинство КОНТРАГЕНТОВ, а не большинство сделок.
     """
     basket = defaultdict(list)
-    for d in deals:
-        basket[(d['spec'], d['level'])].append(d['coef'])
+    if ref == 'edges':
+        agg = defaultdict(lambda: [0.0, 0.0])   # ребро → [Σ units, Σ hours]
+        for d in deals:
+            a = agg[(d['spec'], d['level'], d['payer'], d['worker'])]
+            a[0] += d['units']; a[1] += d['hours']
+        for (spec, lvl, _p, _w), (u, h) in agg.items():
+            if h > 0:
+                basket[(spec, lvl)].append(u / h)
+    else:
+        for d in deals:
+            basket[(d['spec'], d['level'])].append(d['coef'])
     med = {k: st.median(v) for k, v in basket.items()}
     return [d['coef'] / med.get((d['spec'], d['level']), d['coef'] or 1.0)
             for d in deals]
@@ -240,7 +258,7 @@ SCEN = [(5.0, 'both', 2), (5.0, 'alternate', 2), (1.5, 'alternate', 2),
         (5.0, '-', 4), (5.0, '-', 5), (5.0, '-', 6)]
 for k, pattern, ring in SCEN:
     deals = build(k, pattern, ring)
-    anom = anomalies(deals)
+    anom = anomalies(deals, args.ref)
     dmg = 100 * (rate_of(deals) - rate_clean) / rate_clean
     cells = []
     for kind in ('pair', 'ring'):

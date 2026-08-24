@@ -233,14 +233,28 @@ std::vector<records::RateEntry> build_daily_rates(
     // ── ИР-021: counterparty independence over the window ────────────────────
     // Two ingredients, and the discount needs BOTH: how mutual the pair is, and
     // how far above its own basket the deal is priced.
+    using BasketKey = std::pair<std::string, uint8_t>;
     std::map<Edge, double> flow, circ;
-    std::map<std::pair<std::string, uint8_t>, std::vector<double>> basket;
+    std::map<BasketKey, std::vector<double>> basket;   // rates per distinct edge
     if (weighted) {
+        // Collapse by edge before taking the reference: one counterparty pair
+        // contributes ONE point however many deals it books, so drowning the
+        // median takes a majority of counterparties, not of deals.
+        std::map<BasketKey, std::map<Edge, std::pair<double, double>>> by_edge;
         for (const auto& d : resolved) {
             flow[{d.payer, d.worker}] += d.units;
-            if (d.rate > 0.0) basket[{d.specialty, d.level}].push_back(d.rate);
+            if (d.rate <= 0.0) continue;
+            auto& e = by_edge[{d.specialty, d.level}][{d.payer, d.worker}];
+            e.first  += d.units;
+            e.second += d.hours;
         }
-        for (auto& [key, rates] : basket) std::sort(rates.begin(), rates.end());
+        for (const auto& [key, edges] : by_edge) {
+            auto& rates = basket[key];
+            rates.reserve(edges.size());
+            for (const auto& [edge, uh] : edges)
+                if (uh.second > 0.0) rates.push_back(uh.first / uh.second);
+            std::sort(rates.begin(), rates.end());
+        }
         circ = circulation(flow, std::max<size_t>(2, indep->max_cycle));
     }
 
@@ -255,7 +269,10 @@ std::vector<records::RateEntry> build_daily_rates(
         const double R = std::clamp(cit->second / fit->second, 0.0, 1.0);
 
         const auto bit = basket.find({d.specialty, d.level});
-        if (bit == basket.end() || bit->second.empty()) return 1.0;
+        // Too few counterparties to tell an anomaly from a normal price: refuse
+        // to judge rather than punish an honest young specialty.
+        if (bit == basket.end() || bit->second.size() < indep->min_basket_edges)
+            return 1.0;
         const double median = quantile_sorted(bit->second, 0.5);
         if (median <= 0.0 || d.rate <= 0.0) return 1.0;
 
@@ -264,7 +281,7 @@ std::vector<records::RateEntry> build_daily_rates(
         // baskets have no trustworthy spread, so they fall back to `kappa`.
         double kappa = indep->kappa;
         if (indep->self_calibrate &&
-            bit->second.size() >= indep->calib_min_deals) {
+            bit->second.size() >= indep->calib_min_edges) {
             kappa = std::clamp(quantile_sorted(bit->second, 0.9) / median,
                                indep->kappa_min, indep->kappa_max);
         }
@@ -297,8 +314,9 @@ std::vector<records::RateEntry> build_daily_rates(
         records::RateEntry e{};
         e.specialty = key.first;
         e.level     = key.second;
-        e.hours     = acc.hours;
-        e.deals     = acc.deals;
+        e.hours          = acc.hours;
+        e.deals          = acc.deals;
+        e.weighted_hours = acc.w_hours;   // v2 (ИР-021): сколько объёма уцелело
         const auto prev = prev_rate.find(key);
         // Thinness is judged on the WEIGHTED volume: a bucket whose whole day
         // was discounted away carries no evidence, whatever its raw hours.
@@ -333,7 +351,7 @@ std::vector<records::RateEntry> build_daily_rates(
         prev_rate.erase(key);
     }
     for (const auto& [key, rate] : prev_rate)
-        out.push_back({key.first, key.second, rate, 0.0, 0});
+        out.push_back({key.first, key.second, rate, 0.0, 0, 0.0});
 
     std::sort(out.begin(), out.end(),
               [](const records::RateEntry& a, const records::RateEntry& b) {

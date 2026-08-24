@@ -332,12 +332,19 @@ struct RateEntry {
     std::string specialty;  // global key: the specialty name
     uint8_t     level;      // grade level 1–6
     double      rate;       // стч/hour, after smoothing
-    double      hours;      // Σ hours_raw of the day's settled deals
+    double      hours;      // Σ hours_raw of the day's settled deals, RAW
     uint64_t    deals;      // number of settled deals counted
+    // v2 (ИР-021): Σ weight·hours_raw — the volume that survived counterparty
+    // independence weighting. credibility = weighted_hours / hours ∈ [0,1] says
+    // how much of this basket's day was trusted evidence, so a reader sees not
+    // only the rate but how much was discounted to get it. Old (5-field)
+    // entries decode with weighted_hours = hours: nothing was discounted.
+    double      weighted_hours = 0.0;
 
     bool operator==(const RateEntry& o) const noexcept {
         return specialty == o.specialty && level == o.level && rate == o.rate
-            && hours == o.hours && deals == o.deals;
+            && hours == o.hours && deals == o.deals
+            && weighted_hours == o.weighted_hours;
     }
 };
 
@@ -355,6 +362,11 @@ struct DailyAggregate {
     // money supply grows in step with hours actually worked. Old (4-field) blocks
     // decode with W = 1.0 (no normalization).
     double                 W = 1.0;
+    // v4 (ИР-021): the counterparty-independence parameters this aggregate was
+    // computed with ("v1;window_days=365;max_cycle=4;..."), so a witness
+    // recomputes by the same methodology instead of guessing it — the same
+    // discipline as SpecialtyCloud::params. Empty: no weighting was applied.
+    std::string            indep;
 };
 
 // One neighbour of an activity in the specialty cloud (ИР-018, specialty-axes.md

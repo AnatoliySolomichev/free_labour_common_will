@@ -364,20 +364,53 @@ TEST(RecordsCodec, DailyAggregateRoundtrip) {
                     {"кардиохирург", 3, 14.0, 0.75, 1} };
 
     d.W         = 1.0509;   // v3 (economy.md §2б): нормировщик
+    d.indep     = "v1;window_days=365;max_cycle=4";   // v4 (ИР-021)
+    d.rates[0].weighted_hours = 0.42;   // часть объёма ушла в дисконт
+    d.rates[1].weighted_hours = 0.75;   // всё уцелело
 
     const auto decoded = std::get<DailyAggregate>(roundtrip(d));
     EXPECT_EQ(decoded.date,      d.date);
     EXPECT_EQ(decoded.timestamp, d.timestamp);
     EXPECT_DOUBLE_EQ(decoded.W,  1.0509);
+    EXPECT_EQ(decoded.indep,     d.indep);
     ASSERT_EQ(decoded.rates.size(), 2u);
     EXPECT_EQ(decoded.rates[0], d.rates[0]);
     EXPECT_EQ(decoded.rates[1], d.rates[1]);
+    EXPECT_DOUBLE_EQ(decoded.rates[0].weighted_hours, 0.42);
 
     DailyAggregate empty{};
     empty.date = 0;
     const auto de = std::get<DailyAggregate>(roundtrip(empty));
     EXPECT_TRUE(de.rates.empty());
     EXPECT_DOUBLE_EQ(de.W, 1.0);    // default par
+    EXPECT_TRUE(de.indep.empty());  // взвешивание не применялось
+}
+
+// Запись до v2 RateEntry (5 полей, без weighted_hours) считалась без
+// взвешивания независимости, значит весь её объём был зачтён: доверие = 1.
+TEST(RecordsCodec, LegacyRateEntryDecodesWithFullCredibility) {
+    std::vector<uint8_t> b;
+    b.push_back(0xA5);                          // map(5): агрегат v3
+    b.push_back(0x00); b.push_back(0x18); b.push_back(0x71);  // 0: тип 0x71
+    b.push_back(0x01); b.push_back(0x00);       // 1: date 0
+    b.push_back(0x02); b.push_back(0x81);       // 2: массив из одной ставки
+    b.push_back(0xA5);                          //    map(5): RateEntry v1
+    b.push_back(0x00); b.push_back(0x61); b.push_back(0x61);  // 0: "a"
+    b.push_back(0x01); b.push_back(0x03);       // 1: level 3
+    b.push_back(0x02); b.push_back(0xFB);       // 2: rate 2.0
+    for (uint8_t x : {0x40,0x00,0x00,0x00,0x00,0x00,0x00,0x00}) b.push_back(x);
+    b.push_back(0x03); b.push_back(0xFB);       // 3: hours 4.0
+    for (uint8_t x : {0x40,0x10,0x00,0x00,0x00,0x00,0x00,0x00}) b.push_back(x);
+    b.push_back(0x04); b.push_back(0x02);       // 4: deals 2
+    b.push_back(0x03); b.push_back(0x00);       // 3: timestamp 0
+    b.push_back(0x04); b.push_back(0xFB);       // 4: W 1.0
+    for (uint8_t x : {0x3F,0xF0,0x00,0x00,0x00,0x00,0x00,0x00}) b.push_back(x);
+
+    const auto d = std::get<DailyAggregate>(Codec::decode(b));
+    ASSERT_EQ(d.rates.size(), 1u);
+    EXPECT_DOUBLE_EQ(d.rates[0].hours, 4.0);
+    EXPECT_DOUBLE_EQ(d.rates[0].weighted_hours, 4.0);   // ничего не дисконтировано
+    EXPECT_TRUE(d.indep.empty());
 }
 
 // A pre-v3 aggregate (4 fields, no W) still decodes, with W defaulting to 1.0.

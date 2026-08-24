@@ -620,6 +620,15 @@ void AggregatorServer::setup_routes() {
     // both paths below — the ?day= preview must recompute by exactly the
     // methodology the published aggregate used, or re-checking is meaningless.
     static const IndependenceParams kIndependence{};
+    // Committed alongside the result, like SpecialtyCloud::params: a witness
+    // must recompute by the same methodology, not guess which one was used.
+    static const std::string kIndepParams =
+        "v1;window_days=" + std::to_string(kIndependence.window_days)
+      + ";max_cycle="     + std::to_string(kIndependence.max_cycle)
+      + ";kappa="         + std::to_string(kIndependence.kappa)
+      + ";self_calibrate=" + std::string(kIndependence.self_calibrate ? "1" : "0")
+      + ";calib_min_edges=" + std::to_string(kIndependence.calib_min_edges)
+      + ";min_basket_edges=" + std::to_string(kIndependence.min_basket_edges);
 
     // GET /economy/rates — today's specialty rates (records.md §11.2).
     // Computed lazily once per day and published as a signed DailyAggregate
@@ -646,7 +655,8 @@ void AggregatorServer::setup_routes() {
                 const double W = sw > 0.0 ? swr / sw : 1.0;
                 std::string body = "{\"preview_day\":" + std::to_string(d)
                                  + ",\"W\":" + std::to_string(W)
-                                 + ",\"rates\":[";
+                                 + ",\"indep\":\"" + json_escape(kIndepParams)
+                                 + "\",\"rates\":[";
                 bool first = true;
                 for (const auto& r : rr) {
                     if (!first) body += ',';
@@ -656,6 +666,8 @@ void AggregatorServer::setup_routes() {
                          + ",\"rate\":"    + std::to_string(r.rate)
                          + ",\"hours\":"   + std::to_string(r.hours)
                          + ",\"deals\":"   + std::to_string(r.deals)
+                         + ",\"weighted_hours\":"
+                                            + std::to_string(r.weighted_hours)
                          + "}";
                 }
                 body += "]}";
@@ -724,6 +736,7 @@ void AggregatorServer::setup_routes() {
                 double sw = 0.0, swr = 0.0;
                 for (const auto& r : d.rates) { sw += r.hours; swr += r.rate * r.hours; }
                 d.W = sw > 0.0 ? swr / sw : 1.0;
+                d.indep = kIndepParams;             // v4 (ИР-021)
                 const Block block = own_chain_->append_data(
                     records::Codec::encode(records::Record{d}));
                 try { storage_.add_block(block); } catch (...) {}

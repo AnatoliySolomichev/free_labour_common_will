@@ -48,9 +48,18 @@ namespace aggregator {
 // circular AND priced above its own basket:
 //
 //   R      = circulating part of flow(payer→worker) / flow(payer→worker)
-//   anom   = deal rate / median rate of its (specialty, level) basket
+//   anom   = deal rate / reference rate of its (specialty, level) basket
 //   excess = clamp((anom − 1) / (kappa − 1), 0, 1)
 //   weight = 1 − R · excess
+//
+// The reference is a median over the basket's distinct EDGES (all deals of one
+// payer→worker edge collapse to one point at their volume-weighted rate), not
+// over deals. A median breaks down at 50%, and a ring trading monthly easily
+// owns half the DEALS of a thin basket — then the reference becomes the
+// collusion's own price and the whole measure goes blind. Collapsing by edge
+// means drowning the reference takes a majority of COUNTERPARTIES: measured on
+// sim-year, the barrier on one basket rose from 3 conspirators to 15, at the
+// cost of 0.1pp more honest volume touched.
 //
 // max_cycle is a dial, not a wall: a conspiracy can always use a ring one longer.
 // Each extra link costs the conspirators another accomplice who can defect and
@@ -71,7 +80,13 @@ struct IndependenceParams {
     size_t  max_cycle       = 4;     // B5: longest ring cancelled; 2 = pairs only
     double  kappa           = 1.15;  // B1: fallback anomaly threshold
     bool    self_calibrate  = true;  // derive kappa from the basket's own spread
-    size_t  calib_min_deals = 8;     // below this the basket uses `kappa`
+    size_t  calib_min_edges = 8;     // below this the basket uses `kappa`
+    // Below this many distinct edges a basket has no trustworthy reference at
+    // all, so nothing is discounted there: refusing to judge beats punishing an
+    // honest young specialty. It leaves a hole for a pair alone in a fresh
+    // basket — that one is left to the rent map of ИР-020. On sim-year data
+    // this covers 4% of baskets holding 0.7% of network hours.
+    size_t  min_basket_edges = 4;
     double  kappa_min       = 1.10;  // clamps for the self-calibrated kappa
     double  kappa_max       = 1.50;
 };

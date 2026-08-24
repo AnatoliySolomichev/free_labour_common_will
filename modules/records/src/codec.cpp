@@ -298,20 +298,22 @@ void enc_pledge_revoke(Buf& out, const PledgeRevoke& pr) {
 }
 
 void enc_daily_aggregate(Buf& out, const DailyAggregate& d) {
-    w_map(out, 5);
+    w_map(out, 6);
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::DailyAggregate));
     w_uint(out, 1); w_int64(out, d.date);
     w_uint(out, 2); w_arr(out, d.rates.size());
     for (const auto& r : d.rates) {
-        w_map(out, 5);
+        w_map(out, 6);
         w_uint(out, 0); w_text(out, r.specialty);
         w_uint(out, 1); w_uint(out, r.level);
         w_uint(out, 2); w_float64(out, r.rate);
         w_uint(out, 3); w_float64(out, r.hours);
         w_uint(out, 4); w_uint(out, r.deals);
+        w_uint(out, 5); w_float64(out, r.weighted_hours);   // v2 (ИР-021)
     }
     w_uint(out, 3); w_int64(out, d.timestamp);
     w_uint(out, 4); w_float64(out, d.W);        // v3 (economy.md §2б)
+    w_uint(out, 5); w_text(out, d.indep);       // v4 (ИР-021)
 }
 
 void enc_specialty_cloud(Buf& out, const SpecialtyCloud& c) {
@@ -803,18 +805,25 @@ DailyAggregate dec_daily_aggregate_fields(CborReader& r, uint64_t field_count) {
         const uint64_t n = r.r_arr();
         d.rates.reserve(static_cast<size_t>(n));
         for (uint64_t i = 0; i < n; ++i) {
-            if (r.r_map() != 5) throw CodecError("RateEntry: expected 5 fields");
+            const uint64_t nf = r.r_map();
+            if (nf != 5 && nf != 6)
+                throw CodecError("RateEntry: expected 5 or 6 fields");
             RateEntry e{};
             expect_key(r, 0); e.specialty = r.r_text();
             expect_key(r, 1); e.level     = r.r_uint8();
             expect_key(r, 2); e.rate      = r.r_float64();
             expect_key(r, 3); e.hours     = r.r_float64();
             expect_key(r, 4); e.deals     = r.r_uint();
+            // v2 (ИР-021): pre-v2 entries were computed without independence
+            // weighting, so their whole volume counted — credibility 1.
+            if (nf >= 6) { expect_key(r, 5); e.weighted_hours = r.r_float64(); }
+            else         { e.weighted_hours = e.hours; }
             d.rates.push_back(std::move(e));
         }
     }
     expect_key(r, 3); d.timestamp = r.r_int();
     if (field_count >= 5) { expect_key(r, 4); d.W = r.r_float64(); }  // v3 economy.md §2б
+    if (field_count >= 6) { expect_key(r, 5); d.indep = r.r_text(); } // v4 ИР-021
     return d;
 }
 

@@ -517,3 +517,48 @@ TEST_F(IndependenceTest, ThreeChainRingIsCaughtOnlyByCycleSearch) {
     // R = 12/15 = 0.8 → вес 0.2, среднее дня (0.2·3 + 1·1)/(0.2 + 1) = 1.333.
     EXPECT_NEAR(r[0].rate, 4.0 / 3.0, 1e-3);
 }
+
+TEST_F(IndependenceTest, EdgeReferenceSurvivesDealMajorityCollusion) {
+    // Слом, вскрытый на прогоне: у медианы точка отказа 50%, и пара, набившая
+    // большинство СДЕЛОК корзины, становится сама себе опорой. Опора считается
+    // по рёбрам, поэтому пара — это две точки, сколько бы сделок она ни провела.
+    const int64_t before = kDay - 86'400 * 30;
+    honest_background(before);                       // 10 рёбер по обычной цене
+    for (int i = 0; i < 12; ++i) {                   // 24 сделки, но всего 2 ребра
+        deal(alice_, carol_, 1.0, 3.0, before);
+        deal(carol_, alice_, 1.0, 3.0, before);
+    }
+    deal(alice_, carol_, 1.0, 3.0, kDay + 100);                     // сговорная
+    deal(make_chain(0x71), make_chain(0x81), 1.0, 1.0, kDay + 100); // честная
+
+    // Сговор — 25 сделок из 36 в корзине (большинство), но лишь 2 ребра из 13.
+    const IndependenceParams indep{};
+    const auto weighted =
+        build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr, &indep);
+    ASSERT_EQ(weighted.size(), 1u);
+    // Потоки 39 и 36, вернулось 36 → R = 36/39 = 0.923, вес 0.077.
+    // Среднее дня = (0.077·3 + 1·1) / (0.077 + 1) = 1.143 вместо 2.0.
+    EXPECT_NEAR(weighted[0].rate, 1.143, 2e-3);
+    // Витрина показывает, сколько объёма уцелело: 0.077 + 1.0 из сырых 2.0 часов.
+    EXPECT_NEAR(weighted[0].hours, 2.0, 1e-9);
+    EXPECT_NEAR(weighted[0].weighted_hours, 1.077, 2e-3);
+}
+
+TEST_F(IndependenceTest, BasketWithTooFewCounterpartiesIsNotJudged) {
+    // Без достаточного числа контрагентов отличить аномалию от нормальной цены
+    // не по чему. Отказываемся судить: наказать честную молодую специальность
+    // хуже, чем пропустить. Дыра признана и оставлена карте ренты ИР-020.
+    const int64_t before = kDay - 86'400 * 30;
+    for (int i = 0; i < 4; ++i) {
+        deal(alice_, carol_, 1.0, 3.0, before);
+        deal(carol_, alice_, 1.0, 3.0, before);
+    }
+    deal(alice_, carol_, 1.0, 3.0, kDay + 100);
+
+    const IndependenceParams indep{};        // min_basket_edges = 4, рёбер всего 2
+    const auto weighted =
+        build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr, &indep);
+    ASSERT_EQ(weighted.size(), 1u);
+    EXPECT_NEAR(weighted[0].rate, 3.0, 1e-9);
+    EXPECT_NEAR(weighted[0].weighted_hours, weighted[0].hours, 1e-9);
+}
