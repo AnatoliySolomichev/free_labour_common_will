@@ -85,13 +85,22 @@ def predict(beta_raw, x):
     return sum(b * xi for b, xi in zip(beta_raw, x))
 
 
+# Запас, который кандидат обязан отыграть, чтобы быть принятым. Строгого
+# сравнения НЕ ХВАТАЕТ: замерено на 78 корзинах прогона года, 200 независимых
+# пустышек — строгий критерий (loo_with < loo_base) допускает пустышку в 16-18%
+# случаев, потому что скользящий контроль сам шумит. Запас 5% сбивает это до
+# 0.5% (1 из 200), не мешая настоящей оси: разряд отыгрывает 87%.
+GATE_MARGIN = 0.05
+
+
 def loo_rmse(rows_x, rows_y, rows_w):
     """Взвешенный RMSE скользящего контроля (leave-one-out).
 
     Критерий допуска оси в базис: ось принимается, только если улучшает
-    предсказание на наблюдении, которого модель НЕ видела при подгонке.
-    Подгонка «в себя» улучшается от любой оси, даже выдуманной, — поэтому
-    решает не R², а этот показатель (ИР-020, порог допуска оси).
+    предсказание на наблюдении, которого модель НЕ видела при подгонке,
+    и улучшает ЗАМЕТНО (GATE_MARGIN). Подгонка «в себя» улучшается от любой
+    оси, даже выдуманной, — поэтому решает не R², а этот показатель
+    (ИР-020, порог допуска оси).
     """
     n = len(rows_x)
     se = sw = 0.0
@@ -182,8 +191,10 @@ def run_demo():
     gate = {'loo_a': round(loo_rmse(xs_a, ys, ws), 4),
             'loo_b': round(loo_rmse(xs_b, ys, ws), 4),
             'loo_c': round(loo_rmse(xs_c, ys, ws), 4)}
-    gate['verdict_b'] = 'принять' if gate['loo_b'] < gate['loo_a'] else 'отклонить'
-    gate['verdict_c'] = 'принять' if gate['loo_c'] < gate['loo_a'] else 'отклонить'
+    bar = gate['loo_a'] * (1.0 - GATE_MARGIN)
+    gate['bar'] = round(bar, 4)
+    gate['verdict_b'] = 'принять' if gate['loo_b'] < bar else 'отклонить'
+    gate['verdict_c'] = 'принять' if gate['loo_c'] < bar else 'отклонить'
 
     return {'axes': ['знание', 'опасность', 'люди', 'мастерство'],
             'W': round(W, 4), 'rows': rows, 'gate': gate,
@@ -269,8 +280,10 @@ def run_sim(out_dir):
     gate = {'loo_a': round(loo_rmse(xs_a, ys, ws), 4),
             'loo_b': round(loo_rmse(xs_b, ys, ws), 4),
             'loo_c': round(loo_rmse(xs_c, ys, ws), 4)}
-    gate['verdict_b'] = 'принять' if gate['loo_b'] < gate['loo_a'] else 'отклонить'
-    gate['verdict_c'] = 'принять' if gate['loo_c'] < gate['loo_a'] else 'отклонить'
+    bar = gate['loo_a'] * (1.0 - GATE_MARGIN)
+    gate['bar'] = round(bar, 4)
+    gate['verdict_b'] = 'принять' if gate['loo_b'] < bar else 'отклонить'
+    gate['verdict_c'] = 'принять' if gate['loo_c'] < bar else 'отклонить'
 
     return {'W': round(W, 4), 'months': len(months), 'n_obs': len(obs),
             'gate': gate,
@@ -303,7 +316,8 @@ def report(demo, sim):
     print(f'  она же в пассе B: {worst["resid_b"]:+.2f} '
           f'(предсказание {worst["pred_b"]})')
     g = demo['gate']
-    print(f'  допуск оси (скользящий контроль, RMSE — меньше лучше):')
+    print(f'  допуск оси (скользящий контроль, RMSE — меньше лучше;'
+          f' планка {g["bar"]:.4f} = запас {GATE_MARGIN:.0%}):')
     print(f'    без мастерства        {g["loo_a"]:.4f}')
     print(f'    + мастерство          {g["loo_b"]:.4f}  → {g["verdict_b"]}')
     print(f'    + ось-пустышка        {g["loo_c"]:.4f}  → {g["verdict_c"]}')
