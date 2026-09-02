@@ -307,6 +307,47 @@ TEST_F(RatesViewTest, AxisAttestationSummaryCounts) {
     EXPECT_DOUBLE_EQ(it->second.median, 0.02);   // lower weighted median of 2 (weights 1)
 }
 
+// Заверитель — цепь, ПОДПИСАВШАЯ блок, а не `grade.chain`. `bc attest` без --grade
+// оставляет Ref пустым, а пустой Ref — это 32 нуля: по старому ключу все такие
+// заверители схлопывались в один голос, выживало последнее заверение. Регрессия.
+TEST_F(RatesViewTest, UngradedAttestersAreCountedSeparately) {
+    auto attest = [&](const UserId& who, double v, int64_t ts) {
+        records::AxisAttestation a{};
+        a.activity = "хлебопёк"; a.axis = "danger"; a.value = v; a.timestamp = ts;
+        add(who, a);                            // grade не задан — как `bc attest` без --grade
+    };
+    attest(alice_,           0.02, kDay);
+    attest(bob_,             0.03, kDay + 1);
+    attest(make_chain(0xC3), 0.20, kDay + 2);   // публикуется последним
+
+    const auto sum = build_axis_attestation_summary(*storage_);
+    const auto it = sum.find({"хлебопёк", "danger"});
+    ASSERT_NE(it, sum.end());
+    EXPECT_EQ(it->second.attesters, 3);          // было 1 — все трое под ключом из нулей
+    EXPECT_DOUBLE_EQ(it->second.median, 0.03);   // было 0.20 — «последний перебивает всех»
+}
+
+// Вес = разряд САМОГО заверителя (records.md §11.8). Чужой Grade — не его стояние:
+// иначе любой указывает на разряд 6 соседа и получает шестикратный голос.
+TEST_F(RatesViewTest, ForeignGradeBuysNoWeight) {
+    auto attest = [&](const UserId& who, double v, const records::Ref& g) {
+        records::AxisAttestation a{};
+        a.activity = "хлебопёк"; a.axis = "danger"; a.value = v; a.timestamp = kDay;
+        a.grade    = g;
+        add(who, a);
+    };
+    attest(alice_,           0.10, grade_ref_);   // свой разряд 3 → вес 3
+    attest(bob_,             0.50, grade_ref_);   // цепь Алисы ≠ автор → вес 1
+    attest(make_chain(0xC3), 0.90, grade_ref_);   // то же
+
+    const auto sum = build_axis_attestation_summary(*storage_);
+    const auto it = sum.find({"хлебопёк", "danger"});
+    ASSERT_NE(it, sum.end());
+    EXPECT_EQ(it->second.attesters, 3);
+    // Веса 3/1/1 → медиана на 0.10. Если бы чужой разряд считался (3/3/3) → 0.50.
+    EXPECT_DOUBLE_EQ(it->second.median, 0.10);
+}
+
 // ── ИР-021: вес сделки по независимости контрагентов ─────────────────────────
 //
 // Проверяем именно КОНЪЮНКЦИЮ: дисконт обязан требовать обе половины сразу.

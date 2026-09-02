@@ -153,28 +153,43 @@ std::map<std::pair<std::string, std::string>, AttestationStat>
 build_axis_attestation_summary(const AggregatorStorage& storage) {
     using RefHash = std::array<uint8_t, 32>;
     std::map<RefHash, records::Record> by_hash;
+    std::map<RefHash, RefHash>         author_of;   // block hash → the chain that signed it
     for (const Hash& bh : storage.all_block_hashes()) {
         const auto block = storage.get_block_by_hash(bh);
         if (!block || block->type != BlockType::DATA) continue;
         try { by_hash[bh.bytes] = records::Codec::decode(block->payload.data(),
                                                          block->payload.size()); }
-        catch (const records::CodecError&) {}
+        catch (const records::CodecError&) { continue; }
+        author_of[bh.bytes] = block->address.user_id.bytes;
     }
 
-    // Per (activity, axis): keep one entry per attester chain — the latest — so a
-    // single person cannot ballot-stuff. weight = attester's grade level here.
+    // Per (activity, axis): keep one entry per attester — the latest — so a single
+    // person cannot ballot-stuff.
+    //
+    // The attester is the chain that SIGNED the block, not `grade.chain`: the grade
+    // is optional, and an absent Ref is 32 zero bytes, so keying on it collapsed
+    // every attester who published without --grade into a single voice (one of them
+    // survived, the rest vanished from both the median and the count).
+    //
+    // weight = the attester's OWN Grade level (records.md §11.8 — "Grade автора В
+    // этой деятельности"). A Grade sitting on somebody else's chain is not the
+    // author's standing, so it buys no weight; unresolved or foreign → 1.
     struct Att { double value; double weight; int64_t ts; };
     std::map<std::pair<std::string, std::string>,
              std::map<RefHash, Att>> groups;
     for (const auto& [h, rec] : by_hash) {
         const auto* a = std::get_if<records::AxisAttestation>(&rec);
         if (!a) continue;
+        const auto author = author_of.find(h);
+        if (author == author_of.end()) continue;
         double weight = 1.0;
-        const auto git = by_hash.find(a->grade.hash);
-        if (git != by_hash.end())
-            if (const auto* g = std::get_if<records::Grade>(&git->second))
-                weight = static_cast<double>(g->level);
-        auto& per = groups[{a->activity, a->axis}][a->grade.chain];
+        if (a->grade.chain == author->second) {
+            const auto git = by_hash.find(a->grade.hash);
+            if (git != by_hash.end())
+                if (const auto* g = std::get_if<records::Grade>(&git->second))
+                    weight = static_cast<double>(g->level);
+        }
+        auto& per = groups[{a->activity, a->axis}][author->second];
         if (a->timestamp >= per.ts)              // latest attestation of this attester
             per = Att{a->value, weight, a->timestamp};
     }
