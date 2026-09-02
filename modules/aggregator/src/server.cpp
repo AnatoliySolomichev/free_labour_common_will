@@ -8,6 +8,7 @@
 #include "aggregator/profile_view.h"
 #include "aggregator/rates_view.h"
 #include "aggregator/cloud_view.h"
+#include "aggregator/axis_prices.h"
 #include "blockchain/serializer.h"
 #include "blockchain/errors.h"
 #include <records/catalog.h>
@@ -882,6 +883,181 @@ void AggregatorServer::setup_routes() {
                 body += "]}";
             }
             body += "]}";
+            res.set_content(body, "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
+                            "application/json");
+        }
+    });
+
+    // GET /economy/axis-prices — the hedonic decomposition of the day's rates
+    // (ИР-020, records.md §11.9): what the network actually pays for knowledge,
+    // danger, work with people and mastery. NOBODY sets these numbers; they are
+    // read out of deals that already happened.
+    //
+    // The input is the aggregator's OWN published DailyAggregate, not a fresh
+    // recomputation: the record is only re-checkable if a witness can name the
+    // exact rate table it stood on, so its block hash goes into `snapshot`.
+    //
+    // ?rent=1 adds the residual table — the rent map. Residuals are NOT stored in
+    // the record (they follow from beta + snapshot), the same discipline that
+    // keeps the spectral coordinates out of SpecialtyCloud.
+    svr.Get("/economy/axis-prices", [&](const httplib::Request& req,
+                                        httplib::Response& res) {
+        if (catalog_dir_.empty()) {
+            res.status = 501;
+            res.set_content("{\"error\":\"axis prices need a catalog: start with --catalog PATH\"}",
+                            "application/json");
+            return;
+        }
+        try {
+            const auto prof_text = read_file(catalog_dir_ / "professions.json");
+            if (!prof_text) {
+                res.status = 501;
+                res.set_content("{\"error\":\"professions.json not found in catalog dir\"}",
+                                "application/json");
+                return;
+            }
+            std::vector<records::Catalog> cats{records::parse_catalog(*prof_text)};
+
+            // Every rate table this aggregator actually published. One day is far
+            // too thin a cross-section to read a price surface out of, so the
+            // window is pooled — and the sources are named by block hash, because
+            // a record nobody can trace back to its input is worth nothing.
+            static const AxisPricesParams kAxisCfg{};
+            std::vector<records::DailyAggregate> days;
+            std::vector<Hash> day_hashes;
+            int64_t last_date = -1;
+            if (own_chain_) {
+                for (const Block& b : own_chain_->branch()) {
+                    if (b.type != BlockType::DATA) continue;
+                    try {
+                        const auto rec = records::Codec::decode(b.payload.data(),
+                                                                b.payload.size());
+                        const auto* d = std::get_if<records::DailyAggregate>(&rec);
+                        if (!d) continue;
+                        days.push_back(*d);
+                        day_hashes.push_back(Crypto::hash_block(b));
+                        last_date = std::max(last_date, d->date);
+                    } catch (const records::CodecError&) {}
+                }
+            }
+            if (days.empty()) {
+                res.status = 409;
+                res.set_content("{\"error\":\"no published rates yet — call /economy/rates first\"}",
+                                "application/json");
+                return;
+            }
+            const int64_t from_date = last_date - kAxisCfg.window_days * 86'400;
+            const auto pooled = pool_daily_rates(days, from_date);
+
+            const auto attested = build_axis_attestations(storage_);
+
+            // snapshot commits the input exactly: the catalog text, every pooled
+            // rate table by block hash, and the block set the attestations came from.
+            std::string material = *prof_text;
+            std::sort(day_hashes.begin(), day_hashes.end(),
+                      [](const Hash& a, const Hash& b) { return a.bytes < b.bytes; });
+            for (const Hash& h : day_hashes)
+                material.append(reinterpret_cast<const char*>(h.bytes.data()), 32);
+            {
+                auto hs = storage_.all_block_hashes();
+                std::sort(hs.begin(), hs.end(),
+                          [](const Hash& a, const Hash& b) { return a.bytes < b.bytes; });
+                for (const Hash& h : hs)
+                    material.append(reinterpret_cast<const char*>(h.bytes.data()), 32);
+            }
+            const Hash snap = Crypto::hash(
+                reinterpret_cast<const uint8_t*>(material.data()), material.size());
+
+            const auto now = static_cast<int64_t>(std::time(nullptr));
+            // W is already divided out by the pooling, hence 1.0 here.
+            const auto prices = build_axis_prices(pooled, 1.0, cats, last_date, now,
+                                                  snap.bytes, &attested, kAxisCfg);
+
+            // Publish once per source day, like DailyAggregate and SpecialtyCloud.
+            std::string block_hex;
+            if (own_chain_) {
+                std::lock_guard<std::mutex> lock(rates_mutex_);
+                for (const Block& b : own_chain_->branch()) {
+                    if (b.type != BlockType::DATA) continue;
+                    try {
+                        const auto rec = records::Codec::decode(b.payload.data(),
+                                                                b.payload.size());
+                        if (const auto* a = std::get_if<records::AxisPrices>(&rec))
+                            if (a->date == prices.date)
+                                block_hex = to_hex(Crypto::hash_block(b).bytes);
+                    } catch (const records::CodecError&) {}
+                }
+                if (block_hex.empty()) {
+                    const Block block = own_chain_->append_data(
+                        records::Codec::encode(records::Record{prices}));
+                    try { storage_.add_block(block); } catch (...) {}
+                    block_hex = to_hex(Crypto::hash_block(block).bytes);
+                }
+            }
+
+            std::string body = "{\"date\":" + std::to_string(prices.date)
+                + ",\"snapshot\":\"" + to_hex(prices.snapshot)
+                + "\",\"days\":" + std::to_string(days.size())
+                + ",\"block\":\"" + block_hex
+                + "\",\"params\":\"" + json_escape(prices.params)
+                + "\",\"basis\":[";
+            for (size_t i = 0; i < prices.basis.size(); ++i)
+                body += (i ? ",\"" : "\"") + json_escape(prices.basis[i]) + "\"";
+            body += "],\"fits\":[";
+            for (size_t i = 0; i < prices.fits.size(); ++i) {
+                const auto& f = prices.fits[i];
+                if (i) body += ',';
+                body += "{\"kind\":\"" + json_escape(f.kind) + "\",\"beta\":{";
+                for (size_t j = 0; j < f.beta.size(); ++j) {
+                    if (j) body += ',';
+                    body += "\"" + json_escape(j < prices.basis.size()
+                                              ? prices.basis[j] : std::to_string(j))
+                         + "\":" + std::to_string(f.beta[j]);
+                }
+                body += "},\"r2\":" + std::to_string(f.r2)
+                     +  ",\"rows\":" + std::to_string(f.rows)
+                     +  ",\"weight\":" + std::to_string(f.weight) + "}";
+            }
+            body += "],\"gate\":[";
+            for (size_t i = 0; i < prices.gate.size(); ++i) {
+                const auto& g = prices.gate[i];
+                if (i) body += ',';
+                body += "{\"axis\":\"" + json_escape(g.axis)
+                     + "\",\"loo_base\":" + std::to_string(g.loo_base)
+                     + ",\"loo_with\":"    + std::to_string(g.loo_with)
+                     + ",\"bar\":"         + std::to_string(g.bar)
+                     + ",\"admitted\":"    + (g.admitted ? "true" : "false") + "}";
+            }
+            body += "]";
+
+            // The rent map: fact − prediction per basket. A residual is DIAGNOSTICS,
+            // never a payment — it is computed after the fact, by a third party, out
+            // of one price that was already paid (ИР-020). A persistent one on a
+            // whole class of work means the vocabulary is missing an axis; a
+            // temporary one on a single activity is scarcity rent, now visible.
+            if (req.has_param("rent") && !prices.basis.empty()) {
+                std::vector<std::string> cols(prices.basis.begin() + 1, prices.basis.end());
+                const auto design = build_axis_design(pooled, 1.0, cats,
+                                                      cols, &attested);
+                const auto fit = fit_wls(design.obs);
+                body += ",\"rent\":[";
+                if (fit.ok)
+                    for (size_t i = 0; i < design.obs.size(); ++i) {
+                        const auto& o = design.obs[i];
+                        if (i) body += ',';
+                        body += "{\"specialty\":\"" + json_escape(o.slug)
+                             + "\",\"level\":" + std::to_string(o.level)
+                             + ",\"fact\":"     + std::to_string(o.rate)
+                             + ",\"pred\":"     + std::to_string(fit.pred[i])
+                             + ",\"resid\":"    + std::to_string(o.rate - fit.pred[i])
+                             + ",\"hours\":"    + std::to_string(o.weight) + "}";
+                    }
+                body += "]";
+            }
+            body += "}";
             res.set_content(body, "application/json");
         } catch (const std::exception& e) {
             res.status = 500;

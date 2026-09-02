@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string>
 
 namespace aggregator {
 
@@ -186,6 +187,207 @@ void sort_canonically(std::vector<AxisObservation>& obs) {
               [](const AxisObservation& a, const AxisObservation& b) {
                   return a.slug != b.slug ? a.slug < b.slug : a.level < b.level;
               });
+}
+
+// ── From a day's rates to a published price vector (records.md §11.9) ────────
+
+namespace {
+
+// Effective declared value of one axis: the catalog's bootstrap, overridden by
+// the grade-weighted median of practitioners' attestations (ИР-019) when there
+// is one. Deliberately NOT shared with cloud_view's version — the cloud needs
+// `material` (it is a coordinate there), the design matrix must not have it
+// (it is the reference category, axis_prices.h).
+double effective_axis(const records::CatalogEntry& e, const std::string& axis,
+                      const AttestedAxes* attested) {
+    double v = 0.0;
+    if      (axis == "material") v = e.axes.material;
+    else if (axis == "info")     v = e.axes.info;
+    else if (axis == "people")   v = e.axes.people;
+    else if (axis == "danger")   v = e.axes.danger;
+    else return 0.0;
+    if (attested) {
+        const auto it = attested->find({e.slug, axis});
+        if (it != attested->end()) v = it->second;
+    }
+    return v;
+}
+
+std::string fmt(double v) { return std::to_string(v); }
+
+}  // namespace
+
+std::vector<std::string> declared_axis_columns() {
+    return {"info", "people", "danger"};
+}
+
+AxisDesign build_axis_design(const std::vector<records::RateEntry>& rates,
+                             double                                 W,
+                             const std::vector<records::Catalog>&   catalogs,
+                             const std::vector<std::string>&        columns,
+                             const AttestedAxes*                    attested) {
+    AxisDesign d{};
+    d.basis.push_back(kAxisBaseColumn);
+    for (const auto& c : columns) d.basis.push_back(c);
+
+    std::map<std::string, const records::CatalogEntry*> by_slug;
+    for (const auto& cat : catalogs)
+        for (const auto& e : cat.entries)
+            if (e.axes.present) by_slug.emplace(e.slug, &e);
+
+    const double w_norm = W > 0.0 ? W : 1.0;
+    for (const auto& r : rates) {
+        // A basket with no traded hours is a rate carried forward from an
+        // earlier day, not evidence about today; counting it would let a stale
+        // number vote in a fit it contributed nothing to.
+        const double weight = r.weighted_hours > 0.0 ? r.weighted_hours : r.hours;
+        if (weight <= 0.0) continue;
+        const auto it = by_slug.find(r.specialty);
+        if (it == by_slug.end()) continue;      // no declared profile — not guessed at
+        AxisObservation o{};
+        o.slug   = r.specialty;
+        o.level  = r.level;
+        o.rate   = r.rate / w_norm;             // economy.md §2б: average hour = 1
+        o.weight = weight;
+        d.obs.push_back(std::move(o));
+    }
+    if (d.obs.empty()) return d;
+    sort_canonically(d.obs);
+
+    d.level_min = d.obs.front().level;
+    d.level_max = d.obs.front().level;
+    for (const auto& o : d.obs) {
+        d.level_min = std::min(d.level_min, o.level);
+        d.level_max = std::max(d.level_max, o.level);
+    }
+    const double span = d.level_max > d.level_min
+                      ? static_cast<double>(d.level_max - d.level_min) : 1.0;
+
+    for (auto& o : d.obs) {
+        o.x.assign(1, 1.0);                     // the constant
+        for (const auto& c : columns) {
+            if (c == kAxisLevel)
+                o.x.push_back((o.level - d.level_min) / span);
+            else if (c == kAxisJunk)
+                o.x.push_back(junk_axis(o.slug, o.level));
+            else
+                o.x.push_back(effective_axis(*by_slug.at(o.slug), c, attested));
+        }
+    }
+    return d;
+}
+
+std::vector<records::RateEntry> pool_daily_rates(
+    const std::vector<records::DailyAggregate>& days, int64_t from_date) {
+    struct Acc { double rw = 0.0, w = 0.0, h = 0.0; uint64_t deals = 0; };
+    std::map<std::pair<std::string, uint8_t>, Acc> pool;
+    for (const auto& d : days) {
+        if (d.date < from_date) continue;
+        const double w_norm = d.W > 0.0 ? d.W : 1.0;
+        for (const auto& r : d.rates) {
+            const double w = r.weighted_hours > 0.0 ? r.weighted_hours : r.hours;
+            if (w <= 0.0) continue;              // carried forward, not evidence
+            auto& a = pool[{r.specialty, r.level}];
+            a.rw    += (r.rate / w_norm) * w;
+            a.w     += w;
+            a.h     += r.hours;
+            a.deals += r.deals;
+        }
+    }
+    std::vector<records::RateEntry> out;
+    out.reserve(pool.size());
+    for (const auto& [key, a] : pool) {          // std::map: canonical order
+        records::RateEntry e{};
+        e.specialty      = key.first;
+        e.level          = key.second;
+        e.rate           = a.rw / a.w;           // already in W = 1 units
+        e.hours          = a.h;
+        e.deals          = a.deals;
+        e.weighted_hours = a.w;
+        out.push_back(std::move(e));
+    }
+    return out;
+}
+
+records::AxisPrices build_axis_prices(
+    const std::vector<records::RateEntry>& rates,
+    double                                 W,
+    const std::vector<records::Catalog>&   catalogs,
+    int64_t                                date,
+    int64_t                                timestamp,
+    const std::array<uint8_t, 32>&         snapshot,
+    const AttestedAxes*                    attested,
+    const AxisPricesParams&                cfg) {
+
+    records::AxisPrices out{};
+    out.date      = date;
+    out.snapshot  = snapshot;
+    out.timestamp = timestamp;
+
+    const auto declared = declared_axis_columns();
+    const AxisDesign base = build_axis_design(rates, W, catalogs, declared, attested);
+
+    std::string params =
+        "v1;axes=info,people,danger;ref=material;cand=level"
+        ";window_days=" + std::to_string(cfg.window_days)
+      + ";margin="  + fmt(cfg.margin)
+      + ";ridge="   + fmt(kRidgeRelative)
+      + ";W="       + fmt(W > 0.0 ? W : 1.0)
+      + ";weight=weighted_hours"
+      + ";level_min=" + std::to_string(static_cast<unsigned>(base.level_min))
+      + ";level_max=" + std::to_string(static_cast<unsigned>(base.level_max));
+
+    // Refusing is an answer. With no more baskets than columns the ridge would
+    // still return a smooth plausible vector, and nothing downstream could tell
+    // it apart from a measurement.
+    if (base.obs.size() <= base.basis.size()) {
+        out.params = params + ";refused=underdetermined;obs="
+                   + std::to_string(base.obs.size());
+        return out;
+    }
+
+    // The exam: does the grade earn a column of its own? The junk control keeps
+    // the exam itself honest — if a meaningless column also clears the bar, the
+    // criterion is not discriminating today and admits nobody.
+    std::vector<double> cand;
+    cand.reserve(base.obs.size());
+    {
+        const double span = base.level_max > base.level_min
+                          ? static_cast<double>(base.level_max - base.level_min) : 1.0;
+        for (const auto& o : base.obs)
+            cand.push_back((o.level - base.level_min) / span);
+    }
+    const AxisGate g = run_axis_gate(base.obs, cand, cfg.margin);
+
+    std::vector<std::string> columns = declared;
+    if (!g.ok) {
+        params += ";gate=unjudgeable";
+    } else {
+        out.gate.push_back({kAxisLevel, g.loo_base, g.loo_with, g.bar,
+                            g.admitted && g.junk_rejected});
+        out.gate.push_back({kAxisJunk,  g.loo_base, g.loo_junk, g.bar,
+                            !g.junk_rejected});
+        if (g.admitted && g.junk_rejected) columns.push_back(kAxisLevel);
+        if (!g.junk_rejected) params += ";gate=junk_admitted";
+    }
+
+    const AxisDesign fin = columns.size() == declared.size()
+                         ? base
+                         : build_axis_design(rates, W, catalogs, columns, attested);
+    const AxisFit fit = fit_wls(fin.obs);
+    if (!fit.ok) {
+        out.params = params + ";refused=underdetermined;obs="
+                   + std::to_string(fin.obs.size());
+        return out;
+    }
+
+    out.basis = fin.basis;
+    double sw = 0.0;
+    for (const auto& o : fin.obs) sw += o.weight;
+    out.fits.push_back({"declared", fit.beta, fit.r2,
+                        static_cast<uint64_t>(fin.obs.size()), sw});
+    out.params = params;
+    return out;
 }
 
 } // namespace aggregator

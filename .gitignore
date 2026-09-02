@@ -39,6 +39,10 @@ Testing/
 # Артефакты симуляции (sim-year.sh) — не коммитим
 docs/pilot/sim-out/
 
+# Байткод Python (появляется при импорте прототипов из другого скрипта)
+__pycache__/
+*.pyc
+
 # ── Архив переписки с Claude (скрипты — в git, данные — только локально) ──────
 claude-history/raw/
 claude-history/md/

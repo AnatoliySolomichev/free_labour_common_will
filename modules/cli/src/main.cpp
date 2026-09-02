@@ -2716,6 +2716,20 @@ static int cmd_cloud(int argc, char** argv) {
     return economy_get(via, path);
 }
 
+// bc axis-prices --via URL [--rent] — hedonic prices of the axes (ИР-020)
+static int cmd_axis_prices(int argc, char** argv) {
+    const auto via = flag_val(argc, argv, "--via");
+    if (via.empty()) {
+        std::cerr << "Usage: bc axis-prices --via URL [--rent]\n"
+                     "    --rent   also the residual table: fact vs prediction per\n"
+                     "             basket. The residual is DIAGNOSTICS, not a payment.\n";
+        return 1;
+    }
+    std::string path = "/economy/axis-prices";
+    if (flag_present(argc, argv, "--rent")) path += "?rent=1";
+    return economy_get(via, path);
+}
+
 // bc attestations --via URL [--slug SLUG] — attested axis values + support (ИР-019)
 static int cmd_attestations(int argc, char** argv) {
     const auto via = flag_val(argc, argv, "--via");
@@ -4404,6 +4418,13 @@ Means of production (ИР-011, records.md §10.2, records.md §9.4):
     [--grade REF] [--via URL]          over practitioners — value set by who does it
   attestations --via URL           Attested axis values: median, how many attesters,
     [--slug SLUG]                      and whether still preliminary (below N)
+  axis-prices --via URL [--rent]   What the network actually pays for knowledge,
+                                       danger, work with people, mastery (ИР-020,
+                                       signed AxisPrices). Nobody sets these prices —
+                                       they are read out of deals already made.
+                                       --rent: fact vs prediction per basket, the
+                                       rent map. A residual is diagnostics, not a
+                                       payment: there is one price, and it was paid.
   pay --acceptance REF             Pay the worker up to the appraisal (records.md §12.8)
     [--units N] [--via URL]            default: the unpaid remainder
     [--pledge REF]                     Transfer v4 (records.md §11.1): --acceptance says
@@ -4574,6 +4595,7 @@ int main(int argc, char** argv) {
         else if (cmd == "cloud")                            return cmd_cloud(argc, argv);
         else if (cmd == "attest")                           return cmd_attest(data_dir, argc, argv);
         else if (cmd == "attestations")                     return cmd_attestations(argc, argv);
+        else if (cmd == "axis-prices")                      return cmd_axis_prices(argc, argv);
         else if (cmd == "discover")                         return cmd_discover(data_dir, argc, argv);
         else if (cmd == "chain"     && subcmd == "info")    return cmd_chain_info(argc, argv);
         else if (cmd == "export"    && subcmd == "profiles")return cmd_export_profiles(argc, argv);

@@ -18,9 +18,17 @@
 // profiles start being drawn instead of measured (Goodhart), and the residual —
 // which is the whole diagnostic value — disappears by construction.
 
+#include "aggregator.h"
+
+#include <records/catalog.h>
+#include <records/types.h>
+
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace aggregator {
@@ -106,5 +114,97 @@ AxisGate run_axis_gate(const std::vector<AxisObservation>& obs,
 // order-dependent in floating point, so witnesses must traverse identically;
 // callers need not sort, this does it for them.
 void sort_canonically(std::vector<AxisObservation>& obs);
+
+// ── From a day's rates to a published price vector (ИР-020, records.md §11.9) ─
+
+// Column names are PROTOCOL KEYS, not display labels: they join to the catalog's
+// `axes` object and to AxisAttestation::axis, so two witnesses build the same
+// design matrix from the same words.
+inline constexpr const char* kAxisBaseColumn = "base";   // the constant, x[0] = 1
+inline constexpr const char* kAxisLevel      = "level";  // grade, the mastery axis
+inline constexpr const char* kAxisJunk       = "junk";   // the exam's control column
+
+// The declared axes taken from the catalog, in canonical column order.
+//
+// `material` is deliberately absent. material + info + people ≈ 1
+// (specialty-axes.md §4.1), so one of the three MUST be the reference category:
+// keep all three and the design matrix is singular by construction, the ridge
+// splits their shared effect evenly, and that split looks like an answer without
+// being one. Which one is dropped is recorded in AxisPrices::params.
+std::vector<std::string> declared_axis_columns();
+
+// (activity, axis) → the grade-weighted median of practitioners' attestations
+// (ИР-019, cloud_view::build_axis_attestations), overriding the catalog's
+// bootstrap value for that axis.
+using AttestedAxes = std::map<std::pair<std::string, std::string>, double>;
+
+// A design matrix plus the bookkeeping a witness needs to rebuild it.
+struct AxisDesign {
+    std::vector<std::string>     basis;   // basis[0] == kAxisBaseColumn
+    std::vector<AxisObservation> obs;     // canonical order (slug, level)
+    uint8_t level_min = 0;                // range the `level` column was scaled by;
+    uint8_t level_max = 0;                // data-derived, so it goes into params
+};
+
+// Build the design from a day's rate table.
+//
+// One observation per (specialty, level) basket that actually traded: y is the
+// basket's rate divided by W so the network's average labour-hour is 1
+// (economy.md §2б), and the weight is the basket's INDEPENDENCE-WEIGHTED hours
+// (ИР-021) — a basket that turned out to be one colluding ring speaks quietly
+// here too, instead of colluding its way into the price of an axis.
+//
+// `columns` names the design columns beyond the constant; unknown names and
+// baskets with no catalog profile are dropped rather than guessed at.
+AxisDesign build_axis_design(
+    const std::vector<records::RateEntry>&       rates,
+    double                                       W,
+    const std::vector<records::Catalog>&         catalogs,
+    const std::vector<std::string>&              columns,
+    const AttestedAxes*                          attested = nullptr);
+
+// Public parameters of the computation. Every one of them lands in
+// AxisPrices::params: a witness that cannot reproduce the parameters cannot
+// reproduce the number, and then publishing it means nothing.
+struct AxisPricesParams {
+    // How far back the pooled cross-section reaches. One day is far too thin to
+    // read a price surface out of — the prototype needed a year of the sim run
+    // to reach 78 baskets. Same default window as ИР-021, for the same reason:
+    // it must cover the period over which the roles in an economy alternate.
+    int64_t window_days = 365;
+    double  margin      = kAxisGateMargin;
+};
+
+// Pool a window of PUBLISHED daily aggregates into one cross-section.
+//
+// Each day's rates are raw and normalized by that day's own W (economy.md §2б),
+// so W is divided out before pooling — otherwise days with different normalizers
+// are summed in different units. A basket's pooled rate is the mean of its daily
+// rates weighted by independence-weighted hours (ИР-021); `hours` stays the raw
+// total, because the labour did happen — only its valuation was in doubt.
+// Baskets with no weighted volume in the window are rates carried forward, not
+// evidence, and do not appear.
+std::vector<records::RateEntry> pool_daily_rates(
+    const std::vector<records::DailyAggregate>& days,
+    int64_t                                     from_date);
+
+// Fit, examine the candidate axes, and package the result as a signed-ready
+// record. `snapshot` must commit the input (catalog + block set), like
+// SpecialtyCloud — the record is worth nothing if a witness cannot tell what it
+// was computed over.
+//
+// Refusal is a legitimate outcome, not a failure: with no more observations than
+// columns the record comes back with an empty basis and the reason in `params`.
+// The ridge would happily "solve" that system and hand back smooth plausible
+// noise.
+records::AxisPrices build_axis_prices(
+    const std::vector<records::RateEntry>&       rates,
+    double                                       W,
+    const std::vector<records::Catalog>&         catalogs,
+    int64_t                                      date,
+    int64_t                                      timestamp,
+    const std::array<uint8_t, 32>&               snapshot,
+    const AttestedAxes*                          attested = nullptr,
+    const AxisPricesParams&                      params   = {});
 
 } // namespace aggregator

@@ -317,6 +317,34 @@ say "Дмитрий:"; bcp dmitry wallet | sed 's/^/     /'
 hr "сетевые ставки по специальностям (bc rates — подписанный DailyAggregate)"
 bcp anna rates --via "$VIA" | python3 -m json.tool 2>/dev/null | head -20 || bcp anna rates --via "$VIA"
 
+hr "цены осей: во что сеть на самом деле оценивает знание, опасность, людей (bc axis-prices, ИР-020)"
+say "их никто не назначает — они вычитаны из уже совершённых сделок, как индекс"
+say "цен жилья вычитывает «цену этажа», не декретируя её"
+bcp anna axis-prices --via "$VIA" --rent > "$work/axis.json" 2>/dev/null || true
+python3 - "$work/axis.json" <<'PY' 2>/dev/null || say "(данных дня не хватило — считалка отказалась отвечать)"
+import json, sys
+d = json.load(open(sys.argv[1]))
+if not d.get("basis"):
+    print("     считалка ОТКАЗАЛАСЬ отвечать:", d.get("params", "").split(";")[-1])
+    print("     наблюдений не больше, чем столбцов — ридж выдал бы правдоподобный мусор")
+else:
+    f = d["fits"][0]
+    print("     цена оси (в нормированных трудочасах за полную единицу оси):")
+    for name, b in f["beta"].items():
+        print(f"       {name:10s} {b:+.3f}")
+    print(f"     R²={f['r2']:.3f} по {f['rows']} корзинам")
+    for g in d["gate"]:
+        v = "принята" if g["admitted"] else "отклонена"
+        print(f"     экзамен «{g['axis']}»: {g['loo_with']:.4f} против планки "
+              f"{g['bar']:.4f} — {v}")
+    rent = sorted(d.get("rent", []), key=lambda r: -abs(r["resid"]))[:3]
+    if rent:
+        print("     карта ренты (факт − предсказание; это ДИАГНОСТИКА, не доплата):")
+        for r in rent:
+            print(f"       {r['specialty']:20s} р.{r['level']}  факт {r['fact']:.2f}  "
+                  f"модель {r['pred']:.2f}  невязка {r['resid']:+.2f}")
+PY
+
 # ═════════════════════════════════════════════════════════════════════════════
 act "11. Взаимное заверение — растущий граф синхронизации, DAG (bc merge)"
 say "две ветки сливаются попарно; каждый merge несёт снимок охваченных участников"

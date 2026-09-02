@@ -808,3 +808,42 @@ TEST(RecordsCodec, AxisAttestationRoundtrip) {
     EXPECT_EQ(d.grade, a.grade);
     EXPECT_EQ(d.timestamp, 1'700'000'000LL);
 }
+
+// AxisPrices (0x77) — цены осей (ИР-020, records.md §11.9)
+TEST(RecordsCodec, AxisPricesRoundtrip) {
+    records::AxisPrices a{};
+    a.date = 1'700'000'000LL - 1'700'000'000LL % 86'400;
+    a.snapshot.fill(0x77);
+    a.params    = "v1;axes=info,people,danger;ref=material;margin=0.050000";
+    a.basis     = {"base", "info", "people", "danger", "level"};
+    a.fits      = { {"declared", {0.471, 0.925, 0.915, 0.356, 0.753}, 0.9962, 78, 1234.5} };
+    a.gate      = { {"level", 0.1467, 0.0373, 0.1394, true},
+                    {"junk",  0.1467, 0.1992, 0.1394, false} };
+    a.timestamp = 1'700'000'000LL;
+
+    const auto d = std::get<records::AxisPrices>(roundtrip(Record{a}));
+    EXPECT_EQ(d.date, a.date);
+    EXPECT_EQ(d.snapshot, a.snapshot);
+    EXPECT_EQ(d.params, a.params);
+    EXPECT_EQ(d.basis, a.basis);
+    ASSERT_EQ(d.fits.size(), 1u);
+    EXPECT_EQ(d.fits, a.fits);            // beta bit-for-bit: β must survive the wire
+    EXPECT_EQ(d.gate, a.gate);
+    EXPECT_EQ(d.timestamp, a.timestamp);
+}
+
+// Пустой набор — законное состояние: в этот день судить было не по чему
+// (наблюдений меньше, чем столбцов). Отказ обязан кодироваться, а не падать.
+TEST(RecordsCodec, AxisPricesRefusalRoundtrip) {
+    records::AxisPrices a{};
+    a.date      = 86'400;
+    a.snapshot.fill(0x00);
+    a.params    = "v1;refused=underdetermined";
+    a.timestamp = 86'500;
+
+    const auto d = std::get<records::AxisPrices>(roundtrip(Record{a}));
+    EXPECT_TRUE(d.basis.empty());
+    EXPECT_TRUE(d.fits.empty());
+    EXPECT_TRUE(d.gate.empty());
+    EXPECT_EQ(d.params, "v1;refused=underdetermined");
+}

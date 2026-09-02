@@ -349,6 +349,37 @@ void enc_axis_attestation(Buf& out, const AxisAttestation& a) {
     w_uint(out, 5); w_int64(out, a.timestamp);
 }
 
+void enc_axis_prices(Buf& out, const AxisPrices& a) {
+    w_map(out, 8);
+    w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::AxisPrices));
+    w_uint(out, 1); w_int64(out, a.date);
+    w_uint(out, 2); w_fixed(out, a.snapshot);
+    w_uint(out, 3); w_text(out, a.params);
+    w_uint(out, 4); w_arr(out, a.basis.size());
+    for (const auto& b : a.basis) w_text(out, b);
+    w_uint(out, 5); w_arr(out, a.fits.size());
+    for (const auto& f : a.fits) {
+        w_map(out, 5);
+        w_uint(out, 0); w_text(out, f.kind);
+        w_uint(out, 1); w_arr(out, f.beta.size());
+        for (const double b : f.beta) w_float64(out, b);
+        w_uint(out, 2); w_float64(out, f.r2);
+        w_uint(out, 3); w_uint(out, f.rows);
+        w_uint(out, 4); w_float64(out, f.weight);
+    }
+    w_uint(out, 6); w_arr(out, a.gate.size());
+    for (const auto& g : a.gate) {
+        w_map(out, 5);
+        w_uint(out, 0); w_text(out, g.axis);
+        w_uint(out, 1); w_float64(out, g.loo_base);
+        w_uint(out, 2); w_float64(out, g.loo_with);
+        w_uint(out, 3); w_float64(out, g.bar);
+        // This codec has no CBOR bool; 0/1 as an unsigned is just as deterministic.
+        w_uint(out, 4); w_uint(out, g.admitted ? 1u : 0u);
+    }
+    w_uint(out, 7); w_int64(out, a.timestamp);
+}
+
 // ── CBOR reader ───────────────────────────────────────────────────────────────
 
 class CborReader {
@@ -878,6 +909,54 @@ AxisAttestation dec_axis_attestation_fields(CborReader& r) {
     return a;
 }
 
+AxisPrices dec_axis_prices_fields(CborReader& r) {
+    AxisPrices a{};
+    expect_key(r, 1); a.date = r.r_int();
+    expect_key(r, 2); r.r_fixed(a.snapshot);
+    expect_key(r, 3); a.params = r.r_text();
+    expect_key(r, 4);
+    {
+        const uint64_t n = r.r_arr();
+        a.basis.reserve(static_cast<size_t>(n));
+        for (uint64_t i = 0; i < n; ++i) a.basis.push_back(r.r_text());
+    }
+    expect_key(r, 5);
+    {
+        const uint64_t n = r.r_arr();
+        a.fits.reserve(static_cast<size_t>(n));
+        for (uint64_t i = 0; i < n; ++i) {
+            if (r.r_map() != 5) throw CodecError("AxisFitEntry: expected 5 fields");
+            AxisFitEntry f{};
+            expect_key(r, 0); f.kind = r.r_text();
+            expect_key(r, 1);
+            const uint64_t m = r.r_arr();
+            f.beta.reserve(static_cast<size_t>(m));
+            for (uint64_t j = 0; j < m; ++j) f.beta.push_back(r.r_float64());
+            expect_key(r, 2); f.r2     = r.r_float64();
+            expect_key(r, 3); f.rows   = r.r_uint();
+            expect_key(r, 4); f.weight = r.r_float64();
+            a.fits.push_back(std::move(f));
+        }
+    }
+    expect_key(r, 6);
+    {
+        const uint64_t n = r.r_arr();
+        a.gate.reserve(static_cast<size_t>(n));
+        for (uint64_t i = 0; i < n; ++i) {
+            if (r.r_map() != 5) throw CodecError("AxisGateEntry: expected 5 fields");
+            AxisGateEntry g{};
+            expect_key(r, 0); g.axis     = r.r_text();
+            expect_key(r, 1); g.loo_base = r.r_float64();
+            expect_key(r, 2); g.loo_with = r.r_float64();
+            expect_key(r, 3); g.bar      = r.r_float64();
+            expect_key(r, 4); g.admitted = r.r_uint() != 0;
+            a.gate.push_back(std::move(g));
+        }
+    }
+    expect_key(r, 7); a.timestamp = r.r_int();
+    return a;
+}
+
 } // namespace (anonymous)
 
 // ── Codec public methods ──────────────────────────────────────────────────────
@@ -906,6 +985,7 @@ std::vector<uint8_t> Codec::encode(const Record& rec) {
         else if constexpr (std::is_same_v<T, Redemption>)  enc_redemption(out, r);
         else if constexpr (std::is_same_v<T, SpecialtyCloud>) enc_specialty_cloud(out, r);
         else if constexpr (std::is_same_v<T, AxisAttestation>) enc_axis_attestation(out, r);
+        else if constexpr (std::is_same_v<T, AxisPrices>)     enc_axis_prices(out, r);
     }, rec);
     return out;
 }
@@ -939,6 +1019,7 @@ Record Codec::decode(const uint8_t* data, size_t len) {
         case RecordType::Redemption: return dec_redemption_fields(r);
         case RecordType::SpecialtyCloud: return dec_specialty_cloud_fields(r);
         case RecordType::AxisAttestation: return dec_axis_attestation_fields(r);
+        case RecordType::AxisPrices:      return dec_axis_prices_fields(r);
         default:
             throw CodecError("CBOR: unknown record type discriminator");
     }
