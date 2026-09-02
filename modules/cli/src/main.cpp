@@ -2743,9 +2743,17 @@ static int cmd_attestations(int argc, char** argv) {
     return economy_get(via, path);
 }
 
-// bc attest --activity SLUG --axis danger --value 0.02 [--grade REF] [--via URL]
+// bc attest --activity SLUG --axis danger --value 0.02
+//           [--grade REF] [--deal REF] [--via URL]
 // Attest a declared cloud axis value (ИР-019). The aggregator takes the
 // grade-weighted median over practitioners; --grade gives your standing/weight.
+//
+// With --deal the statement is about ONE settled deal you were a party to, and
+// --value is then a DELTA to the catalog's profile ("+0.2 = this job was more
+// dangerous than the standard"). That statement costs something — two signatures
+// and a real payment stand behind it — so it beats your own free-standing one
+// whatever the order in time. Which side you spoke for is derived from the deal
+// itself, never declared (ИР-020).
 static int cmd_attest(const fs::path& data_dir, int argc, char** argv) {
     const auto activity = flag_val(argc, argv, "--activity");
     const auto axis     = flag_val(argc, argv, "--axis");
@@ -2754,6 +2762,10 @@ static int cmd_attest(const fs::path& data_dir, int argc, char** argv) {
         std::cerr << "Usage: bc attest --activity SLUG --axis danger --value 0.02\n"
                      "    [--grade GRADE_CHAIN/HASH]   your Grade in this activity "
                      "(weight; default weight 1)\n"
+                     "    [--deal ACCEPTANCE_CHAIN/HASH]  a settled deal you were a "
+                     "party to; --value\n"
+                     "                                 then means a DELTA to the "
+                     "catalog profile (ИР-020)\n"
                      "    [--via URL]                  publish to the aggregator\n";
         return 1;
     }
@@ -2764,6 +2776,8 @@ static int cmd_attest(const fs::path& data_dir, int argc, char** argv) {
     a.timestamp = static_cast<int64_t>(std::time(nullptr));
     const auto grade_s = flag_val(argc, argv, "--grade");
     if (!grade_s.empty()) a.grade = parse_ref(grade_s);
+    const auto deal_s = flag_val(argc, argv, "--deal");
+    if (!deal_s.empty()) a.deal = parse_ref(deal_s);
     return cmd_write(data_dir, argc, argv, a);
 }
 
@@ -4416,6 +4430,10 @@ Means of production (ИР-011, records.md §10.2, records.md §9.4):
   attest --activity SLUG           Attest a declared axis value, e.g. danger (ИР-019):
     --axis danger --value 0.02         the aggregator takes the grade-weighted median
     [--grade REF] [--via URL]          over practitioners — value set by who does it
+    [--deal ACCEPTANCE_REF]            about ONE settled deal you were a party to:
+                                       --value becomes a DELTA to the catalog profile,
+                                       the side is derived from the deal, and the
+                                       statement outranks your free-standing one (ИР-020)
   attestations --via URL           Attested axis values: median, how many attesters,
     [--slug SLUG]                      and whether still preliminary (below N)
   axis-prices --via URL [--rent]   What the network actually pays for knowledge,

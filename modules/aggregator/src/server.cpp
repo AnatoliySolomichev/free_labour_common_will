@@ -724,7 +724,7 @@ void AggregatorServer::setup_routes() {
                             const Hash sn = Crypto::hash(
                                 reinterpret_cast<const uint8_t*>(comb.data()), comb.size());
                             const auto cap = build_capital_intensity(storage_);
-                            const auto att = build_axis_attestations(storage_);
+                            const auto att = build_axis_attestations(storage_, 1, &cc);
                             cloud_opt = build_specialty_cloud(cc, day, now, sn.bytes, {},
                                                               5, 1.0, &cap, 0.5, &att);
                             prior_cats = std::move(cc);
@@ -828,7 +828,7 @@ void AggregatorServer::setup_routes() {
             // Derived axis (phase 2): capital-intensity from settled deals; and
             // attested declared axes (ИР-019) that override the catalog bootstrap.
             const auto capital  = build_capital_intensity(storage_);
-            const auto attested = build_axis_attestations(storage_);
+            const auto attested = build_axis_attestations(storage_, 1, &cats);
             constexpr double kCapitalWeight = 0.5;
 
             // snapshot commits the input: the catalog AND the block set the derived
@@ -981,7 +981,12 @@ void AggregatorServer::setup_routes() {
             const int64_t from_date = last_date - kAxisCfg.window_days * 86'400;
             const auto pooled = pool_daily_rates(days, from_date);
 
-            const auto attested = build_axis_attestations(storage_);
+            // Three readings of the same profile (ИР-020): what practitioners say
+            // standing alone, and what each side of a settled deal said inside it.
+            const auto profiles = split_axis_profiles(
+                build_axis_attestation_summary(storage_, &cats));
+            const auto& attested = profiles.all;
+            const AxisSides axis_sides{&profiles.seller, &profiles.buyer};
 
             // snapshot commits the input exactly: the catalog text, every pooled
             // rate table by block hash, and the block set the attestations came from.
@@ -1003,7 +1008,8 @@ void AggregatorServer::setup_routes() {
             const auto now = static_cast<int64_t>(std::time(nullptr));
             // W is already divided out by the pooling, hence 1.0 here.
             const auto prices = build_axis_prices(pooled, 1.0, cats, last_date, now,
-                                                  snap.bytes, &attested, kAxisCfg);
+                                                  snap.bytes, &attested, kAxisCfg,
+                                                  &axis_sides);
 
             // Publish once per source day, like DailyAggregate and SpecialtyCloud.
             std::string block_hex;
@@ -1061,6 +1067,19 @@ void AggregatorServer::setup_routes() {
                      + ",\"admitted\":"    + (g.admitted ? "true" : "false") + "}";
             }
             body += "]";
+            if (!prices.disagreement.empty()) {
+                body += ",\"disagreement\":{";
+                bool df = true;
+                for (size_t j = 0; j < prices.disagreement.size()
+                                   && j < prices.basis.size(); ++j) {
+                    if (prices.basis[j] == kAxisBaseColumn) continue;
+                    if (!df) body += ',';
+                    df = false;
+                    body += "\"" + json_escape(prices.basis[j]) + "\":"
+                         + std::to_string(prices.disagreement[j]);
+                }
+                body += "}";
+            }
 
             // The rent map: fact − prediction per basket. A residual is DIAGNOSTICS,
             // never a payment — it is computed after the fact, by a third party, out
@@ -1105,20 +1124,38 @@ void AggregatorServer::setup_routes() {
         // preliminary. The value of N is the shared open question (records.md §14.8 п.11).
         constexpr int kMinAttesters = 1;
         const std::string want = req.has_param("slug") ? req.get_param_value("slug") : "";
-        const auto summary = build_axis_attestation_summary(storage_);
+        std::vector<records::Catalog> cats;
+        if (!catalog_dir_.empty())
+            if (const auto pt = read_file(catalog_dir_ / "professions.json"))
+                try { cats.push_back(records::parse_catalog(*pt)); }
+                catch (const std::exception&) {}
+        const auto summary = build_axis_attestation_summary(
+            storage_, cats.empty() ? nullptr : &cats);
         std::string body = "{\"min_attesters\":" + std::to_string(kMinAttesters)
                          + ",\"axes\":[";
         bool first = true;
-        for (const auto& [key, stat] : summary) {
+        for (const auto& [key, sum] : summary) {
             if (!want.empty() && key.first != want) continue;
             if (!first) body += ',';
             first = false;
             body += "{\"activity\":\"" + json_escape(key.first)
                  + "\",\"axis\":\"" + json_escape(key.second)
-                 + "\",\"value\":" + std::to_string(stat.median)
-                 + ",\"attesters\":" + std::to_string(stat.attesters)
-                 + ",\"preliminary\":" + (stat.attesters < kMinAttesters ? "true" : "false")
-                 + "}";
+                 + "\",\"value\":" + std::to_string(sum.all.median)
+                 + ",\"attesters\":" + std::to_string(sum.all.attesters)
+                 + ",\"preliminary\":"
+                 + (sum.all.attesters < kMinAttesters ? "true" : "false");
+            // The two sides of a deal, side by side and never averaged (ИР-020):
+            // where both spoke, their gap is the published disagreement.
+            if (sum.seller.attesters || sum.buyer.attesters) {
+                body += ",\"seller\":{\"value\":" + std::to_string(sum.seller.median)
+                     + ",\"attesters\":" + std::to_string(sum.seller.attesters) + "}"
+                     + ",\"buyer\":{\"value\":" + std::to_string(sum.buyer.median)
+                     + ",\"attesters\":" + std::to_string(sum.buyer.attesters) + "}";
+                if (sum.seller.attesters && sum.buyer.attesters)
+                    body += ",\"disagreement\":"
+                         + std::to_string(std::abs(sum.seller.median - sum.buyer.median));
+            }
+            body += "}";
         }
         body += "]}";
         res.set_content(body, "application/json");

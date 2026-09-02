@@ -355,7 +355,8 @@ records::AxisPrices build_axis_prices(
     int64_t                                timestamp,
     const std::array<uint8_t, 32>&         snapshot,
     const AttestedAxes*                    attested,
-    const AxisPricesParams&                cfg) {
+    const AxisPricesParams&                cfg,
+    const AxisSides*                       sides) {
 
     records::AxisPrices out{};
     out.date      = date;
@@ -419,6 +420,67 @@ records::AxisPrices build_axis_prices(
     for (const auto& o : fin.obs) sw += o.weight;
     out.fits.push_back({"declared", fit.beta, fit.r2,
                         static_cast<uint64_t>(fin.obs.size()), sw});
+
+    // ── The two sides, kept apart (ИР-020) ──────────────────────────────────
+    if (sides && sides->seller && sides->buyer) {
+        const AxisDesign ds = build_axis_design(rates, W, catalogs, columns, sides->seller);
+        const AxisDesign db = build_axis_design(rates, W, catalogs, columns, sides->buyer);
+        if (ds.obs.size() == fin.obs.size() && db.obs.size() == fin.obs.size()) {
+            const size_t n = fin.obs.size(), m = fin.basis.size();
+
+            // Per-observation distance between the two readings, and per-column
+            // disagreement — the published fact that the sides differ, and where.
+            std::vector<double> dist(n, 0.0);
+            out.disagreement.assign(m, 0.0);
+            double wsum = 0.0;
+            for (size_t i = 0; i < n; ++i) {
+                double d2 = 0.0;
+                for (size_t j = 1; j < m; ++j) {
+                    const double gap = std::abs(ds.obs[i].x[j] - db.obs[i].x[j]);
+                    d2 += gap * gap;
+                    out.disagreement[j] += fin.obs[i].weight * gap;
+                }
+                dist[i] = std::sqrt(d2);
+                wsum += fin.obs[i].weight;
+            }
+            if (wsum > 0.0)
+                for (auto& d : out.disagreement) d /= wsum;
+
+            // τ is the median distance itself, not a decreed constant. It has to
+            // self-calibrate: measured, a fixed threshold is fine while disputes
+            // are a minority but destroys the basis once they are the majority —
+            // at 70% contested only 3.3 of 13 activities kept meaningful weight,
+            // fewer than the design has columns. A τ that grows with the dispute
+            // stops the weighting from eating the very coverage it needs.
+            std::vector<double> sorted = dist;
+            std::sort(sorted.begin(), sorted.end());
+            const double tau = std::max(sorted[sorted.size() / 2], 1e-3);
+
+            // "agreed": the midpoint of the two readings, each observation weighted
+            // by how far apart the sides stood on it.
+            AxisDesign da = ds;
+            for (size_t i = 0; i < n; ++i) {
+                for (size_t j = 1; j < m; ++j)
+                    da.obs[i].x[j] = 0.5 * (ds.obs[i].x[j] + db.obs[i].x[j]);
+                da.obs[i].weight = fin.obs[i].weight
+                                 * std::exp(-(dist[i] * dist[i]) / (tau * tau));
+            }
+
+            auto add_fit = [&](const char* kind, const AxisDesign& d) {
+                const AxisFit f = fit_wls(d.obs);
+                if (!f.ok) return;
+                double w = 0.0;
+                for (const auto& o : d.obs) w += o.weight;
+                out.fits.push_back({kind, f.beta, f.r2,
+                                    static_cast<uint64_t>(d.obs.size()), w});
+            };
+            add_fit("seller", ds);
+            add_fit("buyer",  db);
+            add_fit("agreed", da);
+            params += ";sides=1;tau=" + fmt(tau);
+        }
+    }
+
     out.params = params;
     return out;
 }

@@ -546,3 +546,83 @@ TEST(AxisPricesPredict, AttestedAxisMovesThePrior) {
     ASSERT_TRUE(over.has_value());
     EXPECT_DOUBLE_EQ(*over, 0.10);
 }
+
+// ── Две стороны сделки: три подгонки вместо одного усреднённого числа ────────
+
+namespace {
+const records::AxisFitEntry* need_fit(const records::AxisPrices& p,
+                                      const std::string& kind) {
+    for (const auto& f : p.fits)
+        if (f.kind == kind) return &f;
+    return nullptr;
+}
+double column(const records::AxisPrices& p, const records::AxisFitEntry& f,
+              const std::string& name) {
+    for (size_t j = 0; j < p.basis.size(); ++j)
+        if (p.basis[j] == name) return f.beta[j];
+    return 0.0;
+}
+}  // namespace
+
+// Продавец завышает опасность своей работы, покупатель говорит как есть. Числа
+// НЕ усредняются в одно: публикуются обе подгонки и согласованная.
+TEST(AxisPricesSides, PublishesBothSidesAndTheAgreedFit) {
+    const auto cats = world_catalog();
+    AttestedAxes seller{{{"prof.welder", "danger"}, 0.95}};   // bootstrap 0.80
+    AttestedAxes buyer{};                                      // говорит как есть
+    const AxisSides sides{&seller, &buyer};
+
+    const auto p = build_axis_prices(world_rates(), 1.0, cats, 86'400, 86'500,
+                                     snap(0x10), nullptr, {}, &sides);
+    const auto* d = need_fit(p, "declared");
+    const auto* s = need_fit(p, "seller");
+    const auto* b = need_fit(p, "buyer");
+    const auto* a = need_fit(p, "agreed");
+    ASSERT_NE(d, nullptr); ASSERT_NE(s, nullptr);
+    ASSERT_NE(b, nullptr); ASSERT_NE(a, nullptr);
+
+    // Покупатель говорил правду — по нему закон мира восстанавливается точно.
+    EXPECT_NEAR(column(p, *b, "danger"), kLaw[3], 1e-3);
+    // Продавец завысил ось при той же цене → цена оси у него ниже. Завышать свой
+    // профиль — значит удешевлять ось для себя же.
+    EXPECT_LT(column(p, *s, "danger"), column(p, *b, "danger") - 0.01);
+    // Согласованная — ближе к правде, чем сторона продавца.
+    EXPECT_LT(std::abs(column(p, *a, "danger") - kLaw[3]),
+              std::abs(column(p, *s, "danger") - kLaw[3]));
+
+    EXPECT_NE(p.params.find("sides=1"), std::string::npos);
+    EXPECT_NE(p.params.find("tau="), std::string::npos);
+}
+
+// Расхождение ЛОКАЛИЗУЕТ спор: оно вырастает ровно на оспариваемой оси, а
+// остальные не шелохнулись. Это первый сигнал, что ось на самом деле склеена
+// из двух — второй сигнал (устойчивая невязка) появился раньше.
+TEST(AxisPricesSides, DisagreementPointsAtTheContestedAxis) {
+    const auto cats = world_catalog();
+    AttestedAxes seller{{{"prof.welder", "danger"}, 0.95}};
+    AttestedAxes buyer{};
+    const AxisSides sides{&seller, &buyer};
+
+    const auto p = build_axis_prices(world_rates(), 1.0, cats, 86'400, 86'500,
+                                     snap(0x11), nullptr, {}, &sides);
+    ASSERT_EQ(p.disagreement.size(), p.basis.size());
+    double danger = 0.0, others = 0.0;
+    for (size_t j = 0; j < p.basis.size(); ++j) {
+        if (p.basis[j] == "danger") danger = p.disagreement[j];
+        else                        others += p.disagreement[j];
+    }
+    EXPECT_GT(danger, 0.0);
+    EXPECT_DOUBLE_EQ(others, 0.0);           // спорили ровно об одном
+    // 6 корзин сварщика из 60, разрыв 0.15, веса равны → 0.15 · 6/60.
+    EXPECT_NEAR(danger, 0.15 * 6.0 / 60.0, 1e-9);
+}
+
+// Пока стороны не заговорили, запись остаётся ровно такой, какой была.
+TEST(AxisPricesSides, WithoutSidesTheRecordIsUnchanged) {
+    const auto p = build_axis_prices(world_rates(), 1.0, world_catalog(),
+                                     86'400, 86'500, snap(0x12));
+    ASSERT_EQ(p.fits.size(), 1u);
+    EXPECT_EQ(p.fits[0].kind, "declared");
+    EXPECT_TRUE(p.disagreement.empty());
+    EXPECT_EQ(p.params.find("sides="), std::string::npos);
+}

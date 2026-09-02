@@ -23,14 +23,46 @@ namespace aggregator {
 // many distinct practitioners attested — so a consumer sees whether a value is
 // well-supported or still preliminary (below the N threshold — ИР-019 A4, the same
 // open N as records.md §14.8 п.11).
-struct AttestationStat { double median; int attesters; };
-std::map<std::pair<std::string, std::string>, AttestationStat>
-build_axis_attestation_summary(const AggregatorStorage& storage);
+struct AttestationStat { double median = 0.0; int attesters = 0; };
+
+// The two sides of a deal are kept APART, never averaged into one number (ИР-020).
+// Their interests are opposite, which is exactly what makes their agreement worth
+// something: a value both a buyer and a seller state is evidence, a value only one
+// of them states is a position. Averaging them destroys the very distinction.
+// Measured (13 activities, 104 deals, 40 runs): with 30% of sellers inflating an
+// axis, the error of β recovered from sellers alone is 0.230 and from the
+// agreement-weighted midpoint 0.065 — while in an honest world the split costs
+// nothing at all (0.039 vs 0.036).
+struct AxisAttestationSummary {
+    AttestationStat all;     // one voice per attester; a deal-backed statement
+                             // beats that attester's own free-standing one
+    AttestationStat seller;  // written by the worker inside a SETTLED deal
+    AttestationStat buyer;   // written by the payer inside a SETTLED deal
+};
+
+// `catalogs` is needed only to resolve deal-backed values, which are written as
+// DELTAS to the catalog's bootstrap profile (records.md §11.8). Without it those
+// statements are skipped rather than guessed at, and the result is exactly the
+// pre-ИР-020 picture.
+std::map<std::pair<std::string, std::string>, AxisAttestationSummary>
+build_axis_attestation_summary(const AggregatorStorage& storage,
+                               const std::vector<records::Catalog>* catalogs = nullptr);
+
+// The summary split into the three (activity, axis) → value maps ИР-020 fits on.
+// A side appears only where it actually spoke; elsewhere the map is silent and the
+// catalog's bootstrap stands, so a fit is never fed an invented profile.
+struct AxisProfileMaps {
+    std::map<std::pair<std::string, std::string>, double> all, seller, buyer;
+};
+AxisProfileMaps split_axis_profiles(
+    const std::map<std::pair<std::string, std::string>, AxisAttestationSummary>& summary,
+    unsigned min_attesters = 1);
 
 // Attested overrides used by the cloud: the summary filtered to entries with at
 // least `min_attesters` practitioners (below → preliminary, bootstrap stands).
 std::map<std::pair<std::string, std::string>, double> build_axis_attestations(
-    const AggregatorStorage& storage, unsigned min_attesters = 1);
+    const AggregatorStorage& storage, unsigned min_attesters = 1,
+    const std::vector<records::Catalog>* catalogs = nullptr);
 
 // Derived axis: capital-intensity per specialty (ИР-018 phase 2). For each
 // specialty (activity slug), the mean over its SETTLED accepted works of

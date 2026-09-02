@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 
@@ -149,8 +150,99 @@ void jacobi_eigen(std::vector<std::vector<double>> a,
 
 }  // namespace
 
-std::map<std::pair<std::string, std::string>, AttestationStat>
-build_axis_attestation_summary(const AggregatorStorage& storage) {
+namespace {
+
+// A settled deal, resolved to the things an attestation must be checked against:
+// who paid, who worked, and which activity it was. Only settled deals count —
+// "two signatures and a real payment" is what makes a deal-backed profile
+// expensive, and an unpaid Acceptance is neither.
+struct SettledDeal {
+    std::array<uint8_t, 32> payer{};
+    std::array<uint8_t, 32> worker{};
+    std::string             activity;
+};
+
+std::map<std::array<uint8_t, 32>, SettledDeal> settled_deals(
+    const std::map<std::array<uint8_t, 32>, records::Record>& by_hash,
+    const std::map<std::array<uint8_t, 32>, std::array<uint8_t, 32>>& author_of) {
+    using RefHash = std::array<uint8_t, 32>;
+    std::map<RefHash, double> paid;
+    for (const auto& [h, rec] : by_hash) {
+        const auto* t = std::get_if<records::Transfer>(&rec);
+        if (!t || !t->reason) continue;
+        const auto au = author_of.find(h);
+        if (au == author_of.end() || t->from != au->second) continue;
+        for (const auto& o : t->origins) paid[t->reason->hash] += o.units;
+    }
+
+    std::map<RefHash, SettledDeal> out;
+    for (const auto& [h, rec] : by_hash) {
+        const auto* acc = std::get_if<records::Acceptance>(&rec);
+        if (!acc) continue;
+        const auto au = author_of.find(h);
+        if (au == author_of.end()) continue;
+        const double carried = acc->carried_units ? *acc->carried_units : 0.0;
+        const double payable = acc->labor_units + carried;
+        const auto pit = paid.find(h);
+        if (pit == paid.end() || std::abs(pit->second - payable) > 1e-6) continue;
+        if (acc->work.chain == au->second) continue;              // self-deal
+        const auto wit = by_hash.find(acc->work.hash);
+        if (wit == by_hash.end()) continue;
+        const auto* wr = std::get_if<records::WorkRecord>(&wit->second);
+        if (!wr) continue;
+        const auto git = by_hash.find(wr->agent.hash);
+        if (git == by_hash.end()) continue;
+        const auto* grade = std::get_if<records::Grade>(&git->second);
+        if (!grade) continue;
+        const auto sit = by_hash.find(grade->specialty.hash);
+        if (sit == by_hash.end()) continue;
+        const auto* spec = std::get_if<records::Specialty>(&sit->second);
+        if (!spec) continue;
+        out[h] = SettledDeal{au->second, acc->work.chain, spec->name};
+    }
+    return out;
+}
+
+// The catalog's bootstrap value for one axis — the anchor a deal-backed delta is
+// written against. Deliberately the bootstrap and NOT the standing median: an
+// anchor that moves with its own output is a fixed point, and the result would
+// then depend on the order the deltas were applied in.
+std::optional<double> bootstrap_axis(const std::vector<records::Catalog>* catalogs,
+                                     const std::string& slug, const std::string& axis) {
+    if (!catalogs) return std::nullopt;
+    for (const auto& cat : *catalogs) {
+        const auto* e = cat.find(slug);
+        if (!e || !e->axes.present) continue;
+        if (axis == "material") return e->axes.material;
+        if (axis == "info")     return e->axes.info;
+        if (axis == "people")   return e->axes.people;
+        if (axis == "danger")   return e->axes.danger;
+        return std::nullopt;                       // an axis the catalog cannot anchor
+    }
+    return std::nullopt;
+}
+
+struct Voice { double value = 0.0; double weight = 1.0; int64_t ts = 0; bool from_deal = false; };
+
+AttestationStat weighted_median(const std::map<std::array<uint8_t, 32>, Voice>& per) {
+    if (per.empty()) return {};
+    std::vector<Voice> v;
+    v.reserve(per.size());
+    for (const auto& [chain, a] : per) v.push_back(a);
+    std::sort(v.begin(), v.end(),
+              [](const Voice& x, const Voice& y) { return x.value < y.value; });
+    double total = 0.0;
+    for (const auto& e : v) total += e.weight;
+    double cum = 0.0, med = v.back().value;
+    for (const auto& e : v) { cum += e.weight; if (cum >= total / 2.0) { med = e.value; break; } }
+    return AttestationStat{med, static_cast<int>(per.size())};
+}
+
+}  // namespace
+
+std::map<std::pair<std::string, std::string>, AxisAttestationSummary>
+build_axis_attestation_summary(const AggregatorStorage& storage,
+                               const std::vector<records::Catalog>* catalogs) {
     using RefHash = std::array<uint8_t, 32>;
     std::map<RefHash, records::Record> by_hash;
     std::map<RefHash, RefHash>         author_of;   // block hash → the chain that signed it
@@ -162,6 +254,7 @@ build_axis_attestation_summary(const AggregatorStorage& storage) {
         catch (const records::CodecError&) { continue; }
         author_of[bh.bytes] = block->address.user_id.bytes;
     }
+    const auto deals = settled_deals(by_hash, author_of);
 
     // Per (activity, axis): keep one entry per attester — the latest — so a single
     // person cannot ballot-stuff.
@@ -174,9 +267,10 @@ build_axis_attestation_summary(const AggregatorStorage& storage) {
     // weight = the attester's OWN Grade level (records.md §11.8 — "Grade автора В
     // этой деятельности"). A Grade sitting on somebody else's chain is not the
     // author's standing, so it buys no weight; unresolved or foreign → 1.
-    struct Att { double value; double weight; int64_t ts; };
-    std::map<std::pair<std::string, std::string>,
-             std::map<RefHash, Att>> groups;
+    struct Bucket {
+        std::map<RefHash, Voice> all, seller, buyer;
+    };
+    std::map<std::pair<std::string, std::string>, Bucket> groups;
     for (const auto& [h, rec] : by_hash) {
         const auto* a = std::get_if<records::AxisAttestation>(&rec);
         if (!a) continue;
@@ -189,33 +283,67 @@ build_axis_attestation_summary(const AggregatorStorage& storage) {
                 if (const auto* g = std::get_if<records::Grade>(&git->second))
                     weight = static_cast<double>(g->level);
         }
-        auto& per = groups[{a->activity, a->axis}][author->second];
-        if (a->timestamp >= per.ts)              // latest attestation of this attester
-            per = Att{a->value, weight, a->timestamp};
+
+        // Deal-backed (ИР-020): the side is DERIVED from the deal, never declared.
+        bool from_deal = false, is_seller = false;
+        double value = a->value;
+        if (a->deal) {
+            const auto dit = deals.find(a->deal->hash);
+            if (dit == deals.end()) continue;             // unsettled or unresolvable
+            if (dit->second.activity != a->activity) continue;  // about another trade
+            if      (author->second == dit->second.worker) is_seller = true;
+            else if (author->second == dit->second.payer)  is_seller = false;
+            else continue;                                // not a party to this deal
+            const auto base = bootstrap_axis(catalogs, a->activity, a->axis);
+            if (!base) continue;                          // no anchor → not guessed at
+            value = std::clamp(*base + a->value, 0.0, 1.0);
+            from_deal = true;
+        }
+
+        auto& b = groups[{a->activity, a->axis}];
+        const Voice voice{value, weight, a->timestamp, from_deal};
+        // A deal-backed statement beats that attester's own free-standing one
+        // whatever the order in time: the free one is costless, and letting it
+        // override would make the cheap word louder than the paid-for one.
+        auto& slot = b.all[author->second];
+        if ((from_deal && !slot.from_deal) ||
+            (from_deal == slot.from_deal && a->timestamp >= slot.ts))
+            slot = voice;
+        if (from_deal) {
+            auto& side = is_seller ? b.seller : b.buyer;
+            auto& s = side[author->second];
+            if (a->timestamp >= s.ts) s = voice;
+        }
     }
 
-    std::map<std::pair<std::string, std::string>, AttestationStat> out;
-    for (auto& [key, per] : groups) {
-        std::vector<Att> v;
-        v.reserve(per.size());
-        for (const auto& [chain, a] : per) v.push_back(a);
-        std::sort(v.begin(), v.end(),
-                  [](const Att& x, const Att& y) { return x.value < y.value; });
-        double total = 0.0;
-        for (const auto& e : v) total += e.weight;
-        double cum = 0.0, med = v.back().value;
-        for (const auto& e : v) { cum += e.weight; if (cum >= total / 2.0) { med = e.value; break; } }
-        out[key] = AttestationStat{med, static_cast<int>(per.size())};
+    std::map<std::pair<std::string, std::string>, AxisAttestationSummary> out;
+    for (const auto& [key, b] : groups)
+        out[key] = AxisAttestationSummary{weighted_median(b.all),
+                                          weighted_median(b.seller),
+                                          weighted_median(b.buyer)};
+    return out;
+}
+
+AxisProfileMaps split_axis_profiles(
+    const std::map<std::pair<std::string, std::string>, AxisAttestationSummary>& summary,
+    unsigned min_attesters) {
+    AxisProfileMaps out;
+    for (const auto& [key, sum] : summary) {
+        if (static_cast<unsigned>(sum.all.attesters) >= min_attesters)
+            out.all[key] = sum.all.median;
+        if (sum.seller.attesters) out.seller[key] = sum.seller.median;
+        if (sum.buyer.attesters)  out.buyer[key]  = sum.buyer.median;
     }
     return out;
 }
 
 std::map<std::pair<std::string, std::string>, double> build_axis_attestations(
-    const AggregatorStorage& storage, unsigned min_attesters) {
+    const AggregatorStorage& storage, unsigned min_attesters,
+    const std::vector<records::Catalog>* catalogs) {
     std::map<std::pair<std::string, std::string>, double> out;
-    for (const auto& [key, stat] : build_axis_attestation_summary(storage))
-        if (static_cast<unsigned>(stat.attesters) >= min_attesters)  // else preliminary
-            out[key] = stat.median;
+    for (const auto& [key, sum] : build_axis_attestation_summary(storage, catalogs))
+        if (static_cast<unsigned>(sum.all.attesters) >= min_attesters)  // else preliminary
+            out[key] = sum.all.median;
     return out;
 }
 

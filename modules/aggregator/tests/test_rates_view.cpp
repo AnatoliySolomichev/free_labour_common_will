@@ -86,7 +86,8 @@ protected:
     }
 
     // One settled deal: work → acceptance (by `payer`) → settlement transfer.
-    void settled_deal(const UserId& payer, double hours, double units) {
+    // Returns the Acceptance ref — a deal-backed profile (ИР-020) points at it.
+    records::Ref settled_deal(const UserId& payer, double hours, double units) {
         records::WorkRecord wr{};
         wr.agent = grade_ref_;
         wr.hours = hours;
@@ -106,6 +107,7 @@ protected:
         t.origins = { {payer.bytes, units} };
         t.reason  = ref_to(payer, acc);
         add(payer, t);
+        return ref_to(payer, acc);
     }
 };
 
@@ -384,8 +386,8 @@ TEST_F(RatesViewTest, AxisAttestationSummaryCounts) {
     const auto sum = build_axis_attestation_summary(*storage_);
     const auto it = sum.find({"хлебопёк", "danger"});
     ASSERT_NE(it, sum.end());
-    EXPECT_EQ(it->second.attesters, 2);
-    EXPECT_DOUBLE_EQ(it->second.median, 0.02);   // lower weighted median of 2 (weights 1)
+    EXPECT_EQ(it->second.all.attesters, 2);
+    EXPECT_DOUBLE_EQ(it->second.all.median, 0.02);   // lower weighted median of 2 (weights 1)
 }
 
 // Заверитель — цепь, ПОДПИСАВШАЯ блок, а не `grade.chain`. `bc attest` без --grade
@@ -404,8 +406,8 @@ TEST_F(RatesViewTest, UngradedAttestersAreCountedSeparately) {
     const auto sum = build_axis_attestation_summary(*storage_);
     const auto it = sum.find({"хлебопёк", "danger"});
     ASSERT_NE(it, sum.end());
-    EXPECT_EQ(it->second.attesters, 3);          // было 1 — все трое под ключом из нулей
-    EXPECT_DOUBLE_EQ(it->second.median, 0.03);   // было 0.20 — «последний перебивает всех»
+    EXPECT_EQ(it->second.all.attesters, 3);          // было 1 — все трое под ключом из нулей
+    EXPECT_DOUBLE_EQ(it->second.all.median, 0.03);   // было 0.20 — «последний перебивает всех»
 }
 
 // Вес = разряд САМОГО заверителя (records.md §11.8). Чужой Grade — не его стояние:
@@ -424,9 +426,9 @@ TEST_F(RatesViewTest, ForeignGradeBuysNoWeight) {
     const auto sum = build_axis_attestation_summary(*storage_);
     const auto it = sum.find({"хлебопёк", "danger"});
     ASSERT_NE(it, sum.end());
-    EXPECT_EQ(it->second.attesters, 3);
+    EXPECT_EQ(it->second.all.attesters, 3);
     // Веса 3/1/1 → медиана на 0.10. Если бы чужой разряд считался (3/3/3) → 0.50.
-    EXPECT_DOUBLE_EQ(it->second.median, 0.10);
+    EXPECT_DOUBLE_EQ(it->second.all.median, 0.10);
 }
 
 // ── ИР-021: вес сделки по независимости контрагентов ─────────────────────────
@@ -683,4 +685,126 @@ TEST_F(IndependenceTest, BasketWithTooFewCounterpartiesIsNotJudged) {
     ASSERT_EQ(weighted.size(), 1u);
     EXPECT_NEAR(weighted[0].rate, 3.0, 1e-9);
     EXPECT_NEAR(weighted[0].weighted_hours, weighted[0].hours, 1e-9);
+}
+
+// ── ИР-020: профиль, встроенный в сделку ─────────────────────────────────────
+//
+// Две подписи и настоящая оплата. Сторона НЕ объявляется, а выводится из самой
+// сделки: приёмку пишет плательщик, `Acceptance::work` называет цепь работника.
+// Объявленная сторона могла бы соврать, выведенная — нет.
+
+namespace {
+std::vector<records::Catalog> baker_catalog(double danger) {
+    records::CatalogEntry e;
+    e.slug          = "хлебопёк";
+    e.axes.material = 1.0;
+    e.axes.danger   = danger;
+    e.axes.present  = true;
+    records::Catalog c;
+    c.name    = "professions";
+    c.entries = {e};
+    return {c};
+}
+}  // namespace
+
+TEST_F(RatesViewTest, DealBackedProfilesKeepTheTwoSidesApart) {
+    const auto deal = settled_deal(bob_, 4.0, 6.0);   // алиса работник, борис платит
+    const auto cats = baker_catalog(0.20);            // bootstrap опасности 0.20
+
+    auto profile = [&](const UserId& who, double delta) {
+        records::AxisAttestation a{};
+        a.activity = "хлебопёк"; a.axis = "danger"; a.value = delta;
+        a.timestamp = kDay; a.deal = deal;
+        add(who, a);
+    };
+    profile(alice_, +0.30);    // продавец: «было опаснее обычного»
+    profile(bob_,   +0.10);    // покупатель: «немного опаснее»
+
+    const auto sum = build_axis_attestation_summary(*storage_, &cats);
+    const auto it = sum.find({"хлебопёк", "danger"});
+    ASSERT_NE(it, sum.end());
+    EXPECT_EQ(it->second.seller.attesters, 1);
+    EXPECT_EQ(it->second.buyer.attesters, 1);
+    EXPECT_DOUBLE_EQ(it->second.seller.median, 0.50);   // 0.20 + 0.30
+    EXPECT_DOUBLE_EQ(it->second.buyer.median,  0.30);   // 0.20 + 0.10
+    EXPECT_EQ(it->second.all.attesters, 2);             // и оба в общей медиане
+
+    // Без каталога дельту не к чему прибавить — заявления пропускаются, а не
+    // угадываются: картина ровно та, что была до ИР-020.
+    EXPECT_TRUE(build_axis_attestation_summary(*storage_).empty());
+}
+
+// Подкреплённое сделкой бьёт свободное заявление того же человека НЕЗАВИСИМО от
+// времени: бесплатное слово не должно перебивать оплаченное (ратифицировано).
+TEST_F(RatesViewTest, DealBackedBeatsTheSameAttestersFreeWord) {
+    const auto deal = settled_deal(bob_, 4.0, 6.0);
+    const auto cats = baker_catalog(0.20);
+
+    records::AxisAttestation paid{};
+    paid.activity = "хлебопёк"; paid.axis = "danger"; paid.value = +0.30;
+    paid.timestamp = kDay; paid.deal = deal;
+    add(alice_, paid);
+
+    records::AxisAttestation free_word{};                 // ПОЗЖЕ по времени
+    free_word.activity = "хлебопёк"; free_word.axis = "danger";
+    free_word.value = 0.95; free_word.timestamp = kDay + 1000;
+    add(alice_, free_word);
+
+    const auto sum = build_axis_attestation_summary(*storage_, &cats);
+    const auto it = sum.find({"хлебопёк", "danger"});
+    ASSERT_NE(it, sum.end());
+    EXPECT_EQ(it->second.all.attesters, 1);               // один человек — один голос
+    EXPECT_DOUBLE_EQ(it->second.all.median, 0.50);        // победило оплаченное
+}
+
+// Кто не сторона сделки — не голосует в ней. И неразрешимая ссылка профиля не
+// несёт: «две подписи и настоящая оплата», иначе заявление снова бесплатное.
+TEST_F(RatesViewTest, OnlyPaidPartiesGetAVoiceInADeal) {
+    const auto deal = settled_deal(bob_, 4.0, 6.0);
+    const auto cats = baker_catalog(0.20);
+
+    records::AxisAttestation outsider{};
+    outsider.activity = "хлебопёк"; outsider.axis = "danger";
+    outsider.value = +0.70; outsider.timestamp = kDay; outsider.deal = deal;
+    add(make_chain(0xEE), outsider);                      // посторонняя цепь
+
+    records::AxisAttestation dangling{};                  // ссылка в никуда
+    dangling.activity = "хлебопёк"; dangling.axis = "danger";
+    dangling.value = +0.70; dangling.timestamp = kDay;
+    dangling.deal = records::Ref{};
+    add(alice_, dangling);
+
+    records::AxisAttestation wrong_activity{};            // сделка была о другом
+    wrong_activity.activity = "сварщик"; wrong_activity.axis = "danger";
+    wrong_activity.value = +0.70; wrong_activity.timestamp = kDay;
+    wrong_activity.deal = deal;
+    add(alice_, wrong_activity);
+
+    const auto sum = build_axis_attestation_summary(*storage_, &cats);
+    EXPECT_TRUE(sum.empty());
+}
+
+// Приёмка без оплаты — не сделка для этой цели. Профиль, привязанный к ней,
+// снова стал бы бесплатным словом, только с видом оплаченного.
+TEST_F(RatesViewTest, UnpaidAcceptanceCarriesNoProfile) {
+    records::WorkRecord wr{};
+    wr.agent = grade_ref_;
+    wr.hours = 4.0;
+    const Block work = add(alice_, wr);
+
+    records::Acceptance acc{};
+    acc.work        = ref_to(alice_, work);
+    acc.receiver    = bob_.bytes;
+    acc.hours_raw   = 4.0;
+    acc.labor_units = 6.0;
+    acc.timestamp   = kDay + 100;
+    const Block accb = add(bob_, acc);          // перевода нет — не рассчитана
+
+    records::AxisAttestation a{};
+    a.activity = "хлебопёк"; a.axis = "danger"; a.value = +0.30;
+    a.timestamp = kDay; a.deal = ref_to(bob_, accb);
+    add(alice_, a);
+
+    const auto cats = baker_catalog(0.20);
+    EXPECT_TRUE(build_axis_attestation_summary(*storage_, &cats).empty());
 }

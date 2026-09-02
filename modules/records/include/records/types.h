@@ -414,9 +414,22 @@ struct AxisAttestation {
 
     std::string activity;   // activity slug (cloud/rate key)
     std::string axis;       // axis name ("danger", ...)
-    double      value;      // attested value, 0..1
+    // Standalone (no `deal`): the ABSOLUTE attested value, 0..1.
+    // Deal-backed (`deal` set): a DELTA to the catalog's bootstrap value for this
+    // axis (+0.2 = "this job was more dangerous than the standard profile"). A
+    // delta says what it means directly, sums into a median, and is anchored to a
+    // value fixed in advance — so it cannot chase its own output.
+    double      value;
     Ref         grade;      // attester's Grade IN this activity (weight + standing)
     int64_t     timestamp;  // Unix timestamp UTC
+    // v2 (ИР-020): the settled Acceptance this profile was written against.
+    // Its presence is what makes the statement expensive — two signatures and a
+    // real payment stand behind it, not a free opinion. WHICH SIDE the author
+    // spoke for is DERIVED, never declared: the Acceptance's author is the payer,
+    // `Acceptance::work` names the worker's chain, and an author who is neither is
+    // not a party to the deal and does not get a voice in it. A declared side
+    // could lie; a derived one cannot.
+    std::optional<Ref> deal;
 };
 
 // ── Axis prices (ИР-020) ─────────────────────────────────────────────────────
@@ -479,6 +492,13 @@ struct AxisPrices {
     std::vector<AxisFitEntry>  fits;
     std::vector<AxisGateEntry> gate;
     int64_t                    timestamp; // Unix timestamp UTC
+    // v2 (ИР-020): how far the two sides of a deal stand apart on each column,
+    // aligned with `basis` (0 for the constant, and for columns nobody disputed).
+    // Published rather than averaged away: a value both a buyer and a seller state
+    // is evidence, a value only one of them states is a position, and the gap
+    // between them is the first signal that an axis is really two axes glued
+    // together. Empty until the two-sided profile exists.
+    std::vector<double>        disagreement;
 };
 
 // ── Record variant ────────────────────────────────────────────────────────────

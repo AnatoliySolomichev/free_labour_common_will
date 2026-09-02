@@ -228,6 +228,24 @@ std::optional<double> axis_price_predict(
     const std::vector<records::Catalog>& catalogs,
     const AttestedAxes*                  attested = nullptr);
 
+// The two sides' readings of the profile, when they exist (ИР-020). Given these,
+// the record carries "seller", "buyer" and "agreed" fits beside "declared", plus
+// the per-column disagreement.
+//
+// They are NOT averaged into one profile. The sides' interests are opposite, and
+// that is exactly what makes their agreement worth something: a value both a buyer
+// and a seller state is evidence, a value only one states is a position. Measured
+// on 13 activities × 104 deals × 40 runs, with 30% of sellers inflating an axis:
+// error of β from sellers alone 0.230, from the plain midpoint 0.111, from the
+// agreement-weighted midpoint 0.065 — and in an honest world all three are equal,
+// so the split costs nothing. What it does NOT catch is collusion (both sides
+// stating the same lie); that is ИР-021's job, and the weights compose:
+// weight = independence × agreement.
+struct AxisSides {
+    const AttestedAxes* seller = nullptr;
+    const AttestedAxes* buyer  = nullptr;
+};
+
 // Fit, examine the candidate axes, and package the result as a signed-ready
 // record. `snapshot` must commit the input (catalog + block set), like
 // SpecialtyCloud — the record is worth nothing if a witness cannot tell what it
@@ -245,6 +263,7 @@ records::AxisPrices build_axis_prices(
     int64_t                                      timestamp,
     const std::array<uint8_t, 32>&               snapshot,
     const AttestedAxes*                          attested = nullptr,
-    const AxisPricesParams&                      params   = {});
+    const AxisPricesParams&                      params   = {},
+    const AxisSides*                             sides    = nullptr);
 
 } // namespace aggregator

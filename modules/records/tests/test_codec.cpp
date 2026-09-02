@@ -809,6 +809,37 @@ TEST(RecordsCodec, AxisAttestationRoundtrip) {
     EXPECT_EQ(d.timestamp, 1'700'000'000LL);
 }
 
+// AxisAttestation v2 (ИР-020): профиль, привязанный к рассчитанной сделке.
+// Значение при этом — ДЕЛЬТА к bootstrap каталога, а не абсолют.
+TEST(RecordsCodec, AxisAttestationDealBackedRoundtrip) {
+    records::AxisAttestation a{};
+    a.activity  = "prof.welder";
+    a.axis      = "danger";
+    a.value     = 0.20;                     // дельта: «эта работа была опаснее»
+    a.grade     = make_ref(0x51, 0x52);
+    a.timestamp = 1'700'000'000LL;
+    a.deal      = make_ref(0x54, 0x55);
+
+    const auto d = std::get<records::AxisAttestation>(roundtrip(Record{a}));
+    ASSERT_TRUE(d.deal.has_value());
+    EXPECT_EQ(*d.deal, *a.deal);
+    EXPECT_DOUBLE_EQ(d.value, 0.20);
+}
+
+// v1 (6 полей) обязана декодироваться без сделки — старые записи не переписываются
+// и их байты не меняются.
+TEST(RecordsCodec, AxisAttestationV1DecodesWithoutADeal) {
+    records::AxisAttestation a{};
+    a.activity  = "prof.teacher";
+    a.axis      = "danger";
+    a.value     = 0.02;
+    a.timestamp = 1'700'000'000LL;
+    const auto bytes = Codec::encode(Record{a});
+    EXPECT_EQ(bytes[0], 0xa6);              // map(6): ключа сделки нет вовсе
+    const auto d = std::get<records::AxisAttestation>(Codec::decode(bytes));
+    EXPECT_FALSE(d.deal.has_value());
+}
+
 // AxisPrices (0x77) — цены осей (ИР-020, records.md §11.9)
 TEST(RecordsCodec, AxisPricesRoundtrip) {
     records::AxisPrices a{};
@@ -830,6 +861,30 @@ TEST(RecordsCodec, AxisPricesRoundtrip) {
     EXPECT_EQ(d.fits, a.fits);            // beta bit-for-bit: β must survive the wire
     EXPECT_EQ(d.gate, a.gate);
     EXPECT_EQ(d.timestamp, a.timestamp);
+    EXPECT_TRUE(d.disagreement.empty());
+    EXPECT_EQ(Codec::encode(Record{a})[0], 0xa8);   // v1: map(8), без расхождения
+}
+
+// v2: расхождение сторон едет рядом с базисом, столбец в столбец.
+TEST(RecordsCodec, AxisPricesDisagreementRoundtrip) {
+    records::AxisPrices a{};
+    a.date         = 86'400;
+    a.snapshot.fill(0x77);
+    a.params       = "v1;sides=1;tau=0.030000";
+    a.basis        = {"base", "info", "people", "danger", "level"};
+    a.fits         = {{"declared", {0.5, 0.1, 0.1, 0.9, 0.4}, 0.98, 60, 6000.0},
+                      {"seller",   {0.5, 0.1, 0.1, 0.7, 0.4}, 0.97, 60, 6000.0},
+                      {"buyer",    {0.5, 0.1, 0.1, 0.9, 0.4}, 0.98, 60, 6000.0},
+                      {"agreed",   {0.5, 0.1, 0.1, 0.8, 0.4}, 0.98, 60, 5400.0}};
+    a.disagreement = {0.0, 0.0, 0.0, 0.015, 0.0};
+    a.timestamp    = 86'500;
+
+    const auto bytes = Codec::encode(Record{a});
+    EXPECT_EQ(bytes[0], 0xa9);                      // map(9)
+    const auto d = std::get<records::AxisPrices>(Codec::decode(bytes));
+    EXPECT_EQ(d.disagreement, a.disagreement);
+    ASSERT_EQ(d.fits.size(), 4u);
+    EXPECT_EQ(d.fits, a.fits);
 }
 
 // Пустой набор — законное состояние: в этот день судить было не по чему

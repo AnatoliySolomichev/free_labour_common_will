@@ -340,17 +340,22 @@ void enc_specialty_cloud(Buf& out, const SpecialtyCloud& c) {
 }
 
 void enc_axis_attestation(Buf& out, const AxisAttestation& a) {
-    w_map(out, 6);
+    // v1 = map(6); v2 adds the deal link (key 6) only when present, so records
+    // written before ИР-020 keep their exact bytes and hashes.
+    w_map(out, 6 + (a.deal ? 1 : 0));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::AxisAttestation));
     w_uint(out, 1); w_text(out, a.activity);
     w_uint(out, 2); w_text(out, a.axis);
     w_uint(out, 3); w_float64(out, a.value);
     w_uint(out, 4); w_ref(out, a.grade);
     w_uint(out, 5); w_int64(out, a.timestamp);
+    if (a.deal) { w_uint(out, 6); w_ref(out, *a.deal); }   // v2 (ИР-020)
 }
 
 void enc_axis_prices(Buf& out, const AxisPrices& a) {
-    w_map(out, 8);
+    // v1 = map(8); v2 adds the two sides' disagreement (key 8) only when there is
+    // one, so records written before the two-sided profile keep their exact bytes.
+    w_map(out, 8 + (a.disagreement.empty() ? 0 : 1));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::AxisPrices));
     w_uint(out, 1); w_int64(out, a.date);
     w_uint(out, 2); w_fixed(out, a.snapshot);
@@ -378,6 +383,10 @@ void enc_axis_prices(Buf& out, const AxisPrices& a) {
         w_uint(out, 4); w_uint(out, g.admitted ? 1u : 0u);
     }
     w_uint(out, 7); w_int64(out, a.timestamp);
+    if (!a.disagreement.empty()) {                       // v2 (ИР-020)
+        w_uint(out, 8); w_arr(out, a.disagreement.size());
+        for (const double d : a.disagreement) w_float64(out, d);
+    }
 }
 
 // ── CBOR reader ───────────────────────────────────────────────────────────────
@@ -899,17 +908,18 @@ SpecialtyCloud dec_specialty_cloud_fields(CborReader& r) {
     return c;
 }
 
-AxisAttestation dec_axis_attestation_fields(CborReader& r) {
+AxisAttestation dec_axis_attestation_fields(CborReader& r, uint64_t field_count) {
     AxisAttestation a{};
     expect_key(r, 1); a.activity  = r.r_text();
     expect_key(r, 2); a.axis      = r.r_text();
     expect_key(r, 3); a.value     = r.r_float64();
     expect_key(r, 4); a.grade     = dec_ref(r);
     expect_key(r, 5); a.timestamp = r.r_int();
+    if (field_count >= 7) { expect_key(r, 6); a.deal = dec_opt_ref(r); }  // v2
     return a;
 }
 
-AxisPrices dec_axis_prices_fields(CborReader& r) {
+AxisPrices dec_axis_prices_fields(CborReader& r, uint64_t field_count) {
     AxisPrices a{};
     expect_key(r, 1); a.date = r.r_int();
     expect_key(r, 2); r.r_fixed(a.snapshot);
@@ -954,6 +964,12 @@ AxisPrices dec_axis_prices_fields(CborReader& r) {
         }
     }
     expect_key(r, 7); a.timestamp = r.r_int();
+    if (field_count >= 9) {                              // v2 (ИР-020)
+        expect_key(r, 8);
+        const uint64_t n = r.r_arr();
+        a.disagreement.reserve(static_cast<size_t>(n));
+        for (uint64_t i = 0; i < n; ++i) a.disagreement.push_back(r.r_float64());
+    }
     return a;
 }
 
@@ -1018,8 +1034,10 @@ Record Codec::decode(const uint8_t* data, size_t len) {
         case RecordType::DailyAggregate: return dec_daily_aggregate_fields(r, field_count);
         case RecordType::Redemption: return dec_redemption_fields(r);
         case RecordType::SpecialtyCloud: return dec_specialty_cloud_fields(r);
-        case RecordType::AxisAttestation: return dec_axis_attestation_fields(r);
-        case RecordType::AxisPrices:      return dec_axis_prices_fields(r);
+        case RecordType::AxisAttestation:
+            return dec_axis_attestation_fields(r, field_count);
+        case RecordType::AxisPrices:
+            return dec_axis_prices_fields(r, field_count);
         default:
             throw CodecError("CBOR: unknown record type discriminator");
     }

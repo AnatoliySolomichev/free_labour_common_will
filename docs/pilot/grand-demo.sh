@@ -303,13 +303,36 @@ bcp irina deal settle "$ND_irina" --yes --via "$VIA" | sed 's/^/   /'
 act "10. Явный перевод и кошельки (bc transfer send / wallet)"
 say "Пелагея-медсестра принимает работу Галины и платит прямым переводом"
 SPEC_galina=$( bcp galina specialty add prof.hairdresser --via "$VIA" | after 'hash: ')
-GRADE_galina=$(bcp galina grade add "${CID[galina]}/$SPEC_galina" 4 | after 'hash: ')
+GRADE_galina=$(bcp galina grade add "${CID[galina]}/$SPEC_galina" 4 --via "$VIA" | after 'hash: ')
 WORK_galina=$(bcp galina work log --agent "${CID[galina]}/$GRADE_galina" \
               --action "Стрижка перед сменой" --hours 1 --via "$VIA" | after 'hash: ')
 bcp pelageya fetch "${CID[galina]}/$WORK_galina" --via "$VIA" >/dev/null
 ACC_galina=$(bcp pelageya accept --work "${CID[galina]}/$WORK_galina" --quality "аккуратно" --coef 1.0 --via "$VIA" | after 'acceptance ref: ')
 hr "bc transfer send --reason (часы движутся только против принятого труда)"
 bcp pelageya transfer send --to "${CID[galina]}" --units 1 --reason "$ACC_galina" --via "$VIA" | sed 's/^/   /'
+hr "профиль в сделке: обе стороны говорят независимо (bc attest --deal, ИР-020)"
+say "платится по-прежнему ОДНО число — профиль лишь разбивает уже уплаченную цену."
+say "Стороны его не усредняют: их расхождение публикуется как факт, а не замазывается"
+bcp galina   attest --activity prof.hairdresser --axis people --value 0.15 \
+             --deal "$ACC_galina" --via "$VIA" >/dev/null 2>&1 || true
+bcp pelageya attest --activity prof.hairdresser --axis people --value 0.05 \
+             --deal "$ACC_galina" --via "$VIA" >/dev/null 2>&1 || true
+bcp anna attestations --slug prof.hairdresser --via "$VIA" > "$work/att.json" 2>/dev/null || true
+python3 - "$work/att.json" <<'PY' 2>/dev/null || say "(профиль не прочитался)"
+import json, sys
+for a in json.load(open(sys.argv[1])).get("axes", []):
+    line = f"     {a['activity']} · {a['axis']}: медиана {a['value']:.2f} " \
+           f"({a['attesters']} заверителей)"
+    if "seller" in a:
+        line += (f"  |  продавец {a['seller']['value']:.2f}"
+                 f"  покупатель {a['buyer']['value']:.2f}")
+        if "disagreement" in a:
+            line += f"  расхождение {a['disagreement']:.2f}"
+    print(line)
+PY
+say "сторона не объявляется, а выводится из сделки: приёмку пишет плательщик,"
+say "работу — исполнитель. Объявленная сторона могла бы соврать, выведенная — нет"
+
 hr "кошелёк Анны (держит чужую бумагу) и Дмитрия (свой долг в обороте)"
 say "Анна:";   bcp anna   wallet | sed 's/^/     /'
 say "Дмитрий:"; bcp dmitry wallet | sed 's/^/     /'
