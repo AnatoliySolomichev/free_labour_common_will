@@ -92,6 +92,21 @@ def predict(beta_raw, x):
 # 0.5% (1 из 200), не мешая настоящей оси: разряд отыгрывает 87%.
 GATE_MARGIN = 0.05
 
+# Ниже стольких наблюдений НА СТОЛБЕЦ экзамен не различает и судить отказывается.
+# Замер подвыборками 78 корзин прогона года (5 столбцов), доля принятых пустышек:
+#   строк   10    13    20    30    40    55    78
+#   пустышка 20%  16%   12%    6%    4%   1.7%  0.3%   (настоящая ось: 100% везде)
+# Отказ не стоит ничего в силе — разряд принимается при любом объёме. Больше
+# КОНТРОЛЕЙ не заменяет данные: три контроля при 13 строках сбивают пустышку до
+# 10%, но роняют настоящую ось до 55%; пять — до 6%/36%.
+MIN_ROWS_PER_COL = 10
+
+
+def gate_verdict(loo, bar, n_rows, n_cols):
+    if n_rows < n_cols * MIN_ROWS_PER_COL:
+        return 'судить не по чему'
+    return 'принять' if loo < bar else 'отклонить'
+
 
 def loo_rmse(rows_x, rows_y, rows_w):
     """Взвешенный RMSE скользящего контроля (leave-one-out).
@@ -115,12 +130,17 @@ def loo_rmse(rows_x, rows_y, rows_w):
     return (se / sw) ** 0.5
 
 
-def junk_axis(name):
+def junk_axis(slug, level=0):
     """Детерминированная ось-пустышка: осмысленного сигнала не несёт.
 
     Нужна как контроль критерия: честный критерий обязан её ОТВЕРГНУТЬ.
-    Значения воспроизводимы (FNV-1a от имени), никакого random.
+    Значения воспроизводимы (FNV-1a от ключа), никакого random.
+
+    Ключ — «<слаг>#<разряд>»: это СОГЛАШЕНИЕ ПРОТОКОЛА, а не деталь реализации.
+    Два свидетеля обязаны нарисовать одну и ту же пустышку, иначе экзамен у них
+    разный. Тот же ключ в `aggregator::junk_axis` (axis_prices.h).
     """
+    name = f'{slug}#{level}'
     h = 2166136261
     for ch in name.encode('utf-8'):
         h = ((h ^ ch) * 16777619) & 0xFFFFFFFF
@@ -187,14 +207,16 @@ def run_demo():
                'rent_pct': round(100 * (bumped - pred) / pred, 1)}
     # порог допуска оси: скользящий контроль на невиданном наблюдении.
     # C = пасс A + ось-пустышка; честный критерий обязан её отвергнуть.
-    xs_c = [xa + [junk_axis(row[0])] for xa, row in zip(xs_a, DEMO)]
+    xs_c = [xa + [junk_axis(row[0])] for xa, row in zip(xs_a, DEMO)]  # разряда нет → 0
     gate = {'loo_a': round(loo_rmse(xs_a, ys, ws), 4),
             'loo_b': round(loo_rmse(xs_b, ys, ws), 4),
             'loo_c': round(loo_rmse(xs_c, ys, ws), 4)}
     bar = gate['loo_a'] * (1.0 - GATE_MARGIN)
     gate['bar'] = round(bar, 4)
-    gate['verdict_b'] = 'принять' if gate['loo_b'] < bar else 'отклонить'
-    gate['verdict_c'] = 'принять' if gate['loo_c'] < bar else 'отклонить'
+    gate['rows'] = len(DEMO)
+    gate['cols'] = len(names_b)
+    gate['verdict_b'] = gate_verdict(gate['loo_b'], bar, gate['rows'], gate['cols'])
+    gate['verdict_c'] = gate_verdict(gate['loo_c'], bar, gate['rows'], gate['cols'])
 
     return {'axes': ['знание', 'опасность', 'люди', 'мастерство'],
             'W': round(W, 4), 'rows': rows, 'gate': gate,
@@ -230,9 +252,14 @@ def run_sim(out_dir):
     W = sum(o['rate'] * o['hours'] for o in obs) / sw   # economy.md §2б
     for o in obs:
         o['nrate'] = o['rate'] / W
+    # Разряд нормируется ПРОТОКОЛЬНЫМ размахом 1..6 (records.md §9.2), а не тем,
+    # который случайно попался в данных. Размах по данным делал бы β_разряд
+    # несравнимым между свидетелями: у видевшего разряды 3..6 и у видевшего 1..6
+    # это разные единицы, и медиану по агрегаторам брать не от чего.
+    GRADE_MIN, GRADE_MAX = 1, 6
+    span = float(GRADE_MAX - GRADE_MIN)
     gmin = min(o['level'] for o in obs)
     gmax = max(o['level'] for o in obs)
-    span = float(gmax - gmin) or 1.0
 
     names_a = ['базовый час', 'информация', 'люди', 'опасность']
     names_b = names_a + ['разряд']
@@ -242,7 +269,7 @@ def run_sim(out_dir):
         x = [1.0, ax.get('info', 0.0), ax.get('people', 0.0),
              ax.get('danger', 0.0)]
         if with_grade:
-            x.append((o['level'] - gmin) / span)
+            x.append(min(1.0, max(0.0, (o['level'] - GRADE_MIN) / span)))
         return x
 
     xs_a = [feats(o, False) for o in obs]
@@ -275,15 +302,17 @@ def run_sim(out_dir):
                    'rent': round(bumped - pred, 3),
                    'rent_pct': round(100 * (bumped - pred) / pred, 1)}
 
-    xs_c = [xa + [junk_axis(o['slug'] + str(o['level']))]
+    xs_c = [xa + [junk_axis(o['slug'], o['level'])]
             for xa, o in zip(xs_a, obs)]
     gate = {'loo_a': round(loo_rmse(xs_a, ys, ws), 4),
             'loo_b': round(loo_rmse(xs_b, ys, ws), 4),
             'loo_c': round(loo_rmse(xs_c, ys, ws), 4)}
     bar = gate['loo_a'] * (1.0 - GATE_MARGIN)
     gate['bar'] = round(bar, 4)
-    gate['verdict_b'] = 'принять' if gate['loo_b'] < bar else 'отклонить'
-    gate['verdict_c'] = 'принять' if gate['loo_c'] < bar else 'отклонить'
+    gate['rows'] = len(obs)
+    gate['cols'] = len(names_b)
+    gate['verdict_b'] = gate_verdict(gate['loo_b'], bar, gate['rows'], gate['cols'])
+    gate['verdict_c'] = gate_verdict(gate['loo_c'], bar, gate['rows'], gate['cols'])
 
     return {'W': round(W, 4), 'months': len(months), 'n_obs': len(obs),
             'gate': gate,

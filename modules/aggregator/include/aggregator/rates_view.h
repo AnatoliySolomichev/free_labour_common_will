@@ -5,6 +5,9 @@
 #include <records/types.h>
 
 #include <cstdint>
+#include <functional>
+#include <optional>
+#include <string>
 #include <vector>
 
 namespace aggregator {
@@ -101,6 +104,15 @@ struct IndependenceParams {
 // scaled by the share of volume that survived weighting: a day discounted away
 // leaves yesterday's rate almost untouched. With `indep` absent that share is
 // 1 and the smoothing is exactly as before.
+// Model prior of LAST resort (ИР-020): asked for a rate only after the cloud has
+// failed to find a neighbour or a tree parent that already has one — data first,
+// the model last. It NEVER touches a bucket that traded: a deal is primary
+// (economy.md §2а), and the day it stops being primary, profiles get drawn to fit
+// the model instead of measured (Goodhart) and the residual stops meaning
+// anything. Returning nothing falls through to normalized par, as before.
+using AxisPriorFn =
+    std::function<std::optional<double>(const std::string& slug, uint8_t level)>;
+
 std::vector<records::RateEntry> build_daily_rates(
     const AggregatorStorage&              storage,
     int64_t                               day_start,
@@ -108,6 +120,7 @@ std::vector<records::RateEntry> build_daily_rates(
     double                                alpha     = 0.3,
     double                                min_hours = 0.1,
     const records::SpecialtyCloud*        cloud     = nullptr,
-    const IndependenceParams*             indep     = nullptr);
+    const IndependenceParams*             indep     = nullptr,
+    const AxisPriorFn&                    axis_prior = {});
 
 } // namespace aggregator

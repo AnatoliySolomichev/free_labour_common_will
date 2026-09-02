@@ -103,15 +103,28 @@ TEST(AxisPrices, NormalizationHoldsUpToRidge) {
     EXPECT_NE(swp / sw, 1.0);   // и это не тождество — расхождение реально
 }
 
-TEST(AxisPrices, GateAdmitsRealAxisAndRejectsJunk) {
+// Числа скользящего контроля учебного мира — сверка с прототипом. Ось мастерства
+// отыгрывает 87%: 0.1467 → 0.0373.
+TEST(AxisPrices, SlidingControlMatchesThePrototype) {
     const auto obs = demo_base();
+    auto with = obs;
+    const auto m = demo_mastery();
+    for (size_t i = 0; i < with.size(); ++i) with[i].x.push_back(m[i]);
+    EXPECT_NEAR(loo_rmse(obs),  0.1467, 1e-3);
+    EXPECT_NEAR(loo_rmse(with), 0.0373, 1e-3);
+}
+
+// А сам экзамен на этом мире СУДИТЬ ОТКАЗЫВАЕТСЯ: 13 наблюдений на 5 столбцов —
+// меньше kMinRowsPerColumn. Замер: на такой длине стола экзамен пропускает
+// пустышку в ~16% случаев, и никакое число контролей это не чинит (axis_prices.h).
+// Настоящая ось видна невооружённым глазом (0.1467 → 0.0373) — и всё равно не
+// допускается: не потому что она плоха, а потому что судить не по чему.
+TEST(AxisPrices, GateRefusesToJudgeOnTooFewObservations) {
+    const auto obs = demo_base();
+    ASSERT_LT(obs.size(), (obs.front().x.size() + 1) * kMinRowsPerColumn);
     const auto gate = run_axis_gate(obs, demo_mastery());
-    ASSERT_TRUE(gate.ok);
-    EXPECT_NEAR(gate.loo_base, 0.1467, 1e-3);
-    EXPECT_NEAR(gate.loo_with, 0.0373, 1e-3);
-    EXPECT_TRUE(gate.admitted);         // настоящая ось отыгрывает 87%
-    EXPECT_TRUE(gate.junk_rejected);    // пустышка — нет
-    EXPECT_LT(gate.bar, gate.loo_base); // планка ниже базы на запас
+    EXPECT_FALSE(gate.ok);
+    EXPECT_FALSE(gate.admitted);
 }
 
 TEST(AxisPrices, StrictComparisonWouldAdmitNoise) {
@@ -200,6 +213,9 @@ records::CatalogEntry cat_entry(const std::string& slug, double material,
     return e;
 }
 
+// Десять деятельностей × шесть разрядов = 60 корзин. Меньше нельзя: экзамен
+// допуска оси требует kMinRowsPerColumn наблюдений на столбец и на коротком
+// столе отказывается судить (замер — axis_prices.h).
 std::vector<records::Catalog> world_catalog() {
     records::Catalog c;
     c.name    = "professions";
@@ -209,6 +225,11 @@ std::vector<records::Catalog> world_catalog() {
         cat_entry("prof.cook",        1.0, 0.0, 0.0, 0.10),
         cat_entry("prof.welder",      1.0, 0.0, 0.0, 0.80),
         cat_entry("prof.nurse",       0.0, 0.4, 0.6, 0.25),
+        cat_entry("prof.driver",      0.8, 0.1, 0.1, 0.35),
+        cat_entry("prof.accountant",  0.0, 0.9, 0.1, 0.00),
+        cat_entry("prof.miner",       1.0, 0.0, 0.0, 0.95),
+        cat_entry("prof.barber",      0.5, 0.0, 0.5, 0.05),
+        cat_entry("prof.doctor",      0.0, 0.5, 0.5, 0.20),
     };
     return {c};
 }
@@ -235,7 +256,7 @@ std::vector<records::RateEntry> world_rates() {
     std::vector<records::RateEntry> out;
     const uint8_t lo = 1, hi = 6;
     for (const auto& e : cats[0].entries)
-        for (uint8_t lv : {lo, uint8_t(3), hi}) {
+        for (uint8_t lv = lo; lv <= hi; ++lv) {
             const double lvx = double(lv - lo) / double(hi - lo);
             const double rate = kLaw[0] + kLaw[1] * e.axes.info
                               + kLaw[2] * e.axes.people + kLaw[3] * e.axes.danger
@@ -279,8 +300,8 @@ TEST(AxisPricesBuild, RecoversTheWorldsLawFromItsRates) {
     for (size_t i = 0; i < 5; ++i)
         EXPECT_NEAR(f->beta[i], kLaw[i], 1e-3) << "столбец " << p.basis[i];
     EXPECT_NEAR(f->r2, 1.0, 1e-6);
-    EXPECT_EQ(f->rows, 15u);
-    EXPECT_DOUBLE_EQ(f->weight, 1500.0);
+    EXPECT_EQ(f->rows, 60u);
+    EXPECT_DOUBLE_EQ(f->weight, 6000.0);
 }
 
 // Разряд обязан пройти экзамен, а пустышка — провалить его. Если пустышка
@@ -336,7 +357,7 @@ TEST(AxisPricesBuild, WeightIsIndependenceWeightedHours) {
     const auto p = build_axis_prices(rates, 1.0, world_catalog(), 86'400, 86'500, snap(5));
     const auto* f = fit_of(p, "declared");
     ASSERT_NE(f, nullptr);
-    EXPECT_DOUBLE_EQ(f->weight, 1500.0 - 300.0 + 3.0);
+    EXPECT_DOUBLE_EQ(f->weight, 6000.0 - 600.0 + 6.0);
     EXPECT_NE(p.params.find("weight=weighted_hours"), std::string::npos);
 }
 
@@ -453,4 +474,75 @@ TEST(AxisPricesPool, ParametersAreRecordedInTheRecord) {
     EXPECT_NE(p.params.find("window_days=90"), std::string::npos);
     EXPECT_NE(p.params.find("margin=0.050000"), std::string::npos);
     EXPECT_NE(p.params.find("ref=material"), std::string::npos);
+}
+
+// ── Приор по β: мнение модели о том, что ещё не торговалось ──────────────────
+
+TEST(AxisPricesPredict, ComputesTheDotProductOverThePublishedBasis) {
+    const auto cats = world_catalog();
+    records::AxisPrices p{};
+    p.basis = {"base", "info", "people", "danger", "level"};
+    p.fits  = {{"declared", {0.60, 0.50, 0.30, 0.90, 0.40}, 1.0, 60, 6000.0}};
+
+    // prof.welder: info 0, people 0, danger 0.80; разряд 6 → колонка 1.0.
+    const auto v = axis_price_predict(p, "prof.welder", 6, cats);
+    ASSERT_TRUE(v.has_value());
+    EXPECT_NEAR(*v, 0.60 + 0.90 * 0.80 + 0.40 * 1.0, 1e-12);
+
+    // Разряд 1 → колонка 0.0: протокольный размах 1..6, не размах данных.
+    const auto lo = axis_price_predict(p, "prof.welder", 1, cats);
+    ASSERT_TRUE(lo.has_value());
+    EXPECT_NEAR(*lo, 0.60 + 0.90 * 0.80, 1e-12);
+}
+
+// Приор строится на том, о чём стороны СОШЛИСЬ. Подгонка по одной стороне несёт
+// интерес этой стороны, поэтому "agreed" имеет приоритет над "declared".
+TEST(AxisPricesPredict, PrefersTheAgreedFitOverASingleSidesFit) {
+    const auto cats = world_catalog();
+    records::AxisPrices p{};
+    p.basis = {"base"};
+    p.fits  = {{"declared", {1.0}, 1.0, 60, 1.0},
+               {"seller",   {9.0}, 1.0, 60, 1.0},
+               {"agreed",   {2.0}, 1.0, 60, 1.0}};
+    const auto v = axis_price_predict(p, "prof.cook", 3, cats);
+    ASSERT_TRUE(v.has_value());
+    EXPECT_DOUBLE_EQ(*v, 2.0);
+}
+
+// Молчание вместо догадки: отказавшаяся запись, незнакомая деятельность и
+// незнакомый столбец базиса — три случая, где приора просто нет.
+TEST(AxisPricesPredict, StaysSilentInsteadOfGuessing) {
+    const auto cats = world_catalog();
+
+    records::AxisPrices refused{};
+    refused.params = "v1;refused=underdetermined";
+    EXPECT_FALSE(axis_price_predict(refused, "prof.cook", 3, cats).has_value());
+
+    records::AxisPrices p{};
+    p.basis = {"base", "danger"};
+    p.fits  = {{"declared", {0.5, 0.5}, 1.0, 60, 1.0}};
+    EXPECT_FALSE(axis_price_predict(p, "prof.unknown", 3, cats).has_value());
+
+    records::AxisPrices future{};
+    future.basis = {"base", "bravery"};       // ось, которой этот код не знает
+    future.fits  = {{"declared", {0.5, 0.5}, 1.0, 60, 1.0}};
+    EXPECT_FALSE(axis_price_predict(future, "prof.cook", 3, cats).has_value());
+}
+
+// Заверения практиков (ИР-019) доходят и до приора: значение оси ставят те, кто
+// делает работу, а не bootstrap каталога.
+TEST(AxisPricesPredict, AttestedAxisMovesThePrior) {
+    const auto cats = world_catalog();
+    records::AxisPrices p{};
+    p.basis = {"base", "danger"};
+    p.fits  = {{"declared", {0.0, 1.0}, 1.0, 60, 1.0}};
+
+    const auto plain = axis_price_predict(p, "prof.welder", 3, cats);
+    ASSERT_TRUE(plain.has_value());
+    EXPECT_DOUBLE_EQ(*plain, 0.80);           // bootstrap каталога
+
+    AttestedAxes att{{{"prof.welder", "danger"}, 0.10}};
+    const auto over = axis_price_predict(p, "prof.welder", 3, cats, &att);
+    ASSERT_TRUE(over.has_value());
+    EXPECT_DOUBLE_EQ(*over, 0.10);
 }

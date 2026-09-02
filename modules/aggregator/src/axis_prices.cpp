@@ -160,6 +160,9 @@ AxisGate run_axis_gate(const std::vector<AxisObservation>& obs,
                        double                              margin) {
     AxisGate g{};
     if (obs.empty() || candidate.size() != obs.size()) return g;
+    // Too thin to examine anything: the sliding control is itself noisy, and on a
+    // short table it hands out passes to invented columns. Refuse, admit nobody.
+    if (obs.size() < (obs.front().x.size() + 1) * kMinRowsPerColumn) return g;
 
     auto with_column = [&obs](const std::vector<double>& col) {
         std::vector<AxisObservation> out = obs;
@@ -221,6 +224,12 @@ std::vector<std::string> declared_axis_columns() {
     return {"info", "people", "danger"};
 }
 
+double grade_column(uint8_t level) {
+    const double v = (static_cast<double>(level) - kGradeMin)
+                   / static_cast<double>(kGradeMax - kGradeMin);
+    return std::clamp(v, 0.0, 1.0);
+}
+
 AxisDesign build_axis_design(const std::vector<records::RateEntry>& rates,
                              double                                 W,
                              const std::vector<records::Catalog>&   catalogs,
@@ -254,20 +263,11 @@ AxisDesign build_axis_design(const std::vector<records::RateEntry>& rates,
     if (d.obs.empty()) return d;
     sort_canonically(d.obs);
 
-    d.level_min = d.obs.front().level;
-    d.level_max = d.obs.front().level;
-    for (const auto& o : d.obs) {
-        d.level_min = std::min(d.level_min, o.level);
-        d.level_max = std::max(d.level_max, o.level);
-    }
-    const double span = d.level_max > d.level_min
-                      ? static_cast<double>(d.level_max - d.level_min) : 1.0;
-
     for (auto& o : d.obs) {
         o.x.assign(1, 1.0);                     // the constant
         for (const auto& c : columns) {
             if (c == kAxisLevel)
-                o.x.push_back((o.level - d.level_min) / span);
+                o.x.push_back(grade_column(o.level));
             else if (c == kAxisJunk)
                 o.x.push_back(junk_axis(o.slug, o.level));
             else
@@ -309,6 +309,44 @@ std::vector<records::RateEntry> pool_daily_rates(
     return out;
 }
 
+std::optional<double> axis_price_predict(
+    const records::AxisPrices&           prices,
+    const std::string&                   slug,
+    uint8_t                              level,
+    const std::vector<records::Catalog>& catalogs,
+    const AttestedAxes*                  attested) {
+
+    if (prices.basis.empty() || prices.fits.empty()) return std::nullopt;
+    // The prior is built on what both sides agreed, when that exists: a fit made
+    // of one side's declarations alone carries that side's interest.
+    const records::AxisFitEntry* use = nullptr;
+    for (const auto& f : prices.fits)
+        if (f.kind == "agreed") use = &f;
+    if (!use)
+        for (const auto& f : prices.fits)
+            if (f.kind == "declared") use = &f;
+    if (!use || use->beta.size() != prices.basis.size()) return std::nullopt;
+
+    const records::CatalogEntry* entry = nullptr;
+    for (const auto& cat : catalogs)
+        if (const auto* e = cat.find(slug))
+            if (e->axes.present) { entry = e; break; }
+    if (!entry) return std::nullopt;
+
+    double sum = 0.0;
+    for (size_t j = 0; j < prices.basis.size(); ++j) {
+        const std::string& c = prices.basis[j];
+        double x;
+        if      (c == kAxisBaseColumn) x = 1.0;
+        else if (c == kAxisLevel)      x = grade_column(level);
+        else if (c == "material" || c == "info" || c == "people" || c == "danger")
+            x = effective_axis(*entry, c, attested);
+        else return std::nullopt;   // a column this build cannot rebuild: no guessing
+        sum += use->beta[j] * x;
+    }
+    return sum;
+}
+
 records::AxisPrices build_axis_prices(
     const std::vector<records::RateEntry>& rates,
     double                                 W,
@@ -334,8 +372,8 @@ records::AxisPrices build_axis_prices(
       + ";ridge="   + fmt(kRidgeRelative)
       + ";W="       + fmt(W > 0.0 ? W : 1.0)
       + ";weight=weighted_hours"
-      + ";level_min=" + std::to_string(static_cast<unsigned>(base.level_min))
-      + ";level_max=" + std::to_string(static_cast<unsigned>(base.level_max));
+      + ";grade_range=" + std::to_string(static_cast<unsigned>(kGradeMin)) + "-"
+                        + std::to_string(static_cast<unsigned>(kGradeMax));
 
     // Refusing is an answer. With no more baskets than columns the ridge would
     // still return a smooth plausible vector, and nothing downstream could tell
@@ -351,12 +389,7 @@ records::AxisPrices build_axis_prices(
     // criterion is not discriminating today and admits nobody.
     std::vector<double> cand;
     cand.reserve(base.obs.size());
-    {
-        const double span = base.level_max > base.level_min
-                          ? static_cast<double>(base.level_max - base.level_min) : 1.0;
-        for (const auto& o : base.obs)
-            cand.push_back((o.level - base.level_min) / span);
-    }
+    for (const auto& o : base.obs) cand.push_back(grade_column(o.level));
     const AxisGate g = run_axis_gate(base.obs, cand, cfg.margin);
 
     std::vector<std::string> columns = declared;

@@ -115,13 +115,17 @@ double quantile_sorted(const std::vector<double>& v, double q) {
 } // namespace
 
 // Prior for a thin, previously-unseen (specialty, level) bucket from the cloud
-// (specialty-axes.md §10): weighted mean of neighbours that already have a rate at
-// this level (a neighbour with none is "thin" and skipped) → tree parent's rate →
-// 1.0. `prev0` is the immutable yesterday-rate map (not the one being drained).
+// (specialty-axes.md §10). Order matters and is deliberate — DATA FIRST, MODEL
+// LAST: weighted mean of neighbours that already have a rate at this level (a
+// neighbour with none is "thin" and skipped) → tree parent's rate → the axis-price
+// model (ИР-020) → 1.0. Neighbours and parent are other people's actual deals;
+// β is a model of them, so it speaks only where no deal is within reach.
+// `prev0` is the immutable yesterday-rate map (not the one being drained).
 static std::optional<double> cloud_prior(
     const std::string& specialty, uint8_t level,
     const records::SpecialtyCloud& cloud,
-    const std::map<std::pair<std::string, uint8_t>, double>& prev0) {
+    const std::map<std::pair<std::string, uint8_t>, double>& prev0,
+    const AxisPriorFn& axis_prior) {
     const records::CloudPoint* pt = nullptr;
     for (const auto& p : cloud.points)
         if (p.slug == specialty) { pt = &p; break; }
@@ -138,6 +142,8 @@ static std::optional<double> cloud_prior(
         const auto it = prev0.find({pt->parent, level});
         if (it != prev0.end()) return it->second;
     }
+    if (axis_prior)                                 // ИР-020: model, after the data
+        if (const auto beta = axis_prior(specialty, level)) return *beta;
     return 1.0;                                    // normalized par, last resort
 }
 
@@ -148,7 +154,8 @@ std::vector<records::RateEntry> build_daily_rates(
     double                                 alpha,
     double                                 min_hours,
     const records::SpecialtyCloud*         cloud,
-    const IndependenceParams*              indep) {
+    const IndependenceParams*              indep,
+    const AxisPriorFn&                     axis_prior) {
     const int64_t day_end = day_start + 86'400;
     // Without independence weighting only the day itself is ever looked at, so
     // the behaviour (and the cost of the scan) stays exactly as before.
@@ -324,7 +331,8 @@ std::vector<records::RateEntry> build_daily_rates(
             if (prev != prev_rate.end()) {
                 e.rate = prev->second;               // inherit unchanged
             } else if (cloud) {                      // seed a prior from the cloud
-                const auto prior = cloud_prior(key.first, key.second, *cloud, prev0);
+                const auto prior = cloud_prior(key.first, key.second, *cloud,
+                                               prev0, axis_prior);
                 if (!prior) continue;
                 e.rate = *prior;
             } else {

@@ -710,6 +710,8 @@ void AggregatorServer::setup_routes() {
                 // catalog is served, the specialty cloud seeds priors for thin new
                 // activities (специальности-axes specialty-axes.md §10) — else nullptr, unchanged.
                 std::optional<records::SpecialtyCloud> cloud_opt;
+                std::vector<records::Catalog> prior_cats;
+                AttestedAxes                  prior_att;
                 if (!catalog_dir_.empty()) {
                     if (const auto pt = read_file(catalog_dir_ / "professions.json")) {
                         try {
@@ -725,13 +727,40 @@ void AggregatorServer::setup_routes() {
                             const auto att = build_axis_attestations(storage_);
                             cloud_opt = build_specialty_cloud(cc, day, now, sn.bytes, {},
                                                               5, 1.0, &cap, 0.5, &att);
+                            prior_cats = std::move(cc);
+                            prior_att  = att;
                         } catch (const std::exception&) {}
                     }
                 }
+
+                // ИР-020: the model's opinion, consulted ONLY where the cloud found
+                // neither a neighbour nor a parent with a rate. β comes from the
+                // aggregator's own latest published AxisPrices — yesterday's
+                // measurement priced today's newcomer, and it is re-checkable.
+                std::optional<records::AxisPrices> beta;
+                if (own_chain_ && !prior_cats.empty()) {
+                    for (const Block& b : own_chain_->branch()) {
+                        if (b.type != BlockType::DATA) continue;
+                        try {
+                            const auto rec = records::Codec::decode(b.payload.data(),
+                                                                    b.payload.size());
+                            const auto* a = std::get_if<records::AxisPrices>(&rec);
+                            if (a && !a->basis.empty() && (!beta || a->date >= beta->date))
+                                beta = *a;
+                        } catch (const records::CodecError&) {}
+                    }
+                }
+                AxisPriorFn axis_prior;
+                if (beta)
+                    axis_prior = [&](const std::string& slug, uint8_t level) {
+                        return axis_price_predict(*beta, slug, level, prior_cats,
+                                                  &prior_att);
+                    };
+
                 d.rates     = build_daily_rates(storage_, day - 86'400, previous,
                                                 0.3, 0.1,
                                                 cloud_opt ? &*cloud_opt : nullptr,
-                                                &kIndependence);
+                                                &kIndependence, axis_prior);
                 // W = hours-weighted mean of raw rates (economy.md §2б): the client
                 // divides by it so the average labour-hour equals 1.
                 double sw = 0.0, swr = 0.0;

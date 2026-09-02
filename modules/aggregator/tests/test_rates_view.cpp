@@ -268,6 +268,87 @@ TEST_F(RatesViewTest, CloudPriorSeedsThinNewSpecialty) {
     EXPECT_FALSE(present);
 }
 
+// ── ИР-020: приор по цене осей — модель говорит ПОСЛЕДНЕЙ ───────────────────
+//
+// Порядок «соседи → родитель → модель → номинал» — не вкусовщина. Соседи и
+// родитель — это чужие настоящие сделки; β — лишь модель этих сделок. Модель,
+// поставленная раньше данных, начала бы перебивать сделку, а тогда профили
+// станут рисовать под формулу вместо того чтобы мерить (Гудхарт).
+
+// Соседей с ставкой нет, родителя нет — вот здесь модель и говорит.
+TEST_F(RatesViewTest, AxisPriorSpeaksWhenTheCloudHasNothing) {
+    settled_deal(bob_, 0.05, 5.0);            // тонкая корзина, истории нет
+
+    records::SpecialtyCloud cloud{};
+    records::CloudPoint p{};
+    p.slug = "хлебопёк";
+    p.neighbors.push_back({"prof.cook", 1.0});   // у соседа ставки нет
+    cloud.points.push_back(p);
+
+    int asked = 0;
+    AxisPriorFn prior = [&](const std::string& slug, uint8_t level)
+        -> std::optional<double> {
+        ++asked;
+        EXPECT_EQ(slug, "хлебопёк");
+        EXPECT_EQ(level, 3);
+        return 2.5;
+    };
+    const auto rates = build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, &cloud,
+                                         nullptr, prior);
+    bool seeded = false;
+    for (const auto& r : rates)
+        if (r.specialty == "хлебопёк") { EXPECT_DOUBLE_EQ(r.rate, 2.5); seeded = true; }
+    EXPECT_TRUE(seeded);
+    EXPECT_EQ(asked, 1);
+
+    // Без модели та же корзина садится на номинал 1.0 — прежнее поведение.
+    for (const auto& r : build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, &cloud))
+        if (r.specialty == "хлебопёк") EXPECT_DOUBLE_EQ(r.rate, 1.0);
+}
+
+// У соседа ставка ЕСТЬ — модель не спрашивается вовсе.
+TEST_F(RatesViewTest, AxisPriorNeverOverridesRealNeighbourRates) {
+    settled_deal(bob_, 0.05, 5.0);
+
+    records::SpecialtyCloud cloud{};
+    records::CloudPoint p{};
+    p.slug = "хлебопёк";
+    p.neighbors.push_back({"prof.cook", 1.0});
+    cloud.points.push_back(p);
+    const std::vector<records::RateEntry> prev = {{"prof.cook", 3, 1.2, 0.0, 0}};
+
+    bool asked = false;
+    AxisPriorFn prior = [&](const std::string&, uint8_t) -> std::optional<double> {
+        asked = true;
+        return 9.9;
+    };
+    for (const auto& r : build_daily_rates(*storage_, kDay, prev, 0.3, 0.1, &cloud,
+                                           nullptr, prior))
+        if (r.specialty == "хлебопёк") EXPECT_DOUBLE_EQ(r.rate, 1.2);
+    EXPECT_FALSE(asked);
+}
+
+// Корзина, у которой был настоящий объём, берёт среднее дня. Модель к ней не
+// подходит близко: сделка первична (economy.md §2а).
+TEST_F(RatesViewTest, AxisPriorNeverTouchesABucketThatTraded) {
+    settled_deal(bob_, 10.0, 15.0);           // 1.5 стч/ч, объём настоящий
+
+    records::SpecialtyCloud cloud{};
+    records::CloudPoint p{};
+    p.slug = "хлебопёк";
+    cloud.points.push_back(p);
+
+    bool asked = false;
+    AxisPriorFn prior = [&](const std::string&, uint8_t) -> std::optional<double> {
+        asked = true;
+        return 9.9;
+    };
+    for (const auto& r : build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, &cloud,
+                                           nullptr, prior))
+        if (r.specialty == "хлебопёк") EXPECT_DOUBLE_EQ(r.rate, 1.5);
+    EXPECT_FALSE(asked);
+}
+
 // build_axis_attestations (ИР-019): grade-weighted median over attesters, one
 // (latest) per attester chain; outlier trimmed by the median.
 TEST_F(RatesViewTest, AxisAttestationWeightedMedian) {

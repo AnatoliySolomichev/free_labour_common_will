@@ -27,6 +27,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -71,6 +72,23 @@ struct AxisGate {
 // of the time, because the sliding control is itself noisy. A 5% margin drops
 // that to 0.5% while leaving real axes untouched — grade beats the base by 87%.
 inline constexpr double kAxisGateMargin = 0.05;
+
+// Below this many observations per design column the exam does not discriminate
+// and REFUSES TO JUDGE, admitting nobody. Measured on the year run by subsampling
+// the 78 baskets, junk columns admitted at 5 columns:
+//
+//   rows   10    13    20    30    40    55    78
+//   junk   20%   16%   12%    6%    4%   1.7%  0.3%      (real axis: 100% throughout)
+//
+// The refusal costs nothing in power — the grade is admitted at every size — so
+// it is free insurance. More junk CONTROLS are not a substitute: measured, three
+// controls at 13 rows cut junk to 10% but dropped the real axis to 55%, five to
+// 6%/36%. Below ~30 rows no number of controls is both strict and powerful; only
+// data is. 10 per column puts junk at 2.5% with the real axis still at 100%.
+//
+// Same discipline as `min_basket_edges` in ИР-021: refusing to judge beats
+// judging badly, and the exam runs again tomorrow.
+inline constexpr size_t kMinRowsPerColumn = 10;
 
 // Ridge is numerical insurance, not statistical regularization: it keeps a
 // near-singular normal-equation matrix invertible. It does NOT create the
@@ -138,12 +156,19 @@ std::vector<std::string> declared_axis_columns();
 // bootstrap value for that axis.
 using AttestedAxes = std::map<std::pair<std::string, std::string>, double>;
 
+// Grade runs 1..6 by protocol (records.md §9.2), so the `level` column is scaled
+// by that fixed range and NOT by the range that happens to appear in the data.
+// A data-derived range would make β_level mean something different for every
+// witness — an aggregator that saw grades 2..5 and one that saw 1..6 could not
+// have their vectors compared, let alone medianed.
+inline constexpr uint8_t kGradeMin = 1;
+inline constexpr uint8_t kGradeMax = 6;
+double grade_column(uint8_t level);
+
 // A design matrix plus the bookkeeping a witness needs to rebuild it.
 struct AxisDesign {
     std::vector<std::string>     basis;   // basis[0] == kAxisBaseColumn
     std::vector<AxisObservation> obs;     // canonical order (slug, level)
-    uint8_t level_min = 0;                // range the `level` column was scaled by;
-    uint8_t level_max = 0;                // data-derived, so it goes into params
 };
 
 // Build the design from a day's rate table.
@@ -187,6 +212,21 @@ struct AxisPricesParams {
 std::vector<records::RateEntry> pool_daily_rates(
     const std::vector<records::DailyAggregate>& days,
     int64_t                                     from_date);
+
+// The model's opinion of one (activity, grade) that has not traded: Σ βj·xj over
+// the published basis. Returns nothing when the record refused to fit, when the
+// activity has no declared profile, or when the basis names a column this build
+// cannot reconstruct — guessing would defeat the point of publishing a basis.
+//
+// This is a PRIOR of last resort and nothing else. It may never displace a price
+// two people agreed on: the moment the model sets prices, profiles are drawn
+// instead of measured and the residual stops meaning anything (Goodhart).
+std::optional<double> axis_price_predict(
+    const records::AxisPrices&           prices,
+    const std::string&                   slug,
+    uint8_t                              level,
+    const std::vector<records::Catalog>& catalogs,
+    const AttestedAxes*                  attested = nullptr);
 
 // Fit, examine the candidate axes, and package the result as a signed-ready
 // record. `snapshot` must commit the input (catalog + block set), like
