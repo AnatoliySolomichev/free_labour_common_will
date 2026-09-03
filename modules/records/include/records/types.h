@@ -430,6 +430,13 @@ struct AxisAttestation {
     // not a party to the deal and does not get a voice in it. A declared side
     // could lie; a derived one cannot.
     std::optional<Ref> deal;
+    // v3 (ИР-020): a free-text line FOR PEOPLE — "варил в резервуаре, вытяжки
+    // нет". Never parsed, never weighed, never fed to a fit: it can only be read
+    // by whoever wants to understand why the number is what it is. The moment a
+    // machine reads it, people start writing for the machine. Empty = nothing to
+    // add; the field is then absent from the encoding, so old records keep their
+    // exact bytes and hashes.
+    std::string note;
 };
 
 // ── Axis prices (ИР-020) ─────────────────────────────────────────────────────

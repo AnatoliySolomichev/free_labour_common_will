@@ -222,7 +222,8 @@ std::optional<double> bootstrap_axis(const std::vector<records::Catalog>* catalo
     return std::nullopt;
 }
 
-struct Voice { double value = 0.0; double weight = 1.0; int64_t ts = 0; bool from_deal = false; };
+struct Voice { double value = 0.0; double weight = 1.0; int64_t ts = 0; bool from_deal = false;
+               std::string note; };
 
 AttestationStat weighted_median(const std::map<std::array<uint8_t, 32>, Voice>& per) {
     if (per.empty()) return {};
@@ -233,9 +234,10 @@ AttestationStat weighted_median(const std::map<std::array<uint8_t, 32>, Voice>& 
               [](const Voice& x, const Voice& y) { return x.value < y.value; });
     double total = 0.0;
     for (const auto& e : v) total += e.weight;
-    double cum = 0.0, med = v.back().value;
-    for (const auto& e : v) { cum += e.weight; if (cum >= total / 2.0) { med = e.value; break; } }
-    return AttestationStat{med, static_cast<int>(per.size())};
+    double cum = 0.0;
+    const Voice* win = &v.back();
+    for (const auto& e : v) { cum += e.weight; if (cum >= total / 2.0) { win = &e; break; } }
+    return AttestationStat{win->value, static_cast<int>(per.size()), win->note};
 }
 
 }  // namespace
@@ -301,7 +303,7 @@ build_axis_attestation_summary(const AggregatorStorage& storage,
         }
 
         auto& b = groups[{a->activity, a->axis}];
-        const Voice voice{value, weight, a->timestamp, from_deal};
+        const Voice voice{value, weight, a->timestamp, from_deal, a->note};
         // A deal-backed statement beats that attester's own free-standing one
         // whatever the order in time: the free one is costless, and letting it
         // override would make the cheap word louder than the paid-for one.

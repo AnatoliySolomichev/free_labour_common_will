@@ -7,6 +7,7 @@
 #include "aggregator/match_view.h"
 #include "aggregator/profile_view.h"
 #include "aggregator/rates_view.h"
+#include "aggregator/rent_map.h"
 #include "aggregator/cloud_view.h"
 #include "aggregator/axis_prices.h"
 #include "blockchain/serializer.h"
@@ -1092,17 +1093,33 @@ void AggregatorServer::setup_routes() {
                                                       cols, &attested);
                 const auto fit = fit_wls(design.obs);
                 body += ",\"rent\":[";
-                if (fit.ok)
-                    for (size_t i = 0; i < design.obs.size(); ++i) {
-                        const auto& o = design.obs[i];
+                if (fit.ok) {
+                    // WHO pays the rent, not just how much of it there is: the
+                    // same residual is a market signal when everybody pays it and
+                    // a pipe when one payer does. Three numbers, no composite
+                    // score — the reader judges (records.md §11.9).
+                    const auto flows = build_basket_flows(
+                        storage_, from_date, last_date + 86'400, 1.0);
+                    const auto rent = build_rent_map(design.obs, fit.pred, flows);
+                    for (size_t i = 0; i < rent.size(); ++i) {
+                        const auto& r = rent[i];
                         if (i) body += ',';
-                        body += "{\"specialty\":\"" + json_escape(o.slug)
-                             + "\",\"level\":" + std::to_string(o.level)
-                             + ",\"fact\":"     + std::to_string(o.rate)
-                             + ",\"pred\":"     + std::to_string(fit.pred[i])
-                             + ",\"resid\":"    + std::to_string(o.rate - fit.pred[i])
-                             + ",\"hours\":"    + std::to_string(o.weight) + "}";
+                        body += "{\"specialty\":\"" + json_escape(r.slug)
+                             + "\",\"level\":" + std::to_string(r.level)
+                             + ",\"fact\":"     + std::to_string(r.fact)
+                             + ",\"pred\":"     + std::to_string(r.pred)
+                             + ",\"resid\":"    + std::to_string(r.resid)
+                             + ",\"hours\":"    + std::to_string(r.hours)
+                             + ",\"payers\":"   + std::to_string(r.payers)
+                             + ",\"periods_over\":" + std::to_string(r.periods_over)
+                             + ",\"periods_seen\":" + std::to_string(r.periods_seen);
+                        // null, not 0: "too thin to judge" is not "one payer".
+                        body += r.judged
+                              ? ",\"rent_payers\":" + std::to_string(r.rent_payers)
+                              : std::string(",\"rent_payers\":null");
+                        body += "}";
                     }
+                }
                 body += "]";
             }
             body += "}";
@@ -1144,6 +1161,10 @@ void AggregatorServer::setup_routes() {
                  + ",\"attesters\":" + std::to_string(sum.all.attesters)
                  + ",\"preliminary\":"
                  + (sum.all.attesters < kMinAttesters ? "true" : "false");
+            // The reason given by whoever's value became the median, in their own
+            // words. Carried for a human to read, never parsed (ИР-020).
+            if (!sum.all.note.empty())
+                body += ",\"note\":\"" + json_escape(sum.all.note) + "\"";
             // The two sides of a deal, side by side and never averaged (ИР-020):
             // where both spoke, their gap is the published disagreement.
             if (sum.seller.attesters || sum.buyer.attesters) {

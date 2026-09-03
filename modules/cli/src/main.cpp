@@ -2743,8 +2743,13 @@ static int cmd_attestations(int argc, char** argv) {
     return economy_get(via, path);
 }
 
+// The note is a line for humans, so it is bounded like one: 280 bytes of UTF-8.
+// The limit is a client rule, not a protocol one — the protocol does not read
+// the field at all.
+constexpr std::size_t kAttestNoteMax = 280;
+
 // bc attest --activity SLUG --axis danger --value 0.02
-//           [--grade REF] [--deal REF] [--via URL]
+//           [--grade REF] [--deal REF] [--note TEXT] [--via URL]
 // Attest a declared cloud axis value (ИР-019). The aggregator takes the
 // grade-weighted median over practitioners; --grade gives your standing/weight.
 //
@@ -2766,6 +2771,8 @@ static int cmd_attest(const fs::path& data_dir, int argc, char** argv) {
                      "party to; --value\n"
                      "                                 then means a DELTA to the "
                      "catalog profile (ИР-020)\n"
+                     "    [--note TEXT]                one line for PEOPLE: why the "
+                     "number is what it is\n"
                      "    [--via URL]                  publish to the aggregator\n";
         return 1;
     }
@@ -2778,6 +2785,14 @@ static int cmd_attest(const fs::path& data_dir, int argc, char** argv) {
     if (!grade_s.empty()) a.grade = parse_ref(grade_s);
     const auto deal_s = flag_val(argc, argv, "--deal");
     if (!deal_s.empty()) a.deal = parse_ref(deal_s);
+    // A line for people, never for the arithmetic (records.md §11.8). Capped so a
+    // record stays a record: the chain is not a place to publish essays.
+    a.note = flag_val(argc, argv, "--note");
+    if (a.note.size() > kAttestNoteMax) {
+        std::cerr << "--note слишком длинная: " << a.note.size() << " байт, предел "
+                  << kAttestNoteMax << ". Пояснение — строка, не сочинение.\n";
+        return 1;
+    }
     return cmd_write(data_dir, argc, argv, a);
 }
 
@@ -4434,6 +4449,8 @@ Means of production (ИР-011, records.md §10.2, records.md §9.4):
                                        --value becomes a DELTA to the catalog profile,
                                        the side is derived from the deal, and the
                                        statement outranks your free-standing one (ИР-020)
+    [--note TEXT]                      one line for PEOPLE — why the number is what it
+                                       is. Never parsed, never weighed (max 280 bytes)
   attestations --via URL           Attested axis values: median, how many attesters,
     [--slug SLUG]                      and whether still preliminary (below N)
   axis-prices --via URL [--rent]   What the network actually pays for knowledge,

@@ -23,7 +23,15 @@ namespace aggregator {
 // many distinct practitioners attested — so a consumer sees whether a value is
 // well-supported or still preliminary (below the N threshold — ИР-019 A4, the same
 // open N as records.md §14.8 п.11).
-struct AttestationStat { double median = 0.0; int attesters = 0; };
+// `note` is the free-text line of the attestation that SET the median — the
+// reason, in the words of the person whose value won, so a reader sees not only
+// what the number is but why someone thought so (ИР-020). It is carried, never
+// parsed: nothing downstream may branch on it.
+struct AttestationStat {
+    double      median    = 0.0;
+    int         attesters = 0;
+    std::string note;
+};
 
 // The two sides of a deal are kept APART, never averaged into one number (ИР-020).
 // Their interests are opposite, which is exactly what makes their agreement worth

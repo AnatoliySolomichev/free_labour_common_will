@@ -344,6 +344,14 @@ std::optional<double> axis_price_predict(
         else return std::nullopt;   // a column this build cannot rebuild: no guessing
         sum += use->beta[j] * x;
     }
+    // A rate of zero or less is not a cautious prior, it is a broken one: the
+    // additive form has nothing stopping the sum from going negative once a
+    // column's β is negative (a real outcome — see records.md §11.9 on why a
+    // negative coefficient is a comparison, not negative labour). Handing that
+    // to build_daily_rates would seed a basket at a non-positive rate and every
+    // deal priced off it afterwards. Refuse and let the caller fall through to
+    // par, which is what "no opinion" should look like.
+    if (!(sum > 0.0)) return std::nullopt;
     return sum;
 }
 
@@ -367,7 +375,7 @@ records::AxisPrices build_axis_prices(
     const AxisDesign base = build_axis_design(rates, W, catalogs, declared, attested);
 
     std::string params =
-        "v1;axes=info,people,danger;ref=material;cand=level"
+        "v1;form=linear;axes=info,people,danger;ref=material;cand=level"
         ";window_days=" + std::to_string(cfg.window_days)
       + ";margin="  + fmt(cfg.margin)
       + ";ridge="   + fmt(kRidgeRelative)

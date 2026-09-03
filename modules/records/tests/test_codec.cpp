@@ -840,6 +840,50 @@ TEST(RecordsCodec, AxisAttestationV1DecodesWithoutADeal) {
     EXPECT_FALSE(d.deal.has_value());
 }
 
+// Опциональный хвост читается ПО КЛЮЧУ, а не по счётчику: `deal` (v2) и `note`
+// (v3) независимы, поэтому 7 полей — это либо одно, либо другое. Разобрать по
+// позиции значило бы прочитать пояснение как ссылку на сделку.
+TEST(RecordsCodec, AxisAttestationNoteWithoutDeal) {
+    records::AxisAttestation a{};
+    a.activity  = "prof.welder";
+    a.axis      = "danger";
+    a.value     = 0.2;
+    a.timestamp = 1'700'000'000LL;
+    a.note      = "варил в резервуаре, вытяжки нет";
+
+    const auto d = std::get<records::AxisAttestation>(roundtrip(Record{a}));
+    EXPECT_FALSE(d.deal.has_value());
+    EXPECT_EQ(d.note, a.note);
+    EXPECT_DOUBLE_EQ(d.value, 0.2);
+}
+
+TEST(RecordsCodec, AxisAttestationDealAndNote) {
+    records::AxisAttestation a{};
+    a.activity  = "prof.welder";
+    a.axis      = "danger";
+    a.value     = 0.2;
+    a.timestamp = 1'700'000'000LL;
+    a.deal      = make_ref(0x54, 0x55);
+    a.note      = "заказчик подтвердил: работа в замкнутом объёме";
+
+    const auto d = std::get<records::AxisAttestation>(roundtrip(Record{a}));
+    ASSERT_TRUE(d.deal.has_value());
+    EXPECT_EQ(*d.deal, *a.deal);
+    EXPECT_EQ(d.note, a.note);
+}
+
+// Пустое пояснение не занимает поля вовсе — записи, написанные до ИР-020,
+// сохраняют ровно свои байты и хеши.
+TEST(RecordsCodec, AxisAttestationEmptyNoteChangesNoBytes) {
+    records::AxisAttestation a{};
+    a.activity = "prof.cook"; a.axis = "danger"; a.value = 0.1; a.timestamp = 7;
+    const auto plain = Codec::encode(Record{a});
+    a.note = "";
+    EXPECT_EQ(Codec::encode(Record{a}), plain);
+    a.note = "x";
+    EXPECT_NE(Codec::encode(Record{a}), plain);
+}
+
 // AxisPrices (0x77) — цены осей (ИР-020, records.md §11.9)
 TEST(RecordsCodec, AxisPricesRoundtrip) {
     records::AxisPrices a{};

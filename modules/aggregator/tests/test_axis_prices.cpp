@@ -626,3 +626,32 @@ TEST(AxisPricesSides, WithoutSidesTheRecordIsUnchanged) {
     EXPECT_TRUE(p.disagreement.empty());
     EXPECT_EQ(p.params.find("sides="), std::string::npos);
 }
+
+// Неположительная ставка — не осторожный приор, а сломанный. Аддитивная форма
+// ничем не мешает сумме уйти в минус, как только β какого-то столбца отрицателен
+// (это реальный исход: отрицательный коэффициент — сравнение с базовой
+// категорией, а не отрицательный труд, records.md §11.9). Такое значение ушло бы
+// в build_daily_rates стартовой ставкой корзины, и от неё считались бы все
+// последующие сделки. Молчим — пусть сработает номинал.
+TEST(AxisPricesPredict, RefusesToHandOutANonPositivePrior) {
+    const auto cats = world_catalog();
+
+    records::AxisPrices neg{};
+    neg.basis = {"base", "danger"};
+    // Опасность сварщика 0.80 при β = −4.0: 1.0 − 3.2 = −2.2.
+    neg.fits  = {{"declared", {1.0, -4.0}, 1.0, 60, 1.0}};
+    EXPECT_FALSE(axis_price_predict(neg, "prof.welder", 3, cats).has_value());
+
+    records::AxisPrices zero{};
+    zero.basis = {"base", "danger"};
+    zero.fits  = {{"declared", {1.0, -1.25}, 1.0, 60, 1.0}};  // ровно 0.0
+    EXPECT_FALSE(axis_price_predict(zero, "prof.welder", 3, cats).has_value());
+
+    // А положительный приор по-прежнему выдаётся — защита не глушит нормальный ход.
+    records::AxisPrices ok{};
+    ok.basis = {"base", "danger"};
+    ok.fits  = {{"declared", {1.0, 0.4}, 1.0, 60, 1.0}};
+    const auto v = axis_price_predict(ok, "prof.welder", 3, cats);
+    ASSERT_TRUE(v.has_value());
+    EXPECT_GT(*v, 1.0);
+}

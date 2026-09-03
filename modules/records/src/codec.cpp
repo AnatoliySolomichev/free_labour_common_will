@@ -340,16 +340,18 @@ void enc_specialty_cloud(Buf& out, const SpecialtyCloud& c) {
 }
 
 void enc_axis_attestation(Buf& out, const AxisAttestation& a) {
-    // v1 = map(6); v2 adds the deal link (key 6) only when present, so records
-    // written before ИР-020 keep their exact bytes and hashes.
-    w_map(out, 6 + (a.deal ? 1 : 0));
+    // v1 = map(6); v2 adds the deal link (key 6) and v3 the human note (key 7),
+    // each only when present, so records written earlier keep their exact bytes
+    // and hashes.
+    w_map(out, 6 + (a.deal ? 1 : 0) + (a.note.empty() ? 0 : 1));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::AxisAttestation));
     w_uint(out, 1); w_text(out, a.activity);
     w_uint(out, 2); w_text(out, a.axis);
     w_uint(out, 3); w_float64(out, a.value);
     w_uint(out, 4); w_ref(out, a.grade);
     w_uint(out, 5); w_int64(out, a.timestamp);
-    if (a.deal) { w_uint(out, 6); w_ref(out, *a.deal); }   // v2 (ИР-020)
+    if (a.deal) { w_uint(out, 6); w_ref(out, *a.deal); }        // v2 (ИР-020)
+    if (!a.note.empty()) { w_uint(out, 7); w_text(out, a.note); }  // v3 (ИР-020)
 }
 
 void enc_axis_prices(Buf& out, const AxisPrices& a) {
@@ -915,7 +917,16 @@ AxisAttestation dec_axis_attestation_fields(CborReader& r, uint64_t field_count)
     expect_key(r, 3); a.value     = r.r_float64();
     expect_key(r, 4); a.grade     = dec_ref(r);
     expect_key(r, 5); a.timestamp = r.r_int();
-    if (field_count >= 7) { expect_key(r, 6); a.deal = dec_opt_ref(r); }  // v2
+    // The optional tail is read BY KEY, not by position: `deal` (v2) and `note`
+    // (v3) are independent, so a field count of 7 could mean either of them.
+    // Keys stay ascending (RFC 8949 §4.2.1), so this is still deterministic.
+    for (uint64_t i = 6; i < field_count; ++i) {
+        switch (r.r_uint()) {
+            case 6:  a.deal = dec_opt_ref(r); break;
+            case 7:  a.note = r.r_text();     break;
+            default: throw CodecError("AxisAttestation: unknown field key");
+        }
+    }
     return a;
 }
 
