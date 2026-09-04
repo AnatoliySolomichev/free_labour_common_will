@@ -508,7 +508,8 @@ function betaChart(svgId, beta, capId, capText) {
     nm.textContent = n; svg.appendChild(nm);
     const b = el("path", { d: barPath(L + 1, y, Math.max(X(v), 2), bh, 4, "right"), class: "s1" });
     bindTip(b, `<b>${n}</b><br>${v >= 0 ? "+" : ""}${v.toFixed(3)} стч за полную шкалу` +
-      (n === "базовый час" ? "<br>(свободный член: час при нулях всех осей)" : ""));
+      (n === "материя" ? "<br>(цена часа работы с веществом — точка, от которой " +
+                         "видны остальные)" : ""));
     svg.appendChild(b);
     const dl = el("text", { x: L + X(v) + 8, y: y + bh - 2, class: "datalabel" });
     dl.textContent = (v >= 0 ? "+" : "") + v.toFixed(2); svg.appendChild(dl);

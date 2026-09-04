@@ -198,9 +198,9 @@ namespace {
 
 // Effective declared value of one axis: the catalog's bootstrap, overridden by
 // the grade-weighted median of practitioners' attestations (ИР-019) when there
-// is one. Deliberately NOT shared with cloud_view's version — the cloud needs
-// `material` (it is a coordinate there), the design matrix must not have it
-// (it is the reference category, axis_prices.h).
+// is one. Deliberately NOT shared with cloud_view's version: the cloud weighs
+// `danger` by a separate parameter and adds derived capital-intensity, which the
+// design matrix must not have.
 double effective_axis(const records::CatalogEntry& e, const std::string& axis,
                       const AttestedAxes* attested) {
     double v = 0.0;
@@ -220,8 +220,22 @@ std::string fmt(double v) { return std::to_string(v); }
 
 }  // namespace
 
+std::vector<std::string> object_share_group() {
+    return {"material", "info", "people"};
+}
+
+bool covers_share_group(const std::vector<std::string>& columns) {
+    for (const auto& g : object_share_group())
+        if (std::find(columns.begin(), columns.end(), g) == columns.end())
+            return false;
+    return true;
+}
+
 std::vector<std::string> declared_axis_columns() {
-    return {"info", "people", "danger"};
+    // All three shares, no reference category and no constant: each coefficient
+    // is then the PRICE OF AN HOUR of that kind of work, readable as it stands,
+    // instead of a difference from an hour of nothing in particular.
+    return {"material", "info", "people", "danger"};
 }
 
 double grade_column(uint8_t level) {
@@ -236,7 +250,12 @@ AxisDesign build_axis_design(const std::vector<records::RateEntry>& rates,
                              const std::vector<std::string>&        columns,
                              const AttestedAxes*                    attested) {
     AxisDesign d{};
-    d.basis.push_back(kAxisBaseColumn);
+    // A constant only when the columns do NOT already carry a complete share
+    // group. With the group present, a column of ones is its exact duplicate and
+    // the fit stops having a single answer (records.md §11.9); without it, the
+    // constant is the only thing anchoring an all-zero profile.
+    const bool constant = !covers_share_group(columns);
+    if (constant) d.basis.push_back(kAxisBaseColumn);
     for (const auto& c : columns) d.basis.push_back(c);
 
     std::map<std::string, const records::CatalogEntry*> by_slug;
@@ -264,7 +283,9 @@ AxisDesign build_axis_design(const std::vector<records::RateEntry>& rates,
     sort_canonically(d.obs);
 
     for (auto& o : d.obs) {
-        o.x.assign(1, 1.0);                     // the constant
+        o.x.clear();
+        o.x.reserve(columns.size() + (constant ? 1 : 0));
+        if (constant) o.x.push_back(1.0);
         for (const auto& c : columns) {
             if (c == kAxisLevel)
                 o.x.push_back(grade_column(o.level));
@@ -337,7 +358,7 @@ std::optional<double> axis_price_predict(
     for (size_t j = 0; j < prices.basis.size(); ++j) {
         const std::string& c = prices.basis[j];
         double x;
-        if      (c == kAxisBaseColumn) x = 1.0;
+        if      (c == kAxisBaseColumn) x = 1.0;   // v1 records only
         else if (c == kAxisLevel)      x = grade_column(level);
         else if (c == "material" || c == "info" || c == "people" || c == "danger")
             x = effective_axis(*entry, c, attested);
@@ -375,7 +396,8 @@ records::AxisPrices build_axis_prices(
     const AxisDesign base = build_axis_design(rates, W, catalogs, declared, attested);
 
     std::string params =
-        "v1;form=linear;axes=info,people,danger;ref=material;cand=level"
+        "v2;form=linear;const=none;axes=material,info,people,danger"
+        ";shares=material+info+people=1;cand=level"
         ";window_days=" + std::to_string(cfg.window_days)
       + ";margin="  + fmt(cfg.margin)
       + ";ridge="   + fmt(kRidgeRelative)

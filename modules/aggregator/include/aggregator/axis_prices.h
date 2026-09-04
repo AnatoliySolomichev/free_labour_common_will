@@ -42,7 +42,7 @@ struct AxisObservation {
     uint8_t              level  = 0;
     double               rate   = 0.0;
     double               weight = 0.0;
-    std::vector<double>  x;        // design row, x[0] must be the constant 1
+    std::vector<double>  x;        // design row, aligned with AxisDesign::basis
 };
 
 // Result of one weighted least-squares fit. `beta` empty means REFUSED — the
@@ -138,17 +138,48 @@ void sort_canonically(std::vector<AxisObservation>& obs);
 // Column names are PROTOCOL KEYS, not display labels: they join to the catalog's
 // `axes` object and to AxisAttestation::axis, so two witnesses build the same
 // design matrix from the same words.
-inline constexpr const char* kAxisBaseColumn = "base";   // the constant, x[0] = 1
+// The constant term of v1 records. NOT produced any more: the shares already sum
+// to 1, so a column of ones duplicated them exactly and the fit had no single
+// answer (records.md §11.9). Kept only so a v1 record published earlier still
+// reads back. There is no such thing as an hour of work with no object, so its
+// price was never observable — and it was never anybody's income either.
+inline constexpr const char* kAxisBaseColumn = "base";
 inline constexpr const char* kAxisLevel      = "level";  // grade, the mastery axis
 inline constexpr const char* kAxisJunk       = "junk";   // the exam's control column
 
+// The object-of-labour share group (specialty-axes.md §4.1): fractional
+// membership that sums to 1 in every row, which is what dissolves the trunk of
+// the professions tree — a diagnostician is 50% information + 50% people and
+// need not pick a single parent branch.
+std::vector<std::string> object_share_group();
+
+// True when `columns` contains the WHOLE share group. Then, and only then, a
+// constant column would be the group's exact duplicate and must be left out.
+//
+// The rule is not "never use a constant". A basis of independent intensities
+// (knowledge, danger, mastery — none of them a share of anything) still needs
+// one, or an activity with every axis at zero would be predicted at zero. It is
+// the completeness of a share group that makes the constant redundant.
+bool covers_share_group(const std::vector<std::string>& columns);
+
 // The declared axes taken from the catalog, in canonical column order.
 //
-// `material` is deliberately absent. material + info + people ≈ 1
-// (specialty-axes.md §4.1), so one of the three MUST be the reference category:
-// keep all three and the design matrix is singular by construction, the ridge
-// splits their shared effect evenly, and that split looks like an answer without
-// being one. Which one is dropped is recorded in AxisPrices::params.
+// ALL THREE shares are here, and there is NO constant term. The three sum to 1
+// in every row (specialty-axes.md §4.1), so a constant column of ones would be
+// their exact duplicate and the fit would have infinitely many equal answers —
+// the data only ever shows "constant + share" together, never the constant on
+// its own, because no hour of work has no object.
+//
+// Dropping the constant instead of one of the shares costs nothing (identical
+// predictions, identical R²) and buys the reading: each coefficient is the PRICE
+// OF AN HOUR of that kind of work, standing on its own, rather than a difference
+// from a reference category. It also removes the source of negative coefficients
+// that were only ever comparisons.
+//
+// The zero-sum property survives: summing the normal equations of the three
+// share columns gives Σ w·(y − ŷ) = 0 exactly as an intercept used to, BECAUSE
+// they sum to 1. What was an artefact of the constant is now a consequence of
+// the shares being shares.
 std::vector<std::string> declared_axis_columns();
 
 // (activity, axis) → the grade-weighted median of practitioners' attestations
@@ -167,7 +198,7 @@ double grade_column(uint8_t level);
 
 // A design matrix plus the bookkeeping a witness needs to rebuild it.
 struct AxisDesign {
-    std::vector<std::string>     basis;   // basis[0] == kAxisBaseColumn
+    std::vector<std::string>     basis;   // column names, in canonical order
     std::vector<AxisObservation> obs;     // canonical order (slug, level)
 };
 

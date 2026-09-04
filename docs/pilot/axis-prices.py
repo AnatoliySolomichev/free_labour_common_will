@@ -261,13 +261,17 @@ def run_sim(out_dir):
     gmin = min(o['level'] for o in obs)
     gmax = max(o['level'] for o in obs)
 
-    names_a = ['базовый час', 'информация', 'люди', 'опасность']
+    # Свободного члена НЕТ: доли объекта труда сами дают в сумме 1
+    # (specialty-axes.md §4.1), поэтому столбец из единиц был бы их точным
+    # повторением и у подгонки не стало бы единственного ответа (records.md
+    # §11.9). Каждый коэффициент читается прямо — цена часа такой работы.
+    names_a = ['материя', 'информация', 'люди', 'опасность']
     names_b = names_a + ['разряд']
 
     def feats(o, with_grade):
         ax = cat[o['slug']]['axes']
-        x = [1.0, ax.get('info', 0.0), ax.get('people', 0.0),
-             ax.get('danger', 0.0)]
+        x = [ax.get('material', 0.0), ax.get('info', 0.0),
+             ax.get('people', 0.0), ax.get('danger', 0.0)]
         if with_grade:
             x.append(min(1.0, max(0.0, (o['level'] - GRADE_MIN) / span)))
         return x

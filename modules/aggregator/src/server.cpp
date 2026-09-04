@@ -1088,7 +1088,10 @@ void AggregatorServer::setup_routes() {
             // whole class of work means the vocabulary is missing an axis; a
             // temporary one on a single activity is scarcity rent, now visible.
             if (req.has_param("rent") && !prices.basis.empty()) {
-                std::vector<std::string> cols(prices.basis.begin() + 1, prices.basis.end());
+                // v2 has no constant column; a v1 record read back still might.
+                std::vector<std::string> cols;
+                for (const auto& c : prices.basis)
+                    if (c != kAxisBaseColumn) cols.push_back(c);
                 const auto design = build_axis_design(pooled, 1.0, cats,
                                                       cols, &attested);
                 const auto fit = fit_wls(design.obs);

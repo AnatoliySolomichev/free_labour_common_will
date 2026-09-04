@@ -238,6 +238,16 @@ std::vector<records::Catalog> world_catalog() {
 // ставка = 0.60 + 0.50·информация + 0.30·люди + 0.90·опасность + 0.40·разряд.
 constexpr double kLaw[] = {0.60, 0.50, 0.30, 0.90, 0.40};
 
+// Тот же закон в базисе БЕЗ константы (records.md §11.9). Константа не исчезла,
+// а разошлась по трём долям — они и так дают в сумме единицу, поэтому «час
+// работы с материей» = 0.60, «час работы с информацией» = 0.60 + 0.50 и т.д.
+// Числа другие, мир тот же: предсказания совпадают до последнего знака.
+constexpr double kLawNoConst[] = {kLaw[0],           // материя = бывшая константа
+                                  kLaw[0] + kLaw[1], // информация
+                                  kLaw[0] + kLaw[2], // люди
+                                  kLaw[3],           // опасность
+                                  kLaw[4]};          // разряд
+
 records::RateEntry basket(const std::string& slug, uint8_t level, double rate,
                           double hours, double weighted_hours = -1.0) {
     records::RateEntry r{};
@@ -292,13 +302,13 @@ TEST(AxisPricesBuild, RecoversTheWorldsLawFromItsRates) {
     const auto cats = world_catalog();
     const auto p = build_axis_prices(world_rates(), 1.0, cats, 86'400, 86'500, snap(0x01));
 
-    ASSERT_EQ(p.basis, (std::vector<std::string>{"base", "info", "people",
+    ASSERT_EQ(p.basis, (std::vector<std::string>{"material", "info", "people",
                                                  "danger", "level"}));
     const auto* f = fit_of(p, "declared");
     ASSERT_NE(f, nullptr);
     ASSERT_EQ(f->beta.size(), 5u);
     for (size_t i = 0; i < 5; ++i)
-        EXPECT_NEAR(f->beta[i], kLaw[i], 1e-3) << "столбец " << p.basis[i];
+        EXPECT_NEAR(f->beta[i], kLawNoConst[i], 1e-3) << "столбец " << p.basis[i];
     EXPECT_NEAR(f->r2, 1.0, 1e-6);
     EXPECT_EQ(f->rows, 60u);
     EXPECT_DOUBLE_EQ(f->weight, 6000.0);
@@ -407,7 +417,7 @@ TEST(AxisPricesBuild, NormalizerIsDividedOutBeforeFitting) {
                                      86'400, 86'500, snap(7));
     const auto* f = fit_of(p, "declared");
     ASSERT_NE(f, nullptr);
-    for (size_t i = 0; i < 5; ++i) EXPECT_NEAR(f->beta[i], kLaw[i], 1e-3);
+    for (size_t i = 0; i < 5; ++i) EXPECT_NEAR(f->beta[i], kLawNoConst[i], 1e-3);
     EXPECT_NE(p.params.find("W=2.5"), std::string::npos);
 }
 
@@ -473,7 +483,8 @@ TEST(AxisPricesPool, ParametersAreRecordedInTheRecord) {
                                      86'400, 86'500, snap(8), nullptr, cfg);
     EXPECT_NE(p.params.find("window_days=90"), std::string::npos);
     EXPECT_NE(p.params.find("margin=0.050000"), std::string::npos);
-    EXPECT_NE(p.params.find("ref=material"), std::string::npos);
+    EXPECT_NE(p.params.find("const=none"), std::string::npos);
+    EXPECT_NE(p.params.find("shares=material+info+people=1"), std::string::npos);
 }
 
 // ── Приор по β: мнение модели о том, что ещё не торговалось ──────────────────
@@ -654,4 +665,76 @@ TEST(AxisPricesPredict, RefusesToHandOutANonPositivePrior) {
     const auto v = axis_price_predict(ok, "prof.welder", 3, cats);
     ASSERT_TRUE(v.has_value());
     EXPECT_GT(*v, 1.0);
+}
+
+// Константа выбрасывается не «вообще», а ровно когда доли покрыты целиком.
+// Базис из независимых степеней (знание, опасность, мастерство — ни одна не доля
+// чего-либо) без константы предсказывал бы ноль для профиля из одних нулей.
+TEST(AxisPricesBuild, ConstantOnlyDisappearsWhenTheShareGroupIsComplete) {
+    EXPECT_TRUE(covers_share_group({"material", "info", "people", "danger"}));
+    EXPECT_FALSE(covers_share_group({"info", "people", "danger"}));  // нет материи
+    EXPECT_FALSE(covers_share_group({"danger", "level"}));           // одни степени
+
+    const auto cats = world_catalog();
+    const auto full = build_axis_design(world_rates(), 1.0, cats,
+                                        {"material", "info", "people"}, nullptr);
+    EXPECT_EQ(full.basis, (std::vector<std::string>{"material", "info", "people"}));
+
+    const auto partial = build_axis_design(world_rates(), 1.0, cats,
+                                           {"info", "people"}, nullptr);
+    EXPECT_EQ(partial.basis, (std::vector<std::string>{"base", "info", "people"}));
+}
+
+// Два базиса — одна и та же модель. Выброшенная константа не «потеряна»: она
+// разошлась по долям, и предсказания обязаны совпасть.
+//
+// Допуск 1e-5, а не машинный ноль: у двух базисов разные матрицы, значит разная
+// добавка риджа (λ = 1e-6 от диагонали), и расхождение порядка 7e-7 — это она,
+// а не разница моделей. Та же оговорка, что в NormalizationHoldsUpToRidge.
+TEST(AxisPricesBuild, DroppingTheConstantChangesTheReadingNotTheModelUpToRidge) {
+    const auto cats = world_catalog();
+    const auto with_const = build_axis_design(world_rates(), 1.0, cats,
+                                              {"info", "people", "danger"}, nullptr);
+    const auto no_const   = build_axis_design(world_rates(), 1.0, cats,
+                                              {"material", "info", "people", "danger"},
+                                              nullptr);
+    const auto a = fit_wls(with_const.obs);
+    const auto b = fit_wls(no_const.obs);
+    ASSERT_TRUE(a.ok);
+    ASSERT_TRUE(b.ok);
+    ASSERT_EQ(a.pred.size(), b.pred.size());
+    for (size_t i = 0; i < a.pred.size(); ++i)
+        EXPECT_NEAR(a.pred[i], b.pred[i], 1e-5) << "наблюдение " << i;
+    EXPECT_NEAR(a.r2, b.r2, 1e-6);
+
+    // И читаются они друг через друга: цена часа = константа + надбавка.
+    // Допуск здесь на порядок шире, чем для предсказаний: ридж сжимает сами
+    // коэффициенты сильнее, чем их взвешенную сумму (замерено: предсказания
+    // расходятся на 7e-7, коэффициенты — на 1.3e-5).
+    EXPECT_NEAR(b.beta[0], a.beta[0],             1e-4);  // материя = бывшая база
+    EXPECT_NEAR(b.beta[1], a.beta[0] + a.beta[1], 1e-4);  // информация
+    EXPECT_NEAR(b.beta[2], a.beta[0] + a.beta[2], 1e-4);  // люди
+    EXPECT_NEAR(b.beta[3], a.beta[3],             1e-4);  // опасность — не доля
+}
+
+// Σ вес·(факт − предсказание) = 0 держится и БЕЗ константы — именно потому, что
+// доли дают в сумме единицу: сложив нормальные уравнения трёх долевых столбцов,
+// получаем ровно то тождество, которое раньше давал свободный член. То, что было
+// свойством константы, стало следствием того, что доли остаются долями.
+//
+// «С точностью до риджа», как и всё остальное: 1e-6·диагональ ломает тождество
+// на величину своего порядка, поэтому тождеством это называть нельзя.
+TEST(AxisPricesBuild, ZeroSumSurvivesWithoutTheConstantUpToRidge) {
+    const auto design = build_axis_design(world_rates(), 1.0, world_catalog(),
+                                          declared_axis_columns(), nullptr);
+    const auto fit = fit_wls(design.obs);
+    ASSERT_TRUE(fit.ok);
+    double sw = 0.0, resid = 0.0;
+    for (size_t i = 0; i < design.obs.size(); ++i) {
+        sw    += design.obs[i].weight;
+        resid += design.obs[i].weight * (design.obs[i].rate - fit.pred[i]);
+    }
+    ASSERT_GT(sw, 0.0);
+    EXPECT_NEAR(resid / sw, 0.0, 1e-5);
+    EXPECT_NE(resid, 0.0);          // не тождество: ридж есть ридж
 }
