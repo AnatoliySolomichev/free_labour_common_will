@@ -14,11 +14,11 @@ using records::CatalogEntry;
 namespace {
 
 CatalogEntry spec(const std::string& slug, const std::string& parent,
-                  double material, double info, double people, double danger) {
+                  double physical, double info, double people, double danger) {
     CatalogEntry e;
     e.slug          = slug;
     e.parent        = parent;
-    e.axes.material = material;
+    e.axes.physical = physical;
     e.axes.info     = info;
     e.axes.people   = people;
     e.axes.danger   = danger;

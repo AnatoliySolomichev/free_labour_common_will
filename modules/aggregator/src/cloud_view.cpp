@@ -73,16 +73,20 @@ std::map<std::string, double> build_capital_intensity(const AggregatorStorage& s
 namespace {
 
 // Effective declared axes of an activity (bootstrap ⊕ attestation overrides).
-struct AxisVec { double material = 0, info = 0, people = 0, danger = 0; };
+struct AxisVec { double physical = 0, info = 0, people = 0, danger = 0,
+                        knowledge = 0, responsibility = 0; };
 
 // Proximity 0..1 on the declared axes (1 = identical). Danger scaled by weight so
 // same-craft-but-different-danger activities are pulled apart; capital-intensity
 // (derived, phase 2) added as a further axis scaled by capital_weight.
 double axis_proximity(const AxisVec& x, const AxisVec& y, double dw,
                       double ci_a, double ci_b, double cw) {
-    const double d2 = (x.material - y.material) * (x.material - y.material)
-                    + (x.info     - y.info)     * (x.info     - y.info)
-                    + (x.people   - y.people)   * (x.people   - y.people)
+    const double d2 = (x.physical  - y.physical)  * (x.physical  - y.physical)
+                    + (x.info      - y.info)      * (x.info      - y.info)
+                    + (x.people    - y.people)    * (x.people    - y.people)
+                    + (x.knowledge - y.knowledge) * (x.knowledge - y.knowledge)
+                    + (x.responsibility - y.responsibility)
+                      * (x.responsibility - y.responsibility)
                     + dw * (x.danger - y.danger) * (x.danger - y.danger)
                     + cw * (ci_a - ci_b) * (ci_a - ci_b);
     return 1.0 / (1.0 + std::sqrt(d2));
@@ -92,14 +96,17 @@ using AttestMap = std::map<std::pair<std::string, std::string>, double>;
 
 // Effective declared axes: catalog bootstrap overridden by attestations (ИР-019).
 AxisVec effective_axes(const CatalogEntry& e, const AttestMap* attested) {
-    AxisVec v{e.axes.material, e.axes.info, e.axes.people, e.axes.danger};
+    AxisVec v{e.axes.physical, e.axes.info, e.axes.people, e.axes.danger,
+              e.axes.knowledge, e.axes.responsibility};
     if (attested) {
         auto ov = [&](const char* ax, double& dst) {
             const auto it = attested->find({e.slug, ax});
             if (it != attested->end()) dst = it->second;
         };
-        ov("material", v.material); ov("info", v.info);
-        ov("people", v.people);     ov("danger", v.danger);
+        ov("physical", v.physical);   ov("info", v.info);
+        ov("people",   v.people);     ov("danger", v.danger);
+        ov("knowledge", v.knowledge);
+        ov("responsibility", v.responsibility);
     }
     return v;
 }
@@ -213,10 +220,12 @@ std::optional<double> bootstrap_axis(const std::vector<records::Catalog>* catalo
     for (const auto& cat : *catalogs) {
         const auto* e = cat.find(slug);
         if (!e || !e->axes.present) continue;
-        if (axis == "material") return e->axes.material;
+        if (axis == "physical") return e->axes.physical;
         if (axis == "info")     return e->axes.info;
         if (axis == "people")   return e->axes.people;
         if (axis == "danger")   return e->axes.danger;
+        if (axis == "knowledge")      return e->axes.knowledge;
+        if (axis == "responsibility") return e->axes.responsibility;
         return std::nullopt;                       // an axis the catalog cannot anchor
     }
     return std::nullopt;

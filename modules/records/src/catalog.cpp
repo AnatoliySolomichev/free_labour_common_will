@@ -61,12 +61,12 @@ Catalog catalog_from(const Value& root, const std::string& where) {
                 if (const Value* v = json::find(ax->object, k); v && v->is_number())
                     dst = v->number;
             };
-            num("material", e.axes.material);
-            num("info",     e.axes.info);
-            num("people",   e.axes.people);
-            num("danger",   e.axes.danger);
-            num("knowledge",      e.axes.knowledge);       // ИР-020
-            num("responsibility", e.axes.responsibility);  // ИР-020
+            num("physical",       e.axes.physical);
+            num("info",           e.axes.info);
+            num("people",          e.axes.people);
+            num("danger",          e.axes.danger);
+            num("knowledge",       e.axes.knowledge);
+            num("responsibility",  e.axes.responsibility);
             e.axes.present = true;
         }
         e.aliases   = optional_strings(item.object, "aliases",   ew);

@@ -147,39 +147,29 @@ inline constexpr const char* kAxisBaseColumn = "base";
 inline constexpr const char* kAxisLevel      = "level";  // grade, the mastery axis
 inline constexpr const char* kAxisJunk       = "junk";   // the exam's control column
 
-// The object-of-labour share group (specialty-axes.md §4.1): fractional
-// membership that sums to 1 in every row, which is what dissolves the trunk of
-// the professions tree — a diagnostician is 50% information + 50% people and
-// need not pick a single parent branch.
-std::vector<std::string> object_share_group();
-
-// True when `columns` contains the WHOLE share group. Then, and only then, a
-// constant column would be the group's exact duplicate and must be left out.
-//
-// The rule is not "never use a constant". A basis of independent intensities
-// (knowledge, danger, mastery — none of them a share of anything) still needs
-// one, or an activity with every axis at zero would be predicted at zero. It is
-// the completeness of a share group that makes the constant redundant.
-bool covers_share_group(const std::vector<std::string>& columns);
-
 // The declared axes taken from the catalog, in canonical column order.
 //
-// ALL THREE shares are here, and there is NO constant term. The three sum to 1
-// in every row (specialty-axes.md §4.1), so a constant column of ones would be
-// their exact duplicate and the fit would have infinitely many equal answers —
-// the data only ever shows "constant + share" together, never the constant on
-// its own, because no hour of work has no object.
+// Six INDEPENDENT intensities, nothing summing to anything, and NO constant term
+// (ИР-020, 2026-09-07). Shares are gone: they answered "with what does this work
+// deal" and were complete by construction, but that completeness is also what
+// made them a duplicate of the constant. Intensities reach completeness the
+// other way — an hour with every intensity at zero is an hour in which nothing
+// happened, and it is worth nothing.
 //
-// Dropping the constant instead of one of the shares costs nothing (identical
-// predictions, identical R²) and buys the reading: each coefficient is the PRICE
-// OF AN HOUR of that kind of work, standing on its own, rather than a difference
-// from a reference category. It also removes the source of negative coefficients
-// that were only ever comparisons.
+// A constant here would be a rate paid for existing rather than for working, and
+// this economy has no such thing (records.md §12.2). Its size was, in any case,
+// only ever a measure of how much of pay the vocabulary could not explain.
 //
-// The zero-sum property survives: summing the normal equations of the three
-// share columns gives Σ w·(y − ŷ) = 0 exactly as an intercept used to, BECAUSE
-// they sum to 1. What was an artefact of the constant is now a consequence of
-// the shares being shares.
+// The price: profile values are now LOAD-BEARING. Under shares a wrong profile
+// only misallocated value between axes, because the total was anchored at 1; now
+// it moves the level of the rate itself. That is deliberate — an hour of light,
+// safe, unskilled work should be worth less than an hour of hard, dangerous,
+// skilled work — but it puts the whole weight on attestation (ИР-019) and on the
+// two sides of a deal stating the profile independently (ИР-020).
+//
+// What is lost with the shares: Σ w·(y − ŷ) = 0 no longer holds by construction.
+// It followed from the shares summing to 1 in every row; with independent
+// intensities there is no such identity, and residuals need not cancel network-wide.
 std::vector<std::string> declared_axis_columns();
 
 // (activity, axis) → the grade-weighted median of practitioners' attestations

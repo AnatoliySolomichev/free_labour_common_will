@@ -1,6 +1,6 @@
 {
   "catalog": "professions",
-  "version": "2026.07-tree",
+  "version": "2026.09-axes",
   "entries": [
     {
       "slug": "prof",
@@ -89,9 +89,9 @@
       "parent": "prof.build",
       "kind": "specialty",
       "axes": {
-        "material": 0.9,
-        "info": 0.1,
-        "people": 0,
+        "physical": 0.45,
+        "info": 0.35,
+        "people": 0.15,
         "danger": 0.4,
         "knowledge": 0.5,
         "responsibility": 0.55
@@ -107,9 +107,9 @@
       "parent": "prof.build",
       "kind": "specialty",
       "axes": {
-        "material": 0.95,
-        "info": 0.05,
-        "people": 0,
+        "physical": 0.55,
+        "info": 0.2,
+        "people": 0.2,
         "danger": 0.2,
         "knowledge": 0.4,
         "responsibility": 0.4
@@ -125,9 +125,9 @@
       "parent": "prof.build",
       "kind": "specialty",
       "axes": {
-        "material": 1,
-        "info": 0,
-        "people": 0,
+        "physical": 0.55,
+        "info": 0.15,
+        "people": 0.1,
         "danger": 0.2,
         "knowledge": 0.5,
         "responsibility": 0.25
@@ -144,9 +144,9 @@
       "parent": "prof.build",
       "kind": "specialty",
       "axes": {
-        "material": 1,
-        "info": 0,
-        "people": 0,
+        "physical": 0.8,
+        "info": 0.1,
+        "people": 0.15,
         "danger": 0.3,
         "knowledge": 0.4,
         "responsibility": 0.45
@@ -160,9 +160,9 @@
       "parent": "prof.build",
       "kind": "specialty",
       "axes": {
-        "material": 1,
-        "info": 0,
-        "people": 0,
+        "physical": 0.65,
+        "info": 0.1,
+        "people": 0.05,
         "danger": 0.5,
         "knowledge": 0.5,
         "responsibility": 0.5
@@ -178,9 +178,9 @@
       "parent": "prof.daily",
       "kind": "specialty",
       "axes": {
-        "material": 0.85,
-        "info": 0.15,
-        "people": 0,
+        "physical": 0.35,
+        "info": 0.4,
+        "people": 0.25,
         "danger": 0.2,
         "knowledge": 0.5,
         "responsibility": 0.3
@@ -196,9 +196,9 @@
       "parent": "prof.move",
       "kind": "specialty",
       "axes": {
-        "material": 0.9,
-        "info": 0.1,
-        "people": 0,
+        "physical": 0.55,
+        "info": 0.3,
+        "people": 0.2,
         "danger": 0.2,
         "knowledge": 0.5,
         "responsibility": 0.55
@@ -212,8 +212,8 @@
       "parent": "prof.move",
       "kind": "specialty",
       "axes": {
-        "material": 0.4,
-        "info": 0.3,
+        "physical": 0.3,
+        "info": 0.25,
         "people": 0.3,
         "danger": 0.3,
         "knowledge": 0.3,
@@ -231,9 +231,9 @@
       "parent": "prof.daily",
       "kind": "specialty",
       "axes": {
-        "material": 1,
-        "info": 0,
-        "people": 0,
+        "physical": 0.3,
+        "info": 0.15,
+        "people": 0.15,
         "danger": 0.05,
         "knowledge": 0.4,
         "responsibility": 0.15
@@ -249,9 +249,9 @@
       "parent": "prof.daily",
       "kind": "specialty",
       "axes": {
-        "material": 1,
-        "info": 0,
-        "people": 0,
+        "physical": 0.5,
+        "info": 0.15,
+        "people": 0.2,
         "danger": 0.1,
         "knowledge": 0.35,
         "responsibility": 0.35
@@ -267,9 +267,9 @@
       "parent": "prof.daily",
       "kind": "specialty",
       "axes": {
-        "material": 0.5,
-        "info": 0,
-        "people": 0.5,
+        "physical": 0.3,
+        "info": 0.1,
+        "people": 0.7,
         "danger": 0.05,
         "knowledge": 0.35,
         "responsibility": 0.2
@@ -285,9 +285,9 @@
       "parent": "prof.create",
       "kind": "specialty",
       "axes": {
-        "material": 0,
-        "info": 0.7,
-        "people": 0.3,
+        "physical": 0.25,
+        "info": 0.6,
+        "people": 0.5,
         "danger": 0.05,
         "knowledge": 0.4,
         "responsibility": 0.15
@@ -301,10 +301,10 @@
       "parent": "prof.create",
       "kind": "specialty",
       "axes": {
-        "material": 0,
-        "info": 1,
-        "people": 0,
-        "danger": 0,
+        "physical": 0.05,
+        "info": 0.9,
+        "people": 0.3,
+        "danger": 0.0,
         "knowledge": 0.5,
         "responsibility": 0.2
       }
@@ -319,10 +319,10 @@
       "parent": "prof.lawfin",
       "kind": "specialty",
       "axes": {
-        "material": 0,
-        "info": 1,
-        "people": 0,
-        "danger": 0,
+        "physical": 0.05,
+        "info": 0.95,
+        "people": 0.25,
+        "danger": 0.0,
         "knowledge": 0.6,
         "responsibility": 0.65
       }
@@ -337,10 +337,10 @@
       "parent": "prof.lawfin",
       "kind": "specialty",
       "axes": {
-        "material": 0,
-        "info": 0.6,
-        "people": 0.4,
-        "danger": 0,
+        "physical": 0.05,
+        "info": 0.9,
+        "people": 0.6,
+        "danger": 0.0,
         "knowledge": 0.75,
         "responsibility": 0.75
       }
@@ -355,10 +355,10 @@
       "parent": "prof.it",
       "kind": "specialty",
       "axes": {
-        "material": 0,
-        "info": 1,
-        "people": 0,
-        "danger": 0,
+        "physical": 0.05,
+        "info": 1.0,
+        "people": 0.2,
+        "danger": 0.0,
         "knowledge": 0.65,
         "responsibility": 0.45
       }
@@ -373,9 +373,9 @@
       "parent": "prof.it",
       "kind": "specialty",
       "axes": {
-        "material": 0,
-        "info": 1,
-        "people": 0,
+        "physical": 0.15,
+        "info": 0.95,
+        "people": 0.3,
         "danger": 0.02,
         "knowledge": 0.6,
         "responsibility": 0.6
@@ -392,9 +392,9 @@
       "parent": "prof.teach",
       "kind": "specialty",
       "axes": {
-        "material": 0,
-        "info": 0.3,
-        "people": 0.7,
+        "physical": 0.15,
+        "info": 0.6,
+        "people": 0.9,
         "danger": 0.02,
         "knowledge": 0.6,
         "responsibility": 0.55
@@ -410,9 +410,9 @@
       "parent": "prof.care",
       "kind": "specialty",
       "axes": {
-        "material": 0,
-        "info": 0.4,
-        "people": 0.6,
+        "physical": 0.25,
+        "info": 0.7,
+        "people": 0.85,
         "danger": 0.15,
         "knowledge": 0.9,
         "responsibility": 0.95
@@ -428,9 +428,9 @@
       "parent": "prof.care",
       "kind": "specialty",
       "axes": {
-        "material": 0,
-        "info": 0.2,
-        "people": 0.8,
+        "physical": 0.45,
+        "info": 0.4,
+        "people": 0.85,
         "danger": 0.2,
         "knowledge": 0.55,
         "responsibility": 0.7
@@ -446,9 +446,9 @@
       "parent": "prof.grow",
       "kind": "specialty",
       "axes": {
-        "material": 0.9,
-        "info": 0.1,
-        "people": 0,
+        "physical": 0.75,
+        "info": 0.25,
+        "people": 0.1,
         "danger": 0.2,
         "knowledge": 0.45,
         "responsibility": 0.3
@@ -465,10 +465,10 @@
       "parent": "prof.data",
       "kind": "specialty",
       "axes": {
-        "material": 0,
-        "info": 1,
-        "people": 0,
-        "danger": 0,
+        "physical": 0.1,
+        "info": 0.85,
+        "people": 0.1,
+        "danger": 0.0,
         "knowledge": 0.2,
         "responsibility": 0.25
       }

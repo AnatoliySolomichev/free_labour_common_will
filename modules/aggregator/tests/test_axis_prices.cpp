@@ -201,12 +201,12 @@ namespace {
 // Мир из четырёх деятельностей, специально расцепленных по осям: чистая
 // информация, чистые люди, чистая материя и опасная материя. Иначе оси
 // коллинеарны и восстанавливать нечего.
-records::CatalogEntry cat_entry(const std::string& slug, double material,
+records::CatalogEntry cat_entry(const std::string& slug, double physical,
                                 double info, double people, double danger,
                                 double knowledge, double responsibility) {
     records::CatalogEntry e;
     e.slug                = slug;
-    e.axes.material       = material;
+    e.axes.physical       = physical;
     e.axes.info           = info;
     e.axes.people         = people;
     e.axes.danger         = danger;
@@ -312,7 +312,7 @@ TEST(AxisPricesBuild, RecoversTheWorldsLawFromItsRates) {
     const auto cats = world_catalog();
     const auto p = build_axis_prices(world_rates(), 1.0, cats, 86'400, 86'500, snap(0x01));
 
-    ASSERT_EQ(p.basis, (std::vector<std::string>{"material", "info", "people",
+    ASSERT_EQ(p.basis, (std::vector<std::string>{"physical", "info", "people",
                                                  "danger", "knowledge",
                                                  "responsibility", "level"}));
     const auto* f = fit_of(p, "declared");
@@ -495,7 +495,7 @@ TEST(AxisPricesPool, ParametersAreRecordedInTheRecord) {
     EXPECT_NE(p.params.find("window_days=90"), std::string::npos);
     EXPECT_NE(p.params.find("margin=0.050000"), std::string::npos);
     EXPECT_NE(p.params.find("const=none"), std::string::npos);
-    EXPECT_NE(p.params.find("shares=material+info+people=1"), std::string::npos);
+    EXPECT_NE(p.params.find("shares=none"), std::string::npos);
 }
 
 // ── Приор по β: мнение модели о том, что ещё не торговалось ──────────────────
@@ -678,76 +678,62 @@ TEST(AxisPricesPredict, RefusesToHandOutANonPositivePrior) {
     EXPECT_GT(*v, 1.0);
 }
 
-// Константа выбрасывается не «вообще», а ровно когда доли покрыты целиком.
-// Базис из независимых степеней (знание, опасность, мастерство — ни одна не доля
-// чего-либо) без константы предсказывал бы ноль для профиля из одних нулей.
-TEST(AxisPricesBuild, ConstantOnlyDisappearsWhenTheShareGroupIsComplete) {
-    EXPECT_TRUE(covers_share_group({"material", "info", "people", "danger"}));
-    EXPECT_FALSE(covers_share_group({"info", "people", "danger"}));  // нет материи
-    EXPECT_FALSE(covers_share_group({"danger", "level"}));           // одни степени
-
-    const auto cats = world_catalog();
-    const auto full = build_axis_design(world_rates(), 1.0, cats,
-                                        {"material", "info", "people"}, nullptr);
-    EXPECT_EQ(full.basis, (std::vector<std::string>{"material", "info", "people"}));
-
-    const auto partial = build_axis_design(world_rates(), 1.0, cats,
-                                           {"info", "people"}, nullptr);
-    EXPECT_EQ(partial.basis, (std::vector<std::string>{"base", "info", "people"}));
+// Константы нет НИКОГДА. Час, у которого все степени нули, — это час, в котором
+// ничего не происходило; константа была бы платой за существование, а не за
+// труд, а таких выплат в этой экономике нет (records.md §12.2).
+TEST(AxisPricesBuild, NeverAddsAConstantColumn) {
+    const auto d = build_axis_design(world_rates(), 1.0, world_catalog(),
+                                     declared_axis_columns(), nullptr);
+    EXPECT_EQ(d.basis, declared_axis_columns());
+    for (const auto& c : d.basis) EXPECT_NE(c, std::string(kAxisBaseColumn));
+    ASSERT_FALSE(d.obs.empty());
+    EXPECT_EQ(d.obs.front().x.size(), declared_axis_columns().size());
 }
 
-// Два базиса — одна и та же модель. Выброшенная константа не «потеряна»: она
-// разошлась по долям, и предсказания обязаны совпасть.
+// ЧТО ПОТЕРЯНО ВМЕСТЕ С ДОЛЯМИ: тождество Σ вес·невязка = 0.
 //
-// Допуск 1e-5, а не машинный ноль: у двух базисов разные матрицы, значит разная
-// добавка риджа (λ = 1e-6 от диагонали), и расхождение порядка 7e-7 — это она,
-// а не разница моделей. Та же оговорка, что в NormalizationHoldsUpToRidge.
-TEST(AxisPricesBuild, DroppingTheConstantChangesTheReadingNotTheModelUpToRidge) {
-    const auto cats = world_catalog();
-    const auto with_const = build_axis_design(world_rates(), 1.0, cats,
-                                              {"info", "people", "danger"}, nullptr);
-    const auto no_const   = build_axis_design(world_rates(), 1.0, cats,
-                                              {"material", "info", "people", "danger"},
-                                              nullptr);
-    const auto a = fit_wls(with_const.obs);
-    const auto b = fit_wls(no_const.obs);
-    ASSERT_TRUE(a.ok);
-    ASSERT_TRUE(b.ok);
-    ASSERT_EQ(a.pred.size(), b.pred.size());
-    for (size_t i = 0; i < a.pred.size(); ++i)
-        EXPECT_NEAR(a.pred[i], b.pred[i], 1e-5) << "наблюдение " << i;
-    EXPECT_NEAR(a.r2, b.r2, 1e-6);
-
-    // И читаются они друг через друга: цена часа = константа + надбавка.
-    // Допуск здесь на порядок шире, чем для предсказаний: ридж сжимает сами
-    // коэффициенты сильнее, чем их взвешенную сумму (замерено: предсказания
-    // расходятся на 7e-7, коэффициенты — на 1.3e-5).
-    EXPECT_NEAR(b.beta[0], a.beta[0],             1e-4);  // материя = бывшая база
-    EXPECT_NEAR(b.beta[1], a.beta[0] + a.beta[1], 1e-4);  // информация
-    EXPECT_NEAR(b.beta[2], a.beta[0] + a.beta[2], 1e-4);  // люди
-    EXPECT_NEAR(b.beta[3], a.beta[3],             1e-4);  // опасность — не доля
-}
-
-// Σ вес·(факт − предсказание) = 0 держится и БЕЗ константы — именно потому, что
-// доли дают в сумме единицу: сложив нормальные уравнения трёх долевых столбцов,
-// получаем ровно то тождество, которое раньше давал свободный член. То, что было
-// свойством константы, стало следствием того, что доли остаются долями.
+// Оно следовало из того, что доли давали в сумме единицу в каждой строке —
+// сложив нормальные уравнения долевых столбцов, получали ровно его. С
+// независимыми степенями такой суммы нет.
 //
-// «С точностью до риджа», как и всё остальное: 1e-6·диагональ ломает тождество
-// на величину своего порядка, поэтому тождеством это называть нельзя.
-TEST(AxisPricesBuild, ZeroSumSurvivesWithoutTheConstantUpToRidge) {
-    const auto design = build_axis_design(world_rates(), 1.0, world_catalog(),
-                                          declared_axis_columns(), nullptr);
-    const auto fit = fit_wls(design.obs);
+// Тонкость, ради которой тест построен на явном контрпримере, а не на учебном
+// мире: свойство может ПОЧТИ держаться и без долей — если вектор из единиц
+// близок к тому, что складывается из столбцов. На учебном мире так и вышло
+// (расхождение 9.5e-07), и тест на нём проверял бы удачу, а не правило. Здесь
+// профили подобраны так, что единицу из них не сложить: (1,0), (0,1), (0.5,0.5)
+// дают её, а (0.2,0.9) — уже 1.1.
+TEST(AxisPricesBuild, ZeroSumIsNoLongerAnIdentityWithoutShares) {
+    auto obs = [] {
+        std::vector<AxisObservation> v;
+        const double prof[5][2] = {{1.0, 0.0}, {0.0, 1.0}, {0.5, 0.5},
+                                   {0.2, 0.9}, {0.9, 0.15}};
+        const double rate[5]    = {1.00, 1.20, 1.05, 1.60, 0.95};
+        const double hours[5]   = {100.0, 100.0, 100.0, 100.0, 100.0};
+        for (int i = 0; i < 5; ++i) {
+            AxisObservation o{};
+            o.slug   = "prof.a" + std::to_string(i);
+            o.level  = 1;
+            o.rate   = rate[i];
+            o.weight = hours[i];
+            o.x      = {prof[i][0], prof[i][1]};
+            v.push_back(std::move(o));
+        }
+        return v;
+    }();
+    sort_canonically(obs);
+    const auto fit = fit_wls(obs);
     ASSERT_TRUE(fit.ok);
+
     double sw = 0.0, resid = 0.0;
-    for (size_t i = 0; i < design.obs.size(); ++i) {
-        sw    += design.obs[i].weight;
-        resid += design.obs[i].weight * (design.obs[i].rate - fit.pred[i]);
+    for (size_t i = 0; i < obs.size(); ++i) {
+        sw    += obs[i].weight;
+        resid += obs[i].weight * (obs[i].rate - fit.pred[i]);
     }
     ASSERT_GT(sw, 0.0);
-    EXPECT_NEAR(resid / sw, 0.0, 1e-5);
-    EXPECT_NE(resid, 0.0);          // не тождество: ридж есть ридж
+    // Замерено 3.4e-03 — на три порядка выше ридж-шума (1e-06) и на тринадцать
+    // выше машинного нуля: невязки по сети НЕ гасятся.
+    EXPECT_GT(std::abs(resid / sw), 1e-3)
+        << "без долей гашение невязок по сети перестало быть тождеством";
 }
 
 // ── Куда упирается замена разряда осями (ИР-020) ─────────────────────────────
@@ -791,9 +777,9 @@ TEST(AxisPricesGradeReplacement, GradeIsRejectedOnceTheProfileVariesWithin) {
             o.slug   = e.slug;
             o.level  = lv;
             o.weight = 100.0;
-            o.x      = {e.axes.material, e.axes.info, e.axes.people,
+            o.x      = {e.axes.physical, e.axes.info, e.axes.people,
                         e.axes.danger, know, resp};
-            o.rate   = kLawNoConst[0] * e.axes.material
+            o.rate   = kLawNoConst[0] * e.axes.physical
                      + kLawNoConst[1] * e.axes.info
                      + kLawNoConst[2] * e.axes.people
                      + kLawNoConst[3] * e.axes.danger

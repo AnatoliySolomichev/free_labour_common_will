@@ -204,7 +204,7 @@ namespace {
 double effective_axis(const records::CatalogEntry& e, const std::string& axis,
                       const AttestedAxes* attested) {
     double v = 0.0;
-    if      (axis == "material")       v = e.axes.material;
+    if      (axis == "physical")       v = e.axes.physical;
     else if (axis == "info")           v = e.axes.info;
     else if (axis == "people")         v = e.axes.people;
     else if (axis == "danger")         v = e.axes.danger;
@@ -222,32 +222,18 @@ std::string fmt(double v) { return std::to_string(v); }
 
 }  // namespace
 
-std::vector<std::string> object_share_group() {
-    return {"material", "info", "people"};
-}
-
-bool covers_share_group(const std::vector<std::string>& columns) {
-    for (const auto& g : object_share_group())
-        if (std::find(columns.begin(), columns.end(), g) == columns.end())
-            return false;
-    return true;
-}
-
 std::vector<std::string> declared_axis_columns() {
-    // All three shares, no reference category and no constant: each coefficient
-    // is then the PRICE OF AN HOUR of that kind of work, readable as it stands,
-    // instead of a difference from an hour of nothing in particular.
+    // Six INDEPENDENT intensities and no constant. Each coefficient is then the
+    // price of an hour's worth of that thing, readable as it stands.
     //
     // `knowledge` and `responsibility` are here because they are what a GRADE was
-    // standing in for. A grade-5 welder's hour differs from a grade-2 welder's in
-    // exactly these, so paying for the grade on top of them pays twice for the
-    // same thing. They enter the declared basis; `level` stays a CANDIDATE that
-    // must pass the admission exam against them (records.md §11.9) — and on a
-    // world where the axes describe the work itself the exam rejects it
-    // (sliding control 0.0194 without grade, 0.0317 with it). The grade is
-    // therefore removed by measurement, not by decree: it leaves when the exam
-    // stops admitting it.
-    return {"material", "info", "people", "danger", "knowledge", "responsibility"};
+    // standing in for: a master's hour differs from a novice's in exactly these,
+    // so paying for the grade on top of them pays twice for the same thing.
+    // `level` stays a CANDIDATE that must pass the admission exam against them
+    // (records.md §11.9) — and on a world where the axes describe the work itself
+    // the exam rejects it (sliding control 0.0194 without the grade, 0.0317 with
+    // it). The grade therefore leaves by measurement, not by decree.
+    return {"physical", "info", "people", "danger", "knowledge", "responsibility"};
 }
 
 double grade_column(uint8_t level) {
@@ -262,12 +248,11 @@ AxisDesign build_axis_design(const std::vector<records::RateEntry>& rates,
                              const std::vector<std::string>&        columns,
                              const AttestedAxes*                    attested) {
     AxisDesign d{};
-    // A constant only when the columns do NOT already carry a complete share
-    // group. With the group present, a column of ones is its exact duplicate and
-    // the fit stops having a single answer (records.md §11.9); without it, the
-    // constant is the only thing anchoring an all-zero profile.
-    const bool constant = !covers_share_group(columns);
-    if (constant) d.basis.push_back(kAxisBaseColumn);
+    // NEVER a constant term. An hour with every intensity at zero is an hour in
+    // which nothing happened, and a constant is precisely what would pay for it:
+    // a rate handed out for existing rather than for working. This economy has no
+    // such thing (records.md §12.2) — hours are born only from a Transfer against
+    // an accepted piece of work.
     for (const auto& c : columns) d.basis.push_back(c);
 
     std::map<std::string, const records::CatalogEntry*> by_slug;
@@ -296,8 +281,7 @@ AxisDesign build_axis_design(const std::vector<records::RateEntry>& rates,
 
     for (auto& o : d.obs) {
         o.x.clear();
-        o.x.reserve(columns.size() + (constant ? 1 : 0));
-        if (constant) o.x.push_back(1.0);
+        o.x.reserve(columns.size());
         for (const auto& c : columns) {
             if (c == kAxisLevel)
                 o.x.push_back(grade_column(o.level));
@@ -372,7 +356,7 @@ std::optional<double> axis_price_predict(
         double x;
         if      (c == kAxisBaseColumn) x = 1.0;   // v1 records only
         else if (c == kAxisLevel)      x = grade_column(level);
-        else if (c == "material" || c == "info" || c == "people" || c == "danger"
+        else if (c == "physical" || c == "info" || c == "people" || c == "danger"
               || c == "knowledge" || c == "responsibility")
             x = effective_axis(*entry, c, attested);
         else return std::nullopt;   // a column this build cannot rebuild: no guessing
@@ -409,9 +393,9 @@ records::AxisPrices build_axis_prices(
     const AxisDesign base = build_axis_design(rates, W, catalogs, declared, attested);
 
     std::string params =
-        "v3;form=linear;const=none"
-        ";axes=material,info,people,danger,knowledge,responsibility"
-        ";shares=material+info+people=1;cand=level"
+        "v4;form=linear;const=none;shares=none"
+        ";axes=physical,info,people,danger,knowledge,responsibility"
+        ";cand=level"
         ";window_days=" + std::to_string(cfg.window_days)
       + ";margin="  + fmt(cfg.margin)
       + ";ridge="   + fmt(kRidgeRelative)

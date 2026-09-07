@@ -24,32 +24,40 @@ public:
     explicit CatalogError(const std::string& msg) : std::runtime_error(msg) {}
 };
 
-// Declared cloud coordinates of a specialty (ИР-018, specialty-axes.md).
+// Declared coordinates of a specialty (ИР-018, specialty-axes.md), all of them
+// INDEPENDENT INTENSITIES 0..1: "how much of this is in an hour of such work".
 //
-// Two KINDS of coordinate live here and they behave differently:
+// There is no share group any more and nothing sums to anything (ИР-020,
+// 2026-09-07). Shares (material + info + people ≈ 1) answered "with what does
+// this work deal" and were complete by construction, which is why the model
+// needed no constant term. Intensities buy that completeness differently: an
+// hour with every intensity at zero is an hour in which nothing happened, so it
+// is worth nothing — and a constant would be exactly a payment for existing,
+// which this economy does not have (records.md §12.2: hours are born only from a
+// Transfer against an accepted piece of work).
 //
-//   shares     — material + info + people ≈ 1: fractional membership answering
-//                "with what does this work deal", complete by construction;
-//   intensities— danger, knowledge, responsibility: independent 0..1 degrees
-//                answering "how hard, how dangerous, how much rides on it".
+// The price of that: profile values become load-bearing. Under shares a wrong
+// profile only misallocated value BETWEEN axes, because the total was anchored
+// at 1; now it moves the LEVEL of the rate. This is deliberate — an hour of
+// light, safe, unskilled work should be worth less than an hour of hard,
+// dangerous, skilled work, and saying so is the point of the whole construction.
 //
-// Knowledge and responsibility (ИР-020, specialty-axes.md §4.2, specialty-axes.md §4.5) are what a
-// grade was standing in for: a grade-5 welder's hour differs from a grade-2
-// welder's precisely in these, and paying for the grade ON TOP of them pays twice
-// for the same thing. Measured on a world where the axes describe the work
-// itself, the admission exam REJECTS grade once they are present (sliding
-// control 0.0194 without it against 0.0317 with it).
+// `knowledge` and `responsibility` are what a GRADE was standing in for: a
+// master's hour differs from a novice's precisely in these, and paying for the
+// grade on top of them pays twice for the same thing (specialty-axes.md §4.2,
+// specialty-axes.md §4.5). Measured: with them present the admission exam
+// rejects the grade.
 //
-// These are bootstrap values only. Practitioners overwrite them by attestation
-// (ИР-019) — the value is set by whoever does the work, not by this file.
+// Bootstrap values only. Practitioners overwrite them by attestation (ИР-019) —
+// the value is set by whoever does the work, not by this file.
 struct CatalogAxes {
-    double material       = 0.0;
-    double info           = 0.0;
-    double people         = 0.0;
-    double danger         = 0.0;
-    double knowledge      = 0.0;
-    double responsibility = 0.0;
-    bool   present        = false;   // true iff the entry declared an "axes" object
+    double physical       = 0.0;   // физическая нагрузка (specialty-axes.md §4.3)
+    double info           = 0.0;   // работа со сведениями и символами
+    double people         = 0.0;   // работа с людьми (specialty-axes.md §4.6)
+    double danger         = 0.0;   // опасность (specialty-axes.md §4.5)
+    double knowledge      = 0.0;   // порог входа, глубина (specialty-axes.md §4.2)
+    double responsibility = 0.0;   // цена ошибки (specialty-axes.md §4.5)
+    bool   present        = false; // true iff the entry declared an "axes" object
 };
 
 struct CatalogEntry {
