@@ -204,10 +204,12 @@ namespace {
 double effective_axis(const records::CatalogEntry& e, const std::string& axis,
                       const AttestedAxes* attested) {
     double v = 0.0;
-    if      (axis == "material") v = e.axes.material;
-    else if (axis == "info")     v = e.axes.info;
-    else if (axis == "people")   v = e.axes.people;
-    else if (axis == "danger")   v = e.axes.danger;
+    if      (axis == "material")       v = e.axes.material;
+    else if (axis == "info")           v = e.axes.info;
+    else if (axis == "people")         v = e.axes.people;
+    else if (axis == "danger")         v = e.axes.danger;
+    else if (axis == "knowledge")      v = e.axes.knowledge;
+    else if (axis == "responsibility") v = e.axes.responsibility;
     else return 0.0;
     if (attested) {
         const auto it = attested->find({e.slug, axis});
@@ -235,7 +237,17 @@ std::vector<std::string> declared_axis_columns() {
     // All three shares, no reference category and no constant: each coefficient
     // is then the PRICE OF AN HOUR of that kind of work, readable as it stands,
     // instead of a difference from an hour of nothing in particular.
-    return {"material", "info", "people", "danger"};
+    //
+    // `knowledge` and `responsibility` are here because they are what a GRADE was
+    // standing in for. A grade-5 welder's hour differs from a grade-2 welder's in
+    // exactly these, so paying for the grade on top of them pays twice for the
+    // same thing. They enter the declared basis; `level` stays a CANDIDATE that
+    // must pass the admission exam against them (records.md §11.9) — and on a
+    // world where the axes describe the work itself the exam rejects it
+    // (sliding control 0.0194 without grade, 0.0317 with it). The grade is
+    // therefore removed by measurement, not by decree: it leaves when the exam
+    // stops admitting it.
+    return {"material", "info", "people", "danger", "knowledge", "responsibility"};
 }
 
 double grade_column(uint8_t level) {
@@ -360,7 +372,8 @@ std::optional<double> axis_price_predict(
         double x;
         if      (c == kAxisBaseColumn) x = 1.0;   // v1 records only
         else if (c == kAxisLevel)      x = grade_column(level);
-        else if (c == "material" || c == "info" || c == "people" || c == "danger")
+        else if (c == "material" || c == "info" || c == "people" || c == "danger"
+              || c == "knowledge" || c == "responsibility")
             x = effective_axis(*entry, c, attested);
         else return std::nullopt;   // a column this build cannot rebuild: no guessing
         sum += use->beta[j] * x;
@@ -396,7 +409,8 @@ records::AxisPrices build_axis_prices(
     const AxisDesign base = build_axis_design(rates, W, catalogs, declared, attested);
 
     std::string params =
-        "v2;form=linear;const=none;axes=material,info,people,danger"
+        "v3;form=linear;const=none"
+        ";axes=material,info,people,danger,knowledge,responsibility"
         ";shares=material+info+people=1;cand=level"
         ";window_days=" + std::to_string(cfg.window_days)
       + ";margin="  + fmt(cfg.margin)

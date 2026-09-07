@@ -202,41 +202,47 @@ namespace {
 // информация, чистые люди, чистая материя и опасная материя. Иначе оси
 // коллинеарны и восстанавливать нечего.
 records::CatalogEntry cat_entry(const std::string& slug, double material,
-                                double info, double people, double danger) {
+                                double info, double people, double danger,
+                                double knowledge, double responsibility) {
     records::CatalogEntry e;
-    e.slug          = slug;
-    e.axes.material = material;
-    e.axes.info     = info;
-    e.axes.people   = people;
-    e.axes.danger   = danger;
-    e.axes.present  = true;
+    e.slug                = slug;
+    e.axes.material       = material;
+    e.axes.info           = info;
+    e.axes.people         = people;
+    e.axes.danger         = danger;
+    e.axes.knowledge      = knowledge;
+    e.axes.responsibility = responsibility;
+    e.axes.present        = true;
     return e;
 }
 
-// Десять деятельностей × шесть разрядов = 60 корзин. Меньше нельзя: экзамен
-// допуска оси требует kMinRowsPerColumn наблюдений на столбец и на коротком
-// столе отказывается судить (замер — axis_prices.h).
+// Двенадцать деятельностей × шесть разрядов = 72 корзины. Меньше нельзя: экзамен
+// требует kMinRowsPerColumn наблюдений на столбец, а столбцов теперь семь (шесть
+// заявленных осей плюс кандидат), то есть нужно 70.
 std::vector<records::Catalog> world_catalog() {
     records::Catalog c;
     c.name    = "professions";
     c.entries = {
-        cat_entry("prof.programmer",  0.0, 1.0, 0.0, 0.00),
-        cat_entry("prof.teacher",     0.0, 0.2, 0.8, 0.00),
-        cat_entry("prof.cook",        1.0, 0.0, 0.0, 0.10),
-        cat_entry("prof.welder",      1.0, 0.0, 0.0, 0.80),
-        cat_entry("prof.nurse",       0.0, 0.4, 0.6, 0.25),
-        cat_entry("prof.driver",      0.8, 0.1, 0.1, 0.35),
-        cat_entry("prof.accountant",  0.0, 0.9, 0.1, 0.00),
-        cat_entry("prof.miner",       1.0, 0.0, 0.0, 0.95),
-        cat_entry("prof.barber",      0.5, 0.0, 0.5, 0.05),
-        cat_entry("prof.doctor",      0.0, 0.5, 0.5, 0.20),
+        //         слаг              мат  инф  люди опасн знан  отв
+        cat_entry("prof.programmer",  0.0, 1.0, 0.0, 0.00, 0.65, 0.45),
+        cat_entry("prof.teacher",     0.0, 0.2, 0.8, 0.00, 0.60, 0.55),
+        cat_entry("prof.cook",        1.0, 0.0, 0.0, 0.10, 0.35, 0.35),
+        cat_entry("prof.welder",      1.0, 0.0, 0.0, 0.80, 0.50, 0.50),
+        cat_entry("prof.nurse",       0.0, 0.4, 0.6, 0.25, 0.55, 0.70),
+        cat_entry("prof.driver",      0.8, 0.1, 0.1, 0.35, 0.30, 0.60),
+        cat_entry("prof.accountant",  0.0, 0.9, 0.1, 0.00, 0.60, 0.65),
+        cat_entry("prof.miner",       1.0, 0.0, 0.0, 0.95, 0.25, 0.30),
+        cat_entry("prof.barber",      0.5, 0.0, 0.5, 0.05, 0.35, 0.20),
+        cat_entry("prof.doctor",      0.0, 0.5, 0.5, 0.20, 0.90, 0.95),
+        cat_entry("prof.carpenter",   1.0, 0.0, 0.0, 0.20, 0.50, 0.25),
+        cat_entry("prof.scribe",      0.0, 1.0, 0.0, 0.00, 0.20, 0.25),
     };
     return {c};
 }
 
-// Истинный закон этого мира, который считалка не знает:
-// ставка = 0.60 + 0.50·информация + 0.30·люди + 0.90·опасность + 0.40·разряд.
-constexpr double kLaw[] = {0.60, 0.50, 0.30, 0.90, 0.40};
+// Истинный закон этого мира, который считалка не знает: 0.60 + 0.50·информация
+// + 0.30·люди + 0.90·опасность + 0.70·знание + 0.55·ответственность + 0.40·разряд.
+constexpr double kLaw[] = {0.60, 0.50, 0.30, 0.90, 0.70, 0.55, 0.40};
 
 // Тот же закон в базисе БЕЗ константы (records.md §11.9). Константа не исчезла,
 // а разошлась по трём долям — они и так дают в сумме единицу, поэтому «час
@@ -246,7 +252,9 @@ constexpr double kLawNoConst[] = {kLaw[0],           // материя = быв�
                                   kLaw[0] + kLaw[1], // информация
                                   kLaw[0] + kLaw[2], // люди
                                   kLaw[3],           // опасность
-                                  kLaw[4]};          // разряд
+                                  kLaw[4],           // знание
+                                  kLaw[5],           // ответственность
+                                  kLaw[6]};          // разряд
 
 records::RateEntry basket(const std::string& slug, uint8_t level, double rate,
                           double hours, double weighted_hours = -1.0) {
@@ -270,7 +278,9 @@ std::vector<records::RateEntry> world_rates() {
             const double lvx = double(lv - lo) / double(hi - lo);
             const double rate = kLaw[0] + kLaw[1] * e.axes.info
                               + kLaw[2] * e.axes.people + kLaw[3] * e.axes.danger
-                              + kLaw[4] * lvx;
+                              + kLaw[4] * e.axes.knowledge
+                              + kLaw[5] * e.axes.responsibility
+                              + kLaw[6] * lvx;
             out.push_back(basket(e.slug, lv, rate, 100.0));
         }
     return out;
@@ -303,15 +313,16 @@ TEST(AxisPricesBuild, RecoversTheWorldsLawFromItsRates) {
     const auto p = build_axis_prices(world_rates(), 1.0, cats, 86'400, 86'500, snap(0x01));
 
     ASSERT_EQ(p.basis, (std::vector<std::string>{"material", "info", "people",
-                                                 "danger", "level"}));
+                                                 "danger", "knowledge",
+                                                 "responsibility", "level"}));
     const auto* f = fit_of(p, "declared");
     ASSERT_NE(f, nullptr);
-    ASSERT_EQ(f->beta.size(), 5u);
-    for (size_t i = 0; i < 5; ++i)
+    ASSERT_EQ(f->beta.size(), 7u);
+    for (size_t i = 0; i < 7; ++i)
         EXPECT_NEAR(f->beta[i], kLawNoConst[i], 1e-3) << "столбец " << p.basis[i];
     EXPECT_NEAR(f->r2, 1.0, 1e-6);
-    EXPECT_EQ(f->rows, 60u);
-    EXPECT_DOUBLE_EQ(f->weight, 6000.0);
+    EXPECT_EQ(f->rows, 72u);
+    EXPECT_DOUBLE_EQ(f->weight, 7200.0);
 }
 
 // Разряд обязан пройти экзамен, а пустышка — провалить его. Если пустышка
@@ -367,7 +378,7 @@ TEST(AxisPricesBuild, WeightIsIndependenceWeightedHours) {
     const auto p = build_axis_prices(rates, 1.0, world_catalog(), 86'400, 86'500, snap(5));
     const auto* f = fit_of(p, "declared");
     ASSERT_NE(f, nullptr);
-    EXPECT_DOUBLE_EQ(f->weight, 6000.0 - 600.0 + 6.0);
+    EXPECT_DOUBLE_EQ(f->weight, 7200.0 - 600.0 + 6.0);
     EXPECT_NE(p.params.find("weight=weighted_hours"), std::string::npos);
 }
 
@@ -624,8 +635,8 @@ TEST(AxisPricesSides, DisagreementPointsAtTheContestedAxis) {
     }
     EXPECT_GT(danger, 0.0);
     EXPECT_DOUBLE_EQ(others, 0.0);           // спорили ровно об одном
-    // 6 корзин сварщика из 60, разрыв 0.15, веса равны → 0.15 · 6/60.
-    EXPECT_NEAR(danger, 0.15 * 6.0 / 60.0, 1e-9);
+    // 6 корзин сварщика из 72, разрыв 0.15, веса равны → 0.15 · 6/72.
+    EXPECT_NEAR(danger, 0.15 * 6.0 / 72.0, 1e-9);
 }
 
 // Пока стороны не заговорили, запись остаётся ровно такой, какой была.
@@ -737,4 +748,69 @@ TEST(AxisPricesBuild, ZeroSumSurvivesWithoutTheConstantUpToRidge) {
     ASSERT_GT(sw, 0.0);
     EXPECT_NEAR(resid / sw, 0.0, 1e-5);
     EXPECT_NE(resid, 0.0);          // не тождество: ридж есть ридж
+}
+
+// ── Куда упирается замена разряда осями (ИР-020) ─────────────────────────────
+//
+// Замер на мире, где оси описывают САМУ РАБОТУ, говорит, что разряд лишний:
+// скользящий контроль 0.0194 без него против 0.0317 с ним, экзамен его
+// отвергает. Но чтобы это случилось здесь, знание и ответственность обязаны
+// РАЗЛИЧАТЬСЯ ВНУТРИ деятельности — час сварщика 5-го разряда должен нести
+// больше знания, чем час сварщика 2-го.
+//
+// Сегодня они этого не могут: профиль лежит в каталоге по слагу, и заверения
+// (ИР-019, ИР-020) сводятся к медиане по паре (деятельность, ось) — без разряда.
+// Поэтому разряд остаётся единственным, что меняется внутри деятельности, и
+// экзамен обязан его принимать. Два теста ниже фиксируют обе половины: чего не
+// хватает, и что арифметика готова, как только это появится.
+
+TEST(AxisPricesGradeReplacement, GradeSurvivesWhileProfilesAreOnlyPerActivity) {
+    const auto p = build_axis_prices(world_rates(), 1.0, world_catalog(),
+                                     86'400, 86'500, snap(0x21));
+    const records::AxisGateEntry* level = nullptr;
+    for (const auto& g : p.gate)
+        if (g.axis == kAxisLevel) level = &g;
+    ASSERT_NE(level, nullptr);
+    EXPECT_TRUE(level->admitted)
+        << "пока знание и ответственность одинаковы для всех разрядов одной "
+           "деятельности, разряд несёт то, чего не несёт больше ничто";
+}
+
+TEST(AxisPricesGradeReplacement, GradeIsRejectedOnceTheProfileVariesWithin) {
+    // Тот же мир, но профиль знания и ответственности растёт с разрядом — так,
+    // как его описали бы стороны сделки, а не каталог.
+    const auto cats = world_catalog();
+    std::vector<AxisObservation> obs;
+    for (const auto& e : cats[0].entries)
+        for (uint8_t lv = 1; lv <= 6; ++lv) {
+            const double step = grade_column(lv);
+            // Мастерство — это и есть знание с ответственностью, взятые гуще.
+            const double know = std::min(1.0, e.axes.knowledge      + 0.45 * step);
+            const double resp = std::min(1.0, e.axes.responsibility + 0.35 * step);
+            AxisObservation o{};
+            o.slug   = e.slug;
+            o.level  = lv;
+            o.weight = 100.0;
+            o.x      = {e.axes.material, e.axes.info, e.axes.people,
+                        e.axes.danger, know, resp};
+            o.rate   = kLawNoConst[0] * e.axes.material
+                     + kLawNoConst[1] * e.axes.info
+                     + kLawNoConst[2] * e.axes.people
+                     + kLawNoConst[3] * e.axes.danger
+                     + kLawNoConst[4] * know
+                     + kLawNoConst[5] * resp;
+            obs.push_back(std::move(o));
+        }
+    sort_canonically(obs);
+
+    std::vector<double> level;
+    level.reserve(obs.size());
+    for (const auto& o : obs) level.push_back(grade_column(o.level));
+
+    const auto gate = run_axis_gate(obs, level);
+    ASSERT_TRUE(gate.ok);
+    EXPECT_TRUE(gate.junk_rejected);
+    EXPECT_FALSE(gate.admitted)
+        << "разряд объяснён знанием и ответственностью — платить за него сверху "
+           "значит платить дважды за одно и то же";
 }

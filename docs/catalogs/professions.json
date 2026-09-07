@@ -1,436 +1,480 @@
 {
- "catalog": "professions",
- "version": "2026.07-tree",
- "entries": [
-  {
-   "slug": "prof",
-   "ru": "Всякий труд",
-   "group": "Каталог",
-   "kind": "root"
-  },
-  {
-   "slug": "prof.build",
-   "ru": "Ремонт и строительство",
-   "group": "Каталог",
-   "kind": "category",
-   "parent": "prof"
-  },
-  {
-   "slug": "prof.daily",
-   "ru": "Быт и услуги",
-   "group": "Каталог",
-   "kind": "category",
-   "parent": "prof"
-  },
-  {
-   "slug": "prof.move",
-   "ru": "Транспорт",
-   "group": "Каталог",
-   "kind": "category",
-   "parent": "prof"
-  },
-  {
-   "slug": "prof.create",
-   "ru": "Творчество",
-   "group": "Каталог",
-   "kind": "category",
-   "parent": "prof"
-  },
-  {
-   "slug": "prof.lawfin",
-   "ru": "Финансы и право",
-   "group": "Каталог",
-   "kind": "category",
-   "parent": "prof"
-  },
-  {
-   "slug": "prof.it",
-   "ru": "ИТ",
-   "group": "Каталог",
-   "kind": "category",
-   "parent": "prof"
-  },
-  {
-   "slug": "prof.teach",
-   "ru": "Образование",
-   "group": "Каталог",
-   "kind": "category",
-   "parent": "prof"
-  },
-  {
-   "slug": "prof.care",
-   "ru": "Здоровье",
-   "group": "Каталог",
-   "kind": "category",
-   "parent": "prof"
-  },
-  {
-   "slug": "prof.grow",
-   "ru": "Сельское хозяйство",
-   "group": "Каталог",
-   "kind": "category",
-   "parent": "prof"
-  },
-  {
-   "slug": "prof.data",
-   "ru": "Услуги",
-   "group": "Каталог",
-   "kind": "category",
-   "parent": "prof"
-  },
-  {
-   "slug": "prof.electrician",
-   "ru": "Электрик",
-   "group": "Ремонт и строительство",
-   "aliases": [
-    "электромонтёр",
-    "электромонтажник"
-   ],
-   "parent": "prof.build",
-   "kind": "specialty",
-   "axes": {
-    "material": 0.9,
-    "info": 0.1,
-    "people": 0,
-    "danger": 0.4
-   }
-  },
-  {
-   "slug": "prof.plumber",
-   "ru": "Сантехник",
-   "group": "Ремонт и строительство",
-   "aliases": [
-    "слесарь-сантехник"
-   ],
-   "parent": "prof.build",
-   "kind": "specialty",
-   "axes": {
-    "material": 0.95,
-    "info": 0.05,
-    "people": 0,
-    "danger": 0.2
-   }
-  },
-  {
-   "slug": "prof.carpenter",
-   "ru": "Столяр",
-   "group": "Ремонт и строительство",
-   "aliases": [
-    "плотник"
-   ],
-   "parent": "prof.build",
-   "kind": "specialty",
-   "axes": {
-    "material": 1,
-    "info": 0,
-    "people": 0,
-    "danger": 0.2
-   }
-  },
-  {
-   "slug": "prof.builder",
-   "ru": "Строитель",
-   "group": "Ремонт и строительство",
-   "aliases": [
-    "отделочник",
-    "каменщик"
-   ],
-   "parent": "prof.build",
-   "kind": "specialty",
-   "axes": {
-    "material": 1,
-    "info": 0,
-    "people": 0,
-    "danger": 0.3
-   }
-  },
-  {
-   "slug": "prof.welder",
-   "ru": "Сварщик",
-   "group": "Ремонт и строительство",
-   "aliases": [],
-   "parent": "prof.build",
-   "kind": "specialty",
-   "axes": {
-    "material": 1,
-    "info": 0,
-    "people": 0,
-    "danger": 0.5
-   }
-  },
-  {
-   "slug": "prof.appliance-repair",
-   "ru": "Мастер по ремонту техники",
-   "group": "Быт и услуги",
-   "aliases": [
-    "ремонт бытовой техники"
-   ],
-   "parent": "prof.daily",
-   "kind": "specialty",
-   "axes": {
-    "material": 0.85,
-    "info": 0.15,
-    "people": 0,
-    "danger": 0.2
-   }
-  },
-  {
-   "slug": "prof.auto-mechanic",
-   "ru": "Автослесарь",
-   "group": "Транспорт",
-   "aliases": [
-    "автомеханик"
-   ],
-   "parent": "prof.move",
-   "kind": "specialty",
-   "axes": {
-    "material": 0.9,
-    "info": 0.1,
-    "people": 0,
-    "danger": 0.2
-   }
-  },
-  {
-   "slug": "prof.driver",
-   "ru": "Водитель",
-   "group": "Транспорт",
-   "aliases": [],
-   "parent": "prof.move",
-   "kind": "specialty",
-   "axes": {
-    "material": 0.4,
-    "info": 0.3,
-    "people": 0.3,
-    "danger": 0.3
-   }
-  },
-  {
-   "slug": "prof.tailor",
-   "ru": "Швея",
-   "group": "Быт и услуги",
-   "aliases": [
-    "портной",
-    "закройщик"
-   ],
-   "parent": "prof.daily",
-   "kind": "specialty",
-   "axes": {
-    "material": 1,
-    "info": 0,
-    "people": 0,
-    "danger": 0.05
-   }
-  },
-  {
-   "slug": "prof.cook",
-   "ru": "Повар",
-   "group": "Быт и услуги",
-   "aliases": [
-    "кулинар"
-   ],
-   "parent": "prof.daily",
-   "kind": "specialty",
-   "axes": {
-    "material": 1,
-    "info": 0,
-    "people": 0,
-    "danger": 0.1
-   }
-  },
-  {
-   "slug": "prof.hairdresser",
-   "ru": "Парикмахер",
-   "group": "Быт и услуги",
-   "aliases": [
-    "стилист"
-   ],
-   "parent": "prof.daily",
-   "kind": "specialty",
-   "axes": {
-    "material": 0.5,
-    "info": 0,
-    "people": 0.5,
-    "danger": 0.05
-   }
-  },
-  {
-   "slug": "prof.photographer",
-   "ru": "Фотограф",
-   "group": "Творчество",
-   "aliases": [
-    "видеограф"
-   ],
-   "parent": "prof.create",
-   "kind": "specialty",
-   "axes": {
-    "material": 0,
-    "info": 0.7,
-    "people": 0.3,
-    "danger": 0.05
-   }
-  },
-  {
-   "slug": "prof.designer",
-   "ru": "Дизайнер",
-   "group": "Творчество",
-   "aliases": [],
-   "parent": "prof.create",
-   "kind": "specialty",
-   "axes": {
-    "material": 0,
-    "info": 1,
-    "people": 0,
-    "danger": 0
-   }
-  },
-  {
-   "slug": "prof.accountant",
-   "ru": "Бухгалтер",
-   "group": "Финансы и право",
-   "aliases": [
-    "финансист"
-   ],
-   "parent": "prof.lawfin",
-   "kind": "specialty",
-   "axes": {
-    "material": 0,
-    "info": 1,
-    "people": 0,
-    "danger": 0
-   }
-  },
-  {
-   "slug": "prof.lawyer",
-   "ru": "Юрист",
-   "group": "Финансы и право",
-   "aliases": [
-    "адвокат"
-   ],
-   "parent": "prof.lawfin",
-   "kind": "specialty",
-   "axes": {
-    "material": 0,
-    "info": 0.6,
-    "people": 0.4,
-    "danger": 0
-   }
-  },
-  {
-   "slug": "prof.programmer",
-   "ru": "Программист",
-   "group": "ИТ",
-   "aliases": [
-    "разработчик"
-   ],
-   "parent": "prof.it",
-   "kind": "specialty",
-   "axes": {
-    "material": 0,
-    "info": 1,
-    "people": 0,
-    "danger": 0
-   }
-  },
-  {
-   "slug": "prof.sysadmin",
-   "ru": "Системный администратор",
-   "group": "ИТ",
-   "aliases": [
-    "админ"
-   ],
-   "parent": "prof.it",
-   "kind": "specialty",
-   "axes": {
-    "material": 0,
-    "info": 1,
-    "people": 0,
-    "danger": 0.02
-   }
-  },
-  {
-   "slug": "prof.teacher",
-   "ru": "Преподаватель",
-   "group": "Образование",
-   "aliases": [
-    "учитель",
-    "репетитор"
-   ],
-   "parent": "prof.teach",
-   "kind": "specialty",
-   "axes": {
-    "material": 0,
-    "info": 0.3,
-    "people": 0.7,
-    "danger": 0.02
-   }
-  },
-  {
-   "slug": "prof.doctor",
-   "ru": "Врач",
-   "group": "Здоровье",
-   "aliases": [
-    "медик"
-   ],
-   "parent": "prof.care",
-   "kind": "specialty",
-   "axes": {
-    "material": 0,
-    "info": 0.4,
-    "people": 0.6,
-    "danger": 0.15
-   }
-  },
-  {
-   "slug": "prof.nurse",
-   "ru": "Медсестра",
-   "group": "Здоровье",
-   "aliases": [
-    "медбрат"
-   ],
-   "parent": "prof.care",
-   "kind": "specialty",
-   "axes": {
-    "material": 0,
-    "info": 0.2,
-    "people": 0.8,
-    "danger": 0.2
-   }
-  },
-  {
-   "slug": "prof.farmer",
-   "ru": "Фермер",
-   "group": "Сельское хозяйство",
-   "aliases": [
-    "агроном"
-   ],
-   "parent": "prof.grow",
-   "kind": "specialty",
-   "axes": {
-    "material": 0.9,
-    "info": 0.1,
-    "people": 0,
-    "danger": 0.2
-   }
-  },
-  {
-   "slug": "prof.scribe",
-   "ru": "Писарь / оператор данных",
-   "group": "Услуги",
-   "aliases": [
-    "помощник",
-    "оператор блокчейна"
-   ],
-   "parent": "prof.data",
-   "kind": "specialty",
-   "axes": {
-    "material": 0,
-    "info": 1,
-    "people": 0,
-    "danger": 0
-   }
-  }
- ],
- "root": "prof",
- "_note": "дерево: root prof → категории prof.* → специальности; поле parent, синонимы в aliases (см. ИР-017)",
- "_axes_note": "axes: доли объекта труда (material+info+people≈1) + danger 0–1 — облако (ИР-018, specialty-axes.md); декларируемый bootstrap"
+  "catalog": "professions",
+  "version": "2026.07-tree",
+  "entries": [
+    {
+      "slug": "prof",
+      "ru": "Всякий труд",
+      "group": "Каталог",
+      "kind": "root"
+    },
+    {
+      "slug": "prof.build",
+      "ru": "Ремонт и строительство",
+      "group": "Каталог",
+      "kind": "category",
+      "parent": "prof"
+    },
+    {
+      "slug": "prof.daily",
+      "ru": "Быт и услуги",
+      "group": "Каталог",
+      "kind": "category",
+      "parent": "prof"
+    },
+    {
+      "slug": "prof.move",
+      "ru": "Транспорт",
+      "group": "Каталог",
+      "kind": "category",
+      "parent": "prof"
+    },
+    {
+      "slug": "prof.create",
+      "ru": "Творчество",
+      "group": "Каталог",
+      "kind": "category",
+      "parent": "prof"
+    },
+    {
+      "slug": "prof.lawfin",
+      "ru": "Финансы и право",
+      "group": "Каталог",
+      "kind": "category",
+      "parent": "prof"
+    },
+    {
+      "slug": "prof.it",
+      "ru": "ИТ",
+      "group": "Каталог",
+      "kind": "category",
+      "parent": "prof"
+    },
+    {
+      "slug": "prof.teach",
+      "ru": "Образование",
+      "group": "Каталог",
+      "kind": "category",
+      "parent": "prof"
+    },
+    {
+      "slug": "prof.care",
+      "ru": "Здоровье",
+      "group": "Каталог",
+      "kind": "category",
+      "parent": "prof"
+    },
+    {
+      "slug": "prof.grow",
+      "ru": "Сельское хозяйство",
+      "group": "Каталог",
+      "kind": "category",
+      "parent": "prof"
+    },
+    {
+      "slug": "prof.data",
+      "ru": "Услуги",
+      "group": "Каталог",
+      "kind": "category",
+      "parent": "prof"
+    },
+    {
+      "slug": "prof.electrician",
+      "ru": "Электрик",
+      "group": "Ремонт и строительство",
+      "aliases": [
+        "электромонтёр",
+        "электромонтажник"
+      ],
+      "parent": "prof.build",
+      "kind": "specialty",
+      "axes": {
+        "material": 0.9,
+        "info": 0.1,
+        "people": 0,
+        "danger": 0.4,
+        "knowledge": 0.5,
+        "responsibility": 0.55
+      }
+    },
+    {
+      "slug": "prof.plumber",
+      "ru": "Сантехник",
+      "group": "Ремонт и строительство",
+      "aliases": [
+        "слесарь-сантехник"
+      ],
+      "parent": "prof.build",
+      "kind": "specialty",
+      "axes": {
+        "material": 0.95,
+        "info": 0.05,
+        "people": 0,
+        "danger": 0.2,
+        "knowledge": 0.4,
+        "responsibility": 0.4
+      }
+    },
+    {
+      "slug": "prof.carpenter",
+      "ru": "Столяр",
+      "group": "Ремонт и строительство",
+      "aliases": [
+        "плотник"
+      ],
+      "parent": "prof.build",
+      "kind": "specialty",
+      "axes": {
+        "material": 1,
+        "info": 0,
+        "people": 0,
+        "danger": 0.2,
+        "knowledge": 0.5,
+        "responsibility": 0.25
+      }
+    },
+    {
+      "slug": "prof.builder",
+      "ru": "Строитель",
+      "group": "Ремонт и строительство",
+      "aliases": [
+        "отделочник",
+        "каменщик"
+      ],
+      "parent": "prof.build",
+      "kind": "specialty",
+      "axes": {
+        "material": 1,
+        "info": 0,
+        "people": 0,
+        "danger": 0.3,
+        "knowledge": 0.4,
+        "responsibility": 0.45
+      }
+    },
+    {
+      "slug": "prof.welder",
+      "ru": "Сварщик",
+      "group": "Ремонт и строительство",
+      "aliases": [],
+      "parent": "prof.build",
+      "kind": "specialty",
+      "axes": {
+        "material": 1,
+        "info": 0,
+        "people": 0,
+        "danger": 0.5,
+        "knowledge": 0.5,
+        "responsibility": 0.5
+      }
+    },
+    {
+      "slug": "prof.appliance-repair",
+      "ru": "Мастер по ремонту техники",
+      "group": "Быт и услуги",
+      "aliases": [
+        "ремонт бытовой техники"
+      ],
+      "parent": "prof.daily",
+      "kind": "specialty",
+      "axes": {
+        "material": 0.85,
+        "info": 0.15,
+        "people": 0,
+        "danger": 0.2,
+        "knowledge": 0.5,
+        "responsibility": 0.3
+      }
+    },
+    {
+      "slug": "prof.auto-mechanic",
+      "ru": "Автослесарь",
+      "group": "Транспорт",
+      "aliases": [
+        "автомеханик"
+      ],
+      "parent": "prof.move",
+      "kind": "specialty",
+      "axes": {
+        "material": 0.9,
+        "info": 0.1,
+        "people": 0,
+        "danger": 0.2,
+        "knowledge": 0.5,
+        "responsibility": 0.55
+      }
+    },
+    {
+      "slug": "prof.driver",
+      "ru": "Водитель",
+      "group": "Транспорт",
+      "aliases": [],
+      "parent": "prof.move",
+      "kind": "specialty",
+      "axes": {
+        "material": 0.4,
+        "info": 0.3,
+        "people": 0.3,
+        "danger": 0.3,
+        "knowledge": 0.3,
+        "responsibility": 0.6
+      }
+    },
+    {
+      "slug": "prof.tailor",
+      "ru": "Швея",
+      "group": "Быт и услуги",
+      "aliases": [
+        "портной",
+        "закройщик"
+      ],
+      "parent": "prof.daily",
+      "kind": "specialty",
+      "axes": {
+        "material": 1,
+        "info": 0,
+        "people": 0,
+        "danger": 0.05,
+        "knowledge": 0.4,
+        "responsibility": 0.15
+      }
+    },
+    {
+      "slug": "prof.cook",
+      "ru": "Повар",
+      "group": "Быт и услуги",
+      "aliases": [
+        "кулинар"
+      ],
+      "parent": "prof.daily",
+      "kind": "specialty",
+      "axes": {
+        "material": 1,
+        "info": 0,
+        "people": 0,
+        "danger": 0.1,
+        "knowledge": 0.35,
+        "responsibility": 0.35
+      }
+    },
+    {
+      "slug": "prof.hairdresser",
+      "ru": "Парикмахер",
+      "group": "Быт и услуги",
+      "aliases": [
+        "стилист"
+      ],
+      "parent": "prof.daily",
+      "kind": "specialty",
+      "axes": {
+        "material": 0.5,
+        "info": 0,
+        "people": 0.5,
+        "danger": 0.05,
+        "knowledge": 0.35,
+        "responsibility": 0.2
+      }
+    },
+    {
+      "slug": "prof.photographer",
+      "ru": "Фотограф",
+      "group": "Творчество",
+      "aliases": [
+        "видеограф"
+      ],
+      "parent": "prof.create",
+      "kind": "specialty",
+      "axes": {
+        "material": 0,
+        "info": 0.7,
+        "people": 0.3,
+        "danger": 0.05,
+        "knowledge": 0.4,
+        "responsibility": 0.15
+      }
+    },
+    {
+      "slug": "prof.designer",
+      "ru": "Дизайнер",
+      "group": "Творчество",
+      "aliases": [],
+      "parent": "prof.create",
+      "kind": "specialty",
+      "axes": {
+        "material": 0,
+        "info": 1,
+        "people": 0,
+        "danger": 0,
+        "knowledge": 0.5,
+        "responsibility": 0.2
+      }
+    },
+    {
+      "slug": "prof.accountant",
+      "ru": "Бухгалтер",
+      "group": "Финансы и право",
+      "aliases": [
+        "финансист"
+      ],
+      "parent": "prof.lawfin",
+      "kind": "specialty",
+      "axes": {
+        "material": 0,
+        "info": 1,
+        "people": 0,
+        "danger": 0,
+        "knowledge": 0.6,
+        "responsibility": 0.65
+      }
+    },
+    {
+      "slug": "prof.lawyer",
+      "ru": "Юрист",
+      "group": "Финансы и право",
+      "aliases": [
+        "адвокат"
+      ],
+      "parent": "prof.lawfin",
+      "kind": "specialty",
+      "axes": {
+        "material": 0,
+        "info": 0.6,
+        "people": 0.4,
+        "danger": 0,
+        "knowledge": 0.75,
+        "responsibility": 0.75
+      }
+    },
+    {
+      "slug": "prof.programmer",
+      "ru": "Программист",
+      "group": "ИТ",
+      "aliases": [
+        "разработчик"
+      ],
+      "parent": "prof.it",
+      "kind": "specialty",
+      "axes": {
+        "material": 0,
+        "info": 1,
+        "people": 0,
+        "danger": 0,
+        "knowledge": 0.65,
+        "responsibility": 0.45
+      }
+    },
+    {
+      "slug": "prof.sysadmin",
+      "ru": "Системный администратор",
+      "group": "ИТ",
+      "aliases": [
+        "админ"
+      ],
+      "parent": "prof.it",
+      "kind": "specialty",
+      "axes": {
+        "material": 0,
+        "info": 1,
+        "people": 0,
+        "danger": 0.02,
+        "knowledge": 0.6,
+        "responsibility": 0.6
+      }
+    },
+    {
+      "slug": "prof.teacher",
+      "ru": "Преподаватель",
+      "group": "Образование",
+      "aliases": [
+        "учитель",
+        "репетитор"
+      ],
+      "parent": "prof.teach",
+      "kind": "specialty",
+      "axes": {
+        "material": 0,
+        "info": 0.3,
+        "people": 0.7,
+        "danger": 0.02,
+        "knowledge": 0.6,
+        "responsibility": 0.55
+      }
+    },
+    {
+      "slug": "prof.doctor",
+      "ru": "Врач",
+      "group": "Здоровье",
+      "aliases": [
+        "медик"
+      ],
+      "parent": "prof.care",
+      "kind": "specialty",
+      "axes": {
+        "material": 0,
+        "info": 0.4,
+        "people": 0.6,
+        "danger": 0.15,
+        "knowledge": 0.9,
+        "responsibility": 0.95
+      }
+    },
+    {
+      "slug": "prof.nurse",
+      "ru": "Медсестра",
+      "group": "Здоровье",
+      "aliases": [
+        "медбрат"
+      ],
+      "parent": "prof.care",
+      "kind": "specialty",
+      "axes": {
+        "material": 0,
+        "info": 0.2,
+        "people": 0.8,
+        "danger": 0.2,
+        "knowledge": 0.55,
+        "responsibility": 0.7
+      }
+    },
+    {
+      "slug": "prof.farmer",
+      "ru": "Фермер",
+      "group": "Сельское хозяйство",
+      "aliases": [
+        "агроном"
+      ],
+      "parent": "prof.grow",
+      "kind": "specialty",
+      "axes": {
+        "material": 0.9,
+        "info": 0.1,
+        "people": 0,
+        "danger": 0.2,
+        "knowledge": 0.45,
+        "responsibility": 0.3
+      }
+    },
+    {
+      "slug": "prof.scribe",
+      "ru": "Писарь / оператор данных",
+      "group": "Услуги",
+      "aliases": [
+        "помощник",
+        "оператор блокчейна"
+      ],
+      "parent": "prof.data",
+      "kind": "specialty",
+      "axes": {
+        "material": 0,
+        "info": 1,
+        "people": 0,
+        "danger": 0,
+        "knowledge": 0.2,
+        "responsibility": 0.25
+      }
+    }
+  ],
+  "root": "prof",
+  "_note": "дерево: root prof → категории prof.* → специальности; поле parent, синонимы в aliases (см. ИР-017)",
+  "_axes_note": "axes: доли объекта труда (material+info+people≈1) + danger 0–1 — облако (ИР-018, specialty-axes.md); декларируемый bootstrap"
 }

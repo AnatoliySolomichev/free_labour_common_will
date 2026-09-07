@@ -24,15 +24,32 @@ public:
     explicit CatalogError(const std::string& msg) : std::runtime_error(msg) {}
 };
 
-// Declared cloud coordinates of a specialty (ИР-018, specialty-axes.md): object of
-// labour as fractional membership (material+info+people ≈ 1) + danger 0..1. Present
-// only for leaf specialties; used to place activities in the specialty cloud.
+// Declared cloud coordinates of a specialty (ИР-018, specialty-axes.md).
+//
+// Two KINDS of coordinate live here and they behave differently:
+//
+//   shares     — material + info + people ≈ 1: fractional membership answering
+//                "with what does this work deal", complete by construction;
+//   intensities— danger, knowledge, responsibility: independent 0..1 degrees
+//                answering "how hard, how dangerous, how much rides on it".
+//
+// Knowledge and responsibility (ИР-020, specialty-axes.md §4.2, specialty-axes.md §4.5) are what a
+// grade was standing in for: a grade-5 welder's hour differs from a grade-2
+// welder's precisely in these, and paying for the grade ON TOP of them pays twice
+// for the same thing. Measured on a world where the axes describe the work
+// itself, the admission exam REJECTS grade once they are present (sliding
+// control 0.0194 without it against 0.0317 with it).
+//
+// These are bootstrap values only. Practitioners overwrite them by attestation
+// (ИР-019) — the value is set by whoever does the work, not by this file.
 struct CatalogAxes {
-    double material = 0.0;
-    double info     = 0.0;
-    double people   = 0.0;
-    double danger   = 0.0;
-    bool   present  = false;   // true iff the entry declared an "axes" object
+    double material       = 0.0;
+    double info           = 0.0;
+    double people         = 0.0;
+    double danger         = 0.0;
+    double knowledge      = 0.0;
+    double responsibility = 0.0;
+    bool   present        = false;   // true iff the entry declared an "axes" object
 };
 
 struct CatalogEntry {

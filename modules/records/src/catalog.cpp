@@ -65,6 +65,8 @@ Catalog catalog_from(const Value& root, const std::string& where) {
             num("info",     e.axes.info);
             num("people",   e.axes.people);
             num("danger",   e.axes.danger);
+            num("knowledge",      e.axes.knowledge);       // ИР-020
+            num("responsibility", e.axes.responsibility);  // ИР-020
             e.axes.present = true;
         }
         e.aliases   = optional_strings(item.object, "aliases",   ew);
