@@ -349,7 +349,8 @@ AxisDesign build_axis_design(const std::vector<records::RateEntry>& rates,
                              double                                 W,
                              const std::vector<records::Catalog>&   catalogs,
                              const std::vector<std::string>&        columns,
-                             const AttestedAxes*                    attested) {
+                             const AttestedAxes*                    attested,
+                             const DealProfiles*                    declared) {
     AxisDesign d{};
     // NEVER a constant term. An hour with every intensity at zero is an hour in
     // which nothing happened, and a constant is precisely what would pay for it:
@@ -390,8 +391,22 @@ AxisDesign build_axis_design(const std::vector<records::RateEntry>& rates,
                 o.x.push_back(grade_column(o.level));
             else if (c == kAxisJunk)
                 o.x.push_back(junk_axis(o.slug, o.level));
-            else
-                o.x.push_back(effective_axis(*by_slug.at(o.slug), c, attested));
+            else {
+                // Работа, описавшая сама себя, старше словаря, описавшего её
+                // категорию: объявленный в сделках профиль перебивает каталог по
+                // тем осям, которые он называет. Ось, которую не назвал никто,
+                // отсутствует, а не равна нулю, — и тогда работает каталог.
+                const double* said = nullptr;
+                if (declared) {
+                    const auto dit = declared->find({o.slug, o.level});
+                    if (dit != declared->end()) {
+                        const auto ait = dit->second.find(c);
+                        if (ait != dit->second.end()) said = &ait->second;
+                    }
+                }
+                o.x.push_back(said ? *said
+                                   : effective_axis(*by_slug.at(o.slug), c, attested));
+            }
         }
     }
     return d;
@@ -489,19 +504,20 @@ records::AxisPrices build_axis_prices(
     const std::array<uint8_t, 32>&         snapshot,
     const AttestedAxes*                    attested,
     const AxisPricesParams&                cfg,
-    const AxisSides*                       sides) {
+    const AxisSides*                       sides,
+    const DealProfiles*                    declared) {
 
     records::AxisPrices out{};
     out.date      = date;
     out.snapshot  = snapshot;
     out.timestamp = timestamp;
 
-    const auto declared = axis_columns_by_use(catalogs, rates);
-    const AxisDesign base = build_axis_design(rates, W, catalogs, declared, attested);
+    const auto declared_cols = axis_columns_by_use(catalogs, rates);
+    const AxisDesign base = build_axis_design(rates, W, catalogs, declared_cols, attested, declared);
 
     std::string params =
         "v5;form=linear;const=none;shares=none;basis=by_use"
-        ";axes=" + join_axes(declared) + ";cand=level"
+        ";axes=" + join_axes(declared_cols) + ";cand=level"
         ";window_days=" + std::to_string(cfg.window_days)
       + ";margin="  + fmt(cfg.margin)
       + ";ridge="   + fmt(kRidgeRelative)
@@ -527,7 +543,7 @@ records::AxisPrices build_axis_prices(
     for (const auto& o : base.obs) cand.push_back(grade_column(o.level));
     const AxisGate g = run_axis_gate(base.obs, cand, cfg.margin);
 
-    std::vector<std::string> columns = declared;
+    std::vector<std::string> columns = declared_cols;
     if (!g.ok) {
         params += ";gate=unjudgeable";
     } else {
@@ -539,9 +555,9 @@ records::AxisPrices build_axis_prices(
         if (!g.junk_rejected) params += ";gate=junk_admitted";
     }
 
-    const AxisDesign fin = columns.size() == declared.size()
+    const AxisDesign fin = columns.size() == declared_cols.size()
                          ? base
-                         : build_axis_design(rates, W, catalogs, columns, attested);
+                         : build_axis_design(rates, W, catalogs, columns, attested, declared);
     const AxisFit fit = fit_wls(fin.obs);
     if (!fit.ok) {
         out.params = params + ";refused=underdetermined;obs="
@@ -557,8 +573,8 @@ records::AxisPrices build_axis_prices(
 
     // ── The two sides, kept apart (ИР-020) ──────────────────────────────────
     if (sides && sides->seller && sides->buyer) {
-        const AxisDesign ds = build_axis_design(rates, W, catalogs, columns, sides->seller);
-        const AxisDesign db = build_axis_design(rates, W, catalogs, columns, sides->buyer);
+        const AxisDesign ds = build_axis_design(rates, W, catalogs, columns, sides->seller, declared);
+        const AxisDesign db = build_axis_design(rates, W, catalogs, columns, sides->buyer, declared);
         if (ds.obs.size() == fin.obs.size() && db.obs.size() == fin.obs.size()) {
             const size_t n = fin.obs.size(), m = fin.basis.size();
 

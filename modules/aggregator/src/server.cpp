@@ -1015,9 +1015,14 @@ void AggregatorServer::setup_routes() {
 
             const auto now = static_cast<int64_t>(std::time(nullptr));
             // W is already divided out by the pooling, hence 1.0 here.
+            // Профили, объявленные в самих сделках (ИР-022): где они есть, они
+            // старше каталога — работа, описавшая себя, лучший свидетель, чем
+            // словарь, описавший её категорию. И только они дают профилю
+            // различаться ВНУТРИ деятельности, чем и снимается разряд.
+            const auto said = build_deal_profiles(storage_);
             const auto prices = build_axis_prices(pooled, 1.0, cats, last_date, now,
                                                   snap.bytes, &attested, kAxisCfg,
-                                                  &axis_sides);
+                                                  &axis_sides, &said);
 
             // Publish once per source day, like DailyAggregate and SpecialtyCloud.
             std::string block_hex;

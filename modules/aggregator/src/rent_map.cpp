@@ -1,4 +1,5 @@
 #include "aggregator/rent_map.h"
+#include "aggregator/axis_prices.h"
 
 #include <records/codec.h>
 
@@ -66,6 +67,79 @@ std::map<std::pair<std::string, uint8_t>, BasketFlow> build_basket_flows(
         q.hours      += a.hours_raw;
         q.rate_hours += rate * a.hours_raw;
     }
+    return out;
+}
+
+DealProfiles build_deal_profiles(const AggregatorStorage& storage) {
+    using RefHash = std::array<uint8_t, 32>;
+    std::map<RefHash, records::Record> by_hash;
+    struct Deal { records::Acceptance acc; UserId payer; };
+    std::map<RefHash, Deal>   deals;
+    std::map<RefHash, double> paid;
+    struct Said { records::DealProfile prof; UserId author; };
+    std::vector<Said> said;
+
+    for (const Hash& bh : storage.all_block_hashes()) {
+        const auto block = storage.get_block_by_hash(bh);
+        if (!block || block->type != BlockType::DATA) continue;
+        records::Record rec;
+        try { rec = records::Codec::decode(block->payload.data(), block->payload.size()); }
+        catch (const records::CodecError&) { continue; }
+        if (const auto* a = std::get_if<records::Acceptance>(&rec)) {
+            deals[bh.bytes] = Deal{*a, block->address.user_id};
+        } else if (const auto* t = std::get_if<records::Transfer>(&rec)) {
+            if (t->from == block->address.user_id.bytes && t->reason)
+                for (const auto& o : t->origins) paid[t->reason->hash] += o.units;
+        } else if (const auto* p = std::get_if<records::DealProfile>(&rec)) {
+            said.push_back({*p, block->address.user_id});
+        }
+        by_hash[bh.bytes] = std::move(rec);
+    }
+
+    // Профиль считается, только если сделка РАССЧИТАНА и автор профиля — её
+    // сторона. Сторона выводится из самой сделки (приёмку пишет плательщик,
+    // Acceptance::work называет цепь работника), а не объявляется: объявленная
+    // могла бы соврать, выведенная — нет.
+    struct Acc { double sum = 0.0, w = 0.0; };
+    std::map<std::pair<std::string, uint8_t>, std::map<std::string, Acc>> agg;
+    for (const auto& sp : said) {
+        const auto dit = deals.find(sp.prof.deal.hash);
+        if (dit == deals.end()) continue;
+        const auto& a = dit->second.acc;
+        if (a.hours_raw <= 0.0) continue;
+        const double carried = a.carried_units ? *a.carried_units : 0.0;
+        const auto pit = paid.find(sp.prof.deal.hash);
+        if (pit == paid.end() ||
+            std::abs(pit->second - (a.labor_units + carried)) > 1e-6) continue;
+        if (a.work.chain == dit->second.payer.bytes) continue;          // самосделка
+        const bool party = sp.author.bytes == dit->second.payer.bytes
+                        || sp.author.bytes == a.work.chain;
+        if (!party) continue;
+
+        const auto wit = by_hash.find(a.work.hash);
+        if (wit == by_hash.end()) continue;
+        const auto* wr = std::get_if<records::WorkRecord>(&wit->second);
+        if (!wr) continue;
+        const auto git = by_hash.find(wr->agent.hash);
+        if (git == by_hash.end()) continue;
+        const auto* grade = std::get_if<records::Grade>(&git->second);
+        if (!grade) continue;
+        const auto sit = by_hash.find(grade->specialty.hash);
+        if (sit == by_hash.end()) continue;
+        const auto* spec = std::get_if<records::Specialty>(&sit->second);
+        if (!spec) continue;
+
+        auto& per = agg[{spec->name, grade->level}];
+        for (const auto& ax : sp.prof.axes) {
+            per[ax.axis].sum += a.hours_raw * ax.value;
+            per[ax.axis].w   += a.hours_raw;
+        }
+    }
+
+    DealProfiles out;
+    for (const auto& [key, per] : agg)
+        for (const auto& [axis, acc] : per)
+            if (acc.w > 0.0) out[key][axis] = acc.sum / acc.w;
     return out;
 }
 

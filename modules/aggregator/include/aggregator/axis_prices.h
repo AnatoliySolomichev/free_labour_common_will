@@ -216,6 +216,24 @@ struct AxisDesign {
     std::vector<AxisObservation> obs;     // canonical order (slug, level)
 };
 
+// Profiles declared inside deals (ИР-022), aggregated to the basket key.
+//
+// This is what finally lets a profile differ INSIDE an activity. The catalog
+// knows only "prof.electrician"; the deals know that this hour was under 400 V
+// and that one was not. Since the basket key is (specialty, LEVEL), averaging
+// declared profiles per basket gives a grade-5 welder a different row from a
+// grade-2 welder — which is exactly what the grade was standing in for, and why
+// the admission exam could never displace it before.
+//
+// Only SETTLED deals count, and only a profile written by a party to the deal
+// (payer or worker, derived from the Acceptance — never declared). Values are
+// averaged weighted by the deal's hours: a profile behind eight hours of work
+// speaks louder than one behind one hour. An axis nobody mentioned is absent,
+// not zero: absence falls back to the catalog, zero would be a claim.
+using DealProfiles = std::map<std::pair<std::string, uint8_t>,
+                              std::map<std::string, double>>;
+DealProfiles build_deal_profiles(const AggregatorStorage& storage);
+
 // Build the design from a day's rate table.
 //
 // One observation per (specialty, level) basket that actually traded: y is the
@@ -231,7 +249,11 @@ AxisDesign build_axis_design(
     double                                       W,
     const std::vector<records::Catalog>&         catalogs,
     const std::vector<std::string>&              columns,
-    const AttestedAxes*                          attested = nullptr);
+    const AttestedAxes*                          attested = nullptr,
+    // Declared per-deal profiles. Where a basket has one, it REPLACES the
+    // catalog's activity profile for the axes it names: the work describing
+    // itself outranks a dictionary describing its category.
+    const DealProfiles*                          declared = nullptr);
 
 // Public parameters of the computation. Every one of them lands in
 // AxisPrices::params: a witness that cannot reproduce the parameters cannot
@@ -309,6 +331,10 @@ records::AxisPrices build_axis_prices(
     const std::array<uint8_t, 32>&               snapshot,
     const AttestedAxes*                          attested = nullptr,
     const AxisPricesParams&                      params   = {},
-    const AxisSides*                             sides    = nullptr);
+    const AxisSides*                             sides    = nullptr,
+    // Profiles the deals declared about themselves (ИР-022). Where present they
+    // outrank the catalog: the work describing itself is a better witness than a
+    // dictionary describing its category.
+    const DealProfiles*                          declared = nullptr);
 
 } // namespace aggregator

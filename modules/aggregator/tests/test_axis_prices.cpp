@@ -769,6 +769,8 @@ TEST(AxisPricesBuild, ZeroSumIsNoLongerAnIdentityWithoutShares) {
 // хватает, и что арифметика готова, как только это появится.
 
 TEST(AxisPricesGradeReplacement, GradeSurvivesWhileProfilesAreOnlyPerActivity) {
+    // Без объявленных в сделках профилей всё по-прежнему: профиль общий для всей
+    // деятельности, и разряд остаётся единственным, что внутри неё меняется.
     const auto p = build_axis_prices(world_rates(), 1.0, world_catalog(),
                                      86'400, 86'500, snap(0x21));
     const records::AxisGateEntry* level = nullptr;
@@ -945,4 +947,49 @@ TEST(AxisPriceSpread, PublishedAlongsideTheBasis) {
     ASSERT_FALSE(p.basis.empty());
     ASSERT_EQ(p.spread.size(), p.basis.size());
     for (const double v : p.spread) EXPECT_GE(v, 0.0);
+}
+
+
+// А ВОТ И РАЗВЯЗКА (ИР-022, вариант «б»). Профили, объявленные в сделках, дают
+// каждому разряду свою строку — и разряду больше нечего сказать. Он уходит не
+// решением, а по показанию: экзамен перестаёт его пускать.
+TEST(AxisPricesGradeReplacement, DeclaredProfilesDisplaceTheGrade) {
+    const auto cats = world_catalog();
+    auto rates = world_rates();
+
+    // То, что раньше нёс разряд, теперь несут сами оси работы: знание и
+    // ответственность объявлены гуще там, где разряд выше.
+    DealProfiles declared;
+    for (const auto& e : cats[0].entries)
+        for (uint8_t lv = 1; lv <= 6; ++lv) {
+            const double step = grade_column(lv);
+            declared[{e.slug, lv}] = {
+                {"knowledge",      std::min(1.0, e.axes.get("knowledge") + 0.45 * step)},
+                {"responsibility", std::min(1.0, e.axes.get("responsibility") + 0.35 * step)},
+            };
+        }
+    // Ставки, порождённые этим — тем же законом, но без отдельного слагаемого
+    // за разряд: всё, что он давал, уже лежит в знании и ответственности.
+    for (auto& r : rates) {
+        const auto* e = cats[0].find(r.specialty);
+        ASSERT_NE(e, nullptr);
+        const auto& d = declared.at({r.specialty, r.level});
+        r.rate = kLawNoConst[0] * e->axes.get("physical")
+               + kLawNoConst[1] * e->axes.get("info")
+               + kLawNoConst[2] * e->axes.get("people")
+               + kLawNoConst[3] * e->axes.get("danger")
+               + kLawNoConst[4] * d.at("knowledge")
+               + kLawNoConst[5] * d.at("responsibility");
+    }
+
+    const auto p = build_axis_prices(rates, 1.0, cats, 86'400, 86'500, snap(0x41),
+                                     nullptr, {}, nullptr, &declared);
+    const records::AxisGateEntry* level = nullptr;
+    for (const auto& g : p.gate)
+        if (g.axis == kAxisLevel) level = &g;
+    ASSERT_NE(level, nullptr);
+    EXPECT_FALSE(level->admitted)
+        << "разряд объяснён осями самой работы — платить за него сверху значит "
+           "платить дважды за одно и то же";
+    EXPECT_EQ(std::find(p.basis.begin(), p.basis.end(), kAxisLevel), p.basis.end());
 }

@@ -971,3 +971,48 @@ TEST(RecordsCodec, AxisPricesRefusalRoundtrip) {
     EXPECT_TRUE(d.gate.empty());
     EXPECT_EQ(d.params, "v1;refused=underdetermined");
 }
+
+// DealProfile (0x78) — профиль одной работы, объявленный в сделке (ИР-022)
+TEST(RecordsCodec, DealProfileRoundtrip) {
+    records::DealProfile d{};
+    d.deal      = make_ref(0x54, 0x55);
+    d.axes      = {{"danger", 0.8}, {"knowledge", 0.55}, {"physical", 0.65}};
+    d.base      = make_ref(0x78, 0x79);
+    d.note      = "варил в резервуаре под 400 В";
+    d.timestamp = 1'700'000'000LL;
+
+    const auto r = std::get<records::DealProfile>(roundtrip(Record{d}));
+    EXPECT_EQ(r.deal, d.deal);
+    EXPECT_EQ(r.axes, d.axes);
+    ASSERT_TRUE(r.base.has_value());
+    EXPECT_EQ(*r.base, *d.base);
+    EXPECT_EQ(r.note, d.note);
+    EXPECT_EQ(r.timestamp, d.timestamp);
+}
+
+// Хвост по ключу: `base` (5) и `note` (6) независимы, шесть полей могли бы
+// означать любое из них.
+TEST(RecordsCodec, DealProfileNoteWithoutBase) {
+    records::DealProfile d{};
+    d.deal      = make_ref(0x54, 0x55);
+    d.axes      = {{"danger", 0.8}};
+    d.note      = "без опоры на прежний профиль";
+    d.timestamp = 7;
+
+    const auto r = std::get<records::DealProfile>(roundtrip(Record{d}));
+    EXPECT_FALSE(r.base.has_value());
+    EXPECT_EQ(r.note, d.note);
+}
+
+// Голый профиль — законное состояние: ни опоры, ни пояснения.
+TEST(RecordsCodec, DealProfileBareRoundtrip) {
+    records::DealProfile d{};
+    d.deal      = make_ref(0x01, 0x02);
+    d.axes      = {{"people", 0.5}};
+    d.timestamp = 9;
+
+    const auto r = std::get<records::DealProfile>(roundtrip(Record{d}));
+    EXPECT_FALSE(r.base.has_value());
+    EXPECT_TRUE(r.note.empty());
+    EXPECT_EQ(r.axes.size(), 1u);
+}

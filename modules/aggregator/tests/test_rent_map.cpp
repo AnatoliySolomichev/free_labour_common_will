@@ -35,7 +35,7 @@ records::Ref ref_to(const UserId& chain, const Block& block) {
 // КТО её платит: канал схлопывается в одного плательщика, дефицит не меняет
 // концентрацию вовсе, потому что опора уезжает вместе со всеми.
 class RentMapTest : public ::testing::Test {
-protected:
+public:
     std::filesystem::path              db_path_;
     std::unique_ptr<AggregatorStorage> storage_;
     BlockIndex                         next_index_ = 0;
@@ -201,4 +201,115 @@ TEST_F(RentMapTest, WindowExcludesOldDeals) {
     ASSERT_EQ(rows.size(), 1u);
     EXPECT_EQ(rows[0].payers, 8u);
     EXPECT_NEAR(rows[0].resid, 0.0, 1e-9);
+}
+
+
+// ── Профиль, объявленный в сделке (ИР-022, вариант «б») ──────────────────────
+//
+// Каталог знает профиль ДЕЯТЕЛЬНОСТИ — потому разряд и был нужен: он оставался
+// единственным, что менялось внутри специальности, и экзамен допуска не мог его
+// вытеснить. Ключ корзины — (специальность, РАЗРЯД), поэтому профили, объявленные
+// в сделках, дают пятому разряду свою строку, а второму свою, и разряду больше
+// нечего сказать.
+class DealProfileTest : public RentMapTest {};
+
+TEST_F(DealProfileTest, ProfileVariesWithinAnActivity) {
+    // Один и тот же портной, два разряда: работа пятого объявлена сложнее.
+    const Block spec = add(worker_, records::Specialty{"портной"});
+    auto profiled = [&](const UserId& payer, uint8_t level, double hours,
+                        double rate, double knowledge) {
+        records::Grade g{};
+        g.specialty = ref_to(worker_, spec);         // та же специальность
+        g.level     = level;
+        const Block gb = add(worker_, g);
+
+        records::WorkRecord wr{};
+        wr.agent = ref_to(worker_, gb);
+        wr.hours = hours;
+        const Block work = add(worker_, wr);
+
+        records::Acceptance a{};
+        a.work        = ref_to(worker_, work);
+        a.receiver    = payer.bytes;
+        a.hours_raw   = hours;
+        a.labor_units = hours * rate;
+        a.timestamp   = kFrom + 3600;
+        const Block acc = add(payer, a);
+
+        records::Transfer t{};
+        t.from    = payer.bytes;
+        t.to      = worker_.bytes;
+        t.origins = { {payer.bytes, hours * rate} };
+        t.reason  = ref_to(payer, acc);
+        add(payer, t);
+
+        records::DealProfile dp{};
+        dp.deal      = ref_to(payer, acc);
+        dp.axes      = {{"knowledge", knowledge}};
+        dp.timestamp = kFrom + 3700;
+        add(payer, dp);                              // плательщик — сторона сделки
+    };
+    profiled(chain_of(0xB1), 2, 10.0, 1.0, 0.20);
+    profiled(chain_of(0xB2), 5, 10.0, 2.0, 0.85);
+
+    const auto prof = build_deal_profiles(*storage_);
+    ASSERT_EQ(prof.size(), 2u);
+    EXPECT_NEAR(prof.at({"портной", 2}).at("knowledge"), 0.20, 1e-9);
+    EXPECT_NEAR(prof.at({"портной", 5}).at("knowledge"), 0.85, 1e-9);
+}
+
+// Профиль от постороннего не считается: сторона выводится из самой сделки
+// (приёмку пишет плательщик, Acceptance::work называет цепь работника).
+TEST_F(DealProfileTest, OnlyAPartyToTheDealMayDescribeIt) {
+    records::WorkRecord wr{};
+    wr.agent = grade_ref_;
+    wr.hours = 10.0;
+    const Block work = add(worker_, wr);
+
+    records::Acceptance a{};
+    a.work        = ref_to(worker_, work);
+    a.receiver    = chain_of(0xB1).bytes;
+    a.hours_raw   = 10.0;
+    a.labor_units = 10.0;
+    a.timestamp   = kFrom + 3600;
+    const Block acc = add(chain_of(0xB1), a);
+
+    records::Transfer t{};
+    t.from    = chain_of(0xB1).bytes;
+    t.to      = worker_.bytes;
+    t.origins = { {chain_of(0xB1).bytes, 10.0} };
+    t.reason  = ref_to(chain_of(0xB1), acc);
+    add(chain_of(0xB1), t);
+
+    records::DealProfile dp{};
+    dp.deal      = ref_to(chain_of(0xB1), acc);
+    dp.axes      = {{"knowledge", 0.99}};
+    dp.timestamp = kFrom + 3700;
+    add(chain_of(0xEE), dp);                         // посторонний
+
+    EXPECT_TRUE(build_deal_profiles(*storage_).empty());
+}
+
+// Нерассчитанная сделка профиля не даёт: слово должно быть оплачено.
+TEST_F(DealProfileTest, UnsettledDealCarriesNoProfile) {
+    records::WorkRecord wr{};
+    wr.agent = grade_ref_;
+    wr.hours = 10.0;
+    const Block work = add(worker_, wr);
+
+    records::Acceptance a{};
+    a.work        = ref_to(worker_, work);
+    a.receiver    = chain_of(0xB1).bytes;
+    a.hours_raw   = 10.0;
+    a.labor_units = 10.0;
+    a.timestamp   = kFrom + 3600;
+    const Block acc = add(chain_of(0xB1), a);        // перевода нет
+
+    records::DealProfile dp{};
+    dp.deal      = ref_to(chain_of(0xB1), acc);
+    dp.axes      = {{"knowledge", 0.9}};
+    dp.timestamp = kFrom + 3700;
+    add(chain_of(0xB1), dp);
+
+    EXPECT_TRUE(build_deal_profiles(*storage_).empty());
 }
