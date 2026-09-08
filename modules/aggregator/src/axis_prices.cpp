@@ -145,6 +145,38 @@ double loo_rmse(const std::vector<AxisObservation>& obs) {
     return std::sqrt(se / sw);
 }
 
+std::vector<double> axis_price_spread(const std::vector<AxisObservation>& obs) {
+    const Design d = design_of(obs);
+    if (d.x.empty()) return {};
+    const size_t cols = d.x.front().size();
+    if (d.x.size() <= cols + 1) return {};      // нечего оставлять за бортом
+
+    std::vector<double> sum(cols, 0.0), sumsq(cols, 0.0);
+    size_t folds = 0;
+    for (size_t i = 0; i < d.x.size(); ++i) {
+        std::vector<std::vector<double>> x;
+        std::vector<double> y, w;
+        x.reserve(d.x.size() - 1); y.reserve(d.y.size() - 1); w.reserve(d.w.size() - 1);
+        for (size_t j = 0; j < d.x.size(); ++j) {
+            if (j == i) continue;
+            x.push_back(d.x[j]); y.push_back(d.y[j]); w.push_back(d.w[j]);
+        }
+        const auto beta = solve_wls(x, y, w);
+        if (beta.size() != cols) return {};
+        for (size_t c = 0; c < cols; ++c) { sum[c] += beta[c]; sumsq[c] += beta[c] * beta[c]; }
+        ++folds;
+    }
+    if (folds == 0) return {};
+
+    std::vector<double> out(cols, 0.0);
+    for (size_t c = 0; c < cols; ++c) {
+        const double mean = sum[c] / static_cast<double>(folds);
+        out[c] = std::sqrt(std::max(0.0, sumsq[c] / static_cast<double>(folds)
+                                         - mean * mean));
+    }
+    return out;
+}
+
 double junk_axis(const std::string& slug, uint8_t level) {
     // FNV-1a over "<slug>#<level>" — the key convention is protocol, not detail.
     const std::string key = slug + '#' + std::to_string(static_cast<int>(level));
@@ -585,6 +617,11 @@ records::AxisPrices build_axis_prices(
             params += ";sides=1;tau=" + fmt(tau);
         }
     }
+
+    // Насколько твёрдо сеть сходится в цене каждой оси — то, что заменило
+    // невязку по корзинам (records.md §11.9). Считается по тому же базису, что
+    // и опубликованная подгонка.
+    out.spread = axis_price_spread(fin.obs);
 
     out.params = params;
     return out;

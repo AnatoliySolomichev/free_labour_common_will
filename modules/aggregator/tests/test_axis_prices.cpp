@@ -887,3 +887,62 @@ TEST(AxisColumnsByUse, PriorRefusesAnAxisTheVocabularyDoesNotKnow) {
     with_dict.push_back(dict);
     EXPECT_TRUE(axis_price_predict(p, "prof.cook", 3, with_dict).has_value());
 }
+
+// ── Разброс цены оси вместо невязки по корзинам (ИР-020, п. 4) ───────────────
+
+// Невязка спрашивала «насколько эта корзина далека от модели». Вопрос теряет
+// смысл, когда специальность и разряд растворяются в осях: одинаковых работ
+// больше нет, и корзину не с чем сравнивать. Ось же остаётся общей — и вопрос
+// про неё остаётся: «сеть оценила опасность в 0.35, но насколько твёрдо?»
+//
+// Проверяется СРАВНЕНИЕМ, а не абсолютным порогом: разброс зависит от того,
+// насколько модель вообще описывает мир (здесь базис по употреблению берёт шесть
+// осей, а закон мира содержит ещё и разряд, так что расхождение есть и в
+// «ровном» случае). Утверждение теста — не «разброс мал», а «разброс РАСТЁТ,
+// когда цена начинает держаться на одной сделке».
+TEST(AxisPriceSpread, GrowsWhenThePriceRestsOnFewerDeals) {
+    const auto cats = world_catalog();
+
+    const auto even = build_axis_design(world_rates(), 1.0, cats,
+                                        axis_columns_by_use(cats, world_rates()),
+                                        nullptr);
+    const auto sp_even = axis_price_spread(even.obs);
+    ASSERT_EQ(sp_even.size(), even.basis.size());
+
+    auto rates = world_rates();      // одна корзина уезжает далеко от остальных
+    for (auto& r : rates)
+        if (r.specialty == "prof.miner" && r.level == 6) r.rate *= 4.0;
+    const auto lop = build_axis_design(rates, 1.0, cats,
+                                       axis_columns_by_use(cats, rates), nullptr);
+    const auto sp_lop = axis_price_spread(lop.obs);
+    ASSERT_EQ(sp_lop.size(), lop.basis.size());
+    ASSERT_EQ(sp_even.size(), sp_lop.size());
+
+    const double max_even = *std::max_element(sp_even.begin(), sp_even.end());
+    const double max_lop  = *std::max_element(sp_lop.begin(),  sp_lop.end());
+    EXPECT_GT(max_lop, 3.0 * max_even)
+        << "цена, зависящая от одной сделки, обязана шататься заметно сильнее";
+    for (const double v : sp_even) EXPECT_GE(v, 0.0);
+}
+
+// Отказ вместо числа: оставить за бортом нечего — разброса нет.
+TEST(AxisPriceSpread, RefusesWhenThereIsNothingToLeaveOut) {
+    std::vector<AxisObservation> obs;
+    for (int i = 0; i < 3; ++i) {
+        AxisObservation o{};
+        o.slug = "prof.a" + std::to_string(i);
+        o.level = 1; o.rate = 1.0; o.weight = 1.0;
+        o.x = {1.0, 0.5, 0.25};                    // столбцов столько же, сколько строк
+        obs.push_back(std::move(o));
+    }
+    EXPECT_TRUE(axis_price_spread(obs).empty());
+}
+
+// Разброс публикуется в записи и выровнен с базисом столбец в столбец.
+TEST(AxisPriceSpread, PublishedAlongsideTheBasis) {
+    const auto p = build_axis_prices(world_rates(), 1.0, world_catalog(),
+                                     86'400, 86'500, snap(0x31));
+    ASSERT_FALSE(p.basis.empty());
+    ASSERT_EQ(p.spread.size(), p.basis.size());
+    for (const double v : p.spread) EXPECT_GE(v, 0.0);
+}

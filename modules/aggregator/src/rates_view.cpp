@@ -242,26 +242,38 @@ std::vector<records::RateEntry> build_daily_rates(
     // how far above its own basket the deal is priced.
     using BasketKey = std::pair<std::string, uint8_t>;
     std::map<Edge, double> flow, circ;
-    std::map<BasketKey, std::vector<double>> basket;   // rates per distinct edge
+    std::map<BasketKey, std::vector<double>> basket;   // rates per DEAL
+    std::map<BasketKey, std::pair<double, double>> pool;  // basket → [Σ units, Σ hours]
     if (weighted) {
-        // Collapse by edge before taking the reference: one counterparty pair
-        // contributes ONE point however many deals it books, so drowning the
-        // median takes a majority of counterparties, not of deals.
-        std::map<BasketKey, std::map<Edge, std::pair<double, double>>> by_edge;
+        // Опора корзины — средневзвешенное по часам ВСЕХ её сделок, ровно та же
+        // величина, что и среднее дня: «усреднённый трудочас» и должен быть
+        // средним арифметическим (ратифицировано 2026-09-08).
+        //
+        // Сделки НЕ схлопываются по рёбрам. Прежде одна пара давала одну точку,
+        // чтобы утопить опору требовалось большинство контрагентов, а не сделок.
+        // Цена этого — выброшенные свидетельства: если большинство честно, то
+        // каждая сделка есть настоящий труд и должна считаться, даже когда двое
+        // работают только друг с другом.
+        //
+        // Замерено, чем платим: пара, торгующая по цене ×1.3 и наращивающая
+        // ЧИСЛО сделок, остаётся видна при опоре по рёбрам всегда (1.28x при
+        // любой доле), а при среднем по сделкам её аномалия сползает
+        // 1.28 → 1.21 (28% сделок) → 1.16 (43%) → 1.11 (61%) → 1.07 (75%) и
+        // ниже порога уходит около 61%. Заливать корзину, однако, значит
+        // заявлять часы, а часы дороги (economy.md §3): их подделка требует
+        // свидетелей и непересекающихся слотов. И кругооборотная половина
+        // конъюнкции продолжает работать — заливающая пара взаимна по
+        // построению. Среднее к тому же спускается плавно, без обрыва на 50%,
+        // который был у медианы по сделкам (та падает 1.24 → 1.00 разом).
         for (const auto& d : resolved) {
             flow[{d.payer, d.worker}] += d.units;
             if (d.rate <= 0.0) continue;
-            auto& e = by_edge[{d.specialty, d.level}][{d.payer, d.worker}];
-            e.first  += d.units;
-            e.second += d.hours;
+            auto& p = pool[{d.specialty, d.level}];
+            p.first  += d.units;
+            p.second += d.hours;
+            basket[{d.specialty, d.level}].push_back(d.rate);
         }
-        for (const auto& [key, edges] : by_edge) {
-            auto& rates = basket[key];
-            rates.reserve(edges.size());
-            for (const auto& [edge, uh] : edges)
-                if (uh.second > 0.0) rates.push_back(uh.first / uh.second);
-            std::sort(rates.begin(), rates.end());
-        }
+        for (auto& [key, rates] : basket) std::sort(rates.begin(), rates.end());
         circ = circulation(flow, std::max<size_t>(2, indep->max_cycle));
     }
 
@@ -276,11 +288,14 @@ std::vector<records::RateEntry> build_daily_rates(
         const double R = std::clamp(cit->second / fit->second, 0.0, 1.0);
 
         const auto bit = basket.find({d.specialty, d.level});
-        // Too few counterparties to tell an anomaly from a normal price: refuse
-        // to judge rather than punish an honest young specialty.
-        if (bit == basket.end() || bit->second.size() < indep->min_basket_edges)
+        const auto pit = pool.find({d.specialty, d.level});
+        // Too few deals to tell an anomaly from a normal price: refuse to judge
+        // rather than punish an honest young specialty.
+        if (bit == basket.end() || pit == pool.end() ||
+            bit->second.size() < indep->min_basket_deals ||
+            pit->second.second <= 0.0)
             return 1.0;
-        const double median = quantile_sorted(bit->second, 0.5);
+        const double median = pit->second.first / pit->second.second;  // опора
         if (median <= 0.0 || d.rate <= 0.0) return 1.0;
 
         // Self-calibrating threshold: "anomalous" relative to how wide the
@@ -288,7 +303,7 @@ std::vector<records::RateEntry> build_daily_rates(
         // baskets have no trustworthy spread, so they fall back to `kappa`.
         double kappa = indep->kappa;
         if (indep->self_calibrate &&
-            bit->second.size() >= indep->calib_min_edges) {
+            bit->second.size() >= indep->calib_min_deals) {
             kappa = std::clamp(quantile_sorted(bit->second, 0.9) / median,
                                indep->kappa_min, indep->kappa_max);
         }

@@ -642,49 +642,97 @@ TEST_F(IndependenceTest, ThreeChainRingIsCaughtOnlyByCycleSearch) {
     EXPECT_NEAR(r[0].rate, 4.0 / 3.0, 1e-3);
 }
 
-TEST_F(IndependenceTest, EdgeReferenceSurvivesDealMajorityCollusion) {
-    // Слом, вскрытый на прогоне: у медианы точка отказа 50%, и пара, набившая
-    // большинство СДЕЛОК корзины, становится сама себе опорой. Опора считается
-    // по рёбрам, поэтому пара — это две точки, сколько бы сделок она ни провела.
+// Опора — средневзвешенное по часам ВСЕХ сделок корзины (ратифицировано
+// 2026-09-08): сделки не схлопываются по рёбрам. Если большинство честно, то
+// каждая сделка есть настоящий труд и обязана считаться, даже когда двое
+// работают только друг с другом.
+TEST_F(IndependenceTest, DealMeanReferenceCatchesModerateFlooding) {
     const int64_t before = kDay - 86'400 * 30;
-    honest_background(before);                       // 10 рёбер по обычной цене
-    for (int i = 0; i < 12; ++i) {                   // 24 сделки, но всего 2 ребра
+    honest_background(before);                       // 10 сделок по цене 1.0
+    for (int i = 0; i < 3; ++i) {                    // 6 сделок пары по 3.0
         deal(alice_, carol_, 1.0, 3.0, before);
         deal(carol_, alice_, 1.0, 3.0, before);
     }
     deal(alice_, carol_, 1.0, 3.0, kDay + 100);                     // сговорная
     deal(make_chain(0x71), make_chain(0x81), 1.0, 1.0, kDay + 100); // честная
 
-    // Сговор — 25 сделок из 36 в корзине (большинство), но лишь 2 ребра из 13.
     const IndependenceParams indep{};
     const auto weighted =
         build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr, &indep);
     ASSERT_EQ(weighted.size(), 1u);
-    // Потоки 39 и 36, вернулось 36 → R = 36/39 = 0.923, вес 0.077.
-    // Среднее дня = (0.077·3 + 1·1) / (0.077 + 1) = 1.143 вместо 2.0.
-    EXPECT_NEAR(weighted[0].rate, 1.143, 2e-3);
-    // Витрина показывает, сколько объёма уцелело: 0.077 + 1.0 из сырых 2.0 часов.
-    EXPECT_NEAR(weighted[0].hours, 2.0, 1e-9);
-    EXPECT_NEAR(weighted[0].weighted_hours, 1.077, 2e-3);
+    // Сговорная сделка втрое дороже опоры и полностью кругооборотна — её вес
+    // падает, и среднее дня тянется к честной цене, а не к 2.0.
+    EXPECT_LT(weighted[0].rate, 1.5);
+    EXPECT_NEAR(weighted[0].hours, 2.0, 1e-9);       // часы сырые: труд был
+    EXPECT_LT(weighted[0].weighted_hours, weighted[0].hours);
 }
 
-TEST_F(IndependenceTest, BasketWithTooFewCounterpartiesIsNotJudged) {
-    // Без достаточного числа контрагентов отличить аномалию от нормальной цены
-    // не по чему. Отказываемся судить: наказать честную молодую специальность
-    // хуже, чем пропустить. Дыра признана и оставлена карте ренты ИР-020.
+// ЧЕМ ЗА ЭТО ПЛАТИМ, честно и в тесте. Опора по рёбрам была неуязвима к числу
+// сделок: пара давала одну точку, сколько бы она ни наторговала. Опора по
+// сделкам этим свойством не обладает — залив корзину, пара утягивает опору к
+// себе и перестаёт выглядеть аномальной.
+//
+// Замерено на прогоне года (цена ×1.3): при опоре по рёбрам аномалия остаётся
+// 1.28x при любой доле сделок; при среднем по сделкам она сползает
+// 1.28 → 1.21 (28% сделок) → 1.16 (43%) → 1.11 (61%) → 1.07 (75%).
+//
+// Это принятая цена, а не недосмотр: заливать корзину значит заявлять ЧАСЫ, а
+// часы дороги (economy.md §3) — их подделка требует свидетелей и
+// непересекающихся слотов. Кругооборотная половина конъюнкции при этом
+// продолжает работать: заливающая пара взаимна по построению.
+TEST_F(IndependenceTest, FloodingTheBasketBluntsTheAnomalyHalf) {
     const int64_t before = kDay - 86'400 * 30;
-    for (int i = 0; i < 4; ++i) {
-        deal(alice_, carol_, 1.0, 3.0, before);
-        deal(carol_, alice_, 1.0, 3.0, before);
+    honest_background(before);                       // 10 честных сделок по 1.0
+    for (int i = 0; i < 30; ++i) {                   // 60 сделок пары: 86% корзины
+        deal(alice_, carol_, 1.0, 1.3, before);
+        deal(carol_, alice_, 1.0, 1.3, before);
     }
-    deal(alice_, carol_, 1.0, 3.0, kDay + 100);
+    deal(alice_, carol_, 1.0, 1.3, kDay + 100);
+    deal(make_chain(0x71), make_chain(0x81), 1.0, 1.0, kDay + 100);
 
-    const IndependenceParams indep{};        // min_basket_edges = 4, рёбер всего 2
+    const IndependenceParams indep{};
     const auto weighted =
         build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr, &indep);
     ASSERT_EQ(weighted.size(), 1u);
-    EXPECT_NEAR(weighted[0].rate, 3.0, 1e-9);
+    // Опора уехала к цене пары: аномалия сжалась с 1.30 до ≈1.03. Дисконт не
+    // исчезает совсем — его удерживает нижний зажим kappa_min = 1.10, — но
+    // слабеет резко: уцелевает ≈82% объёма против ≈8% у той же пары в
+    // незалитой корзине (CollusiveReciprocalPairIsDiscounted).
+    EXPECT_GT(weighted[0].weighted_hours / weighted[0].hours, 0.75);
+    EXPECT_LT(weighted[0].weighted_hours, weighted[0].hours);   // но и не ноль
+}
+
+// Ниже min_basket_deals отличить аномалию от нормальной цены не по чему.
+// Отказываемся судить: наказать честную молодую специальность хуже, чем
+// пропустить. Дыра признана и оставлена карте ренты ИР-020.
+TEST_F(IndependenceTest, BasketWithTooFewDealsIsNotJudged) {
+    const int64_t before = kDay - 86'400 * 30;
+    deal(alice_, carol_, 1.0, 1.0, before);          // всего три сделки в корзине
+    deal(carol_, alice_, 1.0, 1.0, before);
+    deal(alice_, carol_, 1.0, 9.0, kDay + 100);      // вопиюще дорогая и взаимная
+
+    const IndependenceParams indep{};                // min_basket_deals = 4
+    const auto weighted =
+        build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr, &indep);
+    ASSERT_EQ(weighted.size(), 1u);
+    EXPECT_NEAR(weighted[0].rate, 9.0, 1e-9);        // не судили вовсе
     EXPECT_NEAR(weighted[0].weighted_hours, weighted[0].hours, 1e-9);
+}
+
+// А как только сделок хватает — та же сделка уценивается. Порог отделяет «нечем
+// судить» от «судить есть чем», и это видно по одной добавленной сделке.
+TEST_F(IndependenceTest, OneMoreDealMakesTheBasketJudgeable) {
+    const int64_t before = kDay - 86'400 * 30;
+    deal(alice_, carol_, 1.0, 1.0, before);
+    deal(carol_, alice_, 1.0, 1.0, before);
+    deal(make_chain(0x71), make_chain(0x81), 1.0, 1.0, before);   // четвёртая
+    deal(alice_, carol_, 1.0, 9.0, kDay + 100);
+
+    const IndependenceParams indep{};
+    const auto weighted =
+        build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr, &indep);
+    ASSERT_EQ(weighted.size(), 1u);
+    EXPECT_LT(weighted[0].weighted_hours, weighted[0].hours);
 }
 
 // ── ИР-020: профиль, встроенный в сделку ─────────────────────────────────────

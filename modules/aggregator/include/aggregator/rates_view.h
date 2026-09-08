@@ -83,13 +83,13 @@ struct IndependenceParams {
     size_t  max_cycle       = 4;     // B5: longest ring cancelled; 2 = pairs only
     double  kappa           = 1.15;  // B1: fallback anomaly threshold
     bool    self_calibrate  = true;  // derive kappa from the basket's own spread
-    size_t  calib_min_edges = 8;     // below this the basket uses `kappa`
+    size_t  calib_min_deals = 8;     // below this the basket uses `kappa`
     // Below this many distinct edges a basket has no trustworthy reference at
     // all, so nothing is discounted there: refusing to judge beats punishing an
     // honest young specialty. It leaves a hole for a pair alone in a fresh
     // basket — that one is left to the rent map of ИР-020. On sim-year data
     // this covers 4% of baskets holding 0.7% of network hours.
-    size_t  min_basket_edges = 4;
+    size_t  min_basket_deals = 4;
     double  kappa_min       = 1.10;  // clamps for the self-calibrated kappa
     double  kappa_max       = 1.50;
 };

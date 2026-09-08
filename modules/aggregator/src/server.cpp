@@ -625,12 +625,12 @@ void AggregatorServer::setup_routes() {
     // Committed alongside the result, like SpecialtyCloud::params: a witness
     // must recompute by the same methodology, not guess which one was used.
     static const std::string kIndepParams =
-        "v1;window_days=" + std::to_string(kIndependence.window_days)
+        "v2;ref=deal_mean;window_days=" + std::to_string(kIndependence.window_days)
       + ";max_cycle="     + std::to_string(kIndependence.max_cycle)
       + ";kappa="         + std::to_string(kIndependence.kappa)
       + ";self_calibrate=" + std::string(kIndependence.self_calibrate ? "1" : "0")
-      + ";calib_min_edges=" + std::to_string(kIndependence.calib_min_edges)
-      + ";min_basket_edges=" + std::to_string(kIndependence.min_basket_edges);
+      + ";calib_min_deals=" + std::to_string(kIndependence.calib_min_deals)
+      + ";min_basket_deals=" + std::to_string(kIndependence.min_basket_deals);
 
     // GET /economy/rates — today's specialty rates (records.md §11.2).
     // Computed lazily once per day and published as a signed DailyAggregate
@@ -1075,6 +1075,20 @@ void AggregatorServer::setup_routes() {
                      + ",\"admitted\":"    + (g.admitted ? "true" : "false") + "}";
             }
             body += "]";
+            // Насколько твёрдо сеть сходится в цене каждой оси — то, что
+            // заменило невязку по корзинам (records.md §11.9).
+            if (!prices.spread.empty()) {
+                body += ",\"spread\":{";
+                bool sf = true;
+                for (size_t j = 0; j < prices.spread.size()
+                                   && j < prices.basis.size(); ++j) {
+                    if (!sf) body += ',';
+                    sf = false;
+                    body += "\"" + json_escape(prices.basis[j]) + "\":"
+                         + std::to_string(prices.spread[j]);
+                }
+                body += "}";
+            }
             if (!prices.disagreement.empty()) {
                 body += ",\"disagreement\":{";
                 bool df = true;

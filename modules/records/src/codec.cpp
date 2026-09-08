@@ -355,9 +355,10 @@ void enc_axis_attestation(Buf& out, const AxisAttestation& a) {
 }
 
 void enc_axis_prices(Buf& out, const AxisPrices& a) {
-    // v1 = map(8); v2 adds the two sides' disagreement (key 8) only when there is
-    // one, so records written before the two-sided profile keep their exact bytes.
-    w_map(out, 8 + (a.disagreement.empty() ? 0 : 1));
+    // v1 = map(8); v2 adds the sides' disagreement (key 8) and v3 the per-axis
+    // price spread (key 9), each only when present, so earlier records keep their
+    // exact bytes and hashes.
+    w_map(out, 8 + (a.disagreement.empty() ? 0 : 1) + (a.spread.empty() ? 0 : 1));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::AxisPrices));
     w_uint(out, 1); w_int64(out, a.date);
     w_uint(out, 2); w_fixed(out, a.snapshot);
@@ -388,6 +389,10 @@ void enc_axis_prices(Buf& out, const AxisPrices& a) {
     if (!a.disagreement.empty()) {                       // v2 (ИР-020)
         w_uint(out, 8); w_arr(out, a.disagreement.size());
         for (const double d : a.disagreement) w_float64(out, d);
+    }
+    if (!a.spread.empty()) {                             // v3 (ИР-020)
+        w_uint(out, 9); w_arr(out, a.spread.size());
+        for (const double d : a.spread) w_float64(out, d);
     }
 }
 
@@ -975,11 +980,18 @@ AxisPrices dec_axis_prices_fields(CborReader& r, uint64_t field_count) {
         }
     }
     expect_key(r, 7); a.timestamp = r.r_int();
-    if (field_count >= 9) {                              // v2 (ИР-020)
-        expect_key(r, 8);
-        const uint64_t n = r.r_arr();
-        a.disagreement.reserve(static_cast<size_t>(n));
-        for (uint64_t i = 0; i < n; ++i) a.disagreement.push_back(r.r_float64());
+    // Хвост читается ПО КЛЮЧУ, а не по счётчику: `disagreement` (v2) и `spread`
+    // (v3) независимы, и девять полей могли бы означать любое из них.
+    for (uint64_t i = 8; i < field_count; ++i) {
+        const uint64_t key = r.r_uint();
+        auto read_vec = [&r](std::vector<double>& dst) {
+            const uint64_t n = r.r_arr();
+            dst.reserve(static_cast<size_t>(n));
+            for (uint64_t k = 0; k < n; ++k) dst.push_back(r.r_float64());
+        };
+        if      (key == 8) read_vec(a.disagreement);
+        else if (key == 9) read_vec(a.spread);
+        else throw CodecError("AxisPrices: unknown field key");
     }
     return a;
 }

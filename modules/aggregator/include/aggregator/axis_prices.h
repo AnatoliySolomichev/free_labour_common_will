@@ -128,6 +128,25 @@ AxisGate run_axis_gate(const std::vector<AxisObservation>& obs,
                        const std::vector<double>&          candidate,
                        double margin = kAxisGateMargin);
 
+// How firmly the network agrees on the price of each axis (ИР-020, item 4).
+//
+// This is what REPLACES the per-basket residual as the published diagnostic. The
+// residual asked "how far is this basket from the model" — a question that stops
+// meaning anything once specialty and grade dissolve into axes, because then no
+// two pieces of work are "the same work" and there is nothing to compare a
+// basket against.
+//
+// The question that survives is about the AXIS, which is shared even when the
+// work is not: "the network prices danger at 0.35, but how firmly?" Each
+// leave-one-out fold refits without one observation; the spread of βj across
+// folds is how much a single piece of work can move that price. Small spread =
+// the whole economy agrees; large spread = the price rests on a handful of deals
+// and is not yet a fact about the network.
+//
+// Aligned with the basis, column for column. Empty when there is too little data
+// to leave anything out — the same refusal as loo_rmse.
+std::vector<double> axis_price_spread(const std::vector<AxisObservation>& obs);
+
 // Canonical ordering by (slug, level). Sums and the leave-one-out loop are
 // order-dependent in floating point, so witnesses must traverse identically;
 // callers need not sort, this does it for them.

@@ -506,6 +506,18 @@ struct AxisPrices {
     // between them is the first signal that an axis is really two axes glued
     // together. Empty until the two-sided profile exists.
     std::vector<double>        disagreement;
+    // v3 (ИР-020): how firmly the network agrees on each axis price — the spread
+    // of βj across leave-one-out folds, column for column with `basis`.
+    //
+    // This REPLACES the per-basket residual as the published diagnostic. The
+    // residual asked "how far is this basket from the model", a question that
+    // stops meaning anything once specialty and grade dissolve into axes: then no
+    // two pieces of work are "the same work" and a basket has nothing to be
+    // compared against. The AXIS is still shared even when the work is not, so
+    // the question that survives is about it. Small spread: the whole economy
+    // agrees on that price. Large: it rests on a handful of deals and is not yet
+    // a fact about the network.
+    std::vector<double>        spread;
 };
 
 // ── Record variant ────────────────────────────────────────────────────────────

@@ -931,6 +931,31 @@ TEST(RecordsCodec, AxisPricesDisagreementRoundtrip) {
     EXPECT_EQ(d.fits, a.fits);
 }
 
+// Хвост AxisPrices читается ПО КЛЮЧУ: `disagreement` (v2) и `spread` (v3)
+// независимы, и девять полей могли бы означать любое из них.
+TEST(RecordsCodec, AxisPricesSpreadWithoutDisagreement) {
+    records::AxisPrices a{};
+    a.date = 86'400; a.snapshot.fill(0x09); a.params = "v5"; a.timestamp = 86'500;
+    a.basis  = {"danger", "physical"};
+    a.spread = {0.031, 0.004};
+
+    const auto d = std::get<records::AxisPrices>(roundtrip(Record{a}));
+    EXPECT_TRUE(d.disagreement.empty());
+    EXPECT_EQ(d.spread, a.spread);
+}
+
+TEST(RecordsCodec, AxisPricesBothTailFields) {
+    records::AxisPrices a{};
+    a.date = 86'400; a.snapshot.fill(0x0A); a.params = "v5"; a.timestamp = 86'500;
+    a.basis        = {"danger", "physical"};
+    a.disagreement = {0.08, 0.0};
+    a.spread       = {0.031, 0.004};
+
+    const auto d = std::get<records::AxisPrices>(roundtrip(Record{a}));
+    EXPECT_EQ(d.disagreement, a.disagreement);
+    EXPECT_EQ(d.spread, a.spread);
+}
+
 // Пустой набор — законное состояние: в этот день судить было не по чему
 // (наблюдений меньше, чем столбцов). Отказ обязан кодироваться, а не падать.
 TEST(RecordsCodec, AxisPricesRefusalRoundtrip) {
