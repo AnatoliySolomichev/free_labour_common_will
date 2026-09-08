@@ -18,10 +18,8 @@ CatalogEntry spec(const std::string& slug, const std::string& parent,
     CatalogEntry e;
     e.slug          = slug;
     e.parent        = parent;
-    e.axes.physical = physical;
-    e.axes.info     = info;
-    e.axes.people   = people;
-    e.axes.danger   = danger;
+    e.axes.values   = {{"physical", physical}, {"info", info},
+                       {"people", people}, {"danger", danger}};
     e.axes.present  = true;
     return e;
 }

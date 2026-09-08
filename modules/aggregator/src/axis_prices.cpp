@@ -1,6 +1,7 @@
 #include "aggregator/axis_prices.h"
 
 #include <algorithm>
+#include <map>
 #include <cmath>
 #include <string>
 
@@ -203,14 +204,10 @@ namespace {
 // design matrix must not have.
 double effective_axis(const records::CatalogEntry& e, const std::string& axis,
                       const AttestedAxes* attested) {
-    double v = 0.0;
-    if      (axis == "physical")       v = e.axes.physical;
-    else if (axis == "info")           v = e.axes.info;
-    else if (axis == "people")         v = e.axes.people;
-    else if (axis == "danger")         v = e.axes.danger;
-    else if (axis == "knowledge")      v = e.axes.knowledge;
-    else if (axis == "responsibility") v = e.axes.responsibility;
-    else return 0.0;
+    // Any axis name at all: the profile is a map, so there is nothing here to
+    // understand or fail to understand. An axis the work does not carry reads 0
+    // — "this work has none of that in it" — which is a value, not a guess.
+    double v = e.axes.get(axis);
     if (attested) {
         const auto it = attested->find({e.slug, axis});
         if (it != attested->end()) v = it->second;
@@ -222,18 +219,92 @@ std::string fmt(double v) { return std::to_string(v); }
 
 }  // namespace
 
-std::vector<std::string> declared_axis_columns() {
-    // Six INDEPENDENT intensities and no constant. Each coefficient is then the
-    // price of an hour's worth of that thing, readable as it stands.
-    //
-    // `knowledge` and `responsibility` are here because they are what a GRADE was
-    // standing in for: a master's hour differs from a novice's in exactly these,
-    // so paying for the grade on top of them pays twice for the same thing.
-    // `level` stays a CANDIDATE that must pass the admission exam against them
-    // (records.md §11.9) — and on a world where the axes describe the work itself
-    // the exam rejects it (sliding control 0.0194 without the grade, 0.0317 with
-    // it). The grade therefore leaves by measurement, not by decree.
-    return {"physical", "info", "people", "danger", "knowledge", "responsibility"};
+namespace {
+
+// Список осей в строку params: свидетель обязан знать базис, чтобы пересчитать.
+std::string join_axes(const std::vector<std::string>& v) {
+    std::string out;
+    for (std::size_t i = 0; i < v.size(); ++i) { if (i) out += ','; out += v[i]; }
+    return out;
+}
+
+} // namespace
+
+namespace {
+
+// Знает ли словарь такую ось: либо она объявлена записью каталога осей
+// (docs/catalogs/axes.json), либо её несёт чей-нибудь профиль.
+bool axis_is_known(const std::vector<records::Catalog>& catalogs,
+                   const std::string& axis) {
+    for (const auto& cat : catalogs)
+        for (const auto& e : cat.entries) {
+            if (e.slug == axis) return true;
+            if (e.axes.values.count(axis)) return true;
+        }
+    return false;
+}
+
+} // namespace
+
+std::vector<std::string> axis_columns_by_use(
+    const std::vector<records::Catalog>&   catalogs,
+    const std::vector<records::RateEntry>& rates,
+    std::size_t                            reserve) {
+
+    std::map<std::string, const records::CatalogEntry*> by_slug;
+    for (const auto& cat : catalogs)
+        for (const auto& e : cat.entries)
+            if (e.axes.present) by_slug.emplace(e.slug, &e);
+
+    // Ранг оси — её ВЗВЕШЕННЫЙ РАЗБРОС по наблюдениям, а не объём работ, которые
+    // её несут. Ось, одинаковая у всех, не различает ничего: она не сообщает о
+    // разнице между работами ровно ничего и вдобавок тайком возвращает
+    // выброшенную константу — постоянный столбец это она и есть. Разброс
+    // считается ТОЛЬКО по профилям, без единого взгляда на ставки: выбирать
+    // столбцы по тому, что они объясняют, значит подгонять базис под ответ, и
+    // экзамен допуска перестал бы что-либо значить.
+    std::map<std::string, double> sum, sumsq;
+    double wtot = 0.0;
+    std::size_t rows = 0;
+    for (const auto& r : rates) {
+        const double w = r.weighted_hours > 0.0 ? r.weighted_hours : r.hours;
+        if (w <= 0.0) continue;
+        const auto it = by_slug.find(r.specialty);
+        if (it == by_slug.end()) continue;
+        ++rows;
+        wtot += w;
+        for (const auto& [axis, value] : it->second->axes.values) {
+            sum[axis]   += w * value;
+            sumsq[axis] += w * value * value;
+        }
+    }
+    std::map<std::string, double> spread;
+    if (wtot > 0.0)
+        for (const auto& [axis, s1] : sum) {
+            const double mean = s1 / wtot;
+            // Нули профиля тоже наблюдения: ось, которую несёт одна работа из
+            // ста, разбросом обладает, но крошечным — и это правда о ней.
+            spread[axis] = std::max(0.0, sumsq[axis] / wtot - mean * mean);
+        }
+
+    // Столько столбцов, сколько данные способны рассудить, и ни одним больше.
+    const std::size_t room = rows / kMinRowsPerColumn;
+    if (room <= reserve) return {};
+    const std::size_t take = room - reserve;
+
+    std::vector<std::pair<std::string, double>> rank(spread.begin(), spread.end());
+    std::sort(rank.begin(), rank.end(),
+              [](const auto& a, const auto& b) {
+                  if (a.second != b.second) return a.second > b.second;
+                  return a.first < b.first;          // детерминированная развязка
+              });
+    if (rank.size() > take) rank.resize(take);
+
+    std::vector<std::string> out;
+    out.reserve(rank.size());
+    for (const auto& [axis, w] : rank) { (void)w; out.push_back(axis); }
+    std::sort(out.begin(), out.end());        // канонический порядок столбцов
+    return out;
 }
 
 double grade_column(uint8_t level) {
@@ -356,10 +427,14 @@ std::optional<double> axis_price_predict(
         double x;
         if      (c == kAxisBaseColumn) x = 1.0;   // v1 records only
         else if (c == kAxisLevel)      x = grade_column(level);
-        else if (c == "physical" || c == "info" || c == "people" || c == "danger"
-              || c == "knowledge" || c == "responsibility")
+        else {
+            // Ось должна быть ИЗВЕСТНА словарю, даже если эта работа её не несёт.
+            // Иначе сборка со старым каталогом молча подставит ноль там, где
+            // публикатор считал β по ненулевым значениям, и приор будет
+            // систематически врать — молчаливо, что хуже всего.
+            if (!axis_is_known(catalogs, c)) return std::nullopt;
             x = effective_axis(*entry, c, attested);
-        else return std::nullopt;   // a column this build cannot rebuild: no guessing
+        }
         sum += use->beta[j] * x;
     }
     // A rate of zero or less is not a cautious prior, it is a broken one: the
@@ -389,13 +464,12 @@ records::AxisPrices build_axis_prices(
     out.snapshot  = snapshot;
     out.timestamp = timestamp;
 
-    const auto declared = declared_axis_columns();
+    const auto declared = axis_columns_by_use(catalogs, rates);
     const AxisDesign base = build_axis_design(rates, W, catalogs, declared, attested);
 
     std::string params =
-        "v4;form=linear;const=none;shares=none"
-        ";axes=physical,info,people,danger,knowledge,responsibility"
-        ";cand=level"
+        "v5;form=linear;const=none;shares=none;basis=by_use"
+        ";axes=" + join_axes(declared) + ";cand=level"
         ";window_days=" + std::to_string(cfg.window_days)
       + ";margin="  + fmt(cfg.margin)
       + ";ridge="   + fmt(kRidgeRelative)
@@ -463,7 +537,10 @@ records::AxisPrices build_axis_prices(
             double wsum = 0.0;
             for (size_t i = 0; i < n; ++i) {
                 double d2 = 0.0;
-                for (size_t j = 1; j < m; ++j) {
+                // С нулевого столбца: свободного члена больше нет, и колонка 0 —
+                // такая же ось, как остальные (пропуск её был наследством базиса
+                // с константой и молча терял расхождение по первой оси).
+                for (size_t j = 0; j < m; ++j) {
                     const double gap = std::abs(ds.obs[i].x[j] - db.obs[i].x[j]);
                     d2 += gap * gap;
                     out.disagreement[j] += fin.obs[i].weight * gap;
@@ -488,7 +565,7 @@ records::AxisPrices build_axis_prices(
             // by how far apart the sides stood on it.
             AxisDesign da = ds;
             for (size_t i = 0; i < n; ++i) {
-                for (size_t j = 1; j < m; ++j)
+                for (size_t j = 0; j < m; ++j)      // тоже с нулевого: константы нет
                     da.obs[i].x[j] = 0.5 * (ds.obs[i].x[j] + db.obs[i].x[j]);
                 da.obs[i].weight = fin.obs[i].weight
                                  * std::exp(-(dist[i] * dist[i]) / (tau * tau));

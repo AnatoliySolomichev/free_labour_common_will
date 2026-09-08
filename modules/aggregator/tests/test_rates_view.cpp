@@ -697,9 +697,8 @@ namespace {
 std::vector<records::Catalog> baker_catalog(double danger) {
     records::CatalogEntry e;
     e.slug          = "хлебопёк";
-    e.axes.physical = 1.0;
-    e.axes.danger   = danger;
-    e.axes.present  = true;
+    e.axes.values  = {{"physical", 1.0}, {"danger", danger}};
+    e.axes.present = true;
     records::Catalog c;
     c.name    = "professions";
     c.entries = {e};

@@ -147,30 +147,35 @@ inline constexpr const char* kAxisBaseColumn = "base";
 inline constexpr const char* kAxisLevel      = "level";  // grade, the mastery axis
 inline constexpr const char* kAxisJunk       = "junk";   // the exam's control column
 
-// The declared axes taken from the catalog, in canonical column order.
+// Which axes earn a column TODAY (ИР-022).
 //
-// Six INDEPENDENT intensities, nothing summing to anything, and NO constant term
-// (ИР-020, 2026-09-07). Shares are gone: they answered "with what does this work
-// deal" and were complete by construction, but that completeness is also what
-// made them a duplicate of the constant. Intensities reach completeness the
-// other way — an hour with every intensity at zero is an hour in which nothing
-// happened, and it is worth nothing.
+// NOT a list in the code any more. specialty-axes.md §4 names about forty axes
+// and a fixed struct held six, so every new one needed a C++ change — the last
+// centralized point left in the valuation of labour. Two rules decide instead,
+// and both are about evidence:
 //
-// A constant here would be a rate paid for existing rather than for working, and
-// this economy has no such thing (records.md §12.2). Its size was, in any case,
-// only ever a measure of how much of pay the vocabulary could not explain.
+//   • ORDER BY SPREAD — an axis is ranked by how much it VARIES across the work
+//     that actually happened (hours-weighted variance of its profile value). An
+//     axis every activity has at the same value distinguishes nothing, and worse,
+//     a constant column is exactly the constant term this basis threw out. Rank
+//     is computed from profiles ALONE, never from rates: choosing columns by what
+//     they explain would fit the basis to the answer and leave the admission exam
+//     meaning nothing;
+//   • TAKE NO MORE THAN THE DATA CAN JUDGE — the admission exam refuses below
+//     kMinRowsPerColumn observations per column, so a wide basis on a short
+//     table is not a richer model, it is a model nobody can check. On the year
+//     run's 78 baskets that leaves room for six axes plus the candidate, which
+//     is exactly the basis the hardcoded list used to name — now it is a
+//     consequence rather than a decision.
 //
-// The price: profile values are now LOAD-BEARING. Under shares a wrong profile
-// only misallocated value between axes, because the total was anchored at 1; now
-// it moves the level of the rate itself. That is deliberate — an hour of light,
-// safe, unskilled work should be worth less than an hour of hard, dangerous,
-// skilled work — but it puts the whole weight on attestation (ИР-019) and on the
-// two sides of a deal stating the profile independently (ИР-020).
-//
-// What is lost with the shares: Σ w·(y − ŷ) = 0 no longer holds by construction.
-// It followed from the shares summing to 1 in every row; with independent
-// intensities there is no such identity, and residuals need not cancel network-wide.
-std::vector<std::string> declared_axis_columns();
+// `reserve` keeps room for the columns the exam will add on top (the candidate
+// and its junk control). Deterministic: ties break by slug.
+std::vector<std::string> axis_columns_by_use(
+    const std::vector<records::Catalog>&   catalogs,
+    const std::vector<records::RateEntry>& rates,
+    std::size_t                            reserve = 1);
+
+
 
 // (activity, axis) → the grade-weighted median of practitioners' attestations
 // (ИР-019, cloud_view::build_axis_attestations), overriding the catalog's

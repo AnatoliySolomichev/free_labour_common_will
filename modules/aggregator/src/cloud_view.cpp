@@ -73,22 +73,30 @@ std::map<std::string, double> build_capital_intensity(const AggregatorStorage& s
 namespace {
 
 // Effective declared axes of an activity (bootstrap ⊕ attestation overrides).
-struct AxisVec { double physical = 0, info = 0, people = 0, danger = 0,
-                        knowledge = 0, responsibility = 0; };
+// A map, not a fixed vector: the axis vocabulary is not the aggregator's to fix
+// (ИР-022, records/catalog.h).
+using AxisVec = std::map<std::string, double>;
 
-// Proximity 0..1 on the declared axes (1 = identical). Danger scaled by weight so
-// same-craft-but-different-danger activities are pulled apart; capital-intensity
-// (derived, phase 2) added as a further axis scaled by capital_weight.
+// Proximity 0..1 on the declared axes (1 = identical), over the UNION of both
+// profiles — an axis one of them does not carry counts as 0, which is a value
+// ("this work has none of that") and not a missing measurement. Danger is scaled
+// by its own weight so same-craft-but-different-danger activities are pulled
+// apart; capital-intensity (derived, ИР-018 phase 2) adds a further coordinate
+// scaled by capital_weight.
 double axis_proximity(const AxisVec& x, const AxisVec& y, double dw,
                       double ci_a, double ci_b, double cw) {
-    const double d2 = (x.physical  - y.physical)  * (x.physical  - y.physical)
-                    + (x.info      - y.info)      * (x.info      - y.info)
-                    + (x.people    - y.people)    * (x.people    - y.people)
-                    + (x.knowledge - y.knowledge) * (x.knowledge - y.knowledge)
-                    + (x.responsibility - y.responsibility)
-                      * (x.responsibility - y.responsibility)
-                    + dw * (x.danger - y.danger) * (x.danger - y.danger)
-                    + cw * (ci_a - ci_b) * (ci_a - ci_b);
+    double d2 = 0.0;
+    std::set<std::string> keys;
+    for (const auto& [k, v] : x) { (void)v; keys.insert(k); }
+    for (const auto& [k, v] : y) { (void)v; keys.insert(k); }
+    for (const auto& k : keys) {
+        const auto ix = x.find(k), iy = y.find(k);
+        const double a = ix == x.end() ? 0.0 : ix->second;
+        const double b = iy == y.end() ? 0.0 : iy->second;
+        const double w = k == "danger" ? dw : 1.0;
+        d2 += w * (a - b) * (a - b);
+    }
+    d2 += cw * (ci_a - ci_b) * (ci_a - ci_b);
     return 1.0 / (1.0 + std::sqrt(d2));
 }
 
@@ -96,18 +104,10 @@ using AttestMap = std::map<std::pair<std::string, std::string>, double>;
 
 // Effective declared axes: catalog bootstrap overridden by attestations (ИР-019).
 AxisVec effective_axes(const CatalogEntry& e, const AttestMap* attested) {
-    AxisVec v{e.axes.physical, e.axes.info, e.axes.people, e.axes.danger,
-              e.axes.knowledge, e.axes.responsibility};
-    if (attested) {
-        auto ov = [&](const char* ax, double& dst) {
-            const auto it = attested->find({e.slug, ax});
-            if (it != attested->end()) dst = it->second;
-        };
-        ov("physical", v.physical);   ov("info", v.info);
-        ov("people",   v.people);     ov("danger", v.danger);
-        ov("knowledge", v.knowledge);
-        ov("responsibility", v.responsibility);
-    }
+    AxisVec v = e.axes.values;
+    if (attested)
+        for (const auto& [key, value] : *attested)   // (деятельность, ось) → значение
+            if (key.first == e.slug) v[key.second] = value;
     return v;
 }
 
@@ -220,13 +220,9 @@ std::optional<double> bootstrap_axis(const std::vector<records::Catalog>* catalo
     for (const auto& cat : *catalogs) {
         const auto* e = cat.find(slug);
         if (!e || !e->axes.present) continue;
-        if (axis == "physical") return e->axes.physical;
-        if (axis == "info")     return e->axes.info;
-        if (axis == "people")   return e->axes.people;
-        if (axis == "danger")   return e->axes.danger;
-        if (axis == "knowledge")      return e->axes.knowledge;
-        if (axis == "responsibility") return e->axes.responsibility;
-        return std::nullopt;                       // an axis the catalog cannot anchor
+        const auto it = e->axes.values.find(axis);
+        if (it != e->axes.values.end()) return it->second;
+        return std::nullopt;                    // ось, которой каталог не знает
     }
     return std::nullopt;
 }

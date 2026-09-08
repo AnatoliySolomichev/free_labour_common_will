@@ -1,6 +1,6 @@
 {
   "catalog": "professions",
-  "version": "2026.09-axes",
+  "version": "2026.09-axes2",
   "entries": [
     {
       "slug": "prof",
@@ -90,11 +90,27 @@
       "kind": "specialty",
       "axes": {
         "physical": 0.45,
+        "endurance": 0.45,
+        "precision": 0.55,
+        "pace": 0.35,
         "info": 0.35,
         "people": 0.15,
-        "danger": 0.4,
+        "space": 0.25,
+        "energy": 0.9,
+        "creativity": 0.35,
+        "decision": 0.55,
+        "uncertainty": 0.45,
         "knowledge": 0.5,
-        "responsibility": 0.55
+        "danger": 0.4,
+        "responsibility": 0.55,
+        "noise": 0.25,
+        "confined": 0.55,
+        "dirt": 0.35,
+        "outdoor": 0.45,
+        "mobility": 0.55,
+        "teamwork": 0.35,
+        "emotional": 0.1,
+        "urgency": 0.45
       }
     },
     {
@@ -108,11 +124,27 @@
       "kind": "specialty",
       "axes": {
         "physical": 0.55,
+        "endurance": 0.5,
+        "precision": 0.4,
+        "pace": 0.35,
         "info": 0.2,
         "people": 0.2,
-        "danger": 0.2,
+        "space": 0.3,
+        "energy": 0.15,
+        "creativity": 0.25,
+        "decision": 0.4,
+        "uncertainty": 0.45,
         "knowledge": 0.4,
-        "responsibility": 0.4
+        "danger": 0.2,
+        "responsibility": 0.4,
+        "noise": 0.25,
+        "confined": 0.6,
+        "dirt": 0.75,
+        "outdoor": 0.35,
+        "mobility": 0.55,
+        "teamwork": 0.25,
+        "emotional": 0.1,
+        "urgency": 0.55
       }
     },
     {
@@ -126,11 +158,28 @@
       "kind": "specialty",
       "axes": {
         "physical": 0.55,
+        "endurance": 0.55,
+        "precision": 0.7,
+        "pace": 0.35,
         "info": 0.15,
         "people": 0.1,
-        "danger": 0.2,
+        "nature": 0.15,
+        "space": 0.15,
+        "energy": 0.05,
+        "creativity": 0.45,
+        "decision": 0.35,
+        "uncertainty": 0.25,
         "knowledge": 0.5,
-        "responsibility": 0.25
+        "danger": 0.2,
+        "responsibility": 0.25,
+        "noise": 0.55,
+        "confined": 0.15,
+        "dirt": 0.45,
+        "outdoor": 0.2,
+        "mobility": 0.2,
+        "teamwork": 0.25,
+        "emotional": 0.05,
+        "urgency": 0.2
       }
     },
     {
@@ -145,11 +194,27 @@
       "kind": "specialty",
       "axes": {
         "physical": 0.8,
+        "endurance": 0.75,
+        "precision": 0.3,
+        "pace": 0.45,
         "info": 0.1,
         "people": 0.15,
-        "danger": 0.3,
+        "space": 0.65,
+        "energy": 0.1,
+        "creativity": 0.15,
+        "decision": 0.3,
+        "uncertainty": 0.3,
         "knowledge": 0.4,
-        "responsibility": 0.45
+        "danger": 0.3,
+        "responsibility": 0.45,
+        "noise": 0.55,
+        "confined": 0.65,
+        "dirt": 0.7,
+        "outdoor": 0.85,
+        "mobility": 0.45,
+        "teamwork": 0.65,
+        "emotional": 0.05,
+        "urgency": 0.35
       }
     },
     {
@@ -161,11 +226,27 @@
       "kind": "specialty",
       "axes": {
         "physical": 0.65,
+        "endurance": 0.6,
+        "precision": 0.65,
+        "pace": 0.35,
         "info": 0.1,
         "people": 0.05,
-        "danger": 0.5,
+        "space": 0.3,
+        "energy": 0.55,
+        "creativity": 0.2,
+        "decision": 0.35,
+        "uncertainty": 0.3,
         "knowledge": 0.5,
-        "responsibility": 0.5
+        "danger": 0.5,
+        "responsibility": 0.5,
+        "noise": 0.65,
+        "confined": 0.55,
+        "dirt": 0.7,
+        "outdoor": 0.45,
+        "mobility": 0.4,
+        "teamwork": 0.35,
+        "emotional": 0.05,
+        "urgency": 0.3
       }
     },
     {
@@ -179,11 +260,27 @@
       "kind": "specialty",
       "axes": {
         "physical": 0.35,
+        "endurance": 0.3,
+        "precision": 0.7,
+        "pace": 0.3,
         "info": 0.4,
         "people": 0.25,
-        "danger": 0.2,
+        "space": 0.1,
+        "energy": 0.35,
+        "creativity": 0.35,
+        "decision": 0.5,
+        "uncertainty": 0.55,
         "knowledge": 0.5,
-        "responsibility": 0.3
+        "danger": 0.2,
+        "responsibility": 0.3,
+        "noise": 0.15,
+        "confined": 0.1,
+        "dirt": 0.3,
+        "outdoor": 0.15,
+        "mobility": 0.6,
+        "teamwork": 0.1,
+        "emotional": 0.15,
+        "urgency": 0.5
       }
     },
     {
@@ -197,11 +294,27 @@
       "kind": "specialty",
       "axes": {
         "physical": 0.55,
+        "endurance": 0.5,
+        "precision": 0.55,
+        "pace": 0.35,
         "info": 0.3,
         "people": 0.2,
-        "danger": 0.2,
+        "space": 0.15,
+        "energy": 0.3,
+        "creativity": 0.3,
+        "decision": 0.5,
+        "uncertainty": 0.5,
         "knowledge": 0.5,
-        "responsibility": 0.55
+        "danger": 0.2,
+        "responsibility": 0.55,
+        "noise": 0.55,
+        "confined": 0.35,
+        "dirt": 0.85,
+        "outdoor": 0.2,
+        "mobility": 0.15,
+        "teamwork": 0.3,
+        "emotional": 0.1,
+        "urgency": 0.45
       }
     },
     {
@@ -213,11 +326,27 @@
       "kind": "specialty",
       "axes": {
         "physical": 0.3,
+        "endurance": 0.65,
+        "precision": 0.45,
+        "pace": 0.45,
         "info": 0.25,
         "people": 0.3,
-        "danger": 0.3,
+        "space": 0.55,
+        "energy": 0.15,
+        "creativity": 0.1,
+        "decision": 0.35,
+        "uncertainty": 0.4,
         "knowledge": 0.3,
-        "responsibility": 0.6
+        "danger": 0.3,
+        "responsibility": 0.6,
+        "noise": 0.45,
+        "confined": 0.1,
+        "dirt": 0.2,
+        "outdoor": 0.35,
+        "mobility": 0.95,
+        "teamwork": 0.15,
+        "emotional": 0.15,
+        "urgency": 0.55
       }
     },
     {
@@ -232,11 +361,27 @@
       "kind": "specialty",
       "axes": {
         "physical": 0.3,
+        "endurance": 0.45,
+        "precision": 0.85,
+        "pace": 0.4,
         "info": 0.15,
         "people": 0.15,
-        "danger": 0.05,
+        "space": 0.05,
+        "energy": 0.05,
+        "creativity": 0.45,
+        "decision": 0.25,
+        "uncertainty": 0.2,
         "knowledge": 0.4,
-        "responsibility": 0.15
+        "danger": 0.05,
+        "responsibility": 0.15,
+        "noise": 0.2,
+        "confined": 0.05,
+        "dirt": 0.15,
+        "outdoor": 0.05,
+        "mobility": 0.05,
+        "teamwork": 0.15,
+        "emotional": 0.1,
+        "urgency": 0.3
       }
     },
     {
@@ -250,11 +395,28 @@
       "kind": "specialty",
       "axes": {
         "physical": 0.5,
+        "endurance": 0.65,
+        "precision": 0.5,
+        "pace": 0.75,
         "info": 0.15,
         "people": 0.2,
-        "danger": 0.1,
+        "nature": 0.1,
+        "space": 0.1,
+        "energy": 0.35,
+        "creativity": 0.4,
+        "decision": 0.35,
+        "uncertainty": 0.35,
         "knowledge": 0.35,
-        "responsibility": 0.35
+        "danger": 0.1,
+        "responsibility": 0.35,
+        "noise": 0.3,
+        "confined": 0.1,
+        "dirt": 0.55,
+        "outdoor": 0.05,
+        "mobility": 0.05,
+        "teamwork": 0.55,
+        "emotional": 0.1,
+        "urgency": 0.7
       }
     },
     {
@@ -268,11 +430,27 @@
       "kind": "specialty",
       "axes": {
         "physical": 0.3,
+        "endurance": 0.5,
+        "precision": 0.75,
+        "pace": 0.35,
         "info": 0.1,
         "people": 0.7,
-        "danger": 0.05,
+        "space": 0.05,
+        "energy": 0.05,
+        "creativity": 0.5,
+        "decision": 0.3,
+        "uncertainty": 0.3,
         "knowledge": 0.35,
-        "responsibility": 0.2
+        "danger": 0.05,
+        "responsibility": 0.2,
+        "noise": 0.15,
+        "confined": 0.05,
+        "dirt": 0.2,
+        "outdoor": 0.05,
+        "mobility": 0.1,
+        "teamwork": 0.15,
+        "emotional": 0.55,
+        "urgency": 0.25
       }
     },
     {
@@ -286,11 +464,28 @@
       "kind": "specialty",
       "axes": {
         "physical": 0.25,
+        "endurance": 0.35,
+        "precision": 0.6,
+        "pace": 0.3,
         "info": 0.6,
         "people": 0.5,
-        "danger": 0.05,
+        "nature": 0.15,
+        "space": 0.35,
+        "energy": 0.05,
+        "creativity": 0.85,
+        "decision": 0.55,
+        "uncertainty": 0.55,
         "knowledge": 0.4,
-        "responsibility": 0.15
+        "danger": 0.05,
+        "responsibility": 0.15,
+        "noise": 0.1,
+        "confined": 0.25,
+        "dirt": 0.15,
+        "outdoor": 0.45,
+        "mobility": 0.65,
+        "teamwork": 0.2,
+        "emotional": 0.35,
+        "urgency": 0.35
       }
     },
     {
@@ -302,11 +497,24 @@
       "kind": "specialty",
       "axes": {
         "physical": 0.05,
+        "endurance": 0.3,
+        "precision": 0.45,
+        "pace": 0.25,
         "info": 0.9,
         "people": 0.3,
-        "danger": 0.0,
+        "space": 0.1,
+        "creativity": 0.9,
+        "decision": 0.6,
+        "uncertainty": 0.6,
         "knowledge": 0.5,
-        "responsibility": 0.2
+        "responsibility": 0.2,
+        "noise": 0.05,
+        "dirt": 0.05,
+        "outdoor": 0.05,
+        "mobility": 0.1,
+        "teamwork": 0.3,
+        "emotional": 0.2,
+        "urgency": 0.35
       }
     },
     {
@@ -320,11 +528,22 @@
       "kind": "specialty",
       "axes": {
         "physical": 0.05,
+        "endurance": 0.35,
+        "precision": 0.55,
+        "pace": 0.3,
         "info": 0.95,
         "people": 0.25,
-        "danger": 0.0,
+        "creativity": 0.2,
+        "decision": 0.6,
+        "uncertainty": 0.35,
         "knowledge": 0.6,
-        "responsibility": 0.65
+        "responsibility": 0.65,
+        "noise": 0.05,
+        "dirt": 0.05,
+        "mobility": 0.05,
+        "teamwork": 0.25,
+        "emotional": 0.15,
+        "urgency": 0.55
       }
     },
     {
@@ -338,11 +557,24 @@
       "kind": "specialty",
       "axes": {
         "physical": 0.05,
+        "endurance": 0.45,
+        "precision": 0.45,
+        "pace": 0.25,
         "info": 0.9,
         "people": 0.6,
-        "danger": 0.0,
+        "space": 0.05,
+        "creativity": 0.55,
+        "decision": 0.85,
+        "uncertainty": 0.7,
         "knowledge": 0.75,
-        "responsibility": 0.75
+        "responsibility": 0.75,
+        "noise": 0.05,
+        "dirt": 0.05,
+        "outdoor": 0.1,
+        "mobility": 0.3,
+        "teamwork": 0.35,
+        "emotional": 0.45,
+        "urgency": 0.55
       }
     },
     {
@@ -356,11 +588,23 @@
       "kind": "specialty",
       "axes": {
         "physical": 0.05,
+        "endurance": 0.45,
+        "precision": 0.55,
+        "pace": 0.3,
         "info": 1.0,
         "people": 0.2,
-        "danger": 0.0,
+        "space": 0.05,
+        "creativity": 0.7,
+        "decision": 0.65,
+        "uncertainty": 0.65,
         "knowledge": 0.65,
-        "responsibility": 0.45
+        "responsibility": 0.45,
+        "noise": 0.05,
+        "dirt": 0.05,
+        "mobility": 0.05,
+        "teamwork": 0.4,
+        "emotional": 0.1,
+        "urgency": 0.4
       }
     },
     {
@@ -374,11 +618,27 @@
       "kind": "specialty",
       "axes": {
         "physical": 0.15,
+        "endurance": 0.5,
+        "precision": 0.5,
+        "pace": 0.4,
         "info": 0.95,
         "people": 0.3,
-        "danger": 0.02,
+        "space": 0.15,
+        "energy": 0.1,
+        "creativity": 0.4,
+        "decision": 0.6,
+        "uncertainty": 0.6,
         "knowledge": 0.6,
-        "responsibility": 0.6
+        "danger": 0.02,
+        "responsibility": 0.6,
+        "noise": 0.15,
+        "confined": 0.2,
+        "dirt": 0.2,
+        "outdoor": 0.1,
+        "mobility": 0.2,
+        "teamwork": 0.3,
+        "emotional": 0.15,
+        "urgency": 0.75
       }
     },
     {
@@ -393,11 +653,25 @@
       "kind": "specialty",
       "axes": {
         "physical": 0.15,
+        "endurance": 0.6,
+        "precision": 0.25,
+        "pace": 0.35,
         "info": 0.6,
         "people": 0.9,
-        "danger": 0.02,
+        "space": 0.1,
+        "creativity": 0.6,
+        "decision": 0.55,
+        "uncertainty": 0.55,
         "knowledge": 0.6,
-        "responsibility": 0.55
+        "danger": 0.02,
+        "responsibility": 0.55,
+        "noise": 0.3,
+        "dirt": 0.05,
+        "outdoor": 0.05,
+        "mobility": 0.1,
+        "teamwork": 0.35,
+        "emotional": 0.75,
+        "urgency": 0.25
       }
     },
     {
@@ -411,11 +685,27 @@
       "kind": "specialty",
       "axes": {
         "physical": 0.25,
+        "endurance": 0.65,
+        "precision": 0.75,
+        "pace": 0.45,
         "info": 0.7,
         "people": 0.85,
-        "danger": 0.15,
+        "space": 0.05,
+        "energy": 0.05,
+        "creativity": 0.55,
+        "decision": 0.9,
+        "uncertainty": 0.8,
         "knowledge": 0.9,
-        "responsibility": 0.95
+        "danger": 0.15,
+        "responsibility": 0.95,
+        "noise": 0.1,
+        "confined": 0.1,
+        "dirt": 0.45,
+        "outdoor": 0.05,
+        "mobility": 0.2,
+        "teamwork": 0.6,
+        "emotional": 0.8,
+        "urgency": 0.85
       }
     },
     {
@@ -429,11 +719,27 @@
       "kind": "specialty",
       "axes": {
         "physical": 0.45,
+        "endurance": 0.7,
+        "precision": 0.65,
+        "pace": 0.5,
         "info": 0.4,
         "people": 0.85,
-        "danger": 0.2,
+        "space": 0.1,
+        "energy": 0.05,
+        "creativity": 0.25,
+        "decision": 0.45,
+        "uncertainty": 0.5,
         "knowledge": 0.55,
-        "responsibility": 0.7
+        "danger": 0.2,
+        "responsibility": 0.7,
+        "noise": 0.15,
+        "confined": 0.05,
+        "dirt": 0.55,
+        "outdoor": 0.05,
+        "mobility": 0.15,
+        "teamwork": 0.65,
+        "emotional": 0.85,
+        "urgency": 0.75
       }
     },
     {
@@ -447,11 +753,28 @@
       "kind": "specialty",
       "axes": {
         "physical": 0.75,
+        "endurance": 0.8,
+        "precision": 0.3,
+        "pace": 0.4,
         "info": 0.25,
         "people": 0.1,
-        "danger": 0.2,
+        "nature": 0.85,
+        "space": 0.75,
+        "energy": 0.2,
+        "creativity": 0.3,
+        "decision": 0.5,
+        "uncertainty": 0.55,
         "knowledge": 0.45,
-        "responsibility": 0.3
+        "danger": 0.2,
+        "responsibility": 0.3,
+        "noise": 0.35,
+        "confined": 0.2,
+        "dirt": 0.8,
+        "outdoor": 0.9,
+        "mobility": 0.35,
+        "teamwork": 0.25,
+        "emotional": 0.15,
+        "urgency": 0.45
       }
     },
     {
@@ -466,11 +789,22 @@
       "kind": "specialty",
       "axes": {
         "physical": 0.1,
+        "endurance": 0.4,
+        "precision": 0.45,
+        "pace": 0.55,
         "info": 0.85,
         "people": 0.1,
-        "danger": 0.0,
+        "creativity": 0.05,
+        "decision": 0.15,
+        "uncertainty": 0.15,
         "knowledge": 0.2,
-        "responsibility": 0.25
+        "responsibility": 0.25,
+        "noise": 0.05,
+        "dirt": 0.05,
+        "mobility": 0.05,
+        "teamwork": 0.1,
+        "emotional": 0.05,
+        "urgency": 0.35
       }
     }
   ],

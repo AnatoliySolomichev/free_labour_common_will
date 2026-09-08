@@ -950,6 +950,13 @@ void AggregatorServer::setup_routes() {
                 return;
             }
             std::vector<records::Catalog> cats{records::parse_catalog(*prof_text)};
+            // The axis dictionary (ИР-022): an axis named in a published basis
+            // must be one the vocabulary knows, or a prior computed against it
+            // would silently read every profile as zero.
+            if (const auto ax_text = read_file(catalog_dir_ / "axes.json")) {
+                try { cats.push_back(records::parse_catalog(*ax_text)); }
+                catch (const records::CatalogError&) {}
+            }
 
             // Every rate table this aggregator actually published. One day is far
             // too thin a cross-section to read a price surface out of, so the

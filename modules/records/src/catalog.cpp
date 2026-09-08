@@ -57,16 +57,11 @@ Catalog catalog_from(const Value& root, const std::string& where) {
         if (const Value* p = json::find(item.object, "parent"); p && p->is_string())
             e.parent = p->string;
         if (const Value* ax = json::find(item.object, "axes"); ax && ax->is_object()) {
-            auto num = [&](const char* k, double& dst) {
-                if (const Value* v = json::find(ax->object, k); v && v->is_number())
-                    dst = v->number;
-            };
-            num("physical",       e.axes.physical);
-            num("info",           e.axes.info);
-            num("people",          e.axes.people);
-            num("danger",          e.axes.danger);
-            num("knowledge",       e.axes.knowledge);
-            num("responsibility",  e.axes.responsibility);
+            // Every numeric member is an axis. The set is NOT fixed here (ИР-022):
+            // a vocabulary the parser has to know in advance is a vocabulary the
+            // aggregator owns.
+            for (const auto& [key, val] : ax->object)
+                if (val.is_number()) e.axes.values[key] = val.number;
             e.axes.present = true;
         }
         e.aliases   = optional_strings(item.object, "aliases",   ew);

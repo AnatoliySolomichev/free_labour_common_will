@@ -2,7 +2,9 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -206,12 +208,9 @@ records::CatalogEntry cat_entry(const std::string& slug, double physical,
                                 double knowledge, double responsibility) {
     records::CatalogEntry e;
     e.slug                = slug;
-    e.axes.physical       = physical;
-    e.axes.info           = info;
-    e.axes.people         = people;
-    e.axes.danger         = danger;
-    e.axes.knowledge      = knowledge;
-    e.axes.responsibility = responsibility;
+    e.axes.values = {{"physical", physical}, {"info", info}, {"people", people},
+                     {"danger", danger}, {"knowledge", knowledge},
+                     {"responsibility", responsibility}};
     e.axes.present        = true;
     return e;
 }
@@ -276,10 +275,10 @@ std::vector<records::RateEntry> world_rates() {
     for (const auto& e : cats[0].entries)
         for (uint8_t lv = lo; lv <= hi; ++lv) {
             const double lvx = double(lv - lo) / double(hi - lo);
-            const double rate = kLaw[0] + kLaw[1] * e.axes.info
-                              + kLaw[2] * e.axes.people + kLaw[3] * e.axes.danger
-                              + kLaw[4] * e.axes.knowledge
-                              + kLaw[5] * e.axes.responsibility
+            const double rate = kLaw[0] + kLaw[1] * e.axes.get("info")
+                              + kLaw[2] * e.axes.get("people") + kLaw[3] * e.axes.get("danger")
+                              + kLaw[4] * e.axes.get("knowledge")
+                              + kLaw[5] * e.axes.get("responsibility")
                               + kLaw[6] * lvx;
             out.push_back(basket(e.slug, lv, rate, 100.0));
         }
@@ -312,14 +311,22 @@ TEST(AxisPricesBuild, RecoversTheWorldsLawFromItsRates) {
     const auto cats = world_catalog();
     const auto p = build_axis_prices(world_rates(), 1.0, cats, 86'400, 86'500, snap(0x01));
 
-    ASSERT_EQ(p.basis, (std::vector<std::string>{"physical", "info", "people",
-                                                 "danger", "knowledge",
+    // Порядок столбцов — канонический (по имени), поэтому закон сверяется ПО
+    // ИМЕНИ оси, а не по позиции: базис теперь следствие употребления, и его
+    // состав может меняться вместе с данными.
+    ASSERT_EQ(p.basis, (std::vector<std::string>{"danger", "info", "knowledge",
+                                                 "people", "physical",
                                                  "responsibility", "level"}));
+    const std::map<std::string, double> law = {
+        {"physical", kLawNoConst[0]}, {"info", kLawNoConst[1]},
+        {"people",   kLawNoConst[2]}, {"danger", kLawNoConst[3]},
+        {"knowledge", kLawNoConst[4]}, {"responsibility", kLawNoConst[5]},
+        {"level", kLawNoConst[6]}};
     const auto* f = fit_of(p, "declared");
     ASSERT_NE(f, nullptr);
     ASSERT_EQ(f->beta.size(), 7u);
     for (size_t i = 0; i < 7; ++i)
-        EXPECT_NEAR(f->beta[i], kLawNoConst[i], 1e-3) << "столбец " << p.basis[i];
+        EXPECT_NEAR(f->beta[i], law.at(p.basis[i]), 1e-3) << "столбец " << p.basis[i];
     EXPECT_NEAR(f->r2, 1.0, 1e-6);
     EXPECT_EQ(f->rows, 72u);
     EXPECT_DOUBLE_EQ(f->weight, 7200.0);
@@ -388,15 +395,20 @@ TEST(AxisPricesBuild, AttestedAxisOverridesTheCatalogProfile) {
     const auto cats = world_catalog();
     AttestedAxes att{{{"prof.welder", "danger"}, 0.10}};   // было 0.80
     const auto plain = build_axis_design(world_rates(), 1.0, cats,
-                                         declared_axis_columns(), nullptr);
+                                         axis_columns_by_use(world_catalog(), world_rates()), nullptr);
     const auto over  = build_axis_design(world_rates(), 1.0, cats,
-                                         declared_axis_columns(), &att);
+                                         axis_columns_by_use(world_catalog(), world_rates()), &att);
     ASSERT_EQ(plain.obs.size(), over.obs.size());
+    // Столбец ищем ПО ИМЕНИ: порядок канонический (алфавитный), а состав базиса
+    // теперь следствие употребления и может меняться вместе с данными.
+    const auto dj = std::find(plain.basis.begin(), plain.basis.end(), "danger");
+    ASSERT_NE(dj, plain.basis.end());
+    const size_t d = static_cast<size_t>(dj - plain.basis.begin());
     bool touched = false, others_intact = true;
     for (size_t i = 0; i < plain.obs.size(); ++i) {
         const bool welder = plain.obs[i].slug == "prof.welder";
-        if (welder) { touched = true; EXPECT_DOUBLE_EQ(over.obs[i].x[3], 0.10); }
-        else if (plain.obs[i].x[3] != over.obs[i].x[3]) others_intact = false;
+        if (welder) { touched = true; EXPECT_DOUBLE_EQ(over.obs[i].x[d], 0.10); }
+        else if (plain.obs[i].x[d] != over.obs[i].x[d]) others_intact = false;
     }
     EXPECT_TRUE(touched);
     EXPECT_TRUE(others_intact);
@@ -428,7 +440,13 @@ TEST(AxisPricesBuild, NormalizerIsDividedOutBeforeFitting) {
                                      86'400, 86'500, snap(7));
     const auto* f = fit_of(p, "declared");
     ASSERT_NE(f, nullptr);
-    for (size_t i = 0; i < 5; ++i) EXPECT_NEAR(f->beta[i], kLawNoConst[i], 1e-3);
+    const std::map<std::string, double> law = {
+        {"physical", kLawNoConst[0]}, {"info", kLawNoConst[1]},
+        {"people",   kLawNoConst[2]}, {"danger", kLawNoConst[3]},
+        {"knowledge", kLawNoConst[4]}, {"responsibility", kLawNoConst[5]},
+        {"level", kLawNoConst[6]}};
+    for (size_t i = 0; i < f->beta.size(); ++i)
+        EXPECT_NEAR(f->beta[i], law.at(p.basis[i]), 1e-3) << p.basis[i];
     EXPECT_NE(p.params.find("W=2.5"), std::string::npos);
 }
 
@@ -683,11 +701,11 @@ TEST(AxisPricesPredict, RefusesToHandOutANonPositivePrior) {
 // труд, а таких выплат в этой экономике нет (records.md §12.2).
 TEST(AxisPricesBuild, NeverAddsAConstantColumn) {
     const auto d = build_axis_design(world_rates(), 1.0, world_catalog(),
-                                     declared_axis_columns(), nullptr);
-    EXPECT_EQ(d.basis, declared_axis_columns());
+                                     axis_columns_by_use(world_catalog(), world_rates()), nullptr);
+    EXPECT_EQ(d.basis, axis_columns_by_use(world_catalog(), world_rates()));
     for (const auto& c : d.basis) EXPECT_NE(c, std::string(kAxisBaseColumn));
     ASSERT_FALSE(d.obs.empty());
-    EXPECT_EQ(d.obs.front().x.size(), declared_axis_columns().size());
+    EXPECT_EQ(d.obs.front().x.size(), axis_columns_by_use(world_catalog(), world_rates()).size());
 }
 
 // ЧТО ПОТЕРЯНО ВМЕСТЕ С ДОЛЯМИ: тождество Σ вес·невязка = 0.
@@ -771,18 +789,18 @@ TEST(AxisPricesGradeReplacement, GradeIsRejectedOnceTheProfileVariesWithin) {
         for (uint8_t lv = 1; lv <= 6; ++lv) {
             const double step = grade_column(lv);
             // Мастерство — это и есть знание с ответственностью, взятые гуще.
-            const double know = std::min(1.0, e.axes.knowledge      + 0.45 * step);
-            const double resp = std::min(1.0, e.axes.responsibility + 0.35 * step);
+            const double know = std::min(1.0, e.axes.get("knowledge")      + 0.45 * step);
+            const double resp = std::min(1.0, e.axes.get("responsibility") + 0.35 * step);
             AxisObservation o{};
             o.slug   = e.slug;
             o.level  = lv;
             o.weight = 100.0;
-            o.x      = {e.axes.physical, e.axes.info, e.axes.people,
-                        e.axes.danger, know, resp};
-            o.rate   = kLawNoConst[0] * e.axes.physical
-                     + kLawNoConst[1] * e.axes.info
-                     + kLawNoConst[2] * e.axes.people
-                     + kLawNoConst[3] * e.axes.danger
+            o.x      = {e.axes.get("physical"), e.axes.get("info"), e.axes.get("people"),
+                        e.axes.get("danger"), know, resp};
+            o.rate   = kLawNoConst[0] * e.axes.get("physical")
+                     + kLawNoConst[1] * e.axes.get("info")
+                     + kLawNoConst[2] * e.axes.get("people")
+                     + kLawNoConst[3] * e.axes.get("danger")
                      + kLawNoConst[4] * know
                      + kLawNoConst[5] * resp;
             obs.push_back(std::move(o));
@@ -799,4 +817,73 @@ TEST(AxisPricesGradeReplacement, GradeIsRejectedOnceTheProfileVariesWithin) {
     EXPECT_FALSE(gate.admitted)
         << "разряд объяснён знанием и ответственностью — платить за него сверху "
            "значит платить дважды за одно и то же";
+}
+
+// ── Базис как следствие употребления, а не список в коде (ИР-022) ────────────
+
+// Столбцов ровно столько, сколько данные способны рассудить: экзамен отказывается
+// судить ниже kMinRowsPerColumn наблюдений на столбец, поэтому широкий базис на
+// коротком столе — не богатая модель, а модель, которую никто не проверит.
+TEST(AxisColumnsByUse, WidthFollowsTheAmountOfData) {
+    const auto cats  = world_catalog();
+    const auto rates = world_rates();                 // 72 корзины
+    const auto all   = axis_columns_by_use(cats, rates);
+    EXPECT_EQ(all.size(), 72u / kMinRowsPerColumn - 1);   // 6: седьмой под кандидата
+
+    std::vector<records::RateEntry> few(rates.begin(), rates.begin() + 30);
+    EXPECT_EQ(axis_columns_by_use(cats, few).size(), 2u);
+
+    std::vector<records::RateEntry> tiny(rates.begin(), rates.begin() + 9);
+    EXPECT_TRUE(axis_columns_by_use(cats, tiny).empty());   // судить не по чему
+}
+
+// Ранг — разброс, а не вездесущность. Ось, одинаковая у ВСЕХ, не различает
+// ничего и вдобавок тайком возвращает выброшенную константу.
+TEST(AxisColumnsByUse, ConstantAxisNeverEarnsAColumn) {
+    auto cats = world_catalog();
+    for (auto& e : cats[0].entries) {
+        e.axes.values["ritual"] = 0.7;      // одинаково у всех — разброс ноль
+        e.axes.values["rare"]   = 0.0;      // ни у кого
+    }
+    cats[0].entries.front().axes.values["rare"] = 0.9;   // ровно у одного
+
+    const auto cols = axis_columns_by_use(cats, world_rates());
+    EXPECT_EQ(std::find(cols.begin(), cols.end(), "ritual"), cols.end())
+        << "постоянная ось — это константа под другим именем";
+    // «rare» разбросом обладает, пусть и малым, поэтому запрета на неё нет —
+    // её судьбу решает экзамен, а не отбор столбцов.
+}
+
+// Порядок столбцов канонический и от порядка ставок не зависит: свидетели
+// обязаны построить один и тот же план из одних и тех же данных.
+TEST(AxisColumnsByUse, DeterministicRegardlessOfInputOrder) {
+    const auto cats = world_catalog();
+    auto rates = world_rates();
+    const auto a = axis_columns_by_use(cats, rates);
+    std::reverse(rates.begin(), rates.end());
+    const auto b = axis_columns_by_use(cats, rates);
+    EXPECT_EQ(a, b);
+    EXPECT_TRUE(std::is_sorted(a.begin(), a.end()));
+}
+
+// Приор молчит про ось, которой словарь не знает: сборка со старым каталогом
+// иначе прочитала бы её как ноль у всех и врала бы систематически и молча.
+TEST(AxisColumnsByUse, PriorRefusesAnAxisTheVocabularyDoesNotKnow) {
+    const auto cats = world_catalog();
+    records::AxisPrices p{};
+    p.basis = {"danger", "bravery"};
+    p.fits  = {{"declared", {0.5, 0.5}, 1.0, 60, 1.0}};
+    EXPECT_FALSE(axis_price_predict(p, "prof.cook", 3, cats).has_value());
+
+    // А ось, объявленную каталогом осей, приор принимает — даже если эта работа
+    // её не несёт: ноль здесь значение, а не догадка.
+    records::Catalog dict;
+    dict.name = "axes";
+    records::CatalogEntry brave;
+    brave.slug = "bravery";
+    brave.ru   = "Храбрость";
+    dict.entries = {brave};
+    auto with_dict = cats;
+    with_dict.push_back(dict);
+    EXPECT_TRUE(axis_price_predict(p, "prof.cook", 3, with_dict).has_value());
 }
