@@ -8,6 +8,15 @@
 #include <gtest/gtest.h>
 #include <filesystem>
 
+// Ось для разбивки цены: в этих тестах её содержание не проверяется, важно лишь
+// что приёмки без разбивки не существует (records.md §9.5 v4).
+inline records::Ref test_axis() {
+    records::Ref r{};
+    r.chain.fill(0x79);
+    r.hash.fill(0x01);
+    return r;
+}
+
 using namespace aggregator;
 using namespace blockchain;
 
@@ -85,6 +94,7 @@ protected:
         a.receiver    = acceptor.bytes;
         a.hours_raw   = hours;
         a.labor_units = hours;
+        a.axes        = {{test_axis(), hours}};
         add(acceptor, a);
     }
 };
@@ -130,6 +140,7 @@ TEST_F(AttestationViewTest, ForeignGradeOrSpecialtyIgnored) {
     a.work      = ref_of(mallory, wh);
     a.receiver  = vera.bytes;
     a.hours_raw = 5;
+    a.axes        = {{test_axis(), 5}};
     add(vera, a);
 
     const auto view = AttestationView::build(*storage_);

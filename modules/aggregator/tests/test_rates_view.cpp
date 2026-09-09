@@ -13,6 +13,15 @@
 #include <filesystem>
 #include <thread>
 
+// Ось для разбивки цены: в этих тестах её содержание не проверяется, важно лишь
+// что приёмки без разбивки не существует (records.md §9.5 v4).
+inline records::Ref test_axis() {
+    records::Ref r{};
+    r.chain.fill(0x79);
+    r.hash.fill(0x01);
+    return r;
+}
+
 using namespace aggregator;
 using namespace blockchain;
 
@@ -98,6 +107,7 @@ protected:
         a.receiver    = payer.bytes;
         a.hours_raw   = hours;
         a.labor_units = units;
+        a.axes        = {{test_axis(), units}};
         a.timestamp   = kDay + 100;
         const Block acc = add(payer, a);
 
@@ -126,6 +136,7 @@ TEST_F(RatesViewTest, SettledDealsAverageSmoothAndCarryForward) {
     fake.receiver    = bob_.bytes;
     fake.hours_raw   = 1.0;
     fake.labor_units = 40.0;          // "искажающая пропорция"
+    fake.axes        = {{test_axis(), 40.0}};
     fake.timestamp   = kDay + 100;
     add(bob_, fake);
 
@@ -186,6 +197,7 @@ TEST_F(RatesViewTest, CarriedCostSettlesAtFullPayableButAveragesLaborOnly) {
     a.receiver      = bob_.bytes;
     a.hours_raw     = 6.0;
     a.labor_units   = 6.0;
+    a.axes          = {{test_axis(), 6.0}};
     a.carried_units = 0.23625;
     a.timestamp     = kDay + 100;
     const Block acc = add(bob_, a);
@@ -488,6 +500,7 @@ protected:
         a.receiver    = payer.bytes;
         a.hours_raw   = hours;
         a.labor_units = hours * rate;
+        a.axes        = {{test_axis(), hours * rate}};
         a.timestamp   = ts;
         const Block acc = add(payer, a);
 
@@ -845,6 +858,7 @@ TEST_F(RatesViewTest, UnpaidAcceptanceCarriesNoProfile) {
     acc.hours_raw   = 4.0;
     acc.labor_units = 6.0;
     acc.timestamp   = kDay + 100;
+    acc.axes        = {{test_axis(), 6.0}};
     const Block accb = add(bob_, acc);          // перевода нет — не рассчитана
 
     records::AxisAttestation a{};

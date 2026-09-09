@@ -66,6 +66,27 @@ after(){ sed -n "s/.*$1//p" | head -1; }
 # ── faketime-обёртка: FT задаётся перед каждой фазой ─────────────────────────
 FT=(faketime "$YEAR-01-15 12:00:00")
 ftbc(){ local who="$1"; shift; "${FT[@]}" "$BC" --data-dir "$work/$who" "$@"; }
+
+# ── Оси: словарь труда живёт в цепи (ИР-022) ─────────────────────────────────
+# Цена каждой сделки расписывается по осям и обязана сойтись в точности.
+# Доли берутся по профессии работника: разные ремёсла тратят труд по-разному.
+AXREFS="$work/axes.tsv"
+axis() { awk -F'\t' -v s="$1" '$1==s{print $2}' "$AXREFS"; }
+axis_shares() {  # $1 — слаг профессии
+  case "$1" in
+    prof.programmer|prof.designer|prof.accountant|prof.scribe|prof.sysadmin)
+      echo "knowledge=0.5 precision=0.3 creativity=0.2" ;;
+    prof.doctor|prof.nurse)
+      echo "responsibility=0.4 knowledge=0.35 emotional=0.25" ;;
+    prof.teacher|prof.lawyer)
+      echo "knowledge=0.45 emotional=0.3 responsibility=0.25" ;;
+    prof.welder|prof.builder|prof.farmer)
+      echo "physical=0.45 danger=0.3 endurance=0.25" ;;
+    prof.electrician|prof.plumber|prof.auto-mechanic|prof.appliance-repair)
+      echo "knowledge=0.35 precision=0.35 danger=0.3" ;;
+    *) echo "physical=0.4 precision=0.35 pace=0.25" ;;
+  esac
+}
 month_date(){ date -u -d "$YEAR-01-15 +$1 months" '+%Y-%m-%d %H:%M:%S'; }
 set_month(){ FT=(faketime "$(month_date "$1")"); }
 
@@ -150,6 +171,11 @@ log "   население готово (сбоев setup: $setup_fail)"
 declare -A CLIST
 for ((i=0;i<POP;i++)); do [[ -n "${PROF[$i]}" ]] && CLIST[${CLUSTER[$i]}]+=" $i"; done
 
+# Оси заводятся записями в цепи — без них приёмку не принять (ИР-022).
+OUT_AX="$AXREFS" OUT="$AXREFS" BC="$BC" bash "$(dirname "$0")/seed-axes.sh" \
+    "$work/axes" --via "$VIA" >/dev/null 2>&1 || true
+[[ -s "$AXREFS" ]] || { echo "не удалось завести оси — цепь осей пуста" >&2; exit 1; }
+
 # ── Идеи для финансирования (3 штуки) ────────────────────────────────────────
 declare -a IDEAREF
 for j in 0 1 2; do
@@ -175,7 +201,12 @@ do_deal(){
     wh="$(ftbc "p$w" work log --agent "${GRADEREF[$w]}" --action "услуга" --hours "$h" --via "$VIA" | after 'hash: ')"
     [[ -z "$wh" ]] && { ((fail_deals++)); return; }
     ftbc "p$c" fetch "${CID[$w]}/$wh" --via "$VIA" >/dev/null 2>&1 || { ((fail_deals++)); return; }
-    acc="$(ftbc "p$c" accept --work "${CID[$w]}/$wh" --quality ok --labor-units "$units" --via "$VIA" | after 'acceptance ref: ')"
+    shares=()
+    for kv in $(axis_shares "${PROF[$w]}"); do
+        shares+=(--axis-share "$(axis "${kv%%=*}")=${kv##*=}")
+    done
+    acc="$(ftbc "p$c" accept --work "${CID[$w]}/$wh" --quality ok --labor-units "$units" \
+           "${shares[@]}" --via "$VIA" | after 'acceptance ref: ')"
     [[ -z "$acc" ]] && { ((fail_deals++)); return; }
     xf="$(ftbc "p$c" pay --acceptance "$acc" --via "$VIA" | after 'transfer ref: ')"
     [[ -z "$xf" ]] && { ((fail_deals++)); return; }

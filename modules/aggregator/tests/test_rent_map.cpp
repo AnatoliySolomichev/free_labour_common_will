@@ -8,6 +8,15 @@
 
 #include <filesystem>
 
+// Ось для разбивки цены: в этих тестах её содержание не проверяется, важно лишь
+// что приёмки без разбивки не существует (records.md §9.5 v4).
+inline records::Ref test_axis() {
+    records::Ref r{};
+    r.chain.fill(0x79);
+    r.hash.fill(0x01);
+    return r;
+}
+
 using namespace aggregator;
 using namespace blockchain;
 
@@ -88,6 +97,7 @@ public:
         a.receiver    = payer.bytes;
         a.hours_raw   = hours;
         a.labor_units = hours * rate;
+        a.axes        = {{test_axis(), hours * rate}};
         a.timestamp   = ts;
         const Block acc = add(payer, a);
 
@@ -211,11 +221,20 @@ TEST_F(RentMapTest, WindowExcludesOldDeals) {
 // вытеснить. Ключ корзины — (специальность, РАЗРЯД), поэтому профили, объявленные
 // в сделках, дают пятому разряду свою строку, а второму свою, и разряду больше
 // нечего сказать.
-class DealProfileTest : public RentMapTest {};
+class DealProfileTest : public RentMapTest {
+public:
+    // Ось — запись в цепи; ссылка на неё и есть её личность (ИР-022).
+    records::Ref axis_def(const std::string& slug, const std::string& why) {
+        records::AxisDef d{};
+        d.slug = slug; d.ru = slug; d.description = why; d.timestamp = 1;
+        return ref_to(chain_of(0xD0), add(chain_of(0xD0), d));
+    }
+};
 
 TEST_F(DealProfileTest, ProfileVariesWithinAnActivity) {
     // Один и тот же портной, два разряда: работа пятого объявлена сложнее.
     const Block spec = add(worker_, records::Specialty{"портной"});
+    const auto knw = axis_def("knowledge", "порог входа в ремесло");
     auto profiled = [&](const UserId& payer, uint8_t level, double hours,
                         double rate, double knowledge) {
         records::Grade g{};
@@ -233,6 +252,7 @@ TEST_F(DealProfileTest, ProfileVariesWithinAnActivity) {
         a.receiver    = payer.bytes;
         a.hours_raw   = hours;
         a.labor_units = hours * rate;
+        a.axes        = {{test_axis(), hours * rate}};
         a.timestamp   = kFrom + 3600;
         const Block acc = add(payer, a);
 
@@ -246,8 +266,7 @@ TEST_F(DealProfileTest, ProfileVariesWithinAnActivity) {
         records::DealProfile dp{};
         dp.deal      = ref_to(payer, acc);
         records::DealProfileAxis ax{};
-        ax.axis  = "knowledge";
-        ax.units = hours * rate;         // вся цена названа одной осью — сходится
+        ax.axis  = knw;
         ax.value = knowledge;            // интенсивность: необязательная геометрия
         dp.axes      = {ax};
         dp.timestamp = kFrom + 3700;
@@ -275,6 +294,7 @@ TEST_F(DealProfileTest, OnlyAPartyToTheDealMayDescribeIt) {
     a.receiver    = chain_of(0xB1).bytes;
     a.hours_raw   = 10.0;
     a.labor_units = 10.0;
+    a.axes        = {{test_axis(), 10.0}};
     a.timestamp   = kFrom + 3600;
     const Block acc = add(chain_of(0xB1), a);
 
@@ -288,7 +308,7 @@ TEST_F(DealProfileTest, OnlyAPartyToTheDealMayDescribeIt) {
     records::DealProfile dp{};
     dp.deal      = ref_to(chain_of(0xB1), acc);
     records::DealProfileAxis ax{};
-    ax.axis = "knowledge"; ax.units = 10.0; ax.value = 0.99;
+    ax.axis = axis_def("knowledge", "порог входа"); ax.value = 0.99;
     dp.axes      = {ax};
     dp.timestamp = kFrom + 3700;
     add(chain_of(0xEE), dp);                         // посторонний
@@ -308,13 +328,14 @@ TEST_F(DealProfileTest, UnsettledDealCarriesNoProfile) {
     a.receiver    = chain_of(0xB1).bytes;
     a.hours_raw   = 10.0;
     a.labor_units = 10.0;
+    a.axes        = {{test_axis(), 10.0}};
     a.timestamp   = kFrom + 3600;
     const Block acc = add(chain_of(0xB1), a);        // перевода нет
 
     records::DealProfile dp{};
     dp.deal      = ref_to(chain_of(0xB1), acc);
     records::DealProfileAxis ax{};
-    ax.axis = "knowledge"; ax.units = 10.0; ax.value = 0.9;
+    ax.axis = axis_def("knowledge", "порог входа"); ax.value = 0.9;
     dp.axes      = {ax};
     dp.timestamp = kFrom + 3700;
     add(chain_of(0xB1), dp);

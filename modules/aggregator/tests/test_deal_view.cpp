@@ -8,6 +8,15 @@
 #include <gtest/gtest.h>
 #include <filesystem>
 
+// Ось для разбивки цены: содержание здесь не проверяется, важно лишь что
+// приёмки без разбивки не существует (records.md §9.5 v4).
+inline records::Ref test_axis() {
+    records::Ref r{};
+    r.chain.fill(0x79);
+    r.hash.fill(0x01);
+    return r;
+}
+
 using namespace aggregator;
 using namespace blockchain;
 
@@ -151,6 +160,7 @@ TEST_F(DealViewTest, StagesDeriveFromWhicheverLinksExist) {
     acc.hours_raw   = 6;
     acc.labor_units = 6;
     acc.timestamp   = 1000;
+    acc.axes        = {{test_axis(), 6}};
     const Hash acc_hash = add(vera, acc);
     {
         const auto view = DealView::build(*storage_);
@@ -207,6 +217,7 @@ TEST_F(DealViewTest, DealWithoutPledgeReachesPaid) {
     acc.work        = ref_of(anna, wh);
     acc.receiver    = vera.bytes;
     acc.labor_units = 1;
+    acc.axes        = {{test_axis(), 1}};
     const Hash ah = add(vera, acc);
 
     records::Transfer pay{};
@@ -258,6 +269,7 @@ TEST_F(DealViewTest, DirectDealAnchoredByAcceptance) {
     acc.work        = ref_of(anna, wh);
     acc.receiver    = friend_.bytes;
     acc.labor_units = 3;
+    acc.axes        = {{test_axis(), 3}};
     add(friend_, acc);
 
     const auto view = DealView::build(*storage_);

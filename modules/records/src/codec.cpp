@@ -188,8 +188,9 @@ void enc_work_record(Buf& out, const WorkRecord& wr) {
 void enc_acceptance(Buf& out, const Acceptance& a) {
     // v1 = map(7); v2 adds carried_units (key 7); v3 adds norm (key 8). Optional
     // keys are written in ascending order, each present only when set.
-    w_map(out, 7 + (a.carried_units ? 1 : 0) + (a.norm ? 1 : 0)
-                + (a.axes.empty() ? 0 : 1));
+    if (a.axes.empty())
+        throw CodecError("Acceptance: цена обязана быть расписана по осям (ИР-022)");
+    w_map(out, 8 + (a.carried_units ? 1 : 0) + (a.norm ? 1 : 0));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Acceptance));
     w_uint(out, 1); w_ref(out, a.work);
     w_uint(out, 2); w_fixed(out, a.receiver);
@@ -205,13 +206,14 @@ void enc_acceptance(Buf& out, const Acceptance& a) {
         w_uint(out, 1); w_int64(out, a.norm->date);
         w_uint(out, 2); w_float64(out, a.norm->W);
     }
-    if (!a.axes.empty()) {                               // v4 (ИР-022)
-        w_uint(out, 9); w_arr(out, a.axes.size());
-        for (const auto& x : a.axes) {
-            w_map(out, 2);
-            w_uint(out, 0); w_text(out, x.axis);
-            w_uint(out, 1); w_float64(out, x.units);
-        }
+    // v4 (ИР-022): цена, расписанная по осям. НЕ опционально — приёмки без
+    // разбивки не существует: цена без объяснения это два разных вида записи
+    // там, где должен быть один.
+    w_uint(out, 9); w_arr(out, a.axes.size());
+    for (const auto& x : a.axes) {
+        w_map(out, 2);
+        w_uint(out, 0); w_ref(out, x.axis);
+        w_uint(out, 1); w_float64(out, x.units);
     }
 }
 
@@ -413,11 +415,9 @@ void enc_deal_profile(Buf& out, const DealProfile& d) {
     w_uint(out, 1); w_ref(out, d.deal);
     w_uint(out, 2); w_arr(out, d.axes.size());
     for (const auto& a : d.axes) {
-        // Ключ 1 — часы (обязательны), ключ 2 — интенсивность (нет).
-        w_map(out, 2 + (a.value ? 1 : 0));
-        w_uint(out, 0); w_text(out, a.axis);
-        w_uint(out, 1); w_float64(out, a.units);
-        if (a.value) { w_uint(out, 2); w_float64(out, *a.value); }
+        w_map(out, 2);
+        w_uint(out, 0); w_ref(out, a.axis);
+        w_uint(out, 1); w_float64(out, a.value);
     }
     w_uint(out, 3); w_int64(out, d.timestamp);
     w_uint(out, 4); w_uint(out, 0);          // зарезервировано под версию профиля
@@ -760,8 +760,8 @@ WorkRecord dec_work_record_fields(CborReader& r, uint64_t field_count) {
 Acceptance dec_acceptance_fields(CborReader& r, uint64_t field_count) {
     // 7 = v1; +carried_units (key 7, v2); +norm (key 8, v3). Optional keys read
     // generically so any subset/order (ascending, deterministic CBOR) decodes.
-    if (field_count < 7 || field_count > 10)
-        throw CodecError("Acceptance: expected 7..10 fields");
+    if (field_count < 8 || field_count > 10)
+        throw CodecError("Acceptance: expected 8..10 fields");
     Acceptance a{};
     expect_key(r, 1); a.work         = dec_ref(r);
     expect_key(r, 2); r.r_fixed(a.receiver);
@@ -779,7 +779,7 @@ Acceptance dec_acceptance_fields(CborReader& r, uint64_t field_count) {
             for (uint64_t k = 0; k < n; ++k) {
                 if (r.r_map() != 2) throw CodecError("AcceptanceAxis: expected 2 fields");
                 AcceptanceAxis x{};
-                expect_key(r, 0); x.axis  = r.r_text();
+                expect_key(r, 0); x.axis  = dec_ref(r);
                 expect_key(r, 1); x.units = r.r_float64();
                 a.axes.push_back(std::move(x));
             }
@@ -1054,13 +1054,10 @@ DealProfile dec_deal_profile_fields(CborReader& r, uint64_t field_count) {
         const uint64_t n = r.r_arr();
         d.axes.reserve(static_cast<size_t>(n));
         for (uint64_t i = 0; i < n; ++i) {
-            const uint64_t fields = r.r_map();
-            if (fields < 2 || fields > 3)
-                throw CodecError("DealProfileAxis: expected 2 or 3 fields");
+            if (r.r_map() != 2) throw CodecError("DealProfileAxis: expected 2 fields");
             DealProfileAxis a{};
-            expect_key(r, 0); a.axis  = r.r_text();
-            expect_key(r, 1); a.units = r.r_float64();
-            if (fields == 3) { expect_key(r, 2); a.value = r.r_float64(); }
+            expect_key(r, 0); a.axis  = dec_ref(r);
+            expect_key(r, 1); a.value = r.r_float64();
             d.axes.push_back(std::move(a));
         }
     }

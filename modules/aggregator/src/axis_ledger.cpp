@@ -8,34 +8,27 @@
 
 namespace aggregator {
 
-std::map<std::string, records::AxisDef> build_axis_definitions(
+std::map<std::array<uint8_t, 32>, records::AxisDef> build_axis_definitions(
     const AggregatorStorage& storage) {
-    struct Seen { records::AxisDef def; std::array<uint8_t, 32> chain; };
-    std::map<std::string, Seen> out;
+    // По хешу определяющего блока: этот блок И ЕСТЬ ось. Никакого поиска по
+    // слагу — слаги сталкиваются, а выбирать между двумя цепями, назвавшими свою
+    // ось «danger», значило бы чьё-то решение. Слаг — подпись для людей.
+    std::map<std::array<uint8_t, 32>, records::AxisDef> out;
     for (const Hash& bh : storage.all_block_hashes()) {
         const auto block = storage.get_block_by_hash(bh);
         if (!block || block->type != BlockType::DATA) continue;
         records::Record rec;
         try { rec = records::Codec::decode(block->payload.data(), block->payload.size()); }
         catch (const records::CodecError&) { continue; }
-        const auto* d = std::get_if<records::AxisDef>(&rec);
-        if (!d || d->slug.empty()) continue;
-        const auto it = out.find(d->slug);
-        // Первое по (времени, цепи) — определение слага; спор о слаге это факт о
-        // нём, а не то, что здесь надо разрешать.
-        if (it == out.end() ||
-            std::make_pair(d->timestamp, block->address.user_id.bytes) <
-            std::make_pair(it->second.def.timestamp, it->second.chain))
-            out[d->slug] = Seen{*d, block->address.user_id.bytes};
+        if (const auto* d = std::get_if<records::AxisDef>(&rec))
+            out.emplace(bh.bytes, *d);
     }
-    std::map<std::string, records::AxisDef> defs;
-    for (auto& [slug, seen] : out) defs.emplace(slug, std::move(seen.def));
-    return defs;
+    return out;
 }
 
 std::vector<AxisLedgerRow> build_axis_ledger(
-    const AggregatorStorage&                       storage,
-    const std::map<std::string, records::AxisDef>* defs) {
+    const AggregatorStorage&                                   storage,
+    const std::map<std::array<uint8_t, 32>, records::AxisDef>* defs) {
 
     using RefHash = std::array<uint8_t, 32>;
     struct Deal { records::Acceptance acc; UserId payer; };
@@ -62,7 +55,8 @@ std::vector<AxisLedgerRow> build_axis_ledger(
         uint64_t deals = 0;
         std::set<RefHash> chains;
     };
-    std::map<std::string, Acc> per_axis;
+    std::map<RefHash, Acc>     per_axis;
+    std::map<RefHash, records::Ref> ident;
     double total_units = 0.0;
 
     for (const auto& [acc_hash, deal] : deals) {
@@ -81,7 +75,8 @@ std::vector<AxisLedgerRow> build_axis_ledger(
         if (std::abs(named - a.labor_units) > 1e-6) continue;
 
         for (const auto& x : a.axes) {
-            auto& acc = per_axis[x.axis];
+            ident.emplace(x.axis.hash, x.axis);
+            auto& acc = per_axis[x.axis.hash];
             const double per_hour = x.units / a.hours_raw;
             acc.units += x.units;
             acc.hours += a.hours_raw;
@@ -95,9 +90,9 @@ std::vector<AxisLedgerRow> build_axis_ledger(
 
     std::vector<AxisLedgerRow> out;
     out.reserve(per_axis.size());
-    for (const auto& [slug, acc] : per_axis) {
+    for (const auto& [hash, acc] : per_axis) {
         AxisLedgerRow r{};
-        r.slug      = slug;
+        r.axis      = ident.at(hash);
         r.units     = acc.units;
         r.hours     = acc.hours;
         r.deals     = acc.deals;
@@ -108,15 +103,20 @@ std::vector<AxisLedgerRow> build_axis_ledger(
             const double mean = acc.sum / acc.hours;
             r.spread = std::sqrt(std::max(0.0, acc.sumsq / acc.hours - mean * mean));
         }
-        r.described = defs && defs->count(slug) != 0
-                   && !defs->at(slug).description.empty();
+        if (defs) {
+            const auto dit = defs->find(hash);
+            if (dit != defs->end()) {
+                r.label     = dit->second.ru;
+                r.described = !dit->second.description.empty();
+            }
+        }
         out.push_back(std::move(r));
     }
     // Канонический порядок: по весу свидетельств, развязка по слагу — два
     // свидетеля обязаны напечатать одну таблицу из одних блоков.
     std::sort(out.begin(), out.end(), [](const AxisLedgerRow& a, const AxisLedgerRow& b) {
         if (a.units != b.units) return a.units > b.units;
-        return a.slug < b.slug;
+        return a.axis.hash < b.axis.hash;
     });
     return out;
 }

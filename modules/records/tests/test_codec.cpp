@@ -213,6 +213,7 @@ TEST(RecordsCodec, Acceptance) {
     a.quality     = "пройдено";
     a.hours_raw   = 2.5;
     a.labor_units = 2.5 * 1.2;
+    a.axes        = {{make_ref(0x79, 0x01), 2.5 * 1.2}};
     a.timestamp   = 1'700'000'100LL;
 
     const auto decoded = std::get<Acceptance>(roundtrip(a));
@@ -695,6 +696,7 @@ TEST(RecordsCodec, AcceptanceV2CarriedUnits) {
     a.quality       = "пройдено";
     a.hours_raw     = 6.0;
     a.labor_units   = 7.2;
+    a.axes          = {{make_ref(0x79, 0x01), 7.2}};
     a.timestamp     = 1'700'000'100LL;
     a.carried_units = 1.19625;
 
@@ -702,10 +704,11 @@ TEST(RecordsCodec, AcceptanceV2CarriedUnits) {
     ASSERT_TRUE(decoded.carried_units.has_value());
     EXPECT_DOUBLE_EQ(*decoded.carried_units, 1.19625);
 
-    // v1 without carried_units stays map(7) and decodes with nullopt.
+    // Без carried_units — map(8): семь полей плюс разбивка цены, которая с
+    // ИР-022 обязательна (records.md §9.5 v4).
     a.carried_units.reset();
     const auto bytes = Codec::encode(Record{a});
-    EXPECT_EQ(bytes[0], 0xA7);
+    EXPECT_EQ(bytes[0], 0xA8);
     const auto d1 = std::get<Acceptance>(Codec::decode(bytes));
     EXPECT_FALSE(d1.carried_units.has_value());
 }
@@ -764,6 +767,7 @@ TEST(RecordsCodec, AcceptanceV3NormRoundtrip) {
     a.quality     = "пройдено";
     a.hours_raw   = 6.0;
     a.labor_units = 6.0;
+    a.axes        = {{make_ref(0x79, 0x01), 6.0}};
     a.timestamp   = 1'700'000'000LL;
     records::AcceptanceNorm n{};
     n.agg.fill(0x33); n.date = 86'400; n.W = 1.0509;
@@ -976,7 +980,8 @@ TEST(RecordsCodec, AxisPricesRefusalRoundtrip) {
 TEST(RecordsCodec, DealProfileRoundtrip) {
     records::DealProfile d{};
     d.deal      = make_ref(0x54, 0x55);
-    d.axes      = {{"danger", 0.8}, {"knowledge", 0.55}, {"physical", 0.65}};
+    d.axes      = {{make_ref(0x79, 0x01), 0.8}, {make_ref(0x79, 0x02), 0.55},
+                   {make_ref(0x79, 0x03), 0.65}};
     d.base      = make_ref(0x78, 0x79);
     d.note      = "варил в резервуаре под 400 В";
     d.timestamp = 1'700'000'000LL;
@@ -995,7 +1000,7 @@ TEST(RecordsCodec, DealProfileRoundtrip) {
 TEST(RecordsCodec, DealProfileNoteWithoutBase) {
     records::DealProfile d{};
     d.deal      = make_ref(0x54, 0x55);
-    d.axes      = {{"danger", 0.8}};
+    d.axes      = {{make_ref(0x79, 0x01), 0.8}};
     d.note      = "без опоры на прежний профиль";
     d.timestamp = 7;
 
@@ -1008,7 +1013,7 @@ TEST(RecordsCodec, DealProfileNoteWithoutBase) {
 TEST(RecordsCodec, DealProfileBareRoundtrip) {
     records::DealProfile d{};
     d.deal      = make_ref(0x01, 0x02);
-    d.axes      = {{"people", 0.5}};
+    d.axes      = {{make_ref(0x79, 0x04), 0.5}};
     d.timestamp = 9;
 
     const auto r = std::get<records::DealProfile>(roundtrip(Record{d}));
@@ -1026,7 +1031,8 @@ TEST(RecordsCodec, AcceptanceAxesRoundtrip) {
     a.hours_raw   = 10.0;
     a.labor_units = 14.0;
     a.timestamp   = 1'700'000'000LL;
-    a.axes        = {{"danger", 2.8}, {"knowledge", 5.5}, {"physical", 5.7}};
+    a.axes        = {{make_ref(0x79, 0x01), 2.8}, {make_ref(0x79, 0x02), 5.5},
+                     {make_ref(0x79, 0x03), 5.7}};
 
     const auto d = std::get<records::Acceptance>(roundtrip(Record{a}));
     EXPECT_EQ(d.axes, a.axes);
@@ -1043,30 +1049,45 @@ TEST(RecordsCodec, AcceptanceAxesAlongsideOtherOptionalFields) {
     a.labor_units = 6.0;
     a.timestamp   = 5;
     a.carried_units = 1.5;
-    a.axes        = {{"physical", 6.0}};
+    a.axes        = {{make_ref(0x79, 0x03), 6.0}};
 
     const auto d = std::get<records::Acceptance>(roundtrip(Record{a}));
     ASSERT_TRUE(d.carried_units.has_value());
     EXPECT_DOUBLE_EQ(*d.carried_units, 1.5);
     ASSERT_EQ(d.axes.size(), 1u);
-    EXPECT_EQ(d.axes[0].axis, "physical");
+    EXPECT_EQ(d.axes[0].axis, a.axes[0].axis);
 }
 
-// Приёмка без разбивки — законное состояние: всё, что написано до ИР-022,
-// декодируется и остаётся оплаченным.
-TEST(RecordsCodec, AcceptanceWithoutAxesStillDecodes) {
+// Приёмки без разбивки НЕ СУЩЕСТВУЕТ: цена без объяснения — это второй вид
+// записи там, где должен быть один. Кодек отказывается её писать, а не пишет
+// «пустой» вариант.
+TEST(RecordsCodec, AcceptanceWithoutAxesIsRefused) {
     records::Acceptance a{};
     a.work        = make_ref(0x53, 0x54);
     a.receiver.fill(0xB3);
     a.hours_raw   = 2.0;
     a.labor_units = 2.0;
     a.timestamp   = 3;
-    const auto plain = Codec::encode(Record{a});
-    const auto d = std::get<records::Acceptance>(Codec::decode(plain));
-    EXPECT_TRUE(d.axes.empty());
+    EXPECT_THROW(Codec::encode(Record{a}), records::CodecError);
 
-    a.axes = {{"physical", 2.0}};
-    EXPECT_NE(Codec::encode(Record{a}), plain);   // пустая — поля нет вовсе
+    a.axes = {{make_ref(0x79, 0x03), 2.0}};
+    EXPECT_NO_THROW(Codec::encode(Record{a}));
+}
+
+// Ось — это Ref, а не слаг: слаги сталкиваются, и выбирать между двумя цепями,
+// назвавшими свою ось одинаково, значило бы чьё-то решение.
+TEST(RecordsCodec, AcceptanceAxisIsAReferenceToItsDefinition) {
+    records::Acceptance a{};
+    a.work        = make_ref(0x53, 0x54);
+    a.receiver.fill(0xB4);
+    a.hours_raw   = 1.0;
+    a.labor_units = 1.0;
+    a.timestamp   = 1;
+    a.axes        = {{make_ref(0xAA, 0xBB), 1.0}};
+
+    const auto d = std::get<records::Acceptance>(roundtrip(Record{a}));
+    ASSERT_EQ(d.axes.size(), 1u);
+    EXPECT_EQ(d.axes[0].axis, a.axes[0].axis);      // цепь И хеш, целиком
 }
 
 // AxisDef (0x79) — ось, заведённая в цепи (ИР-022)

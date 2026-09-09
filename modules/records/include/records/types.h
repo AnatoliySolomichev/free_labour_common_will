@@ -191,9 +191,18 @@ struct AcceptanceNorm {
 // One line of the itemized price (ИР-022): how many of the deal's labour hours
 // went to this axis. No intensity here and no share — just hours, because hours
 // are what was paid.
+//
+// The axis is a Ref — chain + block hash — and NOT a slug. Slugs collide, and
+// there is no principled way to pick between two chains that both call their axis
+// "danger": the tie-break would be somebody's decision, which is exactly what
+// this design has no room for. A Ref is the full unambiguous path to the record
+// that DEFINES the axis, so using an axis and pointing at its argument are the
+// same act. (Chain + hash rather than chain + branch + index: an index can be
+// equivocated — two blocks at one index on two branches — a content hash cannot,
+// records.md §4.)
 struct AcceptanceAxis {
-    std::string axis;    // axis slug; its argument lives in an AxisDef record
-    double      units;   // labour hours of THIS deal's price attributed to it
+    Ref    axis;     // the AxisDef record this line is about
+    double units;    // labour hours of THIS deal's price attributed to it
 
     bool operator==(const AcceptanceAxis& o) const noexcept {
         return axis == o.axis && units == o.units;
@@ -559,38 +568,25 @@ struct AxisPrices {
 // settled description of a job becomes what a "profession" used to be — a
 // reference to a description that worked, not a category from a directory.
 //
-// THE BREAKDOWN IS THE POINT (ИР-022, 2026-09-09). Each axis carries the labour
-// hours of the price that went to it, and they add up to the price exactly. So
-// there is no residual — not because a model fits well, but because there is
-// nothing to add up beyond what was named. Nothing is inferred, so there is
-// nothing to draw a profile against (Goodhart), and the price of an axis is not
-// decreed anywhere: what the network can say is only how much of all the labour
-// it paid actually went to danger, which is a fact, not an estimate.
-//
-// There is deliberately NO "other" bucket. Something you cannot name, you name:
-// invent an axis and argue for it. A badly argued axis reused again and again is
-// itself the signal — and a better one than a nameless remainder, because a
-// remainder ends the conversation while a bad axis invites it.
+// THE PAYMENT IS NOT HERE. The itemized price lives in the Acceptance
+// (records.md §9.5 v4), signed together with the price itself. What is left here
+// is the optional part: intensities for geometry, a line for people, and a
+// template to inherit — none of it money, none of it required.
 //
 // Deliberately a separate type rather than more AxisAttestation records: an
 // attestation states one axis of an activity in general, a profile states the
 // whole shape of one job, and only the second can be pointed at by hash.
 struct DealProfileAxis {
-    std::string axis;    // axis slug (docs/catalogs/axes.json, later a chain Ref)
-    // MANDATORY: labour hours of this deal's price that went to this axis. The
-    // breakdown must add up to the deal's `labor_units` exactly — this is the
-    // PAYMENT, itemized, not an estimate of one. Nothing is inferred from it and
-    // nothing may contradict it.
-    double      units = 0.0;
-    // OPTIONAL: how much of the axis was in an hour of this work (intensity).
-    // Carries no money. It exists only for GEOMETRY — finding neighbours in the
-    // cloud, and suggesting a rate for work nobody has done yet — and it is a
-    // CANDIDATE FOR REMOVAL: if it never shows anything the breakdown does not
-    // already show, it goes (ИР-022). Absent is a legitimate state, not a gap.
-    std::optional<double> value;
+    Ref    axis;     // the AxisDef record, same identity as in the Acceptance
+    // Intensity 0..1: how much of the axis was in an hour of this work. Carries
+    // NO money — the money is in the Acceptance's breakdown (records.md §9.5 v4).
+    // It exists only for GEOMETRY (neighbours in the cloud, a suggested rate for
+    // work nobody has done yet) and is a CANDIDATE FOR REMOVAL: if it never shows
+    // anything the breakdown does not already show, it goes.
+    double value = 0.0;
 
     bool operator==(const DealProfileAxis& o) const noexcept {
-        return axis == o.axis && units == o.units && value == o.value;
+        return axis == o.axis && value == o.value;
     }
 };
 

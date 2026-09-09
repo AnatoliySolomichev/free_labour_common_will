@@ -64,6 +64,14 @@ say()  { printf '   %s\n' "$*"; }
 
 # bc от лица человека: bcp <кто> <аргументы...>
 bcp()  { local who="$1"; shift; "$BC" --data-dir "$work/$who" "$@"; }
+
+# ── Оси: словарь труда живёт в цепи, а не в файле агрегатора (ИР-022) ────────
+AXREFS="$work/axes.tsv"
+seed_axes() {
+  OUT="$AXREFS" BC="$BC" bash "$(dirname "$0")/seed-axes.sh" "$work/axes" \
+      --via "$VIA" >/dev/null
+}
+axis() { awk -F'\t' -v s="$1" '$1==s{print $2}' "$AXREFS"; }
 # Вырезать «...МЕТКА<то, что после>» из stdin.
 after(){ sed -n "s/.*$1//p" | head -1; }
 uid()  { bcp "$1" identity show | after 'User ID: '; }
@@ -207,11 +215,13 @@ say "печь → 6/8000 × 315 = 0.23625ч ;  мука → 12/50 × 4 = 0.96ч"
 hr "аудит нити переноса печи (bc tool show)"
 bcp anna tool show "${TOOL_H:0:12}"
 
+seed_axes
+hr "Оси заведены записями в цепи ($(wc -l < "$AXREFS") шт.) — цену без них не принять"
 hr "Дмитрий принимает работу — приёмка сама суммирует труд и перенос (bc accept)"
 bcp dmitry fetch "${CID[anna]}/$WORK_anna" --via "$VIA" >/dev/null
 bcp dmitry fetch "$TOOL" --via "$VIA" >/dev/null
 bcp dmitry fetch "$MAT"  --via "$VIA" >/dev/null
-ACC_anna=$(bcp dmitry accept --work "${CID[anna]}/$WORK_anna" --quality "пройдено" --coef 1.0 --via "$VIA" | after 'acceptance ref: ')
+ACC_anna=$(bcp dmitry accept --work "${CID[anna]}/$WORK_anna" --quality "пройдено" --coef 1.0 --axis-share "$(axis physical)=0.4" --axis-share "$(axis knowledge)=0.35" --axis-share "$(axis pace)=0.25" --via "$VIA" | after 'acceptance ref: ')
 
 hr "Дмитрий расплачивается трудочасами (bc pay) — потолок = 6 + 0.23625 + 0.96"
 PAY1="$(bcp dmitry pay --acceptance "$ACC_anna" --via "$VIA" 2>&1)"
@@ -237,7 +247,7 @@ WORK_boris=$(bcp boris deal work "$ND_anna" --hours 3 --action "Замена п�
              --agent "${CID[boris]}/$GRADE_boris" --via "$VIA" | after 'работа: ' | awk '{print $1}')
 hr "Анна принимает и платит — бумагой Дмитрия, которую держит (оборот!)"
 bcp anna fetch "$WORK_boris" --via "$VIA" >/dev/null
-ACC_boris=$(bcp anna accept --work "$WORK_boris" --quality "аккуратно" --coef 1.0 --via "$VIA" | after 'acceptance ref: ')
+ACC_boris=$(bcp anna accept --work "$WORK_boris" --quality "аккуратно" --coef 1.0 --axis-share "$(axis precision)=0.45" --axis-share "$(axis knowledge)=0.3" --axis-share "$(axis physical)=0.25" --via "$VIA" | after 'acceptance ref: ')
 PAY2="$(bcp anna pay --acceptance "$ACC_boris" --via "$VIA" 2>&1)"
 echo "$PAY2" | sed 's/^/   /'
 XFER2="$(printf '%s' "$PAY2" | after 'transfer ref: ')"
@@ -257,7 +267,7 @@ bcp boris deal hire "$ND_boris" --executor "${CID[vera]}" --units 2 --via "$VIA"
 WORK_vera=$(bcp vera deal work "$ND_boris" --hours 2 --action "Пошив рабочей робы" \
             --agent "${CID[vera]}/$GRADE_vera" --via "$VIA" | after 'работа: ' | awk '{print $1}')
 bcp boris fetch "$WORK_vera" --via "$VIA" >/dev/null
-ACC_vera=$(bcp boris accept --work "$WORK_vera" --quality "по фигуре" --coef 1.0 --via "$VIA" | after 'acceptance ref: ')
+ACC_vera=$(bcp boris accept --work "$WORK_vera" --quality "по фигуре" --coef 1.0 --axis-share "$(axis precision)=0.5" --axis-share "$(axis creativity)=0.3" --axis-share "$(axis knowledge)=0.2" --via "$VIA" | after 'acceptance ref: ')
 PAY3="$(bcp boris pay --acceptance "$ACC_vera" --via "$VIA" 2>&1)"
 echo "$PAY3" | sed 's/^/   /'
 XFER3="$(printf '%s' "$PAY3" | after 'transfer ref: ')"
@@ -278,7 +288,7 @@ bcp dmitry concept link "${CID[dmitry]}/$WORK_dmitry" "$ND_vera" --kind испо
 bcp vera fetch "${CID[dmitry]}/$WORK_dmitry" --via "$VIA" >/dev/null
 bcp vera fetch "$TOOL2" --via "$VIA" >/dev/null
 bcp vera fetch "$MAT2"  --via "$VIA" >/dev/null
-ACC_dmitry=$(bcp vera accept --work "${CID[dmitry]}/$WORK_dmitry" --quality "как новый" --coef 1.0 --via "$VIA" | after 'acceptance ref: ')
+ACC_dmitry=$(bcp vera accept --work "${CID[dmitry]}/$WORK_dmitry" --quality "как новый" --coef 1.0 --axis-share "$(axis knowledge)=0.4" --axis-share "$(axis precision)=0.35" --axis-share "$(axis physical)=0.25" --via "$VIA" | after 'acceptance ref: ')
 hr "Вера платит Дмитрию — его же бумагой: эмитент ГАСИТ свой долг (bc pay)"
 PAY4="$(bcp vera pay --acceptance "$ACC_dmitry" --via "$VIA" 2>&1)"
 echo "$PAY4" | sed 's/^/   /'
@@ -287,6 +297,19 @@ bcp dmitry transfer recv "$XFER4" --via "$VIA" >/dev/null
 say "→ бумага Дмитрия прошла Анна→Борис→Вера→Дмитрий и частично погашена у эмитента"
 
 # ═════════════════════════════════════════════════════════════════════════════
+hr "bc axis-ledger — куда труд городка ушёл НА САМОМ ДЕЛЕ (ИР-022)"
+say "не оценка и не подгонка: сделки сами расписали цену по осям, суммы сошлись,"
+say "здесь они просто сложены. Цена оси нигде не назначается."
+bcp anna axis-ledger --via "$VIA" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+print("   %-22s %8s %8s %9s  %s" % ("ось","доля","стч/час","разброс","сделок"))
+for r in d["axes"][:8]:
+    print("   %-22s %7.1f%% %8.3f %9.3f  %d%s" % (
+        r["label"] or r["axis"][:12], 100*r["share"], r["per_hour"], r["spread"],
+        r["deals"], "" if r["described"] else "  ⚠ без аргумента"))
+' || say "(книга пуста — ни одной расписанной сделки)"
+
 act "9. Отдельное кольцо через полный bc deal settle: Ирина ← Пётр (need.health)"
 SPEC_petr=$( bcp petr specialty add prof.doctor --via "$VIA" | after 'hash: ')
 GRADE_petr=$(bcp petr grade add "${CID[petr]}/$SPEC_petr" 6 | after 'hash: ')
@@ -295,7 +318,7 @@ bcp irina deal hire "$ND_irina" --executor "${CID[petr]}" --units 1 --via "$VIA"
 WORK_petr=$(bcp petr deal work "$ND_irina" --hours 1 --action "Плановый осмотр" \
             --agent "${CID[petr]}/$GRADE_petr" --via "$VIA" | after 'работа: ' | awk '{print $1}')
 bcp irina fetch "$WORK_petr" --via "$VIA" >/dev/null
-bcp irina accept --work "$WORK_petr" --quality "здорова" --coef 1.0 --via "$VIA" >/dev/null
+bcp irina accept --work "$WORK_petr" --quality "здорова" --coef 1.0 --axis-share "$(axis responsibility)=0.5" --axis-share "$(axis knowledge)=0.5" --via "$VIA" >/dev/null
 hr "bc deal settle — платит по приёмке и СПРАШИВАЕТ, закрыта ли потребность"
 bcp irina deal settle "$ND_irina" --yes --via "$VIA" | sed 's/^/   /'
 
@@ -307,7 +330,7 @@ GRADE_galina=$(bcp galina grade add "${CID[galina]}/$SPEC_galina" 4 --via "$VIA"
 WORK_galina=$(bcp galina work log --agent "${CID[galina]}/$GRADE_galina" \
               --action "Стрижка перед сменой" --hours 1 --via "$VIA" | after 'hash: ')
 bcp pelageya fetch "${CID[galina]}/$WORK_galina" --via "$VIA" >/dev/null
-ACC_galina=$(bcp pelageya accept --work "${CID[galina]}/$WORK_galina" --quality "аккуратно" --coef 1.0 --via "$VIA" | after 'acceptance ref: ')
+ACC_galina=$(bcp pelageya accept --work "${CID[galina]}/$WORK_galina" --quality "аккуратно" --coef 1.0 --axis-share "$(axis precision)=0.5" --axis-share "$(axis physical)=0.3" --axis-share "$(axis pace)=0.2" --via "$VIA" | after 'acceptance ref: ')
 hr "bc transfer send --reason (часы движутся только против принятого труда)"
 bcp pelageya transfer send --to "${CID[galina]}" --units 1 --reason "$ACC_galina" --via "$VIA" | sed 's/^/   /'
 hr "профиль в сделке: обе стороны говорят независимо (bc attest --deal, ИР-020)"

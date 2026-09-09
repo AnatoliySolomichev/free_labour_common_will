@@ -14,6 +14,15 @@
 
 #include <filesystem>
 
+// Ось для разбивки цены: в этих тестах её содержание не проверяется, важно лишь
+// что приёмки без разбивки не существует (records.md §9.5 v4).
+inline records::Ref test_axis() {
+    records::Ref r{};
+    r.chain.fill(0x79);
+    r.hash.fill(0x01);
+    return r;
+}
+
 using namespace aggregator;
 using namespace blockchain;
 
@@ -84,6 +93,7 @@ protected:
         a.receiver    = acceptor.bytes;
         a.hours_raw   = units;
         a.labor_units = units;
+        a.axes        = {{test_axis(), units}};
         add(acceptor, a);
     }
 
@@ -159,6 +169,7 @@ TEST_F(FootprintViewTest, SpoofedRecordsIgnored) {
     a.work.chain  = anna.bytes;
     a.receiver    = vera.bytes;              // ≠ block owner
     a.labor_units = 50.0;
+    a.axes        = {{test_axis(), 50.0}};
     add(anna, a);
 
     EXPECT_FALSE(FootprintView::build(*storage_).chain(vera).has_value());

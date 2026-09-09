@@ -1,5 +1,6 @@
 #include "aggregator/rent_map.h"
 #include "aggregator/axis_prices.h"
+#include "aggregator/axis_ledger.h"
 
 #include <records/codec.h>
 
@@ -72,6 +73,7 @@ std::map<std::pair<std::string, uint8_t>, BasketFlow> build_basket_flows(
 
 DealProfiles build_deal_profiles(const AggregatorStorage& storage) {
     using RefHash = std::array<uint8_t, 32>;
+    const auto defs = build_axis_definitions(storage);
     std::map<RefHash, records::Record> by_hash;
     struct Deal { records::Acceptance acc; UserId payer; };
     std::map<RefHash, Deal>   deals;
@@ -115,11 +117,6 @@ DealProfiles build_deal_profiles(const AggregatorStorage& storage) {
         const bool party = sp.author.bytes == dit->second.payer.bytes
                         || sp.author.bytes == a.work.chain;
         if (!party) continue;
-        // Запись либо верна целиком, либо не верна: если разбивка цены не
-        // сходится с ценой, доверять её интенсивностям тоже не за что.
-        double named = 0.0;
-        for (const auto& ax : sp.prof.axes) named += ax.units;
-        if (std::abs(named - a.labor_units) > 1e-6) continue;
 
         const auto wit = by_hash.find(a.work.hash);
         if (wit == by_hash.end()) continue;
@@ -134,11 +131,15 @@ DealProfiles build_deal_profiles(const AggregatorStorage& storage) {
         const auto* spec = std::get_if<records::Specialty>(&sit->second);
         if (!spec) continue;
 
+        // Наследие: план строится по СЛАГАМ каталога, а личность оси — ссылка.
+        // Слаг берётся из определения оси как подпись. Резолвинг уйдёт вместе с
+        // каталожным путём — он помечен кандидатом на удаление (ИР-022).
         auto& per = agg[{spec->name, grade->level}];
         for (const auto& ax : sp.prof.axes) {
-            if (!ax.value) continue;          // интенсивность необязательна
-            per[ax.axis].sum += a.hours_raw * *ax.value;
-            per[ax.axis].w   += a.hours_raw;
+            const auto dit = defs.find(ax.axis.hash);
+            if (dit == defs.end() || dit->second.slug.empty()) continue;
+            per[dit->second.slug].sum += a.hours_raw * ax.value;
+            per[dit->second.slug].w   += a.hours_raw;
         }
     }
 

@@ -8,6 +8,15 @@
 #include <gtest/gtest.h>
 #include <filesystem>
 
+// Ось для разбивки цены: содержание здесь не проверяется, важно лишь что
+// приёмки без разбивки не существует (records.md §9.5 v4).
+inline records::Ref test_axis() {
+    records::Ref r{};
+    r.chain.fill(0x79);
+    r.hash.fill(0x01);
+    return r;
+}
+
 using namespace aggregator;
 using namespace blockchain;
 
@@ -105,6 +114,7 @@ TEST_F(EconomyViewTest, IdeasBoardAndChainDossiers) {
     acc.quality     = "пройдено";
     acc.hours_raw   = 4;
     acc.labor_units = 4.2;
+    acc.axes        = {{test_axis(), 4.2}};
     const Block acc_block = add(bob, acc);
 
     // Transfer v4 (records.md §11.1): `reason` says WHAT is paid for (the acceptance),

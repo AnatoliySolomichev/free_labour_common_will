@@ -1094,10 +1094,24 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     const auto quality_s = flag_val(argc, argv, "--quality");
     const auto raw_s     = flag_val(argc, argv, "--hours-raw");
     const auto lu_s      = flag_val(argc, argv, "--labor-units");
-    if (work_s.empty() || quality_s.empty()) {
+    std::vector<std::string> axis_args, share_args;
+    for (int i = 1; i + 1 < argc; ++i) {
+        if (std::string(argv[i]) == "--axis")       axis_args.emplace_back(argv[i + 1]);
+        if (std::string(argv[i]) == "--axis-share") share_args.emplace_back(argv[i + 1]);
+    }
+    if (work_s.empty() || quality_s.empty() ||
+        (axis_args.empty() && share_args.empty())) {
         std::cerr << "Usage: bc accept\n"
                      "    --work         WORK_CHAIN/HASH\n"
                      "    --quality      TEXT\n"
+                     "    --axis ОСЬ_CHAIN/HASH=ЧАСЫ   сколько трудочасов цены ушло\n"
+                     "                                 на эту ось; повторяйте для\n"
+                     "                                 каждой. Сумма обязана точно\n"
+                     "                                 совпасть с оценкой (ИР-022)\n"
+                     "    --axis-share ОСЬ=ДОЛЯ        то же долями (в сумме 1.0);\n"
+                     "                                 часы считает клиент, остаток\n"
+                     "                                 отдаётся последней оси — чтобы\n"
+                     "                                 округление не разошлось с ценой\n"
                      "    [--hours-raw   FLOAT]   default: hours of the fetched WorkRecord\n"
                      "    [--coef        FLOAT]   grade coefficient, default 1.0\n"
                      "    [--labor-units FLOAT]   default: hours-raw * coef\n";
@@ -1110,6 +1124,22 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     Acceptance a;
     a.work      = parse_ref(work_s);
     a.quality   = quality_s;
+    for (const auto& p : axis_args) {
+        const auto eq = p.rfind('=');
+        if (eq == std::string::npos || eq == 0)
+            throw std::runtime_error("--axis ждёт ОСЬ_CHAIN/HASH=ЧАСЫ: " + p);
+        AcceptanceAxis x{};
+        x.axis  = parse_ref(p.substr(0, eq));
+        x.units = std::stod(p.substr(eq + 1));
+        a.axes.push_back(std::move(x));
+    }
+    std::vector<std::pair<Ref, double>> shares;
+    for (const auto& p : share_args) {
+        const auto eq = p.rfind('=');
+        if (eq == std::string::npos || eq == 0)
+            throw std::runtime_error("--axis-share ждёт ОСЬ_CHAIN/HASH=ДОЛЯ: " + p);
+        shares.emplace_back(parse_ref(p.substr(0, eq)), std::stod(p.substr(eq + 1)));
+    }
     a.timestamp = static_cast<int64_t>(std::time(nullptr));
     a.receiver  = ctx.user_id.bytes;
 
@@ -1209,6 +1239,39 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
         std::cerr << "нормировщик W=" << nm->W << " (из агрегатора, для истории)\n";
     }
 
+    if (!shares.empty()) {
+        double sum = 0.0;
+        for (const auto& [ref, f] : shares) { (void)ref; sum += f; }
+        if (std::abs(sum - 1.0) > 1e-9)
+            throw std::runtime_error("--axis-share в сумме даёт " + std::to_string(sum)
+                                     + ", а должно 1.0");
+        double left = a.labor_units;
+        for (std::size_t i = 0; i < shares.size(); ++i) {
+            AcceptanceAxis x{};
+            x.axis  = shares[i].first;
+            // Последней достаётся остаток: сумма обязана совпасть с ценой ТОЧНО,
+            // а не с точностью до округления долей.
+            x.units = i + 1 == shares.size() ? left : a.labor_units * shares[i].second;
+            left   -= x.units;
+            a.axes.push_back(std::move(x));
+        }
+    }
+    std::sort(a.axes.begin(), a.axes.end(),
+              [](const AcceptanceAxis& x, const AcceptanceAxis& y) {
+                  return x.axis.hash < y.axis.hash;
+              });
+    {   // Разбивка ЕСТЬ цена: расхождение здесь — не округление, а другая сделка.
+        double named = 0.0;
+        for (const auto& x : a.axes) named += x.units;
+        if (std::abs(named - a.labor_units) > 1e-6)
+            throw std::runtime_error(
+                "разбивка по осям даёт " + std::to_string(named) + " стч, а оценка — "
+                + std::to_string(a.labor_units) + " стч. Цена и её объяснение обязаны "
+                  "совпадать в точности (ИР-022)");
+    }
+
+    // Блок пишется ПОСЛЕ разворота долей и проверки: иначе в цепь ушла бы
+    // приёмка без разбивки, которой не должно существовать.
     const Block block = append_record(ctx, Record{a});
     std::cout << "acceptance ref: " << to_hex(ctx.user_id.bytes) << "/"
               << to_hex(Crypto::hash_block(block).bytes) << "\n";
@@ -2796,8 +2859,10 @@ static int cmd_attest(const fs::path& data_dir, int argc, char** argv) {
     return cmd_write(data_dir, argc, argv, a);
 }
 
-// bc work-profile --deal ACCEPTANCE_REF --axis danger=2.8 --axis knowledge=5.5
-//                 [--intensity danger=0.8] [--base REF] [--note TEXT] [--via URL]
+// bc work-profile --deal ACCEPTANCE_REF --intensity ОСЬ_REF=0.8 [--base REF]
+//
+// Денег не несёт: цена расписана по осям в самой приёмке. Здесь необязательная
+// геометрия — кандидат на удаление (ИР-022).
 //
 // Описать ОДНУ выполненную работу осями (ИР-022). Каталог знает профиль
 // деятельности вообще; здесь работа говорит о себе сама — «этот час был под
@@ -2806,83 +2871,44 @@ static int cmd_attest(const fs::path& data_dir, int argc, char** argv) {
 // сторона выводится из самой сделки, а не объявляется.
 static int cmd_work_profile(const fs::path& data_dir, int argc, char** argv) {
     const auto deal_s = flag_val(argc, argv, "--deal");
-    std::vector<std::string> pairs, ints;
-    for (int i = 1; i + 1 < argc; ++i) {
-        if (std::string(argv[i]) == "--axis")      pairs.emplace_back(argv[i + 1]);
-        if (std::string(argv[i]) == "--intensity") ints.emplace_back(argv[i + 1]);
-    }
+    std::vector<std::string> pairs;
+    for (int i = 1; i + 1 < argc; ++i)
+        if (std::string(argv[i]) == "--intensity") pairs.emplace_back(argv[i + 1]);
     if (deal_s.empty() || pairs.empty()) {
         std::cerr << "Usage: bc work-profile --deal ACCEPTANCE_CHAIN/HASH\n"
-                     "    --axis ОСЬ=ЧАСЫ              сколько трудочасов ЦЕНЫ ушло "
-                     "на эту ось;\n"
-                     "                                 повторяйте для каждой оси. "
-                     "Сумма обязана\n"
-                     "                                 в точности совпасть с ценой "
-                     "сделки\n"
-                     "    [--intensity ОСЬ=0..1]       сколько этого в часе такой "
-                     "работы.\n"
-                     "                                 Денег не несёт, нужна только "
-                     "для соседей\n"
-                     "                                 в облаке; кандидат на "
-                     "удаление (ИР-022)\n"
-                     "    [--base PROFILE_CHAIN/HASH]  взять за основу прежний "
+                     "    --intensity ОСЬ_CHAIN/HASH=0..1   сколько этого в часе "
+                     "такой работы\n"
+                     "    [--base PROFILE_CHAIN/HASH]       взять за основу прежний "
                      "профиль\n"
-                     "    [--note TEXT]                строка для ЛЮДЕЙ\n"
-                     "    [--via URL]                  опубликовать агрегатору\n"
-                     "\nЧего не можете назвать — назовите: заведите свою ось и "
-                     "опишите её.\n"
-                     "Оси «прочее» протокол не предлагает. Слаги: bc catalog "
-                     "--via URL\n";
+                     "    [--note TEXT]                     строка для ЛЮДЕЙ\n"
+                     "    [--via URL]                       опубликовать агрегатору\n"
+                     "\nДЕНЕГ ЭТА ЗАПИСЬ НЕ НЕСЁТ: цена расписана по осям в самой\n"
+                     "приёмке (bc accept --axis). Здесь только необязательная\n"
+                     "геометрия — соседи в облаке; кандидат на удаление (ИР-022).\n";
         return 1;
     }
-    auto split = [](const std::string& p, std::string& key, double& val) -> bool {
-        const auto eq = p.find('=');
-        if (eq == std::string::npos || eq == 0) return false;
-        key = p.substr(0, eq);
-        try { val = std::stod(p.substr(eq + 1)); } catch (const std::exception&) { return false; }
-        return true;
-    };
     DealProfile d{};
     d.deal      = parse_ref(deal_s);
     d.timestamp = static_cast<int64_t>(std::time(nullptr));
-    double named = 0.0;
     for (const auto& p : pairs) {
-        std::string key; double val = 0.0;
-        if (!split(p, key, val)) {
-            std::cerr << "--axis ждёт ОСЬ=ЧАСЫ, получено: " << p << "\n";
-            return 1;
-        }
-        DealProfileAxis a{};
-        a.axis  = key;
-        a.units = val;
-        named  += val;
-        d.axes.push_back(std::move(a));
-    }
-    for (const auto& p : ints) {
-        std::string key; double val = 0.0;
-        if (!split(p, key, val)) {
+        const auto eq = p.rfind('=');
+        if (eq == std::string::npos || eq == 0) {
             std::cerr << "--intensity ждёт ОСЬ=ЗНАЧЕНИЕ, получено: " << p << "\n";
             return 1;
         }
-        const auto it = std::find_if(d.axes.begin(), d.axes.end(),
-            [&](const DealProfileAxis& a) { return a.axis == key; });
-        if (it == d.axes.end()) {
-            std::cerr << "--intensity " << key << ": у этой оси нет --axis "
-                      << key << "=ЧАСЫ\n";
+        DealProfileAxis a{};
+        a.axis = parse_ref(p.substr(0, eq));
+        try { a.value = std::stod(p.substr(eq + 1)); }
+        catch (const std::exception&) {
+            std::cerr << "не число в --intensity " << p << "\n";
             return 1;
         }
-        it->value = val;
+        d.axes.push_back(std::move(a));
     }
-    // Канонический порядок: свидетели обязаны получить те же байты.
     std::sort(d.axes.begin(), d.axes.end(),
               [](const DealProfileAxis& a, const DealProfileAxis& b) {
-                  return a.axis < b.axis;
+                  return a.axis.hash < b.axis.hash;
               });
-    for (std::size_t i = 1; i < d.axes.size(); ++i)
-        if (d.axes[i].axis == d.axes[i - 1].axis) {
-            std::cerr << "ось " << d.axes[i].axis << " названа дважды\n";
-            return 1;
-        }
     if (const auto b = flag_val(argc, argv, "--base"); !b.empty())
         d.base = parse_ref(b);
     d.note = flag_val(argc, argv, "--note");
@@ -2890,9 +2916,6 @@ static int cmd_work_profile(const fs::path& data_dir, int argc, char** argv) {
         std::cerr << "--note слишком длинная: предел " << kAttestNoteMax << " байт\n";
         return 1;
     }
-    std::cout << "разбивка: " << named << " стч по " << d.axes.size()
-              << " осям. Агрегатор засчитает её, только если это в точности "
-                 "цена сделки.\n";
     return cmd_write(data_dir, argc, argv, d);
 }
 
@@ -2932,7 +2955,15 @@ static int cmd_axis_define(const fs::path& data_dir, int argc, char** argv) {
     a.timestamp   = static_cast<int64_t>(std::time(nullptr));
     if (const auto p = flag_val(argc, argv, "--parent");  !p.empty()) a.parent  = parse_ref(p);
     if (const auto q = flag_val(argc, argv, "--same-as"); !q.empty()) a.same_as = parse_ref(q);
-    return cmd_write(data_dir, argc, argv, a);
+    // Ссылка на определение И ЕСТЬ личность оси — её и подхватывают скрипты.
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+    const Block block = append_record(ctx, Record{a});
+    std::cout << "axis ref: " << to_hex(ctx.user_id.bytes) << "/"
+              << to_hex(Crypto::hash_block(block).bytes) << "\n";
+    if (const auto via = flag_val(argc, argv, "--via"); !via.empty())
+        upload_block(via, block);
+    return 0;
 }
 
 // bc axis-ledger --via URL — куда труд сети ушёл на самом деле (ИР-022)
@@ -4600,11 +4631,9 @@ Means of production (ИР-011, records.md §10.2, records.md §9.4):
                                        statement outranks your free-standing one (ИР-020)
     [--note TEXT]                      one line for PEOPLE — why the number is what it
                                        is. Never parsed, never weighed (max 280 bytes)
-  work-profile --deal REF          Распишите цену ОДНОЙ работы по осям (ИР-022):
-    --axis ОСЬ=ЧАСЫ                    сколько трудочасов цены ушло на каждую ось.
-    [--intensity ОСЬ=0..1]             Сумма обязана совпасть с ценой сделки — оттого
-    [--base REF] [--note TEXT]         и невязки нет. Чего не можете назвать —
-                                       назовите: оси «прочее» протокол не предлагает
+  work-profile --deal REF          Необязательная геометрия работы (ИР-022): денег
+    --intensity ОСЬ_REF=0..1           не несёт, цена расписана в самой приёмке.
+    [--base REF] [--note TEXT]         Кандидат на удаление
   axis-define --slug ОСЬ           Завести ось в своей цепи (ИР-022). Словарь труда
     --ru "Название"                    решают люди: заводить волен каждый, сила — от
     --description TEXT                 употребления. Отличает хорошую ось от плохой

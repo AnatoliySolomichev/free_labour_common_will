@@ -39,7 +39,8 @@ namespace aggregator {
 
 // One axis, as the settled deals actually paid it.
 struct AxisLedgerRow {
-    std::string slug;
+    records::Ref axis;           // identity: the AxisDef record itself
+    std::string  label;          // its `ru`, when a definition was found
     double      units    = 0.0;  // Σ labour hours that went to this axis
     double      hours    = 0.0;  // Σ hours of the work that named it
     uint64_t    deals    = 0;    // how many settled deals named it
@@ -48,9 +49,10 @@ struct AxisLedgerRow {
     double      share    = 0.0;  // units / Σ units over all axes
     double      per_hour = 0.0;  // units / hours
     double      spread   = 0.0;  // hours-weighted std of per-deal units/hours
-    // False when no catalog entry describes this axis. Not an error: anyone may
-    // invent an axis. It is the visible fact that it was used without argument —
-    // and an unargued axis reused again and again is exactly what to look at.
+    // False when the Ref points at no AxisDef, or at one with an empty argument.
+    // Not an error: anyone may invent an axis. It is the visible fact that it was
+    // used without argument — and an unargued axis reused again and again is
+    // exactly what to look at.
     bool        described = false;
 };
 
@@ -60,7 +62,11 @@ struct AxisLedgerRow {
 // slug supersede earlier ones from the same chain; across chains the first by
 // (timestamp, chain) wins for display, and disagreement is a fact about the slug,
 // not something to resolve here.
-std::map<std::string, records::AxisDef> build_axis_definitions(
+// Keyed by the DEFINING BLOCK's hash, because that block is the axis. There is
+// no slug lookup here on purpose: slugs collide, and choosing between two chains
+// that both call their axis "danger" would be somebody's decision. A slug is a
+// label for humans; identity is the record.
+std::map<std::array<uint8_t, 32>, records::AxisDef> build_axis_definitions(
     const AggregatorStorage& storage);
 
 // Read the ledger off the settled deals.
@@ -74,7 +80,7 @@ std::map<std::string, records::AxisDef> build_axis_definitions(
 // `defs` is consulted only to mark `described`; it never gates a row. Anyone may
 // use an axis nobody defined — that is visible, not forbidden.
 std::vector<AxisLedgerRow> build_axis_ledger(
-    const AggregatorStorage&                            storage,
-    const std::map<std::string, records::AxisDef>*      defs = nullptr);
+    const AggregatorStorage&                                    storage,
+    const std::map<std::array<uint8_t, 32>, records::AxisDef>*  defs = nullptr);
 
 } // namespace aggregator

@@ -97,13 +97,28 @@ say "мука → 12/50 × 4     = 0.96ч"
 hr "аудит нити переноса печи (bc tool show)"
 "$BC" --data-dir "$work/anna" tool show "${TOOL_H:0:12}"
 
+# ── Оси: словарь труда живёт в цепи, а не в файле агрегатора (ИР-022) ───────
+hr "Оси заводятся записями в цепи — цену без них принять нельзя"
+AXREFS="$work/axes.tsv"
+OUT="$AXREFS" BC="$BC" bash "$(dirname "$0")/seed-axes.sh" "$work/axes" --via "$VIA" \
+    >/dev/null 2>&1
+axis() { awk -F'\t' -v s="$1" '$1==s{print $2}' "$AXREFS"; }
+say "заведено осей: $(wc -l < "$AXREFS"), каждая со своим аргументом"
+say "цена теперь расписывается по ним и обязана сойтись в точности"
+
 # ── Вера принимает и платит ──────────────────────────────────────────────────
 hr "Вера принимает работу — приёмка суммирует труд и перенос"
 "$BC" --data-dir "$work/vera" fetch "$ANNA/$WORK_H" --via "$VIA" >/dev/null
 "$BC" --data-dir "$work/vera" fetch "$ANNA/$TOOL_H"  --via "$VIA" >/dev/null
 "$BC" --data-dir "$work/vera" fetch "$ANNA/$MAT_H"   --via "$VIA" >/dev/null
+# Оценка 6ч труда: Вера расписывает её по осям — сумма обязана дать ровно 6.0.
 ACC="$("$BC" --data-dir "$work/vera" accept --work "$ANNA/$WORK_H" \
-       --quality "пройдено" --coef 1.0 --via "$VIA" | after 'acceptance ref: ')"
+       --quality "пройдено" --coef 1.0 \
+       --axis "$(axis physical)=2.4" \
+       --axis "$(axis knowledge)=2.1" \
+       --axis "$(axis pace)=1.5" \
+       --via "$VIA" | after 'acceptance ref: ')"
+say "разбивка: физический труд 2.4 + знание 2.1 + темп 1.5 = 6.0ч"
 
 hr "Вера платит — потолок = труд 6ч + печь 0.236ч + мука 0.96ч = 7.19625ч"
 pay_out="$("$BC" --data-dir "$work/vera" pay --acceptance "$ACC" --via "$VIA" 2>&1)"

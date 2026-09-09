@@ -1178,7 +1178,9 @@ void AggregatorServer::setup_routes() {
             for (size_t i = 0; i < led.size(); ++i) {
                 const auto& r = led[i];
                 if (i) body += ',';
-                body += "{\"axis\":\"" + json_escape(r.slug)
+                body += "{\"axis\":\"" + to_hex(r.axis.chain) + "/"
+                                        + to_hex(r.axis.hash)
+                     + "\",\"label\":\"" + json_escape(r.label)
                      + "\",\"units\":"    + std::to_string(r.units)
                      + ",\"hours\":"      + std::to_string(r.hours)
                      + ",\"share\":"      + std::to_string(r.share)
