@@ -2896,6 +2896,45 @@ static int cmd_work_profile(const fs::path& data_dir, int argc, char** argv) {
     return cmd_write(data_dir, argc, argv, d);
 }
 
+// bc axis-define --slug danger --ru "Опасность" --description "..."
+//                [--parent REF] [--same-as REF] [--via URL]
+//
+// Завести ось в своей цепи (ИР-022). Словарь труда решают люди: заводить ось
+// волен каждый, сила у неё — от употребления, а не от чьего-то благословения.
+// Отличает хорошую ось от плохой ТОЛЬКО аргумент: что она значит, почему это
+// одна ось, а не две, и чем она не является. Ось без описания видна в книге осей
+// как таковая — это и есть всё принуждение.
+static int cmd_axis_define(const fs::path& data_dir, int argc, char** argv) {
+    const auto slug = flag_val(argc, argv, "--slug");
+    const auto ru   = flag_val(argc, argv, "--ru");
+    const auto desc = flag_val(argc, argv, "--description");
+    if (slug.empty() || ru.empty()) {
+        std::cerr << "Usage: bc axis-define --slug ОСЬ --ru \"Название\"\n"
+                     "    --description TEXT           аргумент: что значит, почему "
+                     "это ОДНА ось,\n"
+                     "                                 чем не является. Без него ось "
+                     "считается\n"
+                     "                                 незаявленной и видна такой в "
+                     "книге осей\n"
+                     "    [--parent CHAIN/HASH]        более широкая ось\n"
+                     "    [--same-as CHAIN/HASH]       заявить, что это та же ось, "
+                     "что и та\n"
+                     "    [--via URL]                  опубликовать агрегатору\n";
+        return 1;
+    }
+    if (desc.empty())
+        std::cerr << "предупреждение: ось без --description войдёт в книгу осей как "
+                     "неописанная\n";
+    AxisDef a{};
+    a.slug        = slug;
+    a.ru          = ru;
+    a.description = desc;
+    a.timestamp   = static_cast<int64_t>(std::time(nullptr));
+    if (const auto p = flag_val(argc, argv, "--parent");  !p.empty()) a.parent  = parse_ref(p);
+    if (const auto q = flag_val(argc, argv, "--same-as"); !q.empty()) a.same_as = parse_ref(q);
+    return cmd_write(data_dir, argc, argv, a);
+}
+
 // bc axis-ledger --via URL — куда труд сети ушёл на самом деле (ИР-022)
 static int cmd_axis_ledger(int argc, char** argv) {
     const auto via = flag_val(argc, argv, "--via");
@@ -4566,6 +4605,10 @@ Means of production (ИР-011, records.md §10.2, records.md §9.4):
     [--intensity ОСЬ=0..1]             Сумма обязана совпасть с ценой сделки — оттого
     [--base REF] [--note TEXT]         и невязки нет. Чего не можете назвать —
                                        назовите: оси «прочее» протокол не предлагает
+  axis-define --slug ОСЬ           Завести ось в своей цепи (ИР-022). Словарь труда
+    --ru "Название"                    решают люди: заводить волен каждый, сила — от
+    --description TEXT                 употребления. Отличает хорошую ось от плохой
+                                       только аргумент; ось без описания это видно
   axis-ledger --via URL            Куда труд сети ушёл НА САМОМ ДЕЛЕ: доля всех
                                        оплаченных часов по каждой оси, разброс цены
                                        и отметка «осью пользуются без описания»
@@ -4749,6 +4792,7 @@ int main(int argc, char** argv) {
         else if (cmd == "attest")                           return cmd_attest(data_dir, argc, argv);
         else if (cmd == "work-profile")                     return cmd_work_profile(data_dir, argc, argv);
         else if (cmd == "axis-ledger")                      return cmd_axis_ledger(argc, argv);
+        else if (cmd == "axis-define")                      return cmd_axis_define(data_dir, argc, argv);
         else if (cmd == "attestations")                     return cmd_attestations(argc, argv);
         else if (cmd == "axis-prices")                      return cmd_axis_prices(argc, argv);
         else if (cmd == "discover")                         return cmd_discover(data_dir, argc, argv);

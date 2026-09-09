@@ -951,14 +951,6 @@ void AggregatorServer::setup_routes() {
                 return;
             }
             std::vector<records::Catalog> cats{records::parse_catalog(*prof_text)};
-            // The axis dictionary (ИР-022): an axis named in a published basis
-            // must be one the vocabulary knows, or a prior computed against it
-            // would silently read every profile as zero.
-            if (const auto ax_text = read_file(catalog_dir_ / "axes.json")) {
-                try { cats.push_back(records::parse_catalog(*ax_text)); }
-                catch (const records::CatalogError&) {}
-            }
-
             // Every rate table this aggregator actually published. One day is far
             // too thin a cross-section to read a price surface out of, so the
             // window is pooled — and the sources are named by block hash, because
@@ -1178,13 +1170,10 @@ void AggregatorServer::setup_routes() {
     svr.Get("/economy/axis-ledger", [&](const httplib::Request&,
                                         httplib::Response& res) {
         try {
-            std::vector<records::Catalog> cats;
-            if (!catalog_dir_.empty())
-                if (const auto ax = read_file(catalog_dir_ / "axes.json")) {
-                    try { cats.push_back(records::parse_catalog(*ax)); }
-                    catch (const records::CatalogError&) {}
-                }
-            const auto led = build_axis_ledger(storage_, cats.empty() ? nullptr : &cats);
+            // Определения осей берутся ИЗ ЦЕПЕЙ, а не из файла, который возит с
+            // собой агрегатор: словарь труда решают люди (ИР-022).
+            const auto defs = build_axis_definitions(storage_);
+            const auto led = build_axis_ledger(storage_, &defs);
             std::string body = "{\"axes\":[";
             for (size_t i = 0; i < led.size(); ++i) {
                 const auto& r = led[i];

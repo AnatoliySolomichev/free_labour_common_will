@@ -39,6 +39,7 @@ enum class RecordType : uint8_t {
     AxisAttestation = 0x76,
     AxisPrices      = 0x77,
     DealProfile     = 0x78,
+    AxisDef         = 0x79,
 };
 
 // ── Cross-chain reference (records.md §4) ────────────────────────────────────
@@ -187,6 +188,18 @@ struct AcceptanceNorm {
     }
 };
 
+// One line of the itemized price (ИР-022): how many of the deal's labour hours
+// went to this axis. No intensity here and no share — just hours, because hours
+// are what was paid.
+struct AcceptanceAxis {
+    std::string axis;    // axis slug; its argument lives in an AxisDef record
+    double      units;   // labour hours of THIS deal's price attributed to it
+
+    bool operator==(const AcceptanceAxis& o) const noexcept {
+        return axis == o.axis && units == o.units;
+    }
+};
+
 struct Acceptance {
     static constexpr RecordType TYPE = RecordType::Acceptance;
 
@@ -201,6 +214,18 @@ struct Acceptance {
     std::optional<double>          carried_units;
     // v3 (economy.md §2б): normalizer provenance, best-effort at accept time.
     std::optional<AcceptanceNorm>  norm;
+    // v4 (ИР-022): the price, itemized by axis. Σ units MUST equal labor_units.
+    //
+    // This is what makes the breakdown protocol rather than commentary: it is
+    // signed together with the price, in the same record, so nobody can accept a
+    // deal and then remember a convenient story about it later. There is no
+    // residual because there is nothing to add up beyond what is named here, and
+    // nothing is inferred, so there is nothing to draw a profile against.
+    //
+    // Empty is still decodable — every deal written before ИР-022 has no
+    // breakdown and still paid — but a deal without one does not enter the axis
+    // economy at all (records.md §11.11): it is a payment nobody explained.
+    std::vector<AcceptanceAxis>    axes;
 };
 
 // ── Production records (records.md §10, v2 — ИР-011) ─────────────────────────
@@ -581,6 +606,39 @@ struct DealProfile {
     int64_t                      timestamp = 0;
 };
 
+// An axis, defined in somebody's chain (ИР-022).
+//
+// The vocabulary of labour is not the aggregator's to decide. It used to be a
+// file the aggregator shipped, so whoever edited that file decided which facets
+// of work exist — the last centralized point left in the valuation of labour,
+// after the VALUES became practitioners' (ИР-019) and the PRICES became the
+// deals' (ИР-020, ИР-022). Now an axis is an ordinary record: anyone writes one,
+// anyone references it, and it gains force by being used, not by being blessed.
+//
+// THE ARGUMENT IS THE POINT. Nothing stops anyone inventing an axis, so what
+// separates a good one from a bad one is how well it is argued: what it means,
+// why it is one axis and not two, what it is not. An axis reused again and again
+// with nothing written behind it is visible as exactly that (`described` in the
+// axis ledger) — and that visibility is the whole enforcement. There is no
+// "other" bucket anywhere in the protocol, deliberately: what you cannot name,
+// you name.
+//
+// `same_as` is a MERGE CLAIM, signed like anything else: "this axis and that one
+// are the same thing". Anyone may publish one — the author of the original, or
+// anybody at all if that author is gone or has lost their keys. Claims are not
+// applied automatically; they are weighed the way everything here is weighed, by
+// who uses them.
+struct AxisDef {
+    static constexpr RecordType TYPE = RecordType::AxisDef;
+
+    std::string        slug;         // join key everything references
+    std::string        ru;           // display name
+    std::string        description;  // the argument: what it means and why it is one
+    std::optional<Ref> parent;       // broader axis / family, when there is one
+    std::optional<Ref> same_as;      // merge claim, never applied automatically
+    int64_t            timestamp = 0;
+};
+
 // ── Record variant ────────────────────────────────────────────────────────────
 
 using Record = std::variant<
@@ -605,7 +663,8 @@ using Record = std::variant<
     SpecialtyCloud,
     AxisAttestation,
     AxisPrices,
-    DealProfile
+    DealProfile,
+    AxisDef
 >;
 
 } // namespace records

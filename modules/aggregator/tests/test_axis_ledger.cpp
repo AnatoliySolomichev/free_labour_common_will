@@ -77,8 +77,9 @@ protected:
         return b;
     }
 
-    // Рассчитанная сделка; profile — разбивка цены по осям, пишет её `author`.
-    records::Ref settled(const UserId& payer, double hours, double units) {
+    // Рассчитанная сделка с разбивкой цены прямо в приёмке (records.md §9.5 v4).
+    records::Ref settled(const UserId& payer, double hours, double units,
+                         std::vector<std::pair<std::string, double>> parts = {}) {
         records::WorkRecord wr{};
         wr.agent = grade_ref_;
         wr.hours = hours;
@@ -90,6 +91,7 @@ protected:
         a.hours_raw   = hours;
         a.labor_units = units;
         a.timestamp   = 1000;
+        for (auto& [axis, u] : parts) a.axes.push_back({axis, u});
         const Block acc = add(payer, a);
 
         records::Transfer t{};
@@ -101,29 +103,15 @@ protected:
         return ref_to(payer, acc);
     }
 
-    void breakdown(const UserId& author, const records::Ref& deal,
-                   std::vector<std::pair<std::string, double>> parts,
-                   int64_t ts = 2000) {
-        records::DealProfile d{};
-        d.deal      = deal;
-        d.timestamp = ts;
-        for (auto& [axis, u] : parts) {
-            records::DealProfileAxis a{};
-            a.axis  = axis;
-            a.units = u;
-            d.axes.push_back(std::move(a));
-        }
-        add(author, d);
-    }
 };
 
 // Доля осей в экономике — факт, а не оценка: столько-то всех оплаченных часов
 // ушло на опасность. Ни модели, ни регрессии.
 TEST_F(AxisLedgerTest, SharesAreReadStraightOffTheDeals) {
-    breakdown(chain_of(0xB1), settled(chain_of(0xB1), 10.0, 14.0),
-              {{"danger", 2.8}, {"knowledge", 5.5}, {"physical", 5.7}});
-    breakdown(chain_of(0xB2), settled(chain_of(0xB2), 10.0, 10.0),
-              {{"danger", 1.0}, {"knowledge", 4.0}, {"physical", 5.0}});
+    settled(chain_of(0xB1), 10.0, 14.0,
+            {{"danger", 2.8}, {"knowledge", 5.5}, {"physical", 5.7}});
+    settled(chain_of(0xB2), 10.0, 10.0,
+            {{"danger", 1.0}, {"knowledge", 4.0}, {"physical", 5.0}});
 
     const auto led = build_axis_ledger(*storage_);
     ASSERT_EQ(led.size(), 3u);
@@ -141,8 +129,8 @@ TEST_F(AxisLedgerTest, SharesAreReadStraightOffTheDeals) {
 
 // Разбивка, не сходящаяся в цену, описывает какую-то другую сделку и не в счёт.
 TEST_F(AxisLedgerTest, BreakdownThatDoesNotAddUpIsIgnored) {
-    breakdown(chain_of(0xB1), settled(chain_of(0xB1), 10.0, 14.0),
-              {{"danger", 2.8}, {"knowledge", 5.5}});    // 8.3 вместо 14.0
+    settled(chain_of(0xB1), 10.0, 14.0,
+            {{"danger", 2.8}, {"knowledge", 5.5}});      // 8.3 вместо 14.0
     EXPECT_TRUE(build_axis_ledger(*storage_).empty());
 }
 
@@ -150,12 +138,9 @@ TEST_F(AxisLedgerTest, BreakdownThatDoesNotAddUpIsIgnored) {
 // разброс не значит «модель плоха»: сеть не согласна, что это одна ось.
 TEST_F(AxisLedgerTest, SpreadComesStraightFromWhatDealsSaid) {
     // Три сделки, одинаковые часы, но за опасность платят по-разному.
-    breakdown(chain_of(0xB1), settled(chain_of(0xB1), 10.0, 10.0),
-              {{"danger", 1.0}, {"physical", 9.0}});
-    breakdown(chain_of(0xB2), settled(chain_of(0xB2), 10.0, 10.0),
-              {{"danger", 5.0}, {"physical", 5.0}});
-    breakdown(chain_of(0xB3), settled(chain_of(0xB3), 10.0, 10.0),
-              {{"danger", 9.0}, {"physical", 1.0}});
+    settled(chain_of(0xB1), 10.0, 10.0, {{"danger", 1.0}, {"physical", 9.0}});
+    settled(chain_of(0xB2), 10.0, 10.0, {{"danger", 5.0}, {"physical", 5.0}});
+    settled(chain_of(0xB3), 10.0, 10.0, {{"danger", 9.0}, {"physical", 1.0}});
 
     const auto led = build_axis_ledger(*storage_);
     const auto* d = row_of(led, "danger");
@@ -168,33 +153,62 @@ TEST_F(AxisLedgerTest, SpreadComesStraightFromWhatDealsSaid) {
 // Ось, которую никто не описал, считается наравне со всеми — но это ВИДНО.
 // Никакой «мусорки» протокол не предлагает: что не можешь назвать, то назови.
 TEST_F(AxisLedgerTest, UndescribedAxisIsCountedButMarked) {
-    breakdown(chain_of(0xB1), settled(chain_of(0xB1), 10.0, 10.0),
-              {{"danger", 4.0}, {"хитрость", 6.0}});
+    settled(chain_of(0xB1), 10.0, 10.0, {{"danger", 4.0}, {"хитрость", 6.0}});
 
-    records::Catalog dict;
-    dict.name = "axes";
-    records::CatalogEntry e;
-    e.slug = "danger";
-    e.ru   = "Опасность";
-    dict.entries = {e};
-    const std::vector<records::Catalog> cats{dict};
+    records::AxisDef def{};
+    def.slug        = "danger";
+    def.ru          = "Опасность";
+    def.description = "вероятность травмы или гибели самого работника";
+    def.timestamp   = 1;
+    add(chain_of(0xD0), def);
+    const auto defs = build_axis_definitions(*storage_);
 
-    const auto led = build_axis_ledger(*storage_, &cats);
+    const auto led = build_axis_ledger(*storage_, &defs);
     ASSERT_EQ(led.size(), 2u);
     EXPECT_TRUE(row_of(led, "danger")->described);
     EXPECT_FALSE(row_of(led, "хитрость")->described);
     EXPECT_NEAR(row_of(led, "хитрость")->share, 0.6, 1e-9);
 }
 
-// Переписать свою разбивку можно, проголосовать дважды — нет.
-TEST_F(AxisLedgerTest, LaterBreakdownSupersedesTheAuthorsEarlierOne) {
-    const auto deal = settled(chain_of(0xB1), 10.0, 10.0);
-    breakdown(chain_of(0xB1), deal, {{"danger", 9.0}, {"physical", 1.0}}, 2000);
-    breakdown(chain_of(0xB1), deal, {{"danger", 1.0}, {"physical", 9.0}}, 3000);
-
+// Цена без объяснения в экономику осей не входит вовсе: заплатили — да,
+// но никто не сказал, за что.
+TEST_F(AxisLedgerTest, DealWithoutABreakdownDoesNotEnterTheLedger) {
+    settled(chain_of(0xB1), 10.0, 10.0);              // разбивки нет
+    settled(chain_of(0xB2), 10.0, 10.0, {{"danger", 10.0}});
     const auto led = build_axis_ledger(*storage_);
-    const auto* d = row_of(led, "danger");
-    ASSERT_NE(d, nullptr);
-    EXPECT_NEAR(d->units, 1.0, 1e-9);
-    EXPECT_EQ(d->deals, 1u);
+    ASSERT_EQ(led.size(), 1u);
+    EXPECT_EQ(led[0].slug, "danger");
+    EXPECT_NEAR(led[0].units, 10.0, 1e-9);
+}
+
+// Определение оси берётся ИЗ ЦЕПЕЙ, а не из файла агрегатора. Спор о слаге —
+// факт о нём: побеждает первое по времени, и это не «разрешение спора».
+TEST_F(AxisLedgerTest, DefinitionsComeFromChainsEarliestWins) {
+    records::AxisDef first{};
+    first.slug = "danger"; first.ru = "Опасность";
+    first.description = "риск для самого работника"; first.timestamp = 100;
+    add(chain_of(0xD1), first);
+
+    records::AxisDef later{};
+    later.slug = "danger"; later.ru = "Опасность (иначе)";
+    later.description = "что-то другое"; later.timestamp = 200;
+    add(chain_of(0xD2), later);
+
+    const auto defs = build_axis_definitions(*storage_);
+    ASSERT_EQ(defs.count("danger"), 1u);
+    EXPECT_EQ(defs.at("danger").ru, "Опасность");
+}
+
+// Ось, объявленная без аргумента, определением не считается: описание пустое —
+// значит осью пользуются, ничего про неё не сказав.
+TEST_F(AxisLedgerTest, AxisDefWithoutAnArgumentDoesNotCountAsDescribed) {
+    settled(chain_of(0xB1), 10.0, 10.0, {{"хитрость", 10.0}});
+    records::AxisDef bare{};
+    bare.slug = "хитрость"; bare.ru = "Хитрость"; bare.timestamp = 1;
+    add(chain_of(0xD1), bare);
+
+    const auto defs = build_axis_definitions(*storage_);
+    const auto led  = build_axis_ledger(*storage_, &defs);
+    ASSERT_EQ(led.size(), 1u);
+    EXPECT_FALSE(led[0].described);
 }

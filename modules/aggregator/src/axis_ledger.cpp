@@ -8,17 +8,39 @@
 
 namespace aggregator {
 
+std::map<std::string, records::AxisDef> build_axis_definitions(
+    const AggregatorStorage& storage) {
+    struct Seen { records::AxisDef def; std::array<uint8_t, 32> chain; };
+    std::map<std::string, Seen> out;
+    for (const Hash& bh : storage.all_block_hashes()) {
+        const auto block = storage.get_block_by_hash(bh);
+        if (!block || block->type != BlockType::DATA) continue;
+        records::Record rec;
+        try { rec = records::Codec::decode(block->payload.data(), block->payload.size()); }
+        catch (const records::CodecError&) { continue; }
+        const auto* d = std::get_if<records::AxisDef>(&rec);
+        if (!d || d->slug.empty()) continue;
+        const auto it = out.find(d->slug);
+        // Первое по (времени, цепи) — определение слага; спор о слаге это факт о
+        // нём, а не то, что здесь надо разрешать.
+        if (it == out.end() ||
+            std::make_pair(d->timestamp, block->address.user_id.bytes) <
+            std::make_pair(it->second.def.timestamp, it->second.chain))
+            out[d->slug] = Seen{*d, block->address.user_id.bytes};
+    }
+    std::map<std::string, records::AxisDef> defs;
+    for (auto& [slug, seen] : out) defs.emplace(slug, std::move(seen.def));
+    return defs;
+}
+
 std::vector<AxisLedgerRow> build_axis_ledger(
-    const AggregatorStorage&             storage,
-    const std::vector<records::Catalog>* catalogs) {
+    const AggregatorStorage&                       storage,
+    const std::map<std::string, records::AxisDef>* defs) {
 
     using RefHash = std::array<uint8_t, 32>;
-    std::map<RefHash, records::Record> by_hash;
     struct Deal { records::Acceptance acc; UserId payer; };
     std::map<RefHash, Deal>   deals;
     std::map<RefHash, double> paid;
-    struct Said { records::DealProfile prof; UserId author; };
-    std::vector<Said> said;
 
     for (const Hash& bh : storage.all_block_hashes()) {
         const auto block = storage.get_block_by_hash(bh);
@@ -31,10 +53,7 @@ std::vector<AxisLedgerRow> build_axis_ledger(
         } else if (const auto* t = std::get_if<records::Transfer>(&rec)) {
             if (t->from == block->address.user_id.bytes && t->reason)
                 for (const auto& o : t->origins) paid[t->reason->hash] += o.units;
-        } else if (const auto* p = std::get_if<records::DealProfile>(&rec)) {
-            said.push_back({*p, block->address.user_id});
         }
-        by_hash[bh.bytes] = std::move(rec);
     }
 
     struct Acc {
@@ -46,52 +65,33 @@ std::vector<AxisLedgerRow> build_axis_ledger(
     std::map<std::string, Acc> per_axis;
     double total_units = 0.0;
 
-    // One breakdown per (deal, author): a later profile from the same party
-    // supersedes their earlier one, so nobody votes twice by rewriting.
-    std::map<std::pair<RefHash, RefHash>, const records::DealProfile*> latest;
-    for (const auto& sp : said) {
-        auto& slot = latest[{sp.prof.deal.hash, sp.author.bytes}];
-        if (!slot || sp.prof.timestamp >= slot->timestamp) slot = &sp.prof;
-    }
-
-    for (const auto& [key, prof] : latest) {
-        const auto dit = deals.find(key.first);
-        if (dit == deals.end()) continue;
-        const auto& a = dit->second.acc;
-        if (a.hours_raw <= 0.0) continue;
+    for (const auto& [acc_hash, deal] : deals) {
+        const auto& a = deal.acc;
+        if (a.axes.empty() || a.hours_raw <= 0.0) continue;   // цена без объяснения
 
         const double carried = a.carried_units ? *a.carried_units : 0.0;
-        const auto pit = paid.find(key.first);
+        const auto pit = paid.find(acc_hash);
         if (pit == paid.end() ||
             std::abs(pit->second - (a.labor_units + carried)) > 1e-6) continue;
-        if (a.work.chain == dit->second.payer.bytes) continue;          // self-deal
-        const bool party = key.second == dit->second.payer.bytes
-                        || key.second == a.work.chain;
-        if (!party) continue;
+        if (a.work.chain == deal.payer.bytes) continue;                 // самосделка
 
-        // The breakdown must BE the payment, not sit beside it.
+        // Разбивка ЕСТЬ цена, а не мнение рядом с ней.
         double named = 0.0;
-        for (const auto& ax : prof->axes) named += ax.units;
+        for (const auto& x : a.axes) named += x.units;
         if (std::abs(named - a.labor_units) > 1e-6) continue;
 
-        for (const auto& ax : prof->axes) {
-            auto& acc = per_axis[ax.axis];
-            const double per_hour = ax.units / a.hours_raw;
-            acc.units += ax.units;
+        for (const auto& x : a.axes) {
+            auto& acc = per_axis[x.axis];
+            const double per_hour = x.units / a.hours_raw;
+            acc.units += x.units;
             acc.hours += a.hours_raw;
             acc.sum   += a.hours_raw * per_hour;
             acc.sumsq += a.hours_raw * per_hour * per_hour;
             acc.deals += 1;
-            acc.chains.insert(key.second);
-            total_units += ax.units;
+            acc.chains.insert(deal.payer.bytes);
+            total_units += x.units;
         }
     }
-
-    std::set<std::string> described;
-    if (catalogs)
-        for (const auto& cat : *catalogs)
-            for (const auto& e : cat.entries)
-                if (!e.ru.empty()) described.insert(e.slug);
 
     std::vector<AxisLedgerRow> out;
     out.reserve(per_axis.size());
@@ -108,11 +108,12 @@ std::vector<AxisLedgerRow> build_axis_ledger(
             const double mean = acc.sum / acc.hours;
             r.spread = std::sqrt(std::max(0.0, acc.sumsq / acc.hours - mean * mean));
         }
-        r.described = described.count(slug) != 0;
+        r.described = defs && defs->count(slug) != 0
+                   && !defs->at(slug).description.empty();
         out.push_back(std::move(r));
     }
-    // Canonical: by weight of evidence, ties by slug — two witnesses must print
-    // the same table from the same blocks.
+    // Канонический порядок: по весу свидетельств, развязка по слагу — два
+    // свидетеля обязаны напечатать одну таблицу из одних блоков.
     std::sort(out.begin(), out.end(), [](const AxisLedgerRow& a, const AxisLedgerRow& b) {
         if (a.units != b.units) return a.units > b.units;
         return a.slug < b.slug;

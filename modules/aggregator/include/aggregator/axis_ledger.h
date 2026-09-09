@@ -54,17 +54,27 @@ struct AxisLedgerRow {
     bool        described = false;
 };
 
+// Axis definitions found in the chains (ИР-022): slug → the record that argues
+// for it. The dictionary of labour is not a file the aggregator ships any more —
+// it is whatever people wrote and whoever uses it. Later definitions of the same
+// slug supersede earlier ones from the same chain; across chains the first by
+// (timestamp, chain) wins for display, and disagreement is a fact about the slug,
+// not something to resolve here.
+std::map<std::string, records::AxisDef> build_axis_definitions(
+    const AggregatorStorage& storage);
+
 // Read the ledger off the settled deals.
 //
-// A profile counts only when the deal is SETTLED, the author is a party to it
-// (derived from the Acceptance, never declared), and the breakdown ADDS UP to the
-// deal's labor_units. The last check is what makes the itemization a statement
-// about the payment rather than an opinion beside it: a breakdown that does not
-// sum to the price describes some other deal.
+// The breakdown is taken from the ACCEPTANCE itself (records.md §9.5 v4) — signed
+// together with the price, so nobody accepts a deal and then remembers a
+// convenient story about it. A deal counts only when it is settled, is not a
+// self-deal, and its breakdown ADDS UP to labor_units: an itemization that does
+// not sum to the price describes some other deal.
 //
-// `catalogs` is consulted only to mark `described`; it never gates a row.
+// `defs` is consulted only to mark `described`; it never gates a row. Anyone may
+// use an axis nobody defined — that is visible, not forbidden.
 std::vector<AxisLedgerRow> build_axis_ledger(
-    const AggregatorStorage&                    storage,
-    const std::vector<records::Catalog>*        catalogs = nullptr);
+    const AggregatorStorage&                            storage,
+    const std::map<std::string, records::AxisDef>*      defs = nullptr);
 
 } // namespace aggregator

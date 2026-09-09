@@ -1016,3 +1016,89 @@ TEST(RecordsCodec, DealProfileBareRoundtrip) {
     EXPECT_TRUE(r.note.empty());
     EXPECT_EQ(r.axes.size(), 1u);
 }
+
+// Acceptance v4 (ИР-022) — цена, расписанная по осям, подписана ВМЕСТЕ с ценой.
+TEST(RecordsCodec, AcceptanceAxesRoundtrip) {
+    records::Acceptance a{};
+    a.work        = make_ref(0x53, 0x54);
+    a.receiver.fill(0xB1);
+    a.quality     = "пройдено";
+    a.hours_raw   = 10.0;
+    a.labor_units = 14.0;
+    a.timestamp   = 1'700'000'000LL;
+    a.axes        = {{"danger", 2.8}, {"knowledge", 5.5}, {"physical", 5.7}};
+
+    const auto d = std::get<records::Acceptance>(roundtrip(Record{a}));
+    EXPECT_EQ(d.axes, a.axes);
+    EXPECT_DOUBLE_EQ(d.labor_units, 14.0);
+    EXPECT_FALSE(d.carried_units.has_value());
+}
+
+// Разбивка независима от carried_units и norm: любое их подмножество читается.
+TEST(RecordsCodec, AcceptanceAxesAlongsideOtherOptionalFields) {
+    records::Acceptance a{};
+    a.work        = make_ref(0x53, 0x54);
+    a.receiver.fill(0xB2);
+    a.hours_raw   = 4.0;
+    a.labor_units = 6.0;
+    a.timestamp   = 5;
+    a.carried_units = 1.5;
+    a.axes        = {{"physical", 6.0}};
+
+    const auto d = std::get<records::Acceptance>(roundtrip(Record{a}));
+    ASSERT_TRUE(d.carried_units.has_value());
+    EXPECT_DOUBLE_EQ(*d.carried_units, 1.5);
+    ASSERT_EQ(d.axes.size(), 1u);
+    EXPECT_EQ(d.axes[0].axis, "physical");
+}
+
+// Приёмка без разбивки — законное состояние: всё, что написано до ИР-022,
+// декодируется и остаётся оплаченным.
+TEST(RecordsCodec, AcceptanceWithoutAxesStillDecodes) {
+    records::Acceptance a{};
+    a.work        = make_ref(0x53, 0x54);
+    a.receiver.fill(0xB3);
+    a.hours_raw   = 2.0;
+    a.labor_units = 2.0;
+    a.timestamp   = 3;
+    const auto plain = Codec::encode(Record{a});
+    const auto d = std::get<records::Acceptance>(Codec::decode(plain));
+    EXPECT_TRUE(d.axes.empty());
+
+    a.axes = {{"physical", 2.0}};
+    EXPECT_NE(Codec::encode(Record{a}), plain);   // пустая — поля нет вовсе
+}
+
+// AxisDef (0x79) — ось, заведённая в цепи (ИР-022)
+TEST(RecordsCodec, AxisDefRoundtrip) {
+    records::AxisDef a{};
+    a.slug        = "danger";
+    a.ru          = "Опасность";
+    a.description = "риск для самого работника, а не для других";
+    a.parent      = make_ref(0x79, 0x01);
+    a.same_as     = make_ref(0x79, 0x02);
+    a.timestamp   = 1'700'000'000LL;
+
+    const auto d = std::get<records::AxisDef>(roundtrip(Record{a}));
+    EXPECT_EQ(d.slug, a.slug);
+    EXPECT_EQ(d.ru, a.ru);
+    EXPECT_EQ(d.description, a.description);
+    ASSERT_TRUE(d.parent.has_value());
+    EXPECT_EQ(*d.parent, *a.parent);
+    ASSERT_TRUE(d.same_as.has_value());
+    EXPECT_EQ(*d.same_as, *a.same_as);
+}
+
+// Хвост по ключу: `parent` (5) и `same_as` (6) независимы.
+TEST(RecordsCodec, AxisDefSameAsWithoutParent) {
+    records::AxisDef a{};
+    a.slug = "хитрость"; a.ru = "Хитрость";
+    a.description = "то же, что изворотливость";
+    a.same_as = make_ref(0x79, 0x03);
+    a.timestamp = 8;
+
+    const auto d = std::get<records::AxisDef>(roundtrip(Record{a}));
+    EXPECT_FALSE(d.parent.has_value());
+    ASSERT_TRUE(d.same_as.has_value());
+    EXPECT_EQ(*d.same_as, *a.same_as);
+}
