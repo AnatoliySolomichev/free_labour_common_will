@@ -59,6 +59,11 @@ struct CatalogEntry {
     std::string              group;      // section, for grouping in a picker
     std::vector<std::string> aliases;    // synonyms, for search only
     std::string              parent;     // tree parent slug ("" = root/none), ИР-017
+    // Argument for the entry — what this axis actually means and why it is one
+    // axis rather than two (ИР-022). The better an axis is argued, the better an
+    // axis it is: nothing forbids inventing one, but an axis reused again and
+    // again with nothing written behind it is visible as exactly that.
+    std::string              description;
     CatalogAxes              axes;       // cloud coordinates, ИР-018
     // Needs only: professions that close this need ("need.electrical" →
     // ["prof.electrician"]). Without it matching cannot be mechanised — a person

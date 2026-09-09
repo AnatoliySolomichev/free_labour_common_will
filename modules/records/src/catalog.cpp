@@ -56,6 +56,8 @@ Catalog catalog_from(const Value& root, const std::string& where) {
             e.group = g->string;
         if (const Value* p = json::find(item.object, "parent"); p && p->is_string())
             e.parent = p->string;
+        if (const Value* d = json::find(item.object, "description"); d && d->is_string())
+            e.description = d->string;
         if (const Value* ax = json::find(item.object, "axes"); ax && ax->is_object()) {
             // Every numeric member is an axis. The set is NOT fixed here (ИР-022):
             // a vocabulary the parser has to know in advance is a vocabulary the

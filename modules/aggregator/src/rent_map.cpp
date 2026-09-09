@@ -115,6 +115,11 @@ DealProfiles build_deal_profiles(const AggregatorStorage& storage) {
         const bool party = sp.author.bytes == dit->second.payer.bytes
                         || sp.author.bytes == a.work.chain;
         if (!party) continue;
+        // Запись либо верна целиком, либо не верна: если разбивка цены не
+        // сходится с ценой, доверять её интенсивностям тоже не за что.
+        double named = 0.0;
+        for (const auto& ax : sp.prof.axes) named += ax.units;
+        if (std::abs(named - a.labor_units) > 1e-6) continue;
 
         const auto wit = by_hash.find(a.work.hash);
         if (wit == by_hash.end()) continue;
@@ -131,7 +136,8 @@ DealProfiles build_deal_profiles(const AggregatorStorage& storage) {
 
         auto& per = agg[{spec->name, grade->level}];
         for (const auto& ax : sp.prof.axes) {
-            per[ax.axis].sum += a.hours_raw * ax.value;
+            if (!ax.value) continue;          // интенсивность необязательна
+            per[ax.axis].sum += a.hours_raw * *ax.value;
             per[ax.axis].w   += a.hours_raw;
         }
     }

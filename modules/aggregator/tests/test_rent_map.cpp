@@ -245,7 +245,11 @@ TEST_F(DealProfileTest, ProfileVariesWithinAnActivity) {
 
         records::DealProfile dp{};
         dp.deal      = ref_to(payer, acc);
-        dp.axes      = {{"knowledge", knowledge}};
+        records::DealProfileAxis ax{};
+        ax.axis  = "knowledge";
+        ax.units = hours * rate;         // вся цена названа одной осью — сходится
+        ax.value = knowledge;            // интенсивность: необязательная геометрия
+        dp.axes      = {ax};
         dp.timestamp = kFrom + 3700;
         add(payer, dp);                              // плательщик — сторона сделки
     };
@@ -283,7 +287,9 @@ TEST_F(DealProfileTest, OnlyAPartyToTheDealMayDescribeIt) {
 
     records::DealProfile dp{};
     dp.deal      = ref_to(chain_of(0xB1), acc);
-    dp.axes      = {{"knowledge", 0.99}};
+    records::DealProfileAxis ax{};
+    ax.axis = "knowledge"; ax.units = 10.0; ax.value = 0.99;
+    dp.axes      = {ax};
     dp.timestamp = kFrom + 3700;
     add(chain_of(0xEE), dp);                         // посторонний
 
@@ -307,7 +313,9 @@ TEST_F(DealProfileTest, UnsettledDealCarriesNoProfile) {
 
     records::DealProfile dp{};
     dp.deal      = ref_to(chain_of(0xB1), acc);
-    dp.axes      = {{"knowledge", 0.9}};
+    records::DealProfileAxis ax{};
+    ax.axis = "knowledge"; ax.units = 10.0; ax.value = 0.9;
+    dp.axes      = {ax};
     dp.timestamp = kFrom + 3700;
     add(chain_of(0xB1), dp);
 

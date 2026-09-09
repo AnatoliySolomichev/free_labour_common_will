@@ -19,6 +19,7 @@ add_library(aggregator
     src/cloud_view.cpp
     src/axis_prices.cpp
     src/rent_map.cpp
+    src/axis_ledger.cpp
     src/own_chain.cpp
 )
 
@@ -60,6 +61,7 @@ add_executable(aggregator_tests
     tests/test_cloud_view.cpp
     tests/test_axis_prices.cpp
     tests/test_rent_map.cpp
+    tests/test_axis_ledger.cpp
     tests/test_tls_smoke.cpp
 )
 

@@ -404,9 +404,11 @@ void enc_deal_profile(Buf& out, const DealProfile& d) {
     w_uint(out, 1); w_ref(out, d.deal);
     w_uint(out, 2); w_arr(out, d.axes.size());
     for (const auto& a : d.axes) {
-        w_map(out, 2);
+        // Ключ 1 — часы (обязательны), ключ 2 — интенсивность (нет).
+        w_map(out, 2 + (a.value ? 1 : 0));
         w_uint(out, 0); w_text(out, a.axis);
-        w_uint(out, 1); w_float64(out, a.value);
+        w_uint(out, 1); w_float64(out, a.units);
+        if (a.value) { w_uint(out, 2); w_float64(out, *a.value); }
     }
     w_uint(out, 3); w_int64(out, d.timestamp);
     w_uint(out, 4); w_uint(out, 0);          // зарезервировано под версию профиля
@@ -1022,10 +1024,13 @@ DealProfile dec_deal_profile_fields(CborReader& r, uint64_t field_count) {
         const uint64_t n = r.r_arr();
         d.axes.reserve(static_cast<size_t>(n));
         for (uint64_t i = 0; i < n; ++i) {
-            if (r.r_map() != 2) throw CodecError("DealProfileAxis: expected 2 fields");
+            const uint64_t fields = r.r_map();
+            if (fields < 2 || fields > 3)
+                throw CodecError("DealProfileAxis: expected 2 or 3 fields");
             DealProfileAxis a{};
             expect_key(r, 0); a.axis  = r.r_text();
-            expect_key(r, 1); a.value = r.r_float64();
+            expect_key(r, 1); a.units = r.r_float64();
+            if (fields == 3) { expect_key(r, 2); a.value = r.r_float64(); }
             d.axes.push_back(std::move(a));
         }
     }

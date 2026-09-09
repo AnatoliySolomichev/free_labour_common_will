@@ -7,6 +7,7 @@
 #include "aggregator/match_view.h"
 #include "aggregator/profile_view.h"
 #include "aggregator/rates_view.h"
+#include "aggregator/axis_ledger.h"
 #include "aggregator/rent_map.h"
 #include "aggregator/cloud_view.h"
 #include "aggregator/axis_prices.h"
@@ -1164,6 +1165,49 @@ void AggregatorServer::setup_routes() {
     // (ИР-019): per (activity, axis) the grade-weighted median, the number of
     // distinct attesters, and whether it is still `preliminary` (below the N
     // threshold — the same open N as records.md §14.8 п.11). ?slug=... filters.
+    // GET /economy/axis-ledger — куда труд сети ушёл НА САМОМ ДЕЛЕ (ИР-022).
+    //
+    // Не оценка и не подгонка: сделки сами расписали свою цену по осям, суммы
+    // сошлись с ценой, здесь они просто сложены. Цена оси нигде не назначается —
+    // сеть может сказать лишь, какая доля всех оплаченных часов ушла на
+    // опасность, и это факт.
+    //
+    // `described: false` — оси, которой никто не дал определения. Это не ошибка:
+    // заводить оси волен каждый. Это видимость того, что осью пользуются без
+    // аргумента, — и чем чаще такую ось переиспользуют, тем громче сигнал.
+    svr.Get("/economy/axis-ledger", [&](const httplib::Request&,
+                                        httplib::Response& res) {
+        try {
+            std::vector<records::Catalog> cats;
+            if (!catalog_dir_.empty())
+                if (const auto ax = read_file(catalog_dir_ / "axes.json")) {
+                    try { cats.push_back(records::parse_catalog(*ax)); }
+                    catch (const records::CatalogError&) {}
+                }
+            const auto led = build_axis_ledger(storage_, cats.empty() ? nullptr : &cats);
+            std::string body = "{\"axes\":[";
+            for (size_t i = 0; i < led.size(); ++i) {
+                const auto& r = led[i];
+                if (i) body += ',';
+                body += "{\"axis\":\"" + json_escape(r.slug)
+                     + "\",\"units\":"    + std::to_string(r.units)
+                     + ",\"hours\":"      + std::to_string(r.hours)
+                     + ",\"share\":"      + std::to_string(r.share)
+                     + ",\"per_hour\":"   + std::to_string(r.per_hour)
+                     + ",\"spread\":"     + std::to_string(r.spread)
+                     + ",\"deals\":"      + std::to_string(r.deals)
+                     + ",\"chains\":"     + std::to_string(r.chains)
+                     + ",\"described\":"  + (r.described ? "true" : "false") + "}";
+            }
+            body += "]}";
+            res.set_content(body, "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
+                            "application/json");
+        }
+    });
+
     svr.Get("/specialty/attestations", [&](const httplib::Request& req,
                                            httplib::Response& res) {
         // Pilot threshold: any attestation overrides bootstrap; below it a value is

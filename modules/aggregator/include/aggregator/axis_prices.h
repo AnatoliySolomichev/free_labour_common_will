@@ -2,6 +2,15 @@
 
 // Axis prices (ИР-020): hedonic decomposition of observed labour rates.
 //
+// ⚠ CANDIDATE FOR REMOVAL (ИР-022, 2026-09-09). Everything in this file infers
+// what a deal never said. Since deals itemize their own price by axis
+// (DealProfile, aggregator/axis_ledger.h), the price of an axis is READ rather
+// than fitted, exactly and with nothing to game. The regression survives here for
+// one reason only: it does not read what people declare, so no amount of lying in
+// declarations moves it — an auditor, not a mechanism. If it never contributes a
+// figure the ledger does not already give, it goes, and the basis, the admission
+// exam, the ridge and the sliding control go with it.
+//
 //   rate_i ≈ β₀ + Σ_j β_j · x_ij        x_ij = profile of activity i on axis j
 //
 // β₀ is the price of a plain hour, β_j how many normalized hours a full unit of
