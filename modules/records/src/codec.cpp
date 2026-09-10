@@ -375,48 +375,6 @@ void enc_axis_attestation(Buf& out, const AxisAttestation& a) {
     if (!a.note.empty()) { w_uint(out, 7); w_text(out, a.note); }  // v3 (ИР-020)
 }
 
-void enc_axis_prices(Buf& out, const AxisPrices& a) {
-    // v1 = map(8); v2 adds the sides' disagreement (key 8) and v3 the per-axis
-    // price spread (key 9), each only when present, so earlier records keep their
-    // exact bytes and hashes.
-    w_map(out, 8 + (a.disagreement.empty() ? 0 : 1) + (a.spread.empty() ? 0 : 1));
-    w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::AxisPrices));
-    w_uint(out, 1); w_int64(out, a.date);
-    w_uint(out, 2); w_fixed(out, a.snapshot);
-    w_uint(out, 3); w_text(out, a.params);
-    w_uint(out, 4); w_arr(out, a.basis.size());
-    for (const auto& b : a.basis) w_text(out, b);
-    w_uint(out, 5); w_arr(out, a.fits.size());
-    for (const auto& f : a.fits) {
-        w_map(out, 5);
-        w_uint(out, 0); w_text(out, f.kind);
-        w_uint(out, 1); w_arr(out, f.beta.size());
-        for (const double b : f.beta) w_float64(out, b);
-        w_uint(out, 2); w_float64(out, f.r2);
-        w_uint(out, 3); w_uint(out, f.rows);
-        w_uint(out, 4); w_float64(out, f.weight);
-    }
-    w_uint(out, 6); w_arr(out, a.gate.size());
-    for (const auto& g : a.gate) {
-        w_map(out, 5);
-        w_uint(out, 0); w_text(out, g.axis);
-        w_uint(out, 1); w_float64(out, g.loo_base);
-        w_uint(out, 2); w_float64(out, g.loo_with);
-        w_uint(out, 3); w_float64(out, g.bar);
-        // This codec has no CBOR bool; 0/1 as an unsigned is just as deterministic.
-        w_uint(out, 4); w_uint(out, g.admitted ? 1u : 0u);
-    }
-    w_uint(out, 7); w_int64(out, a.timestamp);
-    if (!a.disagreement.empty()) {                       // v2 (ИР-020)
-        w_uint(out, 8); w_arr(out, a.disagreement.size());
-        for (const double d : a.disagreement) w_float64(out, d);
-    }
-    if (!a.spread.empty()) {                             // v3 (ИР-020)
-        w_uint(out, 9); w_arr(out, a.spread.size());
-        for (const double d : a.spread) w_float64(out, d);
-    }
-}
-
 void enc_deal_profile(Buf& out, const DealProfile& d) {
     // Keys 5 (base) and 6 (note) only when present, so a bare profile stays as
     // small as it reads.
@@ -1010,67 +968,6 @@ AxisAttestation dec_axis_attestation_fields(CborReader& r, uint64_t field_count)
     return a;
 }
 
-AxisPrices dec_axis_prices_fields(CborReader& r, uint64_t field_count) {
-    AxisPrices a{};
-    expect_key(r, 1); a.date = r.r_int();
-    expect_key(r, 2); r.r_fixed(a.snapshot);
-    expect_key(r, 3); a.params = r.r_text();
-    expect_key(r, 4);
-    {
-        const uint64_t n = r.r_arr();
-        a.basis.reserve(static_cast<size_t>(n));
-        for (uint64_t i = 0; i < n; ++i) a.basis.push_back(r.r_text());
-    }
-    expect_key(r, 5);
-    {
-        const uint64_t n = r.r_arr();
-        a.fits.reserve(static_cast<size_t>(n));
-        for (uint64_t i = 0; i < n; ++i) {
-            if (r.r_map() != 5) throw CodecError("AxisFitEntry: expected 5 fields");
-            AxisFitEntry f{};
-            expect_key(r, 0); f.kind = r.r_text();
-            expect_key(r, 1);
-            const uint64_t m = r.r_arr();
-            f.beta.reserve(static_cast<size_t>(m));
-            for (uint64_t j = 0; j < m; ++j) f.beta.push_back(r.r_float64());
-            expect_key(r, 2); f.r2     = r.r_float64();
-            expect_key(r, 3); f.rows   = r.r_uint();
-            expect_key(r, 4); f.weight = r.r_float64();
-            a.fits.push_back(std::move(f));
-        }
-    }
-    expect_key(r, 6);
-    {
-        const uint64_t n = r.r_arr();
-        a.gate.reserve(static_cast<size_t>(n));
-        for (uint64_t i = 0; i < n; ++i) {
-            if (r.r_map() != 5) throw CodecError("AxisGateEntry: expected 5 fields");
-            AxisGateEntry g{};
-            expect_key(r, 0); g.axis     = r.r_text();
-            expect_key(r, 1); g.loo_base = r.r_float64();
-            expect_key(r, 2); g.loo_with = r.r_float64();
-            expect_key(r, 3); g.bar      = r.r_float64();
-            expect_key(r, 4); g.admitted = r.r_uint() != 0;
-            a.gate.push_back(std::move(g));
-        }
-    }
-    expect_key(r, 7); a.timestamp = r.r_int();
-    // Хвост читается ПО КЛЮЧУ, а не по счётчику: `disagreement` (v2) и `spread`
-    // (v3) независимы, и девять полей могли бы означать любое из них.
-    for (uint64_t i = 8; i < field_count; ++i) {
-        const uint64_t key = r.r_uint();
-        auto read_vec = [&r](std::vector<double>& dst) {
-            const uint64_t n = r.r_arr();
-            dst.reserve(static_cast<size_t>(n));
-            for (uint64_t k = 0; k < n; ++k) dst.push_back(r.r_float64());
-        };
-        if      (key == 8) read_vec(a.disagreement);
-        else if (key == 9) read_vec(a.spread);
-        else throw CodecError("AxisPrices: unknown field key");
-    }
-    return a;
-}
-
 DealProfile dec_deal_profile_fields(CborReader& r, uint64_t field_count) {
     DealProfile d{};
     expect_key(r, 1); d.deal = dec_ref(r);
@@ -1143,7 +1040,6 @@ std::vector<uint8_t> Codec::encode(const Record& rec) {
         else if constexpr (std::is_same_v<T, Redemption>)  enc_redemption(out, r);
         else if constexpr (std::is_same_v<T, SpecialtyCloud>) enc_specialty_cloud(out, r);
         else if constexpr (std::is_same_v<T, AxisAttestation>) enc_axis_attestation(out, r);
-        else if constexpr (std::is_same_v<T, AxisPrices>)     enc_axis_prices(out, r);
         else if constexpr (std::is_same_v<T, DealProfile>)    enc_deal_profile(out, r);
         else if constexpr (std::is_same_v<T, AxisDef>)        enc_axis_def(out, r);
     }, rec);
@@ -1184,8 +1080,6 @@ Record Codec::decode(const uint8_t* data, size_t len) {
             return dec_axis_def_fields(r, field_count);
         case RecordType::DealProfile:
             return dec_deal_profile_fields(r, field_count);
-        case RecordType::AxisPrices:
-            return dec_axis_prices_fields(r, field_count);
         default:
             throw CodecError("CBOR: unknown record type discriminator");
     }

@@ -1,16 +1,14 @@
 #include "aggregator/rent_map.h"
-#include "aggregator/axis_prices.h"
-#include "aggregator/axis_ledger.h"
 
 #include <records/codec.h>
 
 #include <cmath>
+#include <set>
 
 namespace aggregator {
 
-std::map<std::pair<std::string, uint8_t>, BasketFlow> build_basket_flows(
-    const AggregatorStorage& storage, int64_t from_ts, int64_t to_ts, double W) {
-
+RentInput build_rent_input(const AggregatorStorage& storage,
+                           int64_t from_ts, int64_t to_ts) {
     using RefHash = std::array<uint8_t, 32>;
     std::map<RefHash, records::Record> by_hash;
     struct Deal { records::Acceptance acc; UserId payer; };
@@ -32,91 +30,22 @@ std::map<std::pair<std::string, uint8_t>, BasketFlow> build_basket_flows(
         by_hash[bh.bytes] = std::move(rec);
     }
 
-    const double norm = W > 0.0 ? W : 1.0;
-    std::map<std::pair<std::string, uint8_t>, BasketFlow> out;
+    RentInput out;
+    std::map<RefHash, double> axis_units, axis_hours;
     for (const auto& [acc_hash, deal] : deals) {
         const auto& a = deal.acc;
         if (a.timestamp < from_ts || a.timestamp >= to_ts) continue;
-        if (a.hours_raw <= 0.0) continue;
+        if (a.hours_raw <= 0.0 || a.axes.empty()) continue;
         const double carried = a.carried_units ? *a.carried_units : 0.0;
-        const double payable = a.labor_units + carried;
         const auto pit = paid.find(acc_hash);
-        if (pit == paid.end() || std::abs(pit->second - payable) > 1e-6) continue;
-        if (a.work.chain == deal.payer.bytes) continue;                  // self-deal
-
-        const auto wit = by_hash.find(a.work.hash);
-        if (wit == by_hash.end()) continue;
-        const auto* wr = std::get_if<records::WorkRecord>(&wit->second);
-        if (!wr) continue;
-        const auto git = by_hash.find(wr->agent.hash);
-        if (git == by_hash.end()) continue;
-        const auto* grade = std::get_if<records::Grade>(&git->second);
-        if (!grade) continue;
-        const auto sit = by_hash.find(grade->specialty.hash);
-        if (sit == by_hash.end()) continue;
-        const auto* spec = std::get_if<records::Specialty>(&sit->second);
-        if (!spec) continue;
-
-        const double rate   = a.labor_units / a.hours_raw / norm;
-        const int64_t period = (a.timestamp - from_ts) / (kRentPeriodDays * 86'400);
-
-        auto& b = out[{spec->name, grade->level}];
-        auto& p = b.payers[deal.payer.bytes];
-        p.hours      += a.hours_raw;
-        p.rate_hours += rate * a.hours_raw;
-        auto& q = b.periods[period];
-        q.hours      += a.hours_raw;
-        q.rate_hours += rate * a.hours_raw;
-    }
-    return out;
-}
-
-DealProfiles build_deal_profiles(const AggregatorStorage& storage) {
-    using RefHash = std::array<uint8_t, 32>;
-    const auto defs = build_axis_definitions(storage);
-    std::map<RefHash, records::Record> by_hash;
-    struct Deal { records::Acceptance acc; UserId payer; };
-    std::map<RefHash, Deal>   deals;
-    std::map<RefHash, double> paid;
-    struct Said { records::DealProfile prof; UserId author; };
-    std::vector<Said> said;
-
-    for (const Hash& bh : storage.all_block_hashes()) {
-        const auto block = storage.get_block_by_hash(bh);
-        if (!block || block->type != BlockType::DATA) continue;
-        records::Record rec;
-        try { rec = records::Codec::decode(block->payload.data(), block->payload.size()); }
-        catch (const records::CodecError&) { continue; }
-        if (const auto* a = std::get_if<records::Acceptance>(&rec)) {
-            deals[bh.bytes] = Deal{*a, block->address.user_id};
-        } else if (const auto* t = std::get_if<records::Transfer>(&rec)) {
-            if (t->from == block->address.user_id.bytes && t->reason)
-                for (const auto& o : t->origins) paid[t->reason->hash] += o.units;
-        } else if (const auto* p = std::get_if<records::DealProfile>(&rec)) {
-            said.push_back({*p, block->address.user_id});
-        }
-        by_hash[bh.bytes] = std::move(rec);
-    }
-
-    // Профиль считается, только если сделка РАССЧИТАНА и автор профиля — её
-    // сторона. Сторона выводится из самой сделки (приёмку пишет плательщик,
-    // Acceptance::work называет цепь работника), а не объявляется: объявленная
-    // могла бы соврать, выведенная — нет.
-    struct Acc { double sum = 0.0, w = 0.0; };
-    std::map<std::pair<std::string, uint8_t>, std::map<std::string, Acc>> agg;
-    for (const auto& sp : said) {
-        const auto dit = deals.find(sp.prof.deal.hash);
-        if (dit == deals.end()) continue;
-        const auto& a = dit->second.acc;
-        if (a.hours_raw <= 0.0) continue;
-        const double carried = a.carried_units ? *a.carried_units : 0.0;
-        const auto pit = paid.find(sp.prof.deal.hash);
         if (pit == paid.end() ||
             std::abs(pit->second - (a.labor_units + carried)) > 1e-6) continue;
-        if (a.work.chain == dit->second.payer.bytes) continue;          // самосделка
-        const bool party = sp.author.bytes == dit->second.payer.bytes
-                        || sp.author.bytes == a.work.chain;
-        if (!party) continue;
+        if (a.work.chain == deal.payer.bytes) continue;                  // self-deal
+
+        // Разбивка ЕСТЬ цена: не сходящаяся описывает какую-то другую сделку.
+        double named = 0.0;
+        for (const auto& x : a.axes) named += x.units;
+        if (std::abs(named - a.labor_units) > 1e-6) continue;
 
         const auto wit = by_hash.find(a.work.hash);
         if (wit == by_hash.end()) continue;
@@ -131,71 +60,82 @@ DealProfiles build_deal_profiles(const AggregatorStorage& storage) {
         const auto* spec = std::get_if<records::Specialty>(&sit->second);
         if (!spec) continue;
 
-        // Наследие: план строится по СЛАГАМ каталога, а личность оси — ссылка.
-        // Слаг берётся из определения оси как подпись. Резолвинг уйдёт вместе с
-        // каталожным путём — он помечен кандидатом на удаление (ИР-022).
-        auto& per = agg[{spec->name, grade->level}];
-        for (const auto& ax : sp.prof.axes) {
-            const auto dit = defs.find(ax.axis.hash);
-            if (dit == defs.end() || dit->second.slug.empty()) continue;
-            per[dit->second.slug].sum += a.hours_raw * ax.value;
-            per[dit->second.slug].w   += a.hours_raw;
+        DealTrace t{};
+        t.payer  = deal.payer.bytes;
+        t.hours  = a.hours_raw;
+        t.units  = a.labor_units;
+        t.period = (a.timestamp - from_ts) / (kRentPeriodDays * 86'400);
+        for (const auto& x : a.axes) {
+            t.axes[x.axis.hash]    += x.units;
+            axis_units[x.axis.hash] += x.units;
+            axis_hours[x.axis.hash] += a.hours_raw;
         }
+        out.baskets[{spec->name, grade->level}].push_back(std::move(t));
     }
-
-    DealProfiles out;
-    for (const auto& [key, per] : agg)
-        for (const auto& [axis, acc] : per)
-            if (acc.w > 0.0) out[key][axis] = acc.sum / acc.w;
+    for (const auto& [axis, u] : axis_units) {
+        const double h = axis_hours[axis];
+        out.per_hour[axis] = h > 0.0 ? u / h : 0.0;
+    }
     return out;
 }
 
-std::vector<RentRow> build_rent_map(
-    const std::vector<AxisObservation>& obs,
-    const std::vector<double>&          pred,
-    const std::map<std::pair<std::string, uint8_t>, BasketFlow>& flows,
-    unsigned min_payers) {
-
+std::vector<RentRow> build_rent_map(const RentInput& in, unsigned min_payers) {
+    using RefHash = std::array<uint8_t, 32>;
     std::vector<RentRow> out;
-    out.reserve(obs.size());
-    for (std::size_t i = 0; i < obs.size() && i < pred.size(); ++i) {
-        const auto& o = obs[i];
+    out.reserve(in.baskets.size());
+    for (const auto& [key, deals] : in.baskets) {
         RentRow r{};
-        r.slug  = o.slug;
-        r.level = o.level;
-        r.fact  = o.rate;
-        r.pred  = pred[i];
-        r.resid = o.rate - pred[i];
-        r.hours = o.weight;
+        r.slug  = key.first;
+        r.level = key.second;
 
-        const auto fit = flows.find({o.slug, o.level});
-        if (fit == flows.end()) { out.push_back(std::move(r)); continue; }
-        const auto& f = fit->second;
-        r.payers = static_cast<unsigned>(f.payers.size());
-
-        for (const auto& [idx, q] : f.periods) {
+        double units = 0.0, expected = 0.0;
+        std::map<int64_t, std::pair<double, double>> by_period;   // units, expected
+        std::map<RefHash, double> excess;                          // payer → excess
+        std::set<RefHash> payers;
+        for (const auto& t : deals) {
+            // Ожидаемая цена — сетевая цена часа каждой названной оси; превышение
+            // считается по осям, чтобы переплата за одну не пряталась за
+            // недоплатой за другую.
+            double exp_t = 0.0, over_t = 0.0;
+            for (const auto& [axis, u] : t.axes) {
+                const auto it   = in.per_hour.find(axis);
+                const double nm = (it == in.per_hour.end() ? 0.0 : it->second) * t.hours;
+                exp_t += nm;
+                if (u > nm) over_t += u - nm;
+            }
+            r.hours  += t.hours;
+            units    += t.units;
+            expected += exp_t;
+            auto& bp = by_period[t.period];
+            bp.first  += t.units;
+            bp.second += exp_t;
+            payers.insert(t.payer);
+            if (over_t > 0.0) excess[t.payer] += over_t;
+        }
+        if (r.hours > 0.0) {
+            r.fact     = units / r.hours;
+            r.expected = expected / r.hours;
+            r.resid    = r.fact - r.expected;
+        }
+        r.payers = static_cast<unsigned>(payers.size());
+        for (const auto& [idx, bp] : by_period) {
             (void)idx;
-            if (q.hours <= 0.0) continue;
             ++r.periods_seen;
-            if (q.rate_hours / q.hours > r.pred) ++r.periods_over;
+            if (bp.first > bp.second + 1e-9) ++r.periods_over;
         }
 
-        // Concentration OF THE EXCESS, not of the volume. Only payers above the
-        // model contribute: when everybody pays more, the model itself has
-        // already absorbed it and there is no excess to concentrate.
+        // Концентрация ПРЕВЫШЕНИЯ, а не объёма. Когда дороже платят все, их
+        // превышение размазано по всем плательщикам — это дефицит, а не труба.
         if (r.payers >= min_payers) {
             double total = 0.0;
-            std::vector<double> exc;
-            exc.reserve(f.payers.size());
-            for (const auto& [who, p] : f.payers) {
-                (void)who;
-                if (p.hours <= 0.0) continue;
-                const double over = p.rate_hours / p.hours - r.pred;
-                if (over > 0.0) { exc.push_back(over * p.hours); total += over * p.hours; }
-            }
+            for (const auto& [who, e] : excess) { (void)who; total += e; }
             if (total > 0.0) {
                 double hhi = 0.0;
-                for (const double e : exc) { const double s = e / total; hhi += s * s; }
+                for (const auto& [who, e] : excess) {
+                    (void)who;
+                    const double s = e / total;
+                    hhi += s * s;
+                }
                 r.rent_payers = hhi > 0.0 ? 1.0 / hhi : 0.0;
             }
             r.judged = true;

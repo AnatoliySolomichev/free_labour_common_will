@@ -37,7 +37,8 @@ enum class RecordType : uint8_t {
     Redemption     = 0x74,
     SpecialtyCloud = 0x75,
     AxisAttestation = 0x76,
-    AxisPrices      = 0x77,
+    // 0x77 — AxisPrices, снята вместе с регрессией (records.md §11.9);
+    //        номер не переиспользуется.
     DealProfile     = 0x78,
     AxisDef         = 0x79,
 };
@@ -497,87 +498,6 @@ struct AxisAttestation {
     std::string note;
 };
 
-// ── Axis prices (ИР-020) ─────────────────────────────────────────────────────
-//
-// The hedonic decomposition of observed rates, published the way DailyAggregate
-// publishes rates: signed, dated, and committed to its input via `snapshot`, so
-// any witness recomputes it instead of trusting it.
-//
-// LOAD-BEARING INVARIANT: β is an OBSERVATION, never a law. Nothing in the
-// protocol may price a deal by this vector. The moment "price = f(profile)"
-// holds, profiles get drawn instead of measured (Goodhart) and the residual —
-// the entire diagnostic value — vanishes by construction.
-
-// One fitted price vector. `kind` says whose declarations it was fitted on, so
-// two sides of a deal with opposite interests can be fitted separately and
-// compared instead of averaged into a single number that hides the dispute:
-//   "declared" — the catalog profile ⊕ attested overrides (ИР-019), one per
-//                activity: today's only source;
-//   "seller" / "buyer" / "agreed" — the two-sided profile of ИР-020, later.
-struct AxisFitEntry {
-    std::string         kind;
-    std::vector<double> beta;    // aligned with AxisPrices::basis, column for column
-    double              r2     = 0.0;
-    uint64_t            rows    = 0;   // observations the fit stood on
-    double              weight  = 0.0; // Σ of their weights (hours)
-
-    bool operator==(const AxisFitEntry& o) const noexcept {
-        return kind == o.kind && beta == o.beta && r2 == o.r2
-            && rows == o.rows && weight == o.weight;
-    }
-};
-
-// The admission exam for one candidate axis — the audit trail of the decision
-// "this axis belongs in the basis". Published because two witnesses that differ
-// on a basis must be able to see WHERE they differ, not just that they do.
-struct AxisGateEntry {
-    std::string axis;
-    double      loo_base = 0.0;  // sliding-control error without the candidate
-    double      loo_with = 0.0;  // with it
-    double      bar      = 0.0;  // loo_base · (1 − margin): what it had to beat
-    bool        admitted = false;
-
-    bool operator==(const AxisGateEntry& o) const noexcept {
-        return axis == o.axis && loo_base == o.loo_base && loo_with == o.loo_with
-            && bar == o.bar && admitted == o.admitted;
-    }
-};
-
-// Signed axis prices for one day — twin of DailyAggregate and SpecialtyCloud.
-struct AxisPrices {
-    static constexpr RecordType TYPE = RecordType::AxisPrices;
-
-    int64_t                    date;      // UTC day start
-    std::array<uint8_t, 32>    snapshot;  // commits the input (catalog + block set)
-    std::string                params;    // algorithm version + every parameter
-    // Design columns in canonical order; basis[0] is the constant ("base"), the
-    // price of a plain hour. These are PROTOCOL KEYS joining to the catalog's
-    // `axes` and to AxisAttestation::axis — not display names.
-    std::vector<std::string>   basis;
-    std::vector<AxisFitEntry>  fits;
-    std::vector<AxisGateEntry> gate;
-    int64_t                    timestamp; // Unix timestamp UTC
-    // v2 (ИР-020): how far the two sides of a deal stand apart on each column,
-    // aligned with `basis` (0 for the constant, and for columns nobody disputed).
-    // Published rather than averaged away: a value both a buyer and a seller state
-    // is evidence, a value only one of them states is a position, and the gap
-    // between them is the first signal that an axis is really two axes glued
-    // together. Empty until the two-sided profile exists.
-    std::vector<double>        disagreement;
-    // v3 (ИР-020): how firmly the network agrees on each axis price — the spread
-    // of βj across leave-one-out folds, column for column with `basis`.
-    //
-    // This REPLACES the per-basket residual as the published diagnostic. The
-    // residual asked "how far is this basket from the model", a question that
-    // stops meaning anything once specialty and grade dissolve into axes: then no
-    // two pieces of work are "the same work" and a basket has nothing to be
-    // compared against. The AXIS is still shared even when the work is not, so
-    // the question that survives is about it. Small spread: the whole economy
-    // agrees on that price. Large: it rests on a handful of deals and is not yet
-    // a fact about the network.
-    std::vector<double>        spread;
-};
-
 // Profile of ONE piece of work, declared in the deal itself (ИР-022).
 //
 // The catalog gives a profile per ACTIVITY, which is why a grade had to exist:
@@ -681,7 +601,6 @@ using Record = std::variant<
     Redemption,
     SpecialtyCloud,
     AxisAttestation,
-    AxisPrices,
     DealProfile,
     AxisDef
 >;
