@@ -36,7 +36,9 @@ enum class RecordType : uint8_t {
     PledgeRevoke   = 0x73,
     Redemption     = 0x74,
     SpecialtyCloud = 0x75,
-    AxisAttestation = 0x76,
+    // 0x76 — AxisAttestation, снята: заверяла значения осей `x`, а у `x` не
+    //        осталось читателя — облако стоит на разбивках сделок
+    //        (records.md §11.8); номер не переиспользуется.
     // 0x77 — AxisPrices, снята вместе с регрессией (records.md §11.9);
     //        номер не переиспользуется.
     // 0x78 — DealProfile, снята: денег не несла, читателя не осталось
@@ -441,13 +443,14 @@ struct CloudNeighbor {
     }
 };
 
-// One point of the specialty cloud: an activity, its tree parent (for drift) and
-// its k nearest neighbours. Coordinates are NOT published (they live in the
-// catalog; the full map is a preview) — only what the rate prior needs.
+// One point of the specialty cloud: an activity, its tree parent (the prior's
+// fallback) and its k nearest neighbours. Coordinates are NOT published: they are
+// read off the deals the snapshot commits (records.md §11.7), and the map for
+// people is served on demand — only what the rate prior needs is signed.
 struct CloudPoint {
     std::string                slug;      // activity = rate key (records.md §11.2, records.md §14.8)
     std::string                parent;    // tree parent slug ("" = none) — drift target
-    std::vector<CloudNeighbor> neighbors; // k nearest, by cloud distance
+    std::vector<CloudNeighbor> neighbors; // k nearest, by affinity of price composition
 };
 
 // Signed specialty cloud, written into the aggregator's own chain — twin of
@@ -458,45 +461,11 @@ struct SpecialtyCloud {
     static constexpr RecordType TYPE = RecordType::SpecialtyCloud;
 
     int64_t                             date;      // UTC day start
-    std::array<uint8_t, 32>             snapshot;  // Merkle root of the input block set
+    std::array<uint8_t, 32>             snapshot;  // hash of the input block set (+ catalog text)
     std::string                         params;    // algorithm version + parameters
-    std::vector<std::array<uint8_t, 32>> sources;  // catalog source chains used
+    std::vector<std::array<uint8_t, 32>> sources;  // chains the input came from
     std::vector<CloudPoint>             points;
     int64_t                             timestamp; // Unix timestamp UTC
-};
-
-// Attestation of a declared cloud axis value (ИР-019): a practitioner states, on a
-// signed record, that an activity's axis (e.g. danger) is `value`. The aggregator
-// takes the grade-weighted median over practitioners — the value is set by the
-// people who do the work, not by decree, and re-checkable against the chains.
-struct AxisAttestation {
-    static constexpr RecordType TYPE = RecordType::AxisAttestation;
-
-    std::string activity;   // activity slug (cloud/rate key)
-    std::string axis;       // axis name ("danger", ...)
-    // Standalone (no `deal`): the ABSOLUTE attested value, 0..1.
-    // Deal-backed (`deal` set): a DELTA to the catalog's bootstrap value for this
-    // axis (+0.2 = "this job was more dangerous than the standard profile"). A
-    // delta says what it means directly, sums into a median, and is anchored to a
-    // value fixed in advance — so it cannot chase its own output.
-    double      value;
-    Ref         grade;      // attester's Grade IN this activity (weight + standing)
-    int64_t     timestamp;  // Unix timestamp UTC
-    // v2 (ИР-020): the settled Acceptance this profile was written against.
-    // Its presence is what makes the statement expensive — two signatures and a
-    // real payment stand behind it, not a free opinion. WHICH SIDE the author
-    // spoke for is DERIVED, never declared: the Acceptance's author is the payer,
-    // `Acceptance::work` names the worker's chain, and an author who is neither is
-    // not a party to the deal and does not get a voice in it. A declared side
-    // could lie; a derived one cannot.
-    std::optional<Ref> deal;
-    // v3 (ИР-020): a free-text line FOR PEOPLE — "варил в резервуаре, вытяжки
-    // нет". Never parsed, never weighed, never fed to a fit: it can only be read
-    // by whoever wants to understand why the number is what it is. The moment a
-    // machine reads it, people start writing for the machine. Empty = nothing to
-    // add; the field is then absent from the encoding, so old records keep their
-    // exact bytes and hashes.
-    std::string note;
 };
 
 // An axis, defined in somebody's chain (ИР-022).
@@ -554,7 +523,6 @@ using Record = std::variant<
     PledgeRevoke,
     Redemption,
     SpecialtyCloud,
-    AxisAttestation,
     AxisDef
 >;
 

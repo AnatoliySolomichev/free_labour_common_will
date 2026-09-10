@@ -58,14 +58,9 @@ Catalog catalog_from(const Value& root, const std::string& where) {
             e.parent = p->string;
         if (const Value* d = json::find(item.object, "description"); d && d->is_string())
             e.description = d->string;
-        if (const Value* ax = json::find(item.object, "axes"); ax && ax->is_object()) {
-            // Every numeric member is an axis. The set is NOT fixed here (ИР-022):
-            // a vocabulary the parser has to know in advance is a vocabulary the
-            // aggregator owns.
-            for (const auto& [key, val] : ax->object)
-                if (val.is_number()) e.axes.values[key] = val.number;
-            e.axes.present = true;
-        }
+        // "axes" — объявленные интенсивности `x` — больше не читается: облако
+        // стоит на разбивках сделок (records.md §11.8, specialty-axes.md §10).
+        // В professions.json поле осталось для прототипов-замеров.
         e.aliases   = optional_strings(item.object, "aliases",   ew);
         e.closed_by = optional_strings(item.object, "closed_by", ew);
         cat.entries.push_back(std::move(e));

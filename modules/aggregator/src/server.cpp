@@ -110,6 +110,25 @@ std::optional<std::string> read_file(const std::filesystem::path& path) {
                         std::istreambuf_iterator<char>());
 }
 
+// Catalogs the aggregator serves, if any. The specialty cloud takes only the tree
+// parent from them — the prior's fallback, never the neighbourhood — so their text
+// enters the cloud's snapshot together with the block set.
+struct ServedCatalogs {
+    std::vector<records::Catalog> cats;
+    std::string                   text;
+};
+ServedCatalogs served_catalogs(const std::filesystem::path& dir) {
+    ServedCatalogs s;
+    if (dir.empty()) return s;
+    for (const char* name : {"professions.json", "needs.json"})
+        if (const auto text = read_file(dir / name))
+            try {
+                s.cats.push_back(records::parse_catalog(*text));
+                s.text += *text;
+            } catch (const std::exception&) {}
+    return s;
+}
+
 // ── Profile JSON (records.md §8.6) ────────────────────────────────────────────
 // Facet → JSON key. Plurals are spelled out: "industry" + "s" is not a word.
 struct FacetKey { ProfileFacet facet; const char* key; };
@@ -707,33 +726,16 @@ void AggregatorServer::setup_routes() {
                 d.date      = day;
                 d.timestamp = now;
                 // Today's rates derive from YESTERDAY's settled deals
-                // (main_ideas.pdf: коэффициенты этого дня → следующего). If a
-                // catalog is served, the specialty cloud seeds priors for thin new
-                // activities (специальности-axes specialty-axes.md §10) — else nullptr, unchanged.
-                std::optional<records::SpecialtyCloud> cloud_opt;
-                if (!catalog_dir_.empty()) {
-                    if (const auto pt = read_file(catalog_dir_ / "professions.json")) {
-                        try {
-                            std::vector<records::Catalog> cc{records::parse_catalog(*pt)};
-                            std::string comb = *pt;
-                            if (const auto nt = read_file(catalog_dir_ / "needs.json")) {
-                                cc.push_back(records::parse_catalog(*nt));
-                                comb += *nt;
-                            }
-                            const Hash sn = Crypto::hash(
-                                reinterpret_cast<const uint8_t*>(comb.data()), comb.size());
-                            const auto cap = build_capital_intensity(storage_);
-                            const auto att = build_axis_attestations(storage_, 1, &cc);
-                            cloud_opt = build_specialty_cloud(cc, day, now, sn.bytes, {},
-                                                              5, 1.0, &cap, 0.5, &att);
-                        } catch (const std::exception&) {}
-                    }
-                }
-
+                // (main_ideas.pdf: коэффициенты этого дня → следующего). A thin new
+                // activity is seeded from its neighbours in the specialty cloud,
+                // which is read off the same settled deals (specialty-axes.md §10)
+                // and so needs no catalog; a served one lends tree parents only.
+                const auto served = served_catalogs(catalog_dir_);
+                const auto cloud  = build_specialty_cloud(
+                    build_specialty_compositions(storage_), day, now, {}, {}, 5,
+                    served.cats.empty() ? nullptr : &served.cats);
                 d.rates     = build_daily_rates(storage_, day - 86'400, previous,
-                                                0.3, 0.1,
-                                                cloud_opt ? &*cloud_opt : nullptr,
-                                                &kIndependence);
+                                                0.3, 0.1, &cloud, &kIndependence);
                 // W = hours-weighted mean of raw rates (economy.md §2б): the client
                 // divides by it so the average labour-hour equals 1.
                 double sw = 0.0, swr = 0.0;
@@ -772,59 +774,39 @@ void AggregatorServer::setup_routes() {
         }
     });
 
-    // GET /specialty/cloud — the specialty cloud (ИР-018, specialty-axes.md §10):
-    // per activity, its tree parent + k nearest neighbours. Computed from the
-    // catalog's declared axes + closed_by (phase 1), published once/day as a
-    // signed SpecialtyCloud in the aggregator's own chain and re-checkable via the
-    // committed `snapshot`. ?slug=... returns one activity; ?day=TS previews.
+    // GET /specialty/cloud — the specialty cloud (records.md §11.7,
+    // specialty-axes.md §10): per specialty, its k nearest by what their settled
+    // deals paid FOR — the share of the price per axis (ИР-022). Read off the deals,
+    // so it needs no catalog; a served one lends tree parents only. Published
+    // once/day as a signed SpecialtyCloud in the aggregator's own chain and
+    // re-checkable via the committed `snapshot`. ?slug=... returns one specialty;
+    // ?coords=1 adds the 2D spectral map.
     svr.Get("/specialty/cloud", [&](const httplib::Request& req, httplib::Response& res) {
-        if (catalog_dir_.empty()) {
-            res.status = 501;
-            res.set_content("{\"error\":\"cloud needs a catalog: start with --catalog PATH\"}",
-                            "application/json");
-            return;
-        }
         try {
-            const auto prof_text = read_file(catalog_dir_ / "professions.json");
-            if (!prof_text) {
-                res.status = 501;
-                res.set_content("{\"error\":\"professions.json not found in catalog dir\"}",
-                                "application/json");
-                return;
-            }
-            std::vector<records::Catalog> cats{records::parse_catalog(*prof_text)};
-            std::string combined = *prof_text;
-            if (const auto needs_text = read_file(catalog_dir_ / "needs.json")) {
-                cats.push_back(records::parse_catalog(*needs_text));
-                combined += *needs_text;
-            }
-            // Derived axis (phase 2): capital-intensity from settled deals; and
-            // attested declared axes (ИР-019) that override the catalog bootstrap.
-            const auto capital  = build_capital_intensity(storage_);
-            const auto attested = build_axis_attestations(storage_, 1, &cats);
-            constexpr double kCapitalWeight = 0.5;
+            const auto served = served_catalogs(catalog_dir_);
+            const auto comps  = build_specialty_compositions(storage_);
 
-            // snapshot commits the input: the catalog AND the block set the derived
-            // axis was computed over (sorted block hashes → deterministic).
-            std::string combined2 = combined;
+            // snapshot commits the input: the block set the cloud was read off and
+            // the catalog text its parents came from (sorted hashes → deterministic).
+            std::string input = served.text;
             {
                 auto hs = storage_.all_block_hashes();
                 std::sort(hs.begin(), hs.end(),
                           [](const Hash& a, const Hash& b) { return a.bytes < b.bytes; });
                 for (const Hash& h : hs)
-                    combined2.append(reinterpret_cast<const char*>(h.bytes.data()), 32);
+                    input.append(reinterpret_cast<const char*>(h.bytes.data()), 32);
             }
             const Hash snap = Crypto::hash(
-                reinterpret_cast<const uint8_t*>(combined2.data()), combined2.size());
+                reinterpret_cast<const uint8_t*>(input.data()), input.size());
 
             const auto    now = static_cast<int64_t>(std::time(nullptr));
             const int64_t day = now - now % 86'400;
             std::vector<std::array<uint8_t, 32>> sources;
             if (own_chain_) sources.push_back(own_chain_->uid().bytes);
 
-            const auto cloud = build_specialty_cloud(cats, day, now, snap.bytes, sources,
-                                                     5, 1.0, &capital, kCapitalWeight,
-                                                     &attested);
+            const auto cloud = build_specialty_cloud(
+                comps, day, now, snap.bytes, sources, 5,
+                served.cats.empty() ? nullptr : &served.cats);
 
             // Publish once/day (dedupe by scanning the branch), like DailyAggregate.
             std::string block_hex;
@@ -854,9 +836,7 @@ void AggregatorServer::setup_routes() {
             // ?coords=1 — spectral map coordinates on demand (ИР-018 phase 3), not
             // stored in the record (kept compact, specialty-axes.md §10).
             std::map<std::string, std::array<double, 2>> coords;
-            if (req.has_param("coords"))
-                coords = compute_spectral_coords(cats, 1.0, &capital,
-                                                 kCapitalWeight, &attested);
+            if (req.has_param("coords")) coords = compute_spectral_coords(comps);
 
             const std::string want = req.has_param("slug") ? req.get_param_value("slug") : "";
             std::string body = "{\"date\":" + std::to_string(cloud.date)
@@ -869,8 +849,11 @@ void AggregatorServer::setup_routes() {
                 if (!want.empty() && p.slug != want) continue;
                 if (!first) body += ',';
                 first = false;
+                // `deals` — сколько сделок стоит за местом точки: состав из одной
+                // сделки — слово одной сделки, и читатель должен это видеть.
                 body += "{\"slug\":\"" + json_escape(p.slug)
-                     + "\",\"parent\":\"" + json_escape(p.parent) + "\"";
+                     + "\",\"parent\":\"" + json_escape(p.parent)
+                     + "\",\"deals\":" + std::to_string(comps.at(p.slug).deals);
                 if (const auto it = coords.find(p.slug); it != coords.end())
                     body += ",\"coord\":[" + std::to_string(it->second[0]) + ","
                          + std::to_string(it->second[1]) + "]";
@@ -965,57 +948,6 @@ void AggregatorServer::setup_routes() {
             res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
                             "application/json");
         }
-    });
-
-    // GET /specialty/attestations — declared-axis values set by practitioners
-    // (ИР-019): per (activity, axis) the grade-weighted median, the number of
-    // distinct attesters, and whether it is still `preliminary` (below the N
-    // threshold — the same open N as records.md §14.8 п.11). ?slug=... filters.
-    svr.Get("/specialty/attestations", [&](const httplib::Request& req,
-                                           httplib::Response& res) {
-        // Pilot threshold: any attestation overrides bootstrap; below it a value is
-        // preliminary. The value of N is the shared open question (records.md §14.8 п.11).
-        constexpr int kMinAttesters = 1;
-        const std::string want = req.has_param("slug") ? req.get_param_value("slug") : "";
-        std::vector<records::Catalog> cats;
-        if (!catalog_dir_.empty())
-            if (const auto pt = read_file(catalog_dir_ / "professions.json"))
-                try { cats.push_back(records::parse_catalog(*pt)); }
-                catch (const std::exception&) {}
-        const auto summary = build_axis_attestation_summary(
-            storage_, cats.empty() ? nullptr : &cats);
-        std::string body = "{\"min_attesters\":" + std::to_string(kMinAttesters)
-                         + ",\"axes\":[";
-        bool first = true;
-        for (const auto& [key, sum] : summary) {
-            if (!want.empty() && key.first != want) continue;
-            if (!first) body += ',';
-            first = false;
-            body += "{\"activity\":\"" + json_escape(key.first)
-                 + "\",\"axis\":\"" + json_escape(key.second)
-                 + "\",\"value\":" + std::to_string(sum.all.median)
-                 + ",\"attesters\":" + std::to_string(sum.all.attesters)
-                 + ",\"preliminary\":"
-                 + (sum.all.attesters < kMinAttesters ? "true" : "false");
-            // The reason given by whoever's value became the median, in their own
-            // words. Carried for a human to read, never parsed (ИР-020).
-            if (!sum.all.note.empty())
-                body += ",\"note\":\"" + json_escape(sum.all.note) + "\"";
-            // The two sides of a deal, side by side and never averaged (ИР-020):
-            // where both spoke, their gap is the published disagreement.
-            if (sum.seller.attesters || sum.buyer.attesters) {
-                body += ",\"seller\":{\"value\":" + std::to_string(sum.seller.median)
-                     + ",\"attesters\":" + std::to_string(sum.seller.attesters) + "}"
-                     + ",\"buyer\":{\"value\":" + std::to_string(sum.buyer.median)
-                     + ",\"attesters\":" + std::to_string(sum.buyer.attesters) + "}";
-                if (sum.seller.attesters && sum.buyer.attesters)
-                    body += ",\"disagreement\":"
-                         + std::to_string(std::abs(sum.seller.median - sum.buyer.median));
-            }
-            body += "}";
-        }
-        body += "]}";
-        res.set_content(body, "application/json");
     });
 
     svr.Get("/economy/chain/:uid", [&](const httplib::Request& req,

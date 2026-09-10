@@ -2792,7 +2792,9 @@ static int cmd_rates(int argc, char** argv) {
     return economy_get(via, "/economy/rates");
 }
 
-// bc cloud --via URL [--slug SLUG] — the specialty cloud (ИР-018)
+// bc cloud --via URL [--slug SLUG] [--coords] — the specialty cloud, read off
+// the settled deals: each specialty's nearest by what its price was made of
+// (ИР-022, specialty-axes.md §10).
 static int cmd_cloud(int argc, char** argv) {
     const auto via = flag_val(argc, argv, "--via");
     if (via.empty()) {
@@ -2806,72 +2808,6 @@ static int cmd_cloud(int argc, char** argv) {
     if (flag_present(argc, argv, "--coords")) q.push_back("coords=1");
     for (std::size_t i = 0; i < q.size(); ++i) path += (i ? "&" : "?") + q[i];
     return economy_get(via, path);
-}
-
-// bc attestations --via URL [--slug SLUG] — attested axis values + support (ИР-019)
-static int cmd_attestations(int argc, char** argv) {
-    const auto via = flag_val(argc, argv, "--via");
-    if (via.empty()) {
-        std::cerr << "Usage: bc attestations --via URL [--slug SLUG]\n";
-        return 1;
-    }
-    std::string path = "/specialty/attestations";
-    if (const auto slug = flag_val(argc, argv, "--slug"); !slug.empty())
-        path += "?slug=" + slug;
-    return economy_get(via, path);
-}
-
-// The note is a line for humans, so it is bounded like one: 280 bytes of UTF-8.
-// The limit is a client rule, not a protocol one — the protocol does not read
-// the field at all.
-constexpr std::size_t kAttestNoteMax = 280;
-
-// bc attest --activity SLUG --axis danger --value 0.02
-//           [--grade REF] [--deal REF] [--note TEXT] [--via URL]
-// Attest a declared cloud axis value (ИР-019). The aggregator takes the
-// grade-weighted median over practitioners; --grade gives your standing/weight.
-//
-// With --deal the statement is about ONE settled deal you were a party to, and
-// --value is then a DELTA to the catalog's profile ("+0.2 = this job was more
-// dangerous than the standard"). That statement costs something — two signatures
-// and a real payment stand behind it — so it beats your own free-standing one
-// whatever the order in time. Which side you spoke for is derived from the deal
-// itself, never declared (ИР-020).
-static int cmd_attest(const fs::path& data_dir, int argc, char** argv) {
-    const auto activity = flag_val(argc, argv, "--activity");
-    const auto axis     = flag_val(argc, argv, "--axis");
-    const auto value_s  = flag_val(argc, argv, "--value");
-    if (activity.empty() || axis.empty() || value_s.empty()) {
-        std::cerr << "Usage: bc attest --activity SLUG --axis danger --value 0.02\n"
-                     "    [--grade GRADE_CHAIN/HASH]   your Grade in this activity "
-                     "(weight; default weight 1)\n"
-                     "    [--deal ACCEPTANCE_CHAIN/HASH]  a settled deal you were a "
-                     "party to; --value\n"
-                     "                                 then means a DELTA to the "
-                     "catalog profile (ИР-020)\n"
-                     "    [--note TEXT]                one line for PEOPLE: why the "
-                     "number is what it is\n"
-                     "    [--via URL]                  publish to the aggregator\n";
-        return 1;
-    }
-    AxisAttestation a{};
-    a.activity  = activity;
-    a.axis      = axis;
-    a.value     = std::stod(value_s);
-    a.timestamp = static_cast<int64_t>(std::time(nullptr));
-    const auto grade_s = flag_val(argc, argv, "--grade");
-    if (!grade_s.empty()) a.grade = parse_ref(grade_s);
-    const auto deal_s = flag_val(argc, argv, "--deal");
-    if (!deal_s.empty()) a.deal = parse_ref(deal_s);
-    // A line for people, never for the arithmetic (records.md §11.8). Capped so a
-    // record stays a record: the chain is not a place to publish essays.
-    a.note = flag_val(argc, argv, "--note");
-    if (a.note.size() > kAttestNoteMax) {
-        std::cerr << "--note слишком длинная: " << a.note.size() << " байт, предел "
-                  << kAttestNoteMax << ". Пояснение — строка, не сочинение.\n";
-        return 1;
-    }
-    return cmd_write(data_dir, argc, argv, a);
 }
 
 // bc axis-define --slug danger --ru "Опасность" --description "..."
@@ -4580,19 +4516,12 @@ Means of production (ИР-011, records.md §10.2, records.md §9.4):
   tool show / material show PREFIX Audit one carry thread: invariant, forks,
                                        formula, resale ceiling (economy.md §5б)
   rates --via URL                  Today's specialty rates (signed DailyAggregate)
-  cloud --via URL [--slug SLUG]    Specialty cloud: each activity's tree parent and
-    [--coords]                         k nearest neighbours (signed SpecialtyCloud,
-                                       ИР-018) — the geometry rate priors read;
-                                       --coords adds the 2D spectral map coordinates
-  attest --activity SLUG           Attest a declared axis value, e.g. danger (ИР-019):
-    --axis danger --value 0.02         the aggregator takes the grade-weighted median
-    [--grade REF] [--via URL]          over practitioners — value set by who does it
-    [--deal ACCEPTANCE_REF]            about ONE settled deal you were a party to:
-                                       --value becomes a DELTA to the catalog profile,
-                                       the side is derived from the deal, and the
-                                       statement outranks your free-standing one (ИР-020)
-    [--note TEXT]                      one line for PEOPLE — why the number is what it
-                                       is. Never parsed, never weighed (max 280 bytes)
+  cloud --via URL [--slug SLUG]    Specialty cloud, read off settled deals (ИР-022):
+    [--coords]                         where a specialty sits = what its price was
+                                       made of (share per axis); neighbours = work
+                                       paid for the same things. Signed
+                                       SpecialtyCloud — the geometry rate priors
+                                       read; --coords adds the 2D spectral map
   axis-define --slug ОСЬ           Завести ось в своей цепи (ИР-022). Словарь труда
     --ru "Название"                    решают люди: заводить волен каждый, сила — от
     --description TEXT                 употребления. Отличает хорошую ось от плохой
@@ -4602,8 +4531,6 @@ Means of production (ИР-011, records.md §10.2, records.md §9.4):
                                        и отметка «осью пользуются без описания».
                                        --rent: карта ренты — что корзина заплатила
                                        сверх сетевой цены названных осей и КТО
-  attestations --via URL           Attested axis values: median, how many attesters,
-    [--slug SLUG]                      and whether still preliminary (below N)
   pay --acceptance REF             Pay the worker up to the appraisal (records.md §12.8)
     [--units N] [--via URL]            default: the unpaid remainder
     [--pledge REF]                     Transfer v4 (records.md §11.1): --acceptance says
@@ -4772,10 +4699,8 @@ int main(int argc, char** argv) {
         else if (cmd == "ideas"     && subcmd == "top")     return cmd_ideas_top(argc, argv);
         else if (cmd == "rates")                            return cmd_rates(argc, argv);
         else if (cmd == "cloud")                            return cmd_cloud(argc, argv);
-        else if (cmd == "attest")                           return cmd_attest(data_dir, argc, argv);
         else if (cmd == "axis-ledger")                      return cmd_axis_ledger(argc, argv);
         else if (cmd == "axis-define")                      return cmd_axis_define(data_dir, argc, argv);
-        else if (cmd == "attestations")                     return cmd_attestations(argc, argv);
         else if (cmd == "discover")                         return cmd_discover(data_dir, argc, argv);
         else if (cmd == "chain"     && subcmd == "info")    return cmd_chain_info(argc, argv);
         else if (cmd == "export"    && subcmd == "profiles")return cmd_export_profiles(argc, argv);

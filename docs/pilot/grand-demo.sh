@@ -192,7 +192,7 @@ bcp anna match --via "$VIA"
 act "5. Средства производства и амортизация (ИР-011): печь и мука"
 say "Анне-повару нужны разряд и средства производства — они переносят стоимость"
 SPEC_anna=$( bcp anna specialty add prof.cook --via "$VIA" | after 'hash: ')
-GRADE_anna=$(bcp anna grade add "${CID[anna]}/$SPEC_anna" 5 | after 'hash: ')
+GRADE_anna=$(bcp anna grade add "${CID[anna]}/$SPEC_anna" 5 --via "$VIA" | after 'hash: ')
 say "специальность prof.cook, разряд 5"
 
 TOOL=$(bcp anna tool add "Печь подовая" --cost 315 --life 8000 --serial PP-2019-0417 \
@@ -236,7 +236,7 @@ say "Анна держит бумагу Дмитрия на $paid1ч (bc transfe
 act "7. Сделка полного цикла (bc deal): Анна ← Борис закрывает need.electrical"
 say "берусь → найм → работа → приёмка → расчёт; ссылки подставляются сами"
 SPEC_boris=$( bcp boris specialty add prof.electrician --via "$VIA" | after 'hash: ')
-GRADE_boris=$(bcp boris grade add "${CID[boris]}/$SPEC_boris" 4 | after 'hash: ')
+GRADE_boris=$(bcp boris grade add "${CID[boris]}/$SPEC_boris" 4 --via "$VIA" | after 'hash: ')
 
 hr "Борис берётся (bc deal take)"
 bcp boris deal take "$ND_anna" --via "$VIA" | sed 's/^/   /'
@@ -257,9 +257,9 @@ say "→ Анна расплатилась бумагой Дмитрия: она
 # ═════════════════════════════════════════════════════════════════════════════
 act "8. Кольцо замыкается: Борис → Вера → Дмитрий, бумага возвращается эмитенту"
 SPEC_vera=$( bcp vera specialty add prof.tailor --via "$VIA" | after 'hash: ')
-GRADE_vera=$(bcp vera grade add "${CID[vera]}/$SPEC_vera" 5 | after 'hash: ')
+GRADE_vera=$(bcp vera grade add "${CID[vera]}/$SPEC_vera" 5 --via "$VIA" | after 'hash: ')
 SPEC_dmitry=$( bcp dmitry specialty add prof.carpenter --via "$VIA" | after 'hash: ')
-GRADE_dmitry=$(bcp dmitry grade add "${CID[dmitry]}/$SPEC_dmitry" 6 | after 'hash: ')
+GRADE_dmitry=$(bcp dmitry grade add "${CID[dmitry]}/$SPEC_dmitry" 6 --via "$VIA" | after 'hash: ')
 
 hr "Вера чинит робу Бориса (need.clothing) — сделка, оплата бумагой Дмитрия"
 bcp vera deal take "$ND_boris" --via "$VIA" >/dev/null
@@ -312,7 +312,7 @@ for r in d["axes"][:8]:
 
 act "9. Отдельное кольцо через полный bc deal settle: Ирина ← Пётр (need.health)"
 SPEC_petr=$( bcp petr specialty add prof.doctor --via "$VIA" | after 'hash: ')
-GRADE_petr=$(bcp petr grade add "${CID[petr]}/$SPEC_petr" 6 | after 'hash: ')
+GRADE_petr=$(bcp petr grade add "${CID[petr]}/$SPEC_petr" 6 --via "$VIA" | after 'hash: ')
 bcp petr  deal take "$ND_irina" --via "$VIA" >/dev/null
 bcp irina deal hire "$ND_irina" --executor "${CID[petr]}" --units 1 --via "$VIA" >/dev/null
 WORK_petr=$(bcp petr deal work "$ND_irina" --hours 1 --action "Плановый осмотр" \
@@ -333,35 +333,26 @@ bcp pelageya fetch "${CID[galina]}/$WORK_galina" --via "$VIA" >/dev/null
 ACC_galina=$(bcp pelageya accept --work "${CID[galina]}/$WORK_galina" --quality "аккуратно" --coef 1.0 --axis-share "$(axis precision)=0.5" --axis-share "$(axis physical)=0.3" --axis-share "$(axis pace)=0.2" --via "$VIA" | after 'acceptance ref: ')
 hr "bc transfer send --reason (часы движутся только против принятого труда)"
 bcp pelageya transfer send --to "${CID[galina]}" --units 1 --reason "$ACC_galina" --via "$VIA" | sed 's/^/   /'
-hr "профиль в сделке: обе стороны говорят независимо (bc attest --deal, ИР-020)"
-say "платится по-прежнему ОДНО число — профиль лишь разбивает уже уплаченную цену."
-say "Стороны его не усредняют: их расхождение публикуется как факт, а не замазывается"
-bcp galina   attest --activity prof.hairdresser --axis people --value 0.15 \
-             --deal "$ACC_galina" --via "$VIA" >/dev/null 2>&1 || true
-bcp pelageya attest --activity prof.hairdresser --axis people --value 0.05 \
-             --deal "$ACC_galina" --via "$VIA" >/dev/null 2>&1 || true
-bcp anna attestations --slug prof.hairdresser --via "$VIA" > "$work/att.json" 2>/dev/null || true
-python3 - "$work/att.json" <<'PY' 2>/dev/null || say "(профиль не прочитался)"
-import json, sys
-for a in json.load(open(sys.argv[1])).get("axes", []):
-    line = f"     {a['activity']} · {a['axis']}: медиана {a['value']:.2f} " \
-           f"({a['attesters']} заверителей)"
-    if "seller" in a:
-        line += (f"  |  продавец {a['seller']['value']:.2f}"
-                 f"  покупатель {a['buyer']['value']:.2f}")
-        if "disagreement" in a:
-            line += f"  расхождение {a['disagreement']:.2f}"
-    print(line)
-PY
-say "сторона не объявляется, а выводится из сделки: приёмку пишет плательщик,"
-say "работу — исполнитель. Объявленная сторона могла бы соврать, выведенная — нет"
-
 hr "кошелёк Анны (держит чужую бумагу) и Дмитрия (свой долг в обороте)"
 say "Анна:";   bcp anna   wallet | sed 's/^/     /'
 say "Дмитрий:"; bcp dmitry wallet | sed 's/^/     /'
 
 hr "сетевые ставки по специальностям (bc rates — подписанный DailyAggregate)"
 bcp anna rates --via "$VIA" | python3 -m json.tool 2>/dev/null | head -20 || bcp anna rates --via "$VIA"
+
+hr "облако специальностей — из сделок, а не из каталога (bc cloud, ИР-022)"
+say "место специальности — из чего сложилась её цена: доли оплаты по осям."
+say "соседи — те, кому платят за похожее; ставка — высота над картой, не координата"
+bcp anna cloud --via "$VIA" > "$work/cloud.json" 2>/dev/null || true
+python3 - "$work/cloud.json" <<'PY' 2>/dev/null || say "(облако не прочиталось)"
+import json, sys
+pts = json.load(open(sys.argv[1])).get("points", [])
+if not pts:
+    print("     расписанных сделок пока нет — облаку не на чем стоять")
+for p in pts:
+    near = ", ".join(f"{n['slug']} {n['w']:.2f}" for n in p["neighbors"][:3])
+    print(f"     {p['slug']:20s} {p['deals']} сд.  → {near or 'ни с кем ничего общего'}")
+PY
 
 hr "карта ренты по книге осей (bc axis-ledger --rent)"
 say "опора — сетевая цена часа каждой названной оси, прочитанная из самих сделок;"

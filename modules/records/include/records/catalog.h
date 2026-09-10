@@ -25,34 +25,6 @@ public:
     explicit CatalogError(const std::string& msg) : std::runtime_error(msg) {}
 };
 
-// Declared axis values of a specialty (ИР-018, specialty-axes.md, ИР-022).
-//
-// A MAP, not a fixed set of fields: the axis vocabulary is not the aggregator's
-// to decide. specialty-axes.md §4 names about forty axes and the pilot could
-// hold six, so every new one needed a C++ change — the last centralized point
-// left in the valuation of labour. Keys are axis slugs from the axis catalog
-// (docs/catalogs/axes.json), which is itself an ordinary Catalog; ИР-022 moves
-// them into chain blocks, and nothing here has to change when it does.
-//
-// All values are INDEPENDENT INTENSITIES 0..1 — "how much of this is in an hour
-// of such work". Nothing sums to anything (shares were dropped 2026-09-07,
-// records.md §11.9): an hour with every intensity at zero is an hour in which
-// nothing happened, so it is worth nothing, and a constant term would be a
-// payment for existing, which this economy does not have (records.md §12.2).
-//
-// Bootstrap values only. Practitioners overwrite them by attestation (ИР-019) —
-// the value is set by whoever does the work, not by this file.
-struct CatalogAxes {
-    std::map<std::string, double> values;
-    bool present = false;   // true iff the entry declared an "axes" object
-
-    // Absent axis reads as 0: the work simply has none of that in it.
-    double get(const std::string& axis) const noexcept {
-        const auto it = values.find(axis);
-        return it == values.end() ? 0.0 : it->second;
-    }
-};
-
 struct CatalogEntry {
     std::string              slug;       // "prof.electrician" — stable, never renamed
     std::string              ru;         // display name
@@ -64,7 +36,6 @@ struct CatalogEntry {
     // axis it is: nothing forbids inventing one, but an axis reused again and
     // again with nothing written behind it is visible as exactly that.
     std::string              description;
-    CatalogAxes              axes;       // cloud coordinates, ИР-018
     // Needs only: professions that close this need ("need.electrical" →
     // ["prof.electrician"]). Without it matching cannot be mechanised — a person
     // knows an electrician fixes wiring, a program does not. Empty = closed by no

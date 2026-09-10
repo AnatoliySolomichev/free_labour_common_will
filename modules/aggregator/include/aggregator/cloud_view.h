@@ -1,5 +1,36 @@
 #pragma once
 
+// Specialty cloud (ИР-018 → ИР-022) — which kinds of work are paid for the same
+// things.
+//
+// Where a specialty sits is READ off its settled deals. Every deal itemizes its
+// price by axis (records.md §9.5 v4), so the share of everything paid for a
+// specialty that went to each axis is a fact, not a profile somebody declared:
+//
+//     electrician  danger 0.40 · precision 0.60
+//     lineman      danger 0.50 · precision 0.50     → the electrician's neighbour
+//     teacher      people 0.70 · knowledge 0.30     → nothing in common with him
+//
+// Neighbours are specialties whose price is made of the same things. That is the
+// whole definition; there are no weights to argue about.
+//
+// It used to be the catalog's declared intensities `x`, overridden by
+// practitioners' attestations (ИР-019). Both are gone (records.md §11.8): once a
+// deal says what it paid for, a declared `x` is a second, unpaid answer to the
+// same question, and the regression that was its other reader was removed
+// (records.md §11.9).
+//
+// What that costs, said plainly: a specialty nobody has traded yet is not in the
+// cloud. The rate prior never asks about one — it is consulted only for a basket
+// that traded today, and every traded deal carries a breakdown — so for the prior
+// nothing is lost. The map for people shows only work that actually happened.
+//
+// Shares, not prices per hour: the rate is a HEIGHT over the map, not one of its
+// coordinates (specialty-axes.md §7). Two specialties paid for the same things at
+// different rates are one point; otherwise "guess the rate from the neighbours"
+// would become "guess it from those with a similar rate", and dear work would
+// cluster with dear work, feeding inequality back into itself.
+
 #include "aggregator.h"
 
 #include <records/catalog.h>
@@ -9,120 +40,68 @@
 #include <cstdint>
 #include <map>
 #include <string>
-#include <utility>
 #include <vector>
 
 namespace aggregator {
 
-// Attested declared-axis values (ИР-019): per (activity, axis), the grade-weighted
-// median of practitioners' AxisAttestation records — the value set by the people
-// who do the work, not by decree. Below `min_attesters` the value is left out
-// (preliminary) and the catalog's bootstrap value stands. Deterministic over the
-// block set. Weight = the attester's Grade level in the activity (unresolved → 1).
-// Full attestation picture per (activity, axis): the grade-weighted median AND how
-// many distinct practitioners attested — so a consumer sees whether a value is
-// well-supported or still preliminary (below the N threshold — ИР-019 A4, the same
-// open N as records.md §14.8 п.11).
-// `note` is the free-text line of the attestation that SET the median — the
-// reason, in the words of the person whose value won, so a reader sees not only
-// what the number is but why someone thought so (ИР-020). It is carried, never
-// parsed: nothing downstream may branch on it.
-struct AttestationStat {
-    double      median    = 0.0;
-    int         attesters = 0;
-    std::string note;
+// What a specialty's settled deals paid FOR. The shares add up to 1: the
+// breakdown adds up to the labour price exactly (records.md §9.5 v4), and what is
+// left of the payable is the carried means of production.
+struct SpecialtyComposition {
+    // axis (hash of its defining block, as in the axis ledger) → share of Σ payable
+    std::map<std::array<uint8_t, 32>, double> axes;
+    // Share of Σ payable that was means of production carried in (ИР-011). This is
+    // what capital-intensity used to be — now just one more thing the price was
+    // made of, with no weight of its own to decree.
+    double   carried = 0.0;
+    double   payable = 0.0;  // Σ labour + carried: the evidence behind the shares
+    uint64_t deals   = 0;
 };
 
-// The two sides of a deal are kept APART, never averaged into one number (ИР-020).
-// Their interests are opposite, which is exactly what makes their agreement worth
-// something: a value both a buyer and a seller state is evidence, a value only one
-// of them states is a position. Averaging them destroys the very distinction.
-// Measured (13 activities, 104 deals, 40 runs): with 30% of sellers inflating an
-// axis, the error of β recovered from sellers alone is 0.230 and from the
-// agreement-weighted midpoint 0.065 — while in an honest world the split costs
-// nothing at all (0.039 vs 0.036).
-struct AxisAttestationSummary {
-    AttestationStat all;     // one voice per attester; a deal-backed statement
-                             // beats that attester's own free-standing one
-    AttestationStat seller;  // written by the worker inside a SETTLED deal
-    AttestationStat buyer;   // written by the payer inside a SETTLED deal
-};
+// Per specialty, over every settled deal in the store — the same deals the axis
+// ledger reads (records.md §11.11): settled exactly, not a self-deal, with a
+// breakdown that adds up to labor_units. Resolved Acceptance → WorkRecord → Grade
+// → Specialty and pooled over grades: the cloud is about the work, not the worker.
+// Shares are Σ over the deals divided by Σ payable, the same way the average
+// labour-hour is Σ units / Σ hours — a one-hour job and a month-long one do not
+// get an equal say in what a specialty is paid for. Deterministic over the block
+// set.
+std::map<std::string, SpecialtyComposition> build_specialty_compositions(
+    const AggregatorStorage& storage);
 
-// `catalogs` is needed only to resolve deal-backed values, which are written as
-// DELTAS to the catalog's bootstrap profile (records.md §11.8). Without it those
-// statements are skipped rather than guessed at, and the result is exactly the
-// pre-ИР-020 picture.
-std::map<std::pair<std::string, std::string>, AxisAttestationSummary>
-build_axis_attestation_summary(const AggregatorStorage& storage,
-                               const std::vector<records::Catalog>* catalogs = nullptr);
-
-// The summary split into the three (activity, axis) → value maps ИР-020 fits on.
-// A side appears only where it actually spoke; elsewhere the map is silent and the
-// catalog's bootstrap stands, so a fit is never fed an invented profile.
-struct AxisProfileMaps {
-    std::map<std::pair<std::string, std::string>, double> all, seller, buyer;
-};
-AxisProfileMaps split_axis_profiles(
-    const std::map<std::pair<std::string, std::string>, AxisAttestationSummary>& summary,
-    unsigned min_attesters = 1);
-
-// Attested overrides used by the cloud: the summary filtered to entries with at
-// least `min_attesters` practitioners (below → preliminary, bootstrap stands).
-std::map<std::pair<std::string, std::string>, double> build_axis_attestations(
-    const AggregatorStorage& storage, unsigned min_attesters = 1,
-    const std::vector<records::Catalog>* catalogs = nullptr);
-
-// Derived axis: capital-intensity per specialty (ИР-018 phase 2). For each
-// specialty (activity slug), the mean over its SETTLED accepted works of
-// carried_units / (labor_units + carried_units) — how much of the appraisal is
-// carried means-of-production cost (baker with oven ≈ high, teacher ≈ 0). Resolved
-// Acceptance → WorkRecord → Grade → Specialty, like rates. Deterministic over the
-// block set (the SpecialtyCloud snapshot must commit that set).
-std::map<std::string, double> build_capital_intensity(const AggregatorStorage& storage);
-
-// Specialty cloud (ИР-018, specialty-axes.md §10).
+// How much two specialties are paid for the same things: Σ √(aⱼ·bⱼ) over the axes
+// and the carried share (the Bhattacharyya coefficient). 1 — the same
+// composition; 0 — nothing paid for in common.
 //
-// Places every declared specialty (activity) as a point and gives it its k
-// nearest neighbours + its tree parent — what a rate prior needs for thin/new
-// activities. Deterministic: the same catalogs yield the same cloud, so any
-// aggregator recomputes and verifies (the record commits its input via
-// `snapshot`).
-//
-// Phase 1 (this build) uses only what is already in the catalog:
-//   • distance on the declared axes (material, info, people, danger), with the
-//     danger axis scaled by `danger_weight` so a dangerous activity is not a
-//     neighbour of a safe one (its risk premium flows to other risky work);
-//   • a substitution boost for specialties that close the same need (closed_by).
-// Derived edges from live deals (co-occurrence over serials, capital-intensity
-// over carry threads) are a later phase over the block store.
-// `capital` (optional, ИР-018 phase 2): per-specialty capital-intensity 0..1 that
-// adds a coordinate to the distance, scaled by `capital_weight` (a public param —
-// how much capital-intensity pulls activities together vs the object of labour).
-// Specialties absent from the map are treated as 0 (labour-like) — the prior.
+// Why this and not a distance: over shares a distance never reaches zero, so two
+// works with nothing in common would still count as "0.41 close" and pull each
+// other's prior. Here nothing in common is exactly nothing. And no axis gets a
+// weight: axes are records anyone can start (ИР-022), and weighting one would be
+// the aggregator deciding which facet of labour matters. Danger is no exception —
+// a dangerous job is far from a safe one because its PRICE has danger in it.
+double composition_affinity(const SpecialtyComposition& a,
+                            const SpecialtyComposition& b) noexcept;
+
+// The signed cloud (records.md §11.7, specialty-axes.md §10): per specialty, its k
+// nearest by affinity. A specialty with nothing in common with anyone has no
+// neighbours at all, and the prior falls through to its parent. `catalogs`, if
+// served, lends only the tree parent — the fallback, never the neighbourhood.
+// Deterministic: points in slug order, ties broken by slug.
 records::SpecialtyCloud build_specialty_cloud(
-    const std::vector<records::Catalog>&        catalogs,
-    int64_t                                     date,
-    int64_t                                     timestamp,
-    const std::array<uint8_t, 32>&              snapshot,
-    const std::vector<std::array<uint8_t, 32>>& sources        = {},
-    unsigned                                    k              = 5,
-    double                                      danger_weight  = 1.0,
-    const std::map<std::string, double>*        capital        = nullptr,
-    double                                      capital_weight = 0.0,
-    // Attested declared-axis overrides (ИР-019): (activity, axis) → value; when
-    // present, replaces the catalog's bootstrap value for that axis.
-    const std::map<std::pair<std::string, std::string>, double>* attested = nullptr);
+    const std::map<std::string, SpecialtyComposition>& comps,
+    int64_t                                            date,
+    int64_t                                            timestamp,
+    const std::array<uint8_t, 32>&                     snapshot,
+    const std::vector<std::array<uint8_t, 32>>&        sources  = {},
+    unsigned                                           k        = 5,
+    const std::vector<records::Catalog>*               catalogs = nullptr);
 
-// Spectral coordinates for the cloud (ИР-018, phase 3 — the map/picture). Laplacian
-// eigenmaps over the same affinity as the neighbours: each specialty gets a 2D point
-// where near = similar, revealing indirect similarity (friend-of-friend) the raw
-// neighbour list does not. Deterministic; NOT stored in the SpecialtyCloud record
-// (kept compact, specialty-axes.md §10) — served on demand via /specialty/cloud?coords=1.
+// Spectral coordinates (ИР-018 phase 3 — the picture): Laplacian eigenmaps over
+// the same affinity, so near = paid for similar things, including the indirect
+// similarity a neighbour list does not show. Groups with nothing in common land
+// apart, as they should. Deterministic; NOT stored in the record — served on
+// demand via /specialty/cloud?coords=1.
 std::map<std::string, std::array<double, 2>> compute_spectral_coords(
-    const std::vector<records::Catalog>&        catalogs,
-    double                                      danger_weight  = 1.0,
-    const std::map<std::string, double>*        capital        = nullptr,
-    double                                      capital_weight = 0.0,
-    const std::map<std::pair<std::string, std::string>, double>* attested = nullptr);
+    const std::map<std::string, SpecialtyComposition>& comps);
 
 }  // namespace aggregator
