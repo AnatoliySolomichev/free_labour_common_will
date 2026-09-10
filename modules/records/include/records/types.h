@@ -39,7 +39,8 @@ enum class RecordType : uint8_t {
     AxisAttestation = 0x76,
     // 0x77 — AxisPrices, снята вместе с регрессией (records.md §11.9);
     //        номер не переиспользуется.
-    DealProfile     = 0x78,
+    // 0x78 — DealProfile, снята: денег не несла, читателя не осталось
+    //        (records.md §11.10); номер не переиспользуется.
     AxisDef         = 0x79,
 };
 
@@ -498,53 +499,6 @@ struct AxisAttestation {
     std::string note;
 };
 
-// Profile of ONE piece of work, declared in the deal itself (ИР-022).
-//
-// The catalog gives a profile per ACTIVITY, which is why a grade had to exist:
-// it was the only thing that varied inside a specialty, so an electrician's hour
-// at 220 V and at 400 V were the same row. Here the work describes itself, and
-// the grade stops having anything to say — an axis "work under 400 V" says it
-// directly, and better.
-//
-// A SET with its own hash, not a scatter of one-axis records: that is what makes
-// it reusable. `base` points at an earlier profile to inherit wholesale, so a
-// settled description of a job becomes what a "profession" used to be — a
-// reference to a description that worked, not a category from a directory.
-//
-// THE PAYMENT IS NOT HERE. The itemized price lives in the Acceptance
-// (records.md §9.5 v4), signed together with the price itself. What is left here
-// is the optional part: intensities for geometry, a line for people, and a
-// template to inherit — none of it money, none of it required.
-//
-// Deliberately a separate type rather than more AxisAttestation records: an
-// attestation states one axis of an activity in general, a profile states the
-// whole shape of one job, and only the second can be pointed at by hash.
-struct DealProfileAxis {
-    Ref    axis;     // the AxisDef record, same identity as in the Acceptance
-    // Intensity 0..1: how much of the axis was in an hour of this work. Carries
-    // NO money — the money is in the Acceptance's breakdown (records.md §9.5 v4).
-    // It exists only for GEOMETRY (neighbours in the cloud, a suggested rate for
-    // work nobody has done yet) and is a CANDIDATE FOR REMOVAL: if it never shows
-    // anything the breakdown does not already show, it goes.
-    double value = 0.0;
-
-    bool operator==(const DealProfileAxis& o) const noexcept {
-        return axis == o.axis && value == o.value;
-    }
-};
-
-struct DealProfile {
-    static constexpr RecordType TYPE = RecordType::DealProfile;
-
-    Ref                          deal;   // the settled Acceptance this describes
-    std::vector<DealProfileAxis> axes;   // canonical order: sorted by axis slug
-    // Inherit an earlier profile and override only what differs — "same as that
-    // job, but more dangerous". Absent: the axes here are the whole profile.
-    std::optional<Ref>           base;
-    std::string                  note;   // a line for people; never parsed
-    int64_t                      timestamp = 0;
-};
-
 // An axis, defined in somebody's chain (ИР-022).
 //
 // The vocabulary of labour is not the aggregator's to decide. It used to be a
@@ -601,7 +555,6 @@ using Record = std::variant<
     Redemption,
     SpecialtyCloud,
     AxisAttestation,
-    DealProfile,
     AxisDef
 >;
 

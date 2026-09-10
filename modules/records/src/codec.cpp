@@ -375,24 +375,6 @@ void enc_axis_attestation(Buf& out, const AxisAttestation& a) {
     if (!a.note.empty()) { w_uint(out, 7); w_text(out, a.note); }  // v3 (ИР-020)
 }
 
-void enc_deal_profile(Buf& out, const DealProfile& d) {
-    // Keys 5 (base) and 6 (note) only when present, so a bare profile stays as
-    // small as it reads.
-    w_map(out, 5 + (d.base ? 1 : 0) + (d.note.empty() ? 0 : 1));
-    w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::DealProfile));
-    w_uint(out, 1); w_ref(out, d.deal);
-    w_uint(out, 2); w_arr(out, d.axes.size());
-    for (const auto& a : d.axes) {
-        w_map(out, 2);
-        w_uint(out, 0); w_ref(out, a.axis);
-        w_uint(out, 1); w_float64(out, a.value);
-    }
-    w_uint(out, 3); w_int64(out, d.timestamp);
-    w_uint(out, 4); w_uint(out, 0);          // зарезервировано под версию профиля
-    if (d.base)          { w_uint(out, 5); w_ref(out, *d.base); }
-    if (!d.note.empty()) { w_uint(out, 6); w_text(out, d.note); }
-}
-
 void enc_axis_def(Buf& out, const AxisDef& a) {
     w_map(out, 5 + (a.parent ? 1 : 0) + (a.same_as ? 1 : 0));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::AxisDef));
@@ -968,34 +950,6 @@ AxisAttestation dec_axis_attestation_fields(CborReader& r, uint64_t field_count)
     return a;
 }
 
-DealProfile dec_deal_profile_fields(CborReader& r, uint64_t field_count) {
-    DealProfile d{};
-    expect_key(r, 1); d.deal = dec_ref(r);
-    expect_key(r, 2);
-    {
-        const uint64_t n = r.r_arr();
-        d.axes.reserve(static_cast<size_t>(n));
-        for (uint64_t i = 0; i < n; ++i) {
-            if (r.r_map() != 2) throw CodecError("DealProfileAxis: expected 2 fields");
-            DealProfileAxis a{};
-            expect_key(r, 0); a.axis  = dec_ref(r);
-            expect_key(r, 1); a.value = r.r_float64();
-            d.axes.push_back(std::move(a));
-        }
-    }
-    expect_key(r, 3); d.timestamp = r.r_int();
-    expect_key(r, 4); (void)r.r_uint();
-    // Хвост по ключу: `base` и `note` независимы.
-    for (uint64_t i = 5; i < field_count; ++i) {
-        switch (r.r_uint()) {
-            case 5:  d.base = dec_ref(r);  break;
-            case 6:  d.note = r.r_text();  break;
-            default: throw CodecError("DealProfile: unknown field key");
-        }
-    }
-    return d;
-}
-
 AxisDef dec_axis_def_fields(CborReader& r, uint64_t field_count) {
     AxisDef a{};
     expect_key(r, 1); a.slug        = r.r_text();
@@ -1040,7 +994,6 @@ std::vector<uint8_t> Codec::encode(const Record& rec) {
         else if constexpr (std::is_same_v<T, Redemption>)  enc_redemption(out, r);
         else if constexpr (std::is_same_v<T, SpecialtyCloud>) enc_specialty_cloud(out, r);
         else if constexpr (std::is_same_v<T, AxisAttestation>) enc_axis_attestation(out, r);
-        else if constexpr (std::is_same_v<T, DealProfile>)    enc_deal_profile(out, r);
         else if constexpr (std::is_same_v<T, AxisDef>)        enc_axis_def(out, r);
     }, rec);
     return out;
@@ -1078,8 +1031,6 @@ Record Codec::decode(const uint8_t* data, size_t len) {
             return dec_axis_attestation_fields(r, field_count);
         case RecordType::AxisDef:
             return dec_axis_def_fields(r, field_count);
-        case RecordType::DealProfile:
-            return dec_deal_profile_fields(r, field_count);
         default:
             throw CodecError("CBOR: unknown record type discriminator");
     }

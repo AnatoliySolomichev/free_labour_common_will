@@ -2874,66 +2874,6 @@ static int cmd_attest(const fs::path& data_dir, int argc, char** argv) {
     return cmd_write(data_dir, argc, argv, a);
 }
 
-// bc work-profile --deal ACCEPTANCE_REF --intensity ОСЬ_REF=0.8 [--base REF]
-//
-// Денег не несёт: цена расписана по осям в самой приёмке. Здесь необязательная
-// геометрия — кандидат на удаление (ИР-022).
-//
-// Описать ОДНУ выполненную работу осями (ИР-022). Каталог знает профиль
-// деятельности вообще; здесь работа говорит о себе сама — «этот час был под
-// 400 В», — и разряд перестаёт быть нужен: всё, что он означал, называется
-// осями прямо. Считается, только если сделка рассчитана и вы её сторона;
-// сторона выводится из самой сделки, а не объявляется.
-static int cmd_work_profile(const fs::path& data_dir, int argc, char** argv) {
-    const auto deal_s = flag_val(argc, argv, "--deal");
-    std::vector<std::string> pairs;
-    for (int i = 1; i + 1 < argc; ++i)
-        if (std::string(argv[i]) == "--intensity") pairs.emplace_back(argv[i + 1]);
-    if (deal_s.empty() || pairs.empty()) {
-        std::cerr << "Usage: bc work-profile --deal ACCEPTANCE_CHAIN/HASH\n"
-                     "    --intensity ОСЬ_CHAIN/HASH=0..1   сколько этого в часе "
-                     "такой работы\n"
-                     "    [--base PROFILE_CHAIN/HASH]       взять за основу прежний "
-                     "профиль\n"
-                     "    [--note TEXT]                     строка для ЛЮДЕЙ\n"
-                     "    [--via URL]                       опубликовать агрегатору\n"
-                     "\nДЕНЕГ ЭТА ЗАПИСЬ НЕ НЕСЁТ: цена расписана по осям в самой\n"
-                     "приёмке (bc accept --axis). Здесь только необязательная\n"
-                     "геометрия — соседи в облаке; кандидат на удаление (ИР-022).\n";
-        return 1;
-    }
-    DealProfile d{};
-    d.deal      = parse_ref(deal_s);
-    d.timestamp = static_cast<int64_t>(std::time(nullptr));
-    for (const auto& p : pairs) {
-        const auto eq = p.rfind('=');
-        if (eq == std::string::npos || eq == 0) {
-            std::cerr << "--intensity ждёт ОСЬ=ЗНАЧЕНИЕ, получено: " << p << "\n";
-            return 1;
-        }
-        DealProfileAxis a{};
-        a.axis = parse_ref(p.substr(0, eq));
-        try { a.value = std::stod(p.substr(eq + 1)); }
-        catch (const std::exception&) {
-            std::cerr << "не число в --intensity " << p << "\n";
-            return 1;
-        }
-        d.axes.push_back(std::move(a));
-    }
-    std::sort(d.axes.begin(), d.axes.end(),
-              [](const DealProfileAxis& a, const DealProfileAxis& b) {
-                  return a.axis.hash < b.axis.hash;
-              });
-    if (const auto b = flag_val(argc, argv, "--base"); !b.empty())
-        d.base = parse_ref(b);
-    d.note = flag_val(argc, argv, "--note");
-    if (d.note.size() > kAttestNoteMax) {
-        std::cerr << "--note слишком длинная: предел " << kAttestNoteMax << " байт\n";
-        return 1;
-    }
-    return cmd_write(data_dir, argc, argv, d);
-}
-
 // bc axis-define --slug danger --ru "Опасность" --description "..."
 //                [--parent REF] [--same-as REF] [--via URL]
 //
@@ -4653,9 +4593,6 @@ Means of production (ИР-011, records.md §10.2, records.md §9.4):
                                        statement outranks your free-standing one (ИР-020)
     [--note TEXT]                      one line for PEOPLE — why the number is what it
                                        is. Never parsed, never weighed (max 280 bytes)
-  work-profile --deal REF          Необязательная геометрия работы (ИР-022): денег
-    --intensity ОСЬ_REF=0..1           не несёт, цена расписана в самой приёмке.
-    [--base REF] [--note TEXT]         Кандидат на удаление
   axis-define --slug ОСЬ           Завести ось в своей цепи (ИР-022). Словарь труда
     --ru "Название"                    решают люди: заводить волен каждый, сила — от
     --description TEXT                 употребления. Отличает хорошую ось от плохой
@@ -4836,7 +4773,6 @@ int main(int argc, char** argv) {
         else if (cmd == "rates")                            return cmd_rates(argc, argv);
         else if (cmd == "cloud")                            return cmd_cloud(argc, argv);
         else if (cmd == "attest")                           return cmd_attest(data_dir, argc, argv);
-        else if (cmd == "work-profile")                     return cmd_work_profile(data_dir, argc, argv);
         else if (cmd == "axis-ledger")                      return cmd_axis_ledger(argc, argv);
         else if (cmd == "axis-define")                      return cmd_axis_define(data_dir, argc, argv);
         else if (cmd == "attestations")                     return cmd_attestations(argc, argv);
