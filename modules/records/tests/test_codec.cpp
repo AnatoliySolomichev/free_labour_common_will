@@ -19,6 +19,17 @@ static Record roundtrip(const Record& rec) {
     return Codec::decode(bytes);
 }
 
+// Полный путь к блоку (records.md §4): цепь, ветка, номер, хеш.
+static records::BlockPath make_path(uint8_t chain_fill, uint8_t hash_fill,
+                                    uint32_t node = 7, uint32_t block = 3) {
+    records::BlockPath p{};
+    p.chain.fill(chain_fill);
+    p.node  = node;
+    p.block = block;
+    p.hash.fill(hash_fill);
+    return p;
+}
+
 // ── Ref encoding ──────────────────────────────────────────────────────────────
 
 TEST(RecordsCodec, RefRoundtrip) {
@@ -213,7 +224,7 @@ TEST(RecordsCodec, Acceptance) {
     a.quality     = "пройдено";
     a.hours_raw   = 2.5;
     a.labor_units = 2.5 * 1.2;
-    a.axes        = {{make_ref(0x79, 0x01), 2.5 * 1.2}};
+    a.axes        = {{make_path(0x79, 0x01), 2.5 * 1.2}};
     a.timestamp   = 1'700'000'100LL;
 
     const auto decoded = std::get<Acceptance>(roundtrip(a));
@@ -696,7 +707,7 @@ TEST(RecordsCodec, AcceptanceV2CarriedUnits) {
     a.quality       = "пройдено";
     a.hours_raw     = 6.0;
     a.labor_units   = 7.2;
-    a.axes          = {{make_ref(0x79, 0x01), 7.2}};
+    a.axes          = {{make_path(0x79, 0x01), 7.2}};
     a.timestamp     = 1'700'000'100LL;
     a.carried_units = 1.19625;
 
@@ -767,7 +778,7 @@ TEST(RecordsCodec, AcceptanceV3NormRoundtrip) {
     a.quality     = "пройдено";
     a.hours_raw   = 6.0;
     a.labor_units = 6.0;
-    a.axes        = {{make_ref(0x79, 0x01), 6.0}};
+    a.axes        = {{make_path(0x79, 0x01), 6.0}};
     a.timestamp   = 1'700'000'000LL;
     records::AcceptanceNorm n{};
     n.agg.fill(0x33); n.date = 86'400; n.W = 1.0509;
@@ -1031,8 +1042,8 @@ TEST(RecordsCodec, AcceptanceAxesRoundtrip) {
     a.hours_raw   = 10.0;
     a.labor_units = 14.0;
     a.timestamp   = 1'700'000'000LL;
-    a.axes        = {{make_ref(0x79, 0x01), 2.8}, {make_ref(0x79, 0x02), 5.5},
-                     {make_ref(0x79, 0x03), 5.7}};
+    a.axes        = {{make_path(0x79, 0x01), 2.8}, {make_path(0x79, 0x02), 5.5},
+                     {make_path(0x79, 0x03), 5.7}};
 
     const auto d = std::get<records::Acceptance>(roundtrip(Record{a}));
     EXPECT_EQ(d.axes, a.axes);
@@ -1049,7 +1060,7 @@ TEST(RecordsCodec, AcceptanceAxesAlongsideOtherOptionalFields) {
     a.labor_units = 6.0;
     a.timestamp   = 5;
     a.carried_units = 1.5;
-    a.axes        = {{make_ref(0x79, 0x03), 6.0}};
+    a.axes        = {{make_path(0x79, 0x03), 6.0}};
 
     const auto d = std::get<records::Acceptance>(roundtrip(Record{a}));
     ASSERT_TRUE(d.carried_units.has_value());
@@ -1070,12 +1081,12 @@ TEST(RecordsCodec, AcceptanceWithoutAxesIsRefused) {
     a.timestamp   = 3;
     EXPECT_THROW(Codec::encode(Record{a}), records::CodecError);
 
-    a.axes = {{make_ref(0x79, 0x03), 2.0}};
+    a.axes = {{make_path(0x79, 0x03), 2.0}};
     EXPECT_NO_THROW(Codec::encode(Record{a}));
 }
 
-// Ось — это Ref, а не слаг: слаги сталкиваются, и выбирать между двумя цепями,
-// назвавшими свою ось одинаково, значило бы чьё-то решение.
+// Ось — полный путь к её определению, а не слаг: слаги сталкиваются, и выбирать
+// между двумя цепями, назвавшими свою ось одинаково, значило бы чьё-то решение.
 TEST(RecordsCodec, AcceptanceAxisIsAReferenceToItsDefinition) {
     records::Acceptance a{};
     a.work        = make_ref(0x53, 0x54);
@@ -1083,11 +1094,11 @@ TEST(RecordsCodec, AcceptanceAxisIsAReferenceToItsDefinition) {
     a.hours_raw   = 1.0;
     a.labor_units = 1.0;
     a.timestamp   = 1;
-    a.axes        = {{make_ref(0xAA, 0xBB), 1.0}};
+    a.axes        = {{make_path(0xAA, 0xBB), 1.0}};
 
     const auto d = std::get<records::Acceptance>(roundtrip(Record{a}));
     ASSERT_EQ(d.axes.size(), 1u);
-    EXPECT_EQ(d.axes[0].axis, a.axes[0].axis);      // цепь И хеш, целиком
+    EXPECT_EQ(d.axes[0].axis, a.axes[0].axis);      // путь И хеш, целиком
 }
 
 // AxisDef (0x79) — ось, заведённая в цепи (ИР-022)
@@ -1122,4 +1133,22 @@ TEST(RecordsCodec, AxisDefSameAsWithoutParent) {
     EXPECT_FALSE(d.parent.has_value());
     ASSERT_TRUE(d.same_as.has_value());
     EXPECT_EQ(*d.same_as, *a.same_as);
+}
+
+// Путь переживает кодек целиком: ветка и номер — не декорация, по ним к блоку
+// идут руками, а хеш проверяет, что там лежит именно он.
+TEST(RecordsCodec, AcceptanceAxisPathKeepsBranchAndIndex) {
+    records::Acceptance a{};
+    a.work        = make_ref(0x53, 0x54);
+    a.receiver.fill(0xB5);
+    a.hours_raw   = 1.0;
+    a.labor_units = 1.0;
+    a.timestamp   = 2;
+    a.axes        = {{make_path(0x79, 0x01, 0x7FFF'FFFFu, 41), 1.0}};
+
+    const auto d = std::get<records::Acceptance>(roundtrip(Record{a}));
+    ASSERT_EQ(d.axes.size(), 1u);
+    EXPECT_EQ(d.axes[0].axis.node,  0x7FFF'FFFFu);
+    EXPECT_EQ(d.axes[0].axis.block, 41u);
+    EXPECT_EQ(d.axes[0].axis, a.axes[0].axis);
 }

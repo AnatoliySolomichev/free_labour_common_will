@@ -1179,6 +1179,8 @@ void AggregatorServer::setup_routes() {
                 const auto& r = led[i];
                 if (i) body += ',';
                 body += "{\"axis\":\"" + to_hex(r.axis.chain) + "/"
+                                        + std::to_string(r.axis.node) + "/"
+                                        + std::to_string(r.axis.block) + "/"
                                         + to_hex(r.axis.hash)
                      + "\",\"label\":\"" + json_escape(r.label)
                      + "\",\"units\":"    + std::to_string(r.units)
@@ -1188,7 +1190,9 @@ void AggregatorServer::setup_routes() {
                      + ",\"spread\":"     + std::to_string(r.spread)
                      + ",\"deals\":"      + std::to_string(r.deals)
                      + ",\"chains\":"     + std::to_string(r.chains)
-                     + ",\"described\":"  + (r.described ? "true" : "false") + "}";
+                     + ",\"described\":"  + (r.described ? "true" : "false")
+                     + ",\"broken_paths\":" + std::to_string(r.broken_paths)
+                     + ",\"path_ok\":"    + (r.path_ok ? "true" : "false") + "}";
             }
             body += "]}";
             res.set_content(body, "application/json");

@@ -203,6 +203,35 @@ static Ref parse_ref(const std::string& s) {
     return ref;
 }
 
+// Full path to a block: <chain_hex>/<node>/<block>/<hash_hex>. The path is what a
+// person can walk by hand; the hash checks that the block there is the one meant.
+static BlockPath parse_block_path(const std::string& s) {
+    std::vector<std::string> part;
+    std::size_t start = 0;
+    for (;;) {
+        const auto slash = s.find('/', start);
+        part.push_back(s.substr(start, slash == std::string::npos ? std::string::npos
+                                                                  : slash - start));
+        if (slash == std::string::npos) break;
+        start = slash + 1;
+    }
+    if (part.size() != 4)
+        throw std::runtime_error("ожидался путь <цепь>/<узел>/<блок>/<хеш>, получено: " + s);
+    BlockPath p{};
+    if (!from_hex(part[0], p.chain.data(), 32) || !from_hex(part[3], p.hash.data(), 32))
+        throw std::runtime_error("неверный hex в пути: " + s);
+    try {
+        const unsigned long node  = std::stoul(part[1]);
+        const unsigned long block = std::stoul(part[2]);
+        if (node > 0xFFFFFFFFul || block > 0xFFFFFFFFul) throw std::out_of_range("index");
+        p.node  = static_cast<uint32_t>(node);
+        p.block = static_cast<uint32_t>(block);
+    } catch (const std::exception&) {
+        throw std::runtime_error("неверный номер узла или блока в пути: " + s);
+    }
+    return p;
+}
+
 // ── ResourceQty parser ("name:qty:unit") ─────────────────────────────────────
 
 static ResourceQty parse_rq(const std::string& s) {
@@ -1104,7 +1133,7 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
         std::cerr << "Usage: bc accept\n"
                      "    --work         WORK_CHAIN/HASH\n"
                      "    --quality      TEXT\n"
-                     "    --axis ОСЬ_CHAIN/HASH=ЧАСЫ   сколько трудочасов цены ушло\n"
+                     "    --axis ПУТЬ_ОСИ=ЧАСЫ        сколько трудочасов цены ушло\n"
                      "                                 на эту ось; повторяйте для\n"
                      "                                 каждой. Сумма обязана точно\n"
                      "                                 совпасть с оценкой (ИР-022)\n"
@@ -1127,18 +1156,18 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     for (const auto& p : axis_args) {
         const auto eq = p.rfind('=');
         if (eq == std::string::npos || eq == 0)
-            throw std::runtime_error("--axis ждёт ОСЬ_CHAIN/HASH=ЧАСЫ: " + p);
+            throw std::runtime_error("--axis ждёт ПУТЬ_ОСИ=ЧАСЫ (путь: цепь/узел/блок/хеш): " + p);
         AcceptanceAxis x{};
-        x.axis  = parse_ref(p.substr(0, eq));
+        x.axis  = parse_block_path(p.substr(0, eq));
         x.units = std::stod(p.substr(eq + 1));
         a.axes.push_back(std::move(x));
     }
-    std::vector<std::pair<Ref, double>> shares;
+    std::vector<std::pair<BlockPath, double>> shares;
     for (const auto& p : share_args) {
         const auto eq = p.rfind('=');
         if (eq == std::string::npos || eq == 0)
-            throw std::runtime_error("--axis-share ждёт ОСЬ_CHAIN/HASH=ДОЛЯ: " + p);
-        shares.emplace_back(parse_ref(p.substr(0, eq)), std::stod(p.substr(eq + 1)));
+            throw std::runtime_error("--axis-share ждёт ПУТЬ_ОСИ=ДОЛЯ (путь: цепь/узел/блок/хеш): " + p);
+        shares.emplace_back(parse_block_path(p.substr(0, eq)), std::stod(p.substr(eq + 1)));
     }
     a.timestamp = static_cast<int64_t>(std::time(nullptr));
     a.receiver  = ctx.user_id.bytes;
@@ -2959,7 +2988,9 @@ static int cmd_axis_define(const fs::path& data_dir, int argc, char** argv) {
     const NodeIndex leaf = parse_leaf_index(argc, argv);
     Context ctx(data_dir, leaf);
     const Block block = append_record(ctx, Record{a});
-    std::cout << "axis ref: " << to_hex(ctx.user_id.bytes) << "/"
+    // Полный путь: по нему можно дойти до определения руками, хеш — контроль.
+    std::cout << "axis ref: " << to_hex(block.address.user_id.bytes) << "/"
+              << block.address.node_index << "/" << block.address.block_index << "/"
               << to_hex(Crypto::hash_block(block).bytes) << "\n";
     if (const auto via = flag_val(argc, argv, "--via"); !via.empty())
         upload_block(via, block);

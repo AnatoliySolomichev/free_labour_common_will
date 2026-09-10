@@ -39,7 +39,7 @@ namespace aggregator {
 
 // One axis, as the settled deals actually paid it.
 struct AxisLedgerRow {
-    records::Ref axis;           // identity: the AxisDef record itself
+    records::BlockPath axis;     // identity: the full path to the AxisDef record
     std::string  label;          // its `ru`, when a definition was found
     double      units    = 0.0;  // Σ labour hours that went to this axis
     double      hours    = 0.0;  // Σ hours of the work that named it
@@ -54,6 +54,12 @@ struct AxisLedgerRow {
     // used without argument — and an unargued axis reused again and again is
     // exactly what to look at.
     bool        described = false;
+    // References whose path does NOT lead to the block their hash names: a key was
+    // stolen and the block re-signed, or the owner forked the branch
+    // (blockchain.md §6.7). Counted all the same — the payment happened — but the
+    // reference no longer leads where it claimed to, and that is worth seeing.
+    uint64_t    broken_paths = 0;
+    bool        path_ok      = true;   // broken_paths == 0
 };
 
 // Axis definitions found in the chains (ИР-022): slug → the record that argues

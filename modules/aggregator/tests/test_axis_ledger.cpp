@@ -27,7 +27,17 @@ records::Ref ref_to(const UserId& chain, const Block& block) {
     return r;
 }
 
-const AxisLedgerRow* row_of(const std::vector<AxisLedgerRow>& v, const records::Ref& a) {
+// Полный путь к блоку — так на ось и ссылаются (records.md §9.5 v4).
+records::BlockPath path_to(const Block& block) {
+    records::BlockPath p{};
+    p.chain = block.address.user_id.bytes;
+    p.node  = block.address.node_index;
+    p.block = block.address.block_index;
+    p.hash  = Crypto::hash_block(block).bytes;
+    return p;
+}
+
+const AxisLedgerRow* row_of(const std::vector<AxisLedgerRow>& v, const records::BlockPath& a) {
     for (const auto& r : v) if (r.axis == a) return &r;
     return nullptr;
 }
@@ -78,16 +88,16 @@ protected:
     }
 
     // Ось — запись в цепи; ссылка на неё и есть личность оси.
-    records::Ref axis(const std::string& slug, const std::string& ru,
+    records::BlockPath axis(const std::string& slug, const std::string& ru,
                       const std::string& why, int64_t ts = 1) {
         records::AxisDef d{};
         d.slug = slug; d.ru = ru; d.description = why; d.timestamp = ts;
-        return ref_to(chain_of(0xD0), add(chain_of(0xD0), d));
+        return path_to(add(chain_of(0xD0), d));
     }
 
     // Рассчитанная сделка с разбивкой цены прямо в приёмке (records.md §9.5 v4).
     records::Ref settled(const UserId& payer, double hours, double units,
-                         std::vector<std::pair<records::Ref, double>> parts = {}) {
+                         std::vector<std::pair<records::BlockPath, double>> parts = {}) {
         records::WorkRecord wr{};
         wr.agent = grade_ref_;
         wr.hours = hours;
@@ -181,11 +191,11 @@ TEST_F(AxisLedgerTest, SameSlugInTwoChainsAreTwoDifferentAxes) {
     records::AxisDef a{};
     a.slug = "danger"; a.ru = "Опасность"; a.description = "риск работника";
     a.timestamp = 100;
-    const auto mine = ref_to(chain_of(0xD1), add(chain_of(0xD1), a));
+    const auto mine = path_to(add(chain_of(0xD1), a));
     records::AxisDef b{};
     b.slug = "danger"; b.ru = "Опасность"; b.description = "риск чего угодно";
     b.timestamp = 200;
-    const auto theirs = ref_to(chain_of(0xD2), add(chain_of(0xD2), b));
+    const auto theirs = path_to(add(chain_of(0xD2), b));
     ASSERT_NE(mine, theirs);
 
     settled(chain_of(0xB1), 10.0, 10.0, {{mine, 10.0}});
@@ -201,7 +211,7 @@ TEST_F(AxisLedgerTest, SameSlugInTwoChainsAreTwoDifferentAxes) {
 // Ось, на которую сослались, но которой нет ни в одной цепи: считается, но
 // видна как неописанная. Заводить оси волен каждый; молчать про них — тоже.
 TEST_F(AxisLedgerTest, AxisWithNoDefinitionAtAllIsUndescribed) {
-    records::Ref nowhere{};
+    records::BlockPath nowhere{};
     nowhere.chain.fill(0xEE);
     nowhere.hash.fill(0xFF);
     settled(chain_of(0xB1), 10.0, 10.0, {{nowhere, 10.0}});
@@ -211,4 +221,30 @@ TEST_F(AxisLedgerTest, AxisWithNoDefinitionAtAllIsUndescribed) {
     ASSERT_EQ(led.size(), 1u);
     EXPECT_FALSE(led[0].described);
     EXPECT_TRUE(led[0].label.empty());
+    EXPECT_FALSE(led[0].path_ok);          // по этому пути блока нет вовсе
+}
+
+// Путь ведёт к блоку, хеш проверяет, что по этому адресу лежит именно он. Если
+// по адресу оказался ДРУГОЙ блок (ключ угнан и блок переподписан, или владелец
+// раздвоил ветку), платёж всё равно учтён — но расхождение видно.
+TEST_F(AxisLedgerTest, PathIsWalkableAndCheckedByHash) {
+    const auto dng   = axis("danger", "Опасность", "риск для самого работника");
+    const auto other = axis("people", "Работа с людьми", "предмет труда — человек");
+    settled(chain_of(0xB1), 10.0, 10.0, {{dng, 10.0}});
+
+    auto led = build_axis_ledger(*storage_);
+    ASSERT_EQ(led.size(), 1u);
+    EXPECT_TRUE(led[0].path_ok);
+    EXPECT_EQ(led[0].broken_paths, 0u);
+
+    // Тот же хеш, но адрес указывает на соседний блок той же цепи.
+    records::BlockPath lying = dng;
+    lying.block = other.block;
+    settled(chain_of(0xB2), 10.0, 10.0, {{lying, 10.0}});
+
+    led = build_axis_ledger(*storage_);
+    ASSERT_EQ(led.size(), 1u);                     // ось одна: личность — хеш
+    EXPECT_NEAR(led[0].units, 20.0, 1e-9);         // оба платежа учтены
+    EXPECT_EQ(led[0].broken_paths, 1u);            // но одна ссылка ведёт не туда
+    EXPECT_FALSE(led[0].path_ok);
 }

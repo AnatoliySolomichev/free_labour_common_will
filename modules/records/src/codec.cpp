@@ -80,6 +80,16 @@ void w_ref(Buf& out, const Ref& r) {
     w_uint(out, 1); w_fixed(out, r.hash);
 }
 
+// Полный путь к блоку: цепь, ветка (узел), номер в ветке, хеш для контроля.
+// Та же форма, что лист ExternalRef в доказательствах слияний.
+void w_block_path(Buf& out, const BlockPath& p) {
+    w_map(out, 4);
+    w_uint(out, 0); w_fixed(out, p.chain);
+    w_uint(out, 1); w_uint(out, p.node);
+    w_uint(out, 2); w_uint(out, p.block);
+    w_uint(out, 3); w_fixed(out, p.hash);
+}
+
 void w_resource_qty(Buf& out, const ResourceQty& rq) {
     w_map(out, 3);
     w_uint(out, 0); w_text(out, rq.resource);
@@ -212,7 +222,7 @@ void enc_acceptance(Buf& out, const Acceptance& a) {
     w_uint(out, 9); w_arr(out, a.axes.size());
     for (const auto& x : a.axes) {
         w_map(out, 2);
-        w_uint(out, 0); w_ref(out, x.axis);
+        w_uint(out, 0); w_block_path(out, x.axis);
         w_uint(out, 1); w_float64(out, x.units);
     }
 }
@@ -592,6 +602,21 @@ Ref dec_ref(CborReader& r) {
     return ref;
 }
 
+BlockPath dec_block_path(CborReader& r) {
+    if (r.r_map() != 4) throw CodecError("BlockPath: expected 4 fields");
+    auto index = [&r]() -> uint32_t {
+        const uint64_t v = r.r_uint();
+        if (v > 0xFFFF'FFFFu) throw CodecError("BlockPath: index out of range");
+        return static_cast<uint32_t>(v);
+    };
+    BlockPath p{};
+    expect_key(r, 0); r.r_fixed(p.chain);
+    expect_key(r, 1); p.node  = index();
+    expect_key(r, 2); p.block = index();
+    expect_key(r, 3); r.r_fixed(p.hash);
+    return p;
+}
+
 // ── Optional fields: CBOR null (major 7, info 22) or the value itself ─────────
 
 bool is_null_head(const std::pair<uint8_t, uint64_t>& h) {
@@ -779,7 +804,7 @@ Acceptance dec_acceptance_fields(CborReader& r, uint64_t field_count) {
             for (uint64_t k = 0; k < n; ++k) {
                 if (r.r_map() != 2) throw CodecError("AcceptanceAxis: expected 2 fields");
                 AcceptanceAxis x{};
-                expect_key(r, 0); x.axis  = dec_ref(r);
+                expect_key(r, 0); x.axis  = dec_block_path(r);
                 expect_key(r, 1); x.units = r.r_float64();
                 a.axes.push_back(std::move(x));
             }

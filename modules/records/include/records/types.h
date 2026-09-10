@@ -57,6 +57,30 @@ struct Ref {
     bool operator!=(const Ref& o) const noexcept { return !(*this == o); }
 };
 
+// The FULL path to a block: whose chain, which branch of its binary tree, which
+// position in that branch — plus the content hash, so the path can be checked.
+// Same shape as the blockchain layer's ExternalRef, which the protocol already
+// uses to address merge leaves.
+//
+// Why both. By protocol a branch cannot hold two blocks at one index
+// (blockchain.md §9.5), so for a VALID chain the address alone is unique, and it
+// lets anyone walk to the block by hand without any index. But a stolen key, or
+// an owner forking their own branch, can still SIGN a second block at the same
+// address (blockchain.md §6.7) — not a valid block, evidence of fraud, yet it
+// exists. The hash says which of the two was meant, and proves the block has
+// not been re-signed since.
+struct BlockPath {
+    std::array<uint8_t, 32> chain{};   // UserId: root public key of the owner
+    uint32_t                node  = 0; // heap index of the leaf node — the branch
+    uint32_t                block = 0; // position of the block in that branch
+    std::array<uint8_t, 32> hash{};    // BLAKE2b-256 of the block, as a check
+
+    bool operator==(const BlockPath& o) const noexcept {
+        return chain == o.chain && node == o.node && block == o.block && hash == o.hash;
+    }
+    bool operator!=(const BlockPath& o) const noexcept { return !(*this == o); }
+};
+
 // ── Structural / protocol (records.md §3A) ───────────────────────────────────
 
 // Accusation that a merge block's committed snapshot is cryptographically bogus.
@@ -192,16 +216,15 @@ struct AcceptanceNorm {
 // went to this axis. No intensity here and no share — just hours, because hours
 // are what was paid.
 //
-// The axis is a Ref — chain + block hash — and NOT a slug. Slugs collide, and
-// there is no principled way to pick between two chains that both call their axis
-// "danger": the tie-break would be somebody's decision, which is exactly what
-// this design has no room for. A Ref is the full unambiguous path to the record
-// that DEFINES the axis, so using an axis and pointing at its argument are the
-// same act. (Chain + hash rather than chain + branch + index: an index can be
-// equivocated — two blocks at one index on two branches — a content hash cannot,
-// records.md §4.)
+// The axis is a BlockPath — the full path to the AxisDef record plus its hash —
+// and NOT a slug. Slugs collide, and there is no principled way to pick between
+// two chains that both call their axis "danger": the tie-break would be
+// somebody's decision, which is exactly what this design has no room for. The
+// path leads to the record that DEFINES the axis, so using an axis and pointing
+// at its argument are the same act; anyone can walk it by hand, and the hash
+// shows whether the block at that address is still the one that was meant.
 struct AcceptanceAxis {
-    Ref    axis;     // the AxisDef record this line is about
+    BlockPath axis;  // the AxisDef record this line is about
     double units;    // labour hours of THIS deal's price attributed to it
 
     bool operator==(const AcceptanceAxis& o) const noexcept {

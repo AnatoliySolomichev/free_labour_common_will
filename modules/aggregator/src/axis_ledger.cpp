@@ -1,10 +1,12 @@
 #include "aggregator/axis_ledger.h"
 
+#include <blockchain/crypto.h>
 #include <records/codec.h>
 
 #include <algorithm>
 #include <cmath>
 #include <set>
+#include <tuple>
 
 namespace aggregator {
 
@@ -53,10 +55,26 @@ std::vector<AxisLedgerRow> build_axis_ledger(
         double   units = 0.0, hours = 0.0;
         double   sum = 0.0, sumsq = 0.0;      // per-deal units/hours, hours-weighted
         uint64_t deals = 0;
+        uint64_t broken = 0;
         std::set<RefHash> chains;
     };
     std::map<RefHash, Acc>     per_axis;
-    std::map<RefHash, records::Ref> ident;
+    std::map<RefHash, records::BlockPath> ident;
+
+    // Путь обязан вести к блоку, названному хешем. Проверяется один раз на путь.
+    using PathKey = std::tuple<RefHash, uint32_t, uint32_t, RefHash>;
+    std::map<PathKey, bool> walked;
+    auto path_leads = [&](const records::BlockPath& p) {
+        const PathKey k{p.chain, p.node, p.block, p.hash};
+        const auto it = walked.find(k);
+        if (it != walked.end()) return it->second;
+        UserId owner{};
+        owner.bytes = p.chain;
+        const auto at = storage.get_block(BlockAddress{owner, p.node, p.block});
+        const bool ok = at && Crypto::hash_block(*at).bytes == p.hash;
+        walked.emplace(k, ok);
+        return ok;
+    };
     double total_units = 0.0;
 
     for (const auto& [acc_hash, deal] : deals) {
@@ -77,6 +95,7 @@ std::vector<AxisLedgerRow> build_axis_ledger(
         for (const auto& x : a.axes) {
             ident.emplace(x.axis.hash, x.axis);
             auto& acc = per_axis[x.axis.hash];
+            if (!path_leads(x.axis)) acc.broken += 1;
             const double per_hour = x.units / a.hours_raw;
             acc.units += x.units;
             acc.hours += a.hours_raw;
@@ -93,6 +112,8 @@ std::vector<AxisLedgerRow> build_axis_ledger(
     for (const auto& [hash, acc] : per_axis) {
         AxisLedgerRow r{};
         r.axis      = ident.at(hash);
+        r.broken_paths = acc.broken;
+        r.path_ok      = acc.broken == 0;
         r.units     = acc.units;
         r.hours     = acc.hours;
         r.deals     = acc.deals;

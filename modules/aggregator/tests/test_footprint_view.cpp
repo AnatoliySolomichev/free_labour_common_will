@@ -16,8 +16,8 @@
 
 // Ось для разбивки цены: в этих тестах её содержание не проверяется, важно лишь
 // что приёмки без разбивки не существует (records.md §9.5 v4).
-inline records::Ref test_axis() {
-    records::Ref r{};
+inline records::BlockPath test_axis() {
+    records::BlockPath r{};
     r.chain.fill(0x79);
     r.hash.fill(0x01);
     return r;
