@@ -41,6 +41,13 @@ target_compile_options(aggregator PRIVATE -Wall -Wextra)
 add_executable(aggregator_server src/main.cpp)
 target_link_libraries(aggregator_server PRIVATE aggregator)
 
+# ── Measurement tool (not a test: it reads the sim-year journal) ──────────────
+# The record of the ИР-021 measurements decisions rest on — see its header.
+
+add_executable(aggregator_measure_indep tools/measure_indep.cpp)
+target_link_libraries(aggregator_measure_indep PRIVATE aggregator records)
+target_compile_options(aggregator_measure_indep PRIVATE -Wall -Wextra)
+
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 enable_testing()

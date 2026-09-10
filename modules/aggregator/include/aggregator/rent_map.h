@@ -54,7 +54,7 @@ struct DealTrace {
 
 // The window of settled deals, per basket, with the network's axis prices.
 struct RentInput {
-    std::map<std::pair<std::string, uint8_t>, std::vector<DealTrace>> baskets;
+    std::map<std::string, std::vector<DealTrace>> baskets;   // specialty → deals
     // axis (by the hash of its defining block) → standard hours paid per hour of
     // the work that named it, across the WHOLE network — not the basket's own,
     // or a basket where everybody pays more would be its own reference and a
@@ -76,8 +76,9 @@ inline constexpr unsigned kRentMinPayers = 4;
 //
 // The traversal is the rates view's: an Acceptance counts only if a Transfer
 // settles it precisely (paid == labor + carried) and it is non-self, and its
-// (specialty, level) is resolved through Acceptance → WorkRecord → Grade →
-// Specialty. The breakdown must ADD UP to labor_units — one that does not
+// specialty — the basket, as in the rates (ИР-022) — is resolved through
+// Acceptance → WorkRecord → Grade → Specialty. The breakdown must ADD UP to
+// labor_units — one that does not
 // describes some other deal and is left out, the same rule as the axis ledger.
 RentInput build_rent_input(const AggregatorStorage& storage,
                            int64_t from_ts, int64_t to_ts);
@@ -85,7 +86,6 @@ RentInput build_rent_input(const AggregatorStorage& storage,
 // One published row of the rent map.
 struct RentRow {
     std::string slug;
-    uint8_t     level    = 0;
     double      fact     = 0.0;  // what the basket paid per hour
     double      expected = 0.0;  // Σ network per_hour over the axes it named
     double      resid    = 0.0;  // fact − expected, standard hours per hour
@@ -107,7 +107,7 @@ struct RentRow {
     bool     judged       = false;
 };
 
-// Assemble the map, one row per basket in canonical (slug, level) order.
+// Assemble the map, one row per basket in canonical (slug) order.
 std::vector<RentRow> build_rent_map(const RentInput& in,
                                     unsigned min_payers = kRentMinPayers);
 

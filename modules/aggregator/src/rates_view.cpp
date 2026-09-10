@@ -27,7 +27,6 @@ struct Accum {
 // per hour — the network rate times the k agreed in it (economy.md §2а).
 struct ResolvedDeal {
     std::string specialty;
-    uint8_t     level  = 0;
     RefHash     worker{};
     RefHash     payer{};
     double      units  = 0;
@@ -114,30 +113,30 @@ double quantile_sorted(const std::vector<double>& v, double q) {
 
 } // namespace
 
-// Prior for a thin, previously-unseen (specialty, level) bucket from the cloud
+// Prior for a thin, previously-unseen specialty from the cloud
 // (specialty-axes.md §10): weighted mean of neighbours that already have a rate
-// at this level (a neighbour with none is "thin" and skipped) → tree parent's
-// rate → 1.0. Both are other people's actual deals; there is no model step any
-// more (the axis-price regression was removed, records.md §11.9).
+// (a neighbour with none is "thin" and skipped) → tree parent's rate → 1.0.
+// Both are other people's actual deals; there is no model step any more (the
+// axis-price regression was removed, records.md §11.9).
 // `prev0` is the immutable yesterday-rate map (not the one being drained).
 static std::optional<double> cloud_prior(
-    const std::string& specialty, uint8_t level,
-    const records::SpecialtyCloud& cloud,
-    const std::map<std::pair<std::string, uint8_t>, double>& prev0) {
+    const std::string&                   specialty,
+    const records::SpecialtyCloud&       cloud,
+    const std::map<std::string, double>& prev0) {
     const records::CloudPoint* pt = nullptr;
     for (const auto& p : cloud.points)
         if (p.slug == specialty) { pt = &p; break; }
     if (!pt) return std::nullopt;
     double sw = 0.0, swr = 0.0;
     for (const auto& n : pt->neighbors) {
-        const auto it = prev0.find({n.slug, level});
+        const auto it = prev0.find(n.slug);
         if (it == prev0.end()) continue;          // neighbour has no rate yet → skip
         sw += n.weight;
         swr += n.weight * it->second;
     }
     if (sw > 0.0) return swr / sw;
     if (!pt->parent.empty()) {
-        const auto it = prev0.find({pt->parent, level});
+        const auto it = prev0.find(pt->parent);
         if (it != prev0.end()) return it->second;
     }
     return 1.0;                                    // normalized par, last resort
@@ -222,7 +221,6 @@ std::vector<records::RateEntry> build_daily_rates(
 
         ResolvedDeal rd{};
         rd.specialty = spec->name;
-        rd.level     = grade->level;
         rd.worker    = deal.acc.work.chain;
         rd.payer     = deal.payer.bytes;
         rd.units     = deal.acc.labor_units;
@@ -235,7 +233,7 @@ std::vector<records::RateEntry> build_daily_rates(
     // ── ИР-021: counterparty independence over the window ────────────────────
     // Two ingredients, and the discount needs BOTH: how mutual the pair is, and
     // how far above its own basket the deal is priced.
-    using BasketKey = std::pair<std::string, uint8_t>;
+    using BasketKey = std::string;                     // the specialty (ИР-022)
     std::map<Edge, double> flow, circ;
     std::map<BasketKey, std::vector<double>> basket;   // rates per DEAL
     std::map<BasketKey, std::pair<double, double>> pool;  // basket → [Σ units, Σ hours]
@@ -263,10 +261,10 @@ std::vector<records::RateEntry> build_daily_rates(
         for (const auto& d : resolved) {
             flow[{d.payer, d.worker}] += d.units;
             if (d.rate <= 0.0) continue;
-            auto& p = pool[{d.specialty, d.level}];
+            auto& p = pool[d.specialty];
             p.first  += d.units;
             p.second += d.hours;
-            basket[{d.specialty, d.level}].push_back(d.rate);
+            basket[d.specialty].push_back(d.rate);
         }
         for (auto& [key, rates] : basket) std::sort(rates.begin(), rates.end());
         circ = circulation(flow, std::max<size_t>(2, indep->max_cycle));
@@ -282,8 +280,8 @@ std::vector<records::RateEntry> build_daily_rates(
             fit->second <= 0.0) return 1.0;
         const double R = std::clamp(cit->second / fit->second, 0.0, 1.0);
 
-        const auto bit = basket.find({d.specialty, d.level});
-        const auto pit = pool.find({d.specialty, d.level});
+        const auto bit = basket.find(d.specialty);
+        const auto pit = pool.find(d.specialty);
         // Too few deals to tell an anomaly from a normal price: refuse to judge
         // rather than punish an honest young specialty.
         if (bit == basket.end() || pit == pool.end() ||
@@ -309,12 +307,12 @@ std::vector<records::RateEntry> build_daily_rates(
         return 1.0 - R * excess;
     };
 
-    // Fold the day's deals per (specialty, level).
-    std::map<std::pair<std::string, uint8_t>, Accum> day;
+    // Fold the day's deals per specialty.
+    std::map<std::string, Accum> day;
     for (const auto& d : resolved) {
         if (!d.in_day) continue;
         const double w = weight_of(d);
-        auto& acc = day[{d.specialty, d.level}];
+        auto& acc = day[d.specialty];
         acc.w_units += w * d.units;
         acc.w_hours += w * d.hours;
         acc.hours   += d.hours;
@@ -322,15 +320,29 @@ std::vector<records::RateEntry> build_daily_rates(
     }
 
     // Smooth against yesterday; carry forward untouched specialties.
-    std::map<std::pair<std::string, uint8_t>, double> prev_rate;
-    for (const auto& p : previous) prev_rate[{p.specialty, p.level}] = p.rate;
-    const std::map<std::pair<std::string, uint8_t>, double> prev0 = prev_rate;
+    // An aggregate published before v3 (ИР-022) has one entry per (specialty,
+    // grade), and they decode as several entries of one specialty. The grade no
+    // longer splits a rate, so they fold into one — weighted by the hours behind
+    // each, or evenly when none carried any.
+    std::map<std::string, std::vector<const records::RateEntry*>> prev_by;
+    for (const auto& p : previous) prev_by[p.specialty].push_back(&p);
+    std::map<std::string, double> prev_rate;
+    for (const auto& [spec, es] : prev_by) {
+        if (es.size() == 1) { prev_rate[spec] = es.front()->rate; continue; }
+        double sw = 0.0, swr = 0.0, sr = 0.0;
+        for (const auto* e : es) {
+            sw  += e->hours;
+            swr += e->rate * e->hours;
+            sr  += e->rate;
+        }
+        prev_rate[spec] = sw > 0.0 ? swr / sw : sr / static_cast<double>(es.size());
+    }
+    const std::map<std::string, double> prev0 = prev_rate;
 
     std::vector<records::RateEntry> out;
     for (const auto& [key, acc] : day) {
         records::RateEntry e{};
-        e.specialty = key.first;
-        e.level     = key.second;
+        e.specialty = key;
         e.hours          = acc.hours;
         e.deals          = acc.deals;
         e.weighted_hours = acc.w_hours;   // v2 (ИР-021): сколько объёма уцелело
@@ -341,8 +353,7 @@ std::vector<records::RateEntry> build_daily_rates(
             if (prev != prev_rate.end()) {
                 e.rate = prev->second;               // inherit unchanged
             } else if (cloud) {                      // seed a prior from the cloud
-                const auto prior = cloud_prior(key.first, key.second, *cloud,
-                                               prev0);
+                const auto prior = cloud_prior(key, *cloud, prev0);
                 if (!prior) continue;
                 e.rate = *prior;
             } else {
@@ -369,12 +380,11 @@ std::vector<records::RateEntry> build_daily_rates(
         prev_rate.erase(key);
     }
     for (const auto& [key, rate] : prev_rate)
-        out.push_back({key.first, key.second, rate, 0.0, 0, 0.0});
+        out.push_back({key, rate, 0.0, 0, 0.0});
 
     std::sort(out.begin(), out.end(),
               [](const records::RateEntry& a, const records::RateEntry& b) {
-                  return a.specialty != b.specialty ? a.specialty < b.specialty
-                                                    : a.level < b.level;
+                  return a.specialty < b.specialty;
               });
     return out;
 }

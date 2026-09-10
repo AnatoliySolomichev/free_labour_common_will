@@ -437,9 +437,9 @@ for prof,b in sorted(by_prof.items(),key=lambda kv:-kv[1]['avg_received']):
     P(f"    {prof:<20}{b['n']:>4}{b['avg_issued']:>9}{b['avg_received']:>9}{b['avg_labor']:>9}")
 
 if rates_latest:
-    P(f"\n  СЕТЕВЫЕ СТАВКИ на {rates_latest_month} (ч оплаты за час труда, по специальности×разряду):")
+    P(f"\n  СЕТЕВЫЕ СТАВКИ на {rates_latest_month} (ч оплаты за час труда, по специальности):")
     for r in sorted(rates_latest,key=lambda r:-r.get('rate',0))[:10]:
-        P(f"    {r.get('specialty',''):<20} разряд {r.get('level','?')}  ставка {r.get('rate',0):.3f}  "
+        P(f"    {r.get('specialty',''):<20} ставка {r.get('rate',0):.3f}  "
           f"(сделок {r.get('deals',0)}, ч {r.get('hours',0):.0f})")
     months_with_rates=sum(1 for mo in rates_by_month if (rates_by_month[mo] or {}).get('rates'))
     P(f"    (ставки посчитаны для {months_with_rates} мес. из {MONTHS})")

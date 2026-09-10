@@ -390,10 +390,15 @@ struct PledgeRevoke {
     int64_t timestamp;  // Unix timestamp UTC
 };
 
-// Daily rate of one (specialty name, grade level) pair (records.md §11.2).
+// Daily rate of one specialty (records.md §11.2).
+//
+// v3 (ИР-022): the grade is NOT part of the key any more. It used to split a
+// specialty's rate by grade, so a master's hour came out dearer by decree of the
+// ladder — on top of whatever the deal itself paid for. The deal now itemizes
+// its price by axis (records.md §9.5 v4), and a grade in the key would pay a
+// second time for what the breakdown already named.
 struct RateEntry {
     std::string specialty;  // global key: the specialty name
-    uint8_t     level;      // grade level 1–6
     double      rate;       // стч/hour, after smoothing
     double      hours;      // Σ hours_raw of the day's settled deals, RAW
     uint64_t    deals;      // number of settled deals counted
@@ -405,7 +410,7 @@ struct RateEntry {
     double      weighted_hours = 0.0;
 
     bool operator==(const RateEntry& o) const noexcept {
-        return specialty == o.specialty && level == o.level && rate == o.rate
+        return specialty == o.specialty && rate == o.rate
             && hours == o.hours && deals == o.deals
             && weighted_hours == o.weighted_hours;
     }

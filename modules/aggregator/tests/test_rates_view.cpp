@@ -144,15 +144,14 @@ TEST_F(RatesViewTest, SettledDealsAverageSmoothAndCarryForward) {
     const auto fresh = build_daily_rates(*storage_, kDay, {});
     ASSERT_EQ(fresh.size(), 1u);
     EXPECT_EQ(fresh[0].specialty, "хлебопёк");
-    EXPECT_EQ(fresh[0].level, 3);
     EXPECT_NEAR(fresh[0].rate, 0.8 / 0.6, 1e-9);
     EXPECT_EQ(fresh[0].deals, 2u);
 
     // With yesterday's 1.25: rate = 0.3*1.3333 + 0.7*1.25 = 1.275, and an
     // untouched specialty carries forward unchanged.
     const std::vector<records::RateEntry> prev = {
-        {"хлебопёк", 3, 1.25, 0.0, 0},
-        {"кардиохирург", 3, 14.0, 0.0, 0},
+        {"хлебопёк", 1.25, 0.0, 0},
+        {"кардиохирург", 14.0, 0.0, 0},
     };
     const auto smoothed = build_daily_rates(*storage_, kDay, prev);
     ASSERT_EQ(smoothed.size(), 2u);
@@ -170,7 +169,7 @@ TEST_F(RatesViewTest, SelfDealsAndTinyVolumesExcluded) {
     settled_deal(bob_, 0.05, 5.0);            // below min_hours, no previous
     EXPECT_TRUE(build_daily_rates(*storage_, kDay, {}).empty());
     // ...but with a previous rate the specialty inherits it unchanged.
-    const std::vector<records::RateEntry> prev = {{"хлебопёк", 3, 1.25, 0, 0}};
+    const std::vector<records::RateEntry> prev = {{"хлебопёк", 1.25, 0, 0}};
     const auto inherited = build_daily_rates(*storage_, kDay, prev);
     ASSERT_EQ(inherited.size(), 1u);
     EXPECT_DOUBLE_EQ(inherited[0].rate, 1.25);
@@ -256,7 +255,7 @@ TEST_F(RatesViewTest, RatesEndpointPublishesSignedAggregateOnce) {
 // Cloud prior (ИР-018, specialty-axes.md §10): a thin, previously-unseen bucket is
 // seeded from its cloud neighbour's rate instead of being skipped.
 TEST_F(RatesViewTest, CloudPriorSeedsThinNewSpecialty) {
-    settled_deal(bob_, 0.05, 5.0);            // "хлебопёк" level 3, thin, no previous
+    settled_deal(bob_, 0.05, 5.0);            // "хлебопёк", thin, no previous
 
     records::SpecialtyCloud cloud{};
     records::CloudPoint p{};
@@ -264,12 +263,12 @@ TEST_F(RatesViewTest, CloudPriorSeedsThinNewSpecialty) {
     p.neighbors.push_back({"prof.cook", 1.0});
     cloud.points.push_back(p);
 
-    const std::vector<records::RateEntry> prev = {{"prof.cook", 3, 1.2, 0.0, 0}};
+    const std::vector<records::RateEntry> prev = {{"prof.cook", 1.2, 0.0, 0}};
 
     const auto rates = build_daily_rates(*storage_, kDay, prev, 0.3, 0.1, &cloud);
     bool seeded = false;
     for (const auto& r : rates)
-        if (r.specialty == "хлебопёк" && r.level == 3) {
+        if (r.specialty == "хлебопёк") {
             EXPECT_DOUBLE_EQ(r.rate, 1.2);    // neighbour's rate
             seeded = true;
         }
@@ -448,7 +447,7 @@ TEST_F(IndependenceTest, ShortWindowMissesAlternatingCollusion) {
 
     // Вчерашняя ставка корзины — 1.0: за день торговала одна лишь пара, так что
     // разница видна в том, насколько ей позволено сдвинуть ставку.
-    const std::vector<records::RateEntry> prev = {{"хлебопёк", 3, 1.0, 0.0, 0}};
+    const std::vector<records::RateEntry> prev = {{"хлебопёк", 1.0, 0.0, 0}};
     const auto s = build_daily_rates(*storage_, kDay, prev, 0.3, 0.1, nullptr,
                                      &short_win);
     const auto l = build_daily_rates(*storage_, kDay, prev, 0.3, 0.1, nullptr,
@@ -624,12 +623,68 @@ TEST_F(RatesViewTest, CloudReadOffTheDealsSeedsAThinNewSpecialty) {
 
     const auto cloud = build_specialty_cloud(build_specialty_compositions(*storage_),
                                              kDay, kDay, {});
-    const std::vector<records::RateEntry> prev = {{"prof.cook", 3, 1.2, 0.0, 0}};
+    const std::vector<records::RateEntry> prev = {{"prof.cook", 1.2, 0.0, 0}};
     bool seeded = false;
     for (const auto& r : build_daily_rates(*storage_, kDay, prev, 0.3, 0.1, &cloud))
-        if (r.specialty == "хлебопёк" && r.level == 3) {
+        if (r.specialty == "хлебопёк") {
             EXPECT_DOUBLE_EQ(r.rate, 1.2);          // ставка соседа по составу цены
             seeded = true;
         }
     EXPECT_TRUE(seeded);
+}
+
+// ── Разряд не делит ставку (ИР-022) ───────────────────────────────────────────
+//
+// Разряд прежде входил в ключ ставки, и час мастера выходил дороже по одному
+// лишь званию — сверх того, за что платила сама сделка. Теперь цена расписана
+// по осям в сделке, и разряд в ключе оплачивал бы названное второй раз.
+TEST_F(RatesViewTest, GradeDoesNotSplitTheRate) {
+    settled_deal(bob_, 2.0, 2.0);                   // разряд 3: 1.0 за час
+
+    const Block spec = add(alice_, records::Specialty{"хлебопёк"});
+    records::Grade g6{};
+    g6.specialty = ref_to(alice_, spec);
+    g6.level     = 6;
+    const auto master = ref_to(alice_, add(alice_, g6));
+    records::WorkRecord wr{};
+    wr.agent = master;
+    wr.hours = 2.0;
+    const Block work = add(alice_, wr);
+    records::Acceptance a{};
+    a.work        = ref_to(alice_, work);
+    a.receiver    = bob_.bytes;
+    a.hours_raw   = 2.0;
+    a.labor_units = 4.0;                            // разряд 6: 2.0 за час
+    a.axes        = {{test_axis(), 4.0}};
+    a.timestamp   = kDay + 200;
+    const Block acc = add(bob_, a);
+    records::Transfer t{};
+    t.from    = bob_.bytes;
+    t.to      = alice_.bytes;
+    t.origins = { {bob_.bytes, 4.0} };
+    t.reason  = ref_to(bob_, acc);
+    add(bob_, t);
+
+    const auto rates = build_daily_rates(*storage_, kDay, {});
+    ASSERT_EQ(rates.size(), 1u);                    // одна ставка, а не две
+    EXPECT_EQ(rates[0].specialty, "хлебопёк");
+    EXPECT_DOUBLE_EQ(rates[0].rate, 6.0 / 4.0);
+    EXPECT_EQ(rates[0].deals, 2u);
+}
+
+// Агрегат, опубликованный до v3, несёт по строке на разряд, и после чтения это
+// несколько строк одной специальности. Они сливаются в одну — по часам за
+// каждой, а если часов нет ни у одной, поровну.
+TEST_F(RatesViewTest, PreV3AggregateFoldsItsGradesIntoOneRate) {
+    const std::vector<records::RateEntry> by_hours = {
+        {"хлебопёк", 1.0, 3.0, 1}, {"хлебопёк", 2.0, 1.0, 1}};
+    const auto a = build_daily_rates(*storage_, kDay, by_hours);
+    ASSERT_EQ(a.size(), 1u);
+    EXPECT_DOUBLE_EQ(a[0].rate, (1.0 * 3.0 + 2.0 * 1.0) / 4.0);
+
+    const std::vector<records::RateEntry> carried = {
+        {"хлебопёк", 1.0, 0.0, 0}, {"хлебопёк", 2.0, 0.0, 0}};
+    const auto b = build_daily_rates(*storage_, kDay, carried);
+    ASSERT_EQ(b.size(), 1u);
+    EXPECT_DOUBLE_EQ(b[0].rate, 1.5);
 }

@@ -367,7 +367,7 @@ if not rent:
 for r in rent:
     who = ("не судим: плательщиков меньше порога" if r["rent_payers"] is None
            else f"ренту платят {r['rent_payers']:.1f} плательщика")
-    print(f"     {r['specialty']:20s} р.{r['level']}  факт {r['fact']:.2f}  "
+    print(f"     {r['specialty']:20s} факт {r['fact']:.2f}  "
           f"ожидалось {r['expected']:.2f}  невязка {r['resid']:+.2f}  ({who})")
 PY
 

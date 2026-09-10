@@ -683,8 +683,7 @@ void AggregatorServer::setup_routes() {
                     if (!first) body += ',';
                     first = false;
                     body += "{\"specialty\":\"" + json_escape(r.specialty)
-                         + "\",\"level\":" + std::to_string(r.level)
-                         + ",\"rate\":"    + std::to_string(r.rate)
+                         + "\",\"rate\":"  + std::to_string(r.rate)
                          + ",\"hours\":"   + std::to_string(r.hours)
                          + ",\"deals\":"   + std::to_string(r.deals)
                          + ",\"weighted_hours\":"
@@ -759,8 +758,7 @@ void AggregatorServer::setup_routes() {
                 if (!first) body += ',';
                 first = false;
                 body += "{\"specialty\":\"" + json_escape(r.specialty)
-                     + "\",\"level\":" + std::to_string(r.level)
-                     + ",\"rate\":"    + std::to_string(r.rate)
+                     + "\",\"rate\":"  + std::to_string(r.rate)
                      + ",\"hours\":"   + std::to_string(r.hours)
                      + ",\"deals\":"   + std::to_string(r.deals)
                      + "}";
@@ -926,8 +924,7 @@ void AggregatorServer::setup_routes() {
                     const auto& r = rent[i];
                     if (i) body += ',';
                     body += "{\"specialty\":\"" + json_escape(r.slug)
-                         + "\",\"level\":"      + std::to_string(r.level)
-                         + ",\"fact\":"         + std::to_string(r.fact)
+                         + "\",\"fact\":"       + std::to_string(r.fact)
                          + ",\"expected\":"     + std::to_string(r.expected)
                          + ",\"resid\":"        + std::to_string(r.resid)
                          + ",\"hours\":"        + std::to_string(r.hours)

@@ -16,19 +16,27 @@ namespace aggregator {
 //
 // Counts only SETTLED deals of the day [day_start, day_start+86400): an
 // Acceptance with at least one Transfer referencing it; self-deals (payer ==
-// worker) are excluded. The (specialty, level) of a deal is resolved through
+// worker) are excluded. The specialty of a deal is resolved through
 // Acceptance → WorkRecord → Grade → Specialty; unresolvable deals do not
 // count — a deal enters the world average only when its whole provenance is
 // on the table.
 //
-// day_avg = Σ labor_units / Σ hours_raw per (specialty, level);
+// The key is the specialty alone (ИР-022). The grade used to split it, so a
+// master's hour came out dearer by decree of the ladder, on top of whatever the
+// deal paid for; now the deal itemizes its price by axis (records.md §9.5 v4),
+// and a grade in the key would pay a second time for what the breakdown named.
+// The Grade record stays — it is the link from a work to its specialty and a
+// claim of qualification others attest (records.md §14.4) — it just prices
+// nothing.
+//
+// day_avg = Σ labor_units / Σ hours_raw per specialty;
 // rate = alpha*day_avg + (1-alpha)*previous rate (pure day_avg without a
 // previous one). Below min_hours of day volume the previous rate is inherited
 // unchanged; previous entries with no deals today carry forward.
 // When `cloud` is given, a thin bucket with no previous rate is seeded with a
 // PRIOR from the specialty cloud (ИР-018, specialty-axes.md §10): the weighted
-// average of its neighbours' rates at the same level (skipping neighbours that
-// have no rate yet), else its tree parent's rate, else 1.0 (normalized par).
+// average of its neighbours' rates (skipping neighbours that have no rate yet),
+// else its tree parent's rate, else 1.0 (normalized par).
 // Without a cloud the bucket is skipped, as before.
 
 // Counterparty independence (ИР-021): how much a deal counts in the averaging.
@@ -51,18 +59,30 @@ namespace aggregator {
 // circular AND priced above its own basket:
 //
 //   R      = circulating part of flow(payer→worker) / flow(payer→worker)
-//   anom   = deal rate / reference rate of its (specialty, level) basket
+//   anom   = deal rate / reference rate of its specialty's basket
 //   excess = clamp((anom − 1) / (kappa − 1), 0, 1)
 //   weight = 1 − R · excess
 //
-// The reference is a median over the basket's distinct EDGES (all deals of one
-// payer→worker edge collapse to one point at their volume-weighted rate), not
-// over deals. A median breaks down at 50%, and a ring trading monthly easily
-// owns half the DEALS of a thin basket — then the reference becomes the
-// collusion's own price and the whole measure goes blind. Collapsing by edge
-// means drowning the reference takes a majority of COUNTERPARTIES: measured on
-// sim-year, the barrier on one basket rose from 3 conspirators to 15, at the
-// cost of 0.1pp more honest volume touched.
+// The reference is the hours-weighted mean over ALL the basket's deals — the
+// same quantity as the day average, since the averaged labour-hour is an
+// arithmetic mean (ratified 2026-09-08, records.md §11.2). Deals are not
+// collapsed by edge: if the majority is honest, each deal is real labour and
+// counts. A pair adding ever more deals drags the reference towards itself
+// smoothly, with no 50% cliff; and flooding a basket means declaring HOURS,
+// which are dear (economy.md §3).
+//
+// The basket is the specialty (ИР-022). Merging its grades has a measured price
+// — aggregator_measure_indep on the sim-year journal:
+//
+//                     honest volume discounted     W shift   collusion survives
+//     by grade        3.3 … 6.0 %,  4.70 % all     −0.18 %         8.3 %
+//     by specialty    0.0 … 18.1 %, 7.56 % all     −0.99 %         8.3 %
+//
+// A master's price sits above the specialty's mean and villages circulate, so
+// the conjunction now reads honest masters as suspects; the grade used to hide
+// that by giving masters a basket of their own. Open question (records.md
+// §11.2): move the reference onto the network's axis prices, as the rent map
+// has, so that a premium NAMED in the breakdown is not an anomaly.
 //
 // max_cycle is a dial, not a wall: a conspiracy can always use a ring one longer.
 // Each extra link costs the conspirators another accomplice who can defect and
@@ -84,11 +104,10 @@ struct IndependenceParams {
     double  kappa           = 1.15;  // B1: fallback anomaly threshold
     bool    self_calibrate  = true;  // derive kappa from the basket's own spread
     size_t  calib_min_deals = 8;     // below this the basket uses `kappa`
-    // Below this many distinct edges a basket has no trustworthy reference at
-    // all, so nothing is discounted there: refusing to judge beats punishing an
-    // honest young specialty. It leaves a hole for a pair alone in a fresh
-    // basket — that one is left to the rent map of ИР-020. On sim-year data
-    // this covers 4% of baskets holding 0.7% of network hours.
+    // Below this many deals a basket has no trustworthy reference at all, so
+    // nothing is discounted there: refusing to judge beats punishing an honest
+    // young specialty. It leaves a hole for a pair alone in a fresh basket —
+    // that one is left to the rent map (records.md §11.11).
     size_t  min_basket_deals = 4;
     double  kappa_min       = 1.10;  // clamps for the self-calibrated kappa
     double  kappa_max       = 1.50;

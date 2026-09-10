@@ -324,9 +324,10 @@ void enc_daily_aggregate(Buf& out, const DailyAggregate& d) {
     w_uint(out, 1); w_int64(out, d.date);
     w_uint(out, 2); w_arr(out, d.rates.size());
     for (const auto& r : d.rates) {
-        w_map(out, 6);
+        // v3 (ИР-022): no grade. Key 1 is retired; the others keep their numbers,
+        // so an entry reads the same way with or without it.
+        w_map(out, 5);
         w_uint(out, 0); w_text(out, r.specialty);
-        w_uint(out, 1); w_uint(out, r.level);
         w_uint(out, 2); w_float64(out, r.rate);
         w_uint(out, 3); w_float64(out, r.hours);
         w_uint(out, 4); w_uint(out, r.deals);
@@ -853,18 +854,23 @@ DailyAggregate dec_daily_aggregate_fields(CborReader& r, uint64_t field_count) {
         d.rates.reserve(static_cast<size_t>(n));
         for (uint64_t i = 0; i < n; ++i) {
             const uint64_t nf = r.r_map();
-            if (nf != 5 && nf != 6)
-                throw CodecError("RateEntry: expected 5 or 6 fields");
             RateEntry e{};
             expect_key(r, 0); e.specialty = r.r_text();
-            expect_key(r, 1); e.level     = r.r_uint8();
-            expect_key(r, 2); e.rate      = r.r_float64();
-            expect_key(r, 3); e.hours     = r.r_float64();
-            expect_key(r, 4); e.deals     = r.r_uint();
+            // v1/v2 carried the grade under key 1; v3 (ИР-022) does not. An old
+            // entry's grade is read past, not kept: a rate has no grade any more.
+            uint64_t key = r.r_uint();
+            const bool graded = key == 1;
+            if (graded) { (void)r.r_uint8(); key = r.r_uint(); }
+            if (key != 2) throw CodecError("RateEntry: expected key 2 (rate)");
+            e.rate = r.r_float64();
+            expect_key(r, 3); e.hours = r.r_float64();
+            expect_key(r, 4); e.deals = r.r_uint();
             // v2 (ИР-021): pre-v2 entries were computed without independence
             // weighting, so their whole volume counted — credibility 1.
-            if (nf >= 6) { expect_key(r, 5); e.weighted_hours = r.r_float64(); }
-            else         { e.weighted_hours = e.hours; }
+            const uint64_t core = graded ? 5 : 4;
+            if (nf == core + 1)  { expect_key(r, 5); e.weighted_hours = r.r_float64(); }
+            else if (nf == core) { e.weighted_hours = e.hours; }
+            else throw CodecError("RateEntry: unexpected field count");
             d.rates.push_back(std::move(e));
         }
     }

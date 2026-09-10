@@ -70,7 +70,7 @@ RentInput build_rent_input(const AggregatorStorage& storage,
             axis_units[x.axis.hash] += x.units;
             axis_hours[x.axis.hash] += a.hours_raw;
         }
-        out.baskets[{spec->name, grade->level}].push_back(std::move(t));
+        out.baskets[spec->name].push_back(std::move(t));
     }
     for (const auto& [axis, u] : axis_units) {
         const double h = axis_hours[axis];
@@ -85,8 +85,7 @@ std::vector<RentRow> build_rent_map(const RentInput& in, unsigned min_payers) {
     out.reserve(in.baskets.size());
     for (const auto& [key, deals] : in.baskets) {
         RentRow r{};
-        r.slug  = key.first;
-        r.level = key.second;
+        r.slug = key;
 
         double units = 0.0, expected = 0.0;
         std::map<int64_t, std::pair<double, double>> by_period;   // units, expected

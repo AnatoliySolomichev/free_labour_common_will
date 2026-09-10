@@ -2,6 +2,8 @@
 #include "records/types.h"
 #include <gtest/gtest.h>
 
+#include <algorithm>
+
 using namespace records;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -372,8 +374,8 @@ TEST(RecordsCodec, DailyAggregateRoundtrip) {
     DailyAggregate d{};
     d.date      = 1'700'000'000LL - 1'700'000'000LL % 86400;
     d.timestamp = 1'700'000'042LL;
-    d.rates     = { {"хлебопёк", 3, 1.333, 0.6, 2},
-                    {"кардиохирург", 3, 14.0, 0.75, 1} };
+    d.rates     = { {"хлебопёк", 1.333, 0.6, 2},
+                    {"кардиохирург", 14.0, 0.75, 1} };
 
     d.W         = 1.0509;   // v3 (economy.md §2б): нормировщик
     d.indep     = "v1;window_days=365;max_cycle=4";   // v4 (ИР-021)
@@ -400,6 +402,7 @@ TEST(RecordsCodec, DailyAggregateRoundtrip) {
 
 // Запись до v2 RateEntry (5 полей, без weighted_hours) считалась без
 // взвешивания независимости, значит весь её объём был зачтён: доверие = 1.
+// Разряд, который v1/v2 несли в ключе, прочитывается и отбрасывается (ИР-022).
 TEST(RecordsCodec, LegacyRateEntryDecodesWithFullCredibility) {
     std::vector<uint8_t> b;
     b.push_back(0xA5);                          // map(5): агрегат v3
@@ -420,9 +423,55 @@ TEST(RecordsCodec, LegacyRateEntryDecodesWithFullCredibility) {
 
     const auto d = std::get<DailyAggregate>(Codec::decode(b));
     ASSERT_EQ(d.rates.size(), 1u);
+    EXPECT_EQ(d.rates[0].specialty, "a");
+    EXPECT_DOUBLE_EQ(d.rates[0].rate, 2.0);
     EXPECT_DOUBLE_EQ(d.rates[0].hours, 4.0);
     EXPECT_DOUBLE_EQ(d.rates[0].weighted_hours, 4.0);   // ничего не дисконтировано
     EXPECT_TRUE(d.indep.empty());
+}
+
+// RateEntry v3 (ИР-022): разряда в ключе нет. Поле 1 снято, остальные номера
+// прежние — массив из одной ставки: map(5), ключ 0 «a», сразу ключ 2.
+TEST(RecordsCodec, RateEntryV3CarriesNoGrade) {
+    DailyAggregate d{};
+    d.date  = 0;
+    d.rates = { {"a", 2.0, 4.0, 2, 4.0} };
+    const auto bytes = Codec::encode(Record{d});
+    const std::vector<uint8_t> entry = {0x81, 0xA5, 0x00, 0x61, 0x61, 0x02};
+    EXPECT_NE(std::search(bytes.begin(), bytes.end(), entry.begin(), entry.end()),
+              bytes.end());
+    const auto back = std::get<DailyAggregate>(Codec::decode(bytes));
+    ASSERT_EQ(back.rates.size(), 1u);
+    EXPECT_EQ(back.rates[0], d.rates[0]);
+}
+
+// Ставка v2 — такой её писали до 2026-09-10: шесть полей, разряд под ключом 1.
+// Читается по-прежнему; разряд прочитывается и отбрасывается.
+TEST(RecordsCodec, GradedV2RateEntryStillDecodes) {
+    std::vector<uint8_t> b;
+    b.push_back(0xA5);                          // map(5): агрегат v3
+    b.push_back(0x00); b.push_back(0x18); b.push_back(0x71);  // 0: тип 0x71
+    b.push_back(0x01); b.push_back(0x00);       // 1: date 0
+    b.push_back(0x02); b.push_back(0x81);       // 2: массив из одной ставки
+    b.push_back(0xA6);                          //    map(6): RateEntry v2
+    b.push_back(0x00); b.push_back(0x61); b.push_back(0x61);  // 0: "a"
+    b.push_back(0x01); b.push_back(0x06);       // 1: разряд 6 — прочитать мимо
+    b.push_back(0x02); b.push_back(0xFB);       // 2: rate 2.0
+    for (uint8_t x : {0x40,0x00,0x00,0x00,0x00,0x00,0x00,0x00}) b.push_back(x);
+    b.push_back(0x03); b.push_back(0xFB);       // 3: hours 4.0
+    for (uint8_t x : {0x40,0x10,0x00,0x00,0x00,0x00,0x00,0x00}) b.push_back(x);
+    b.push_back(0x04); b.push_back(0x02);       // 4: deals 2
+    b.push_back(0x05); b.push_back(0xFB);       // 5: weighted_hours 3.0
+    for (uint8_t x : {0x40,0x08,0x00,0x00,0x00,0x00,0x00,0x00}) b.push_back(x);
+    b.push_back(0x03); b.push_back(0x00);       // 3: timestamp 0
+    b.push_back(0x04); b.push_back(0xFB);       // 4: W 1.0
+    for (uint8_t x : {0x3F,0xF0,0x00,0x00,0x00,0x00,0x00,0x00}) b.push_back(x);
+
+    const auto d = std::get<DailyAggregate>(Codec::decode(b));
+    ASSERT_EQ(d.rates.size(), 1u);
+    EXPECT_EQ(d.rates[0].specialty, "a");
+    EXPECT_DOUBLE_EQ(d.rates[0].rate, 2.0);
+    EXPECT_DOUBLE_EQ(d.rates[0].weighted_hours, 3.0);
 }
 
 // A pre-v3 aggregate (4 fields, no W) still decodes, with W defaulting to 1.0.

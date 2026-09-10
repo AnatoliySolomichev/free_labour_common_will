@@ -484,9 +484,10 @@ static Block fetch_block_from(const std::string& via, const Ref& src) {
     return block;
 }
 
-// Resolve the (specialty, level) of a work's agent — Grade → Specialty, local
-// external store first, then the aggregator — and look up today's network
-// rate in GET /economy/rates (records.md §11.2). nullopt on any gap.
+// Resolve the specialty of a work's agent — Grade → Specialty, local external
+// store first, then the aggregator — and look up today's network rate in GET
+// /economy/rates (records.md §11.2). The grade is only the link here: it prices
+// nothing any more (ИР-022). nullopt on any gap.
 static std::optional<double> lookup_rate(Context& ctx, const std::string& via,
                                          const Ref& agent_ref) {
     auto get_record = [&](const Ref& ref) -> std::optional<Record> {
@@ -519,9 +520,7 @@ static std::optional<double> lookup_rate(Context& ctx, const std::string& via,
     const auto res = cli.Get("/economy/rates");
     if (!res || res->status != 200) return std::nullopt;
 
-    const std::string needle = "\"specialty\":\"" + spec->name
-                             + "\",\"level\":" + std::to_string(grade->level)
-                             + ",\"rate\":";
+    const std::string needle = "\"specialty\":\"" + spec->name + "\",\"rate\":";
     const auto pos = res->body.find(needle);
     if (pos == std::string::npos) return std::nullopt;
     try { return std::stod(res->body.substr(pos + needle.size())); }
