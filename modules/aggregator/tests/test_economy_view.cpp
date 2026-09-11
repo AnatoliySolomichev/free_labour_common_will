@@ -104,7 +104,6 @@ TEST_F(EconomyViewTest, IdeasBoardAndChainDossiers) {
 
     // Alice's work appraised by Bob at 4.2 labor-h.
     records::WorkRecord work{};
-    work.agent  = idea_ref;   // any ref; agent grade is irrelevant here
     work.action = "сборка";
     work.hours  = 4;
     const Block work_block = add(alice, work);

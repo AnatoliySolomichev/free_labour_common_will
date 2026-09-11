@@ -125,8 +125,8 @@ static UserId load_user_id(const fs::path& data_dir) {
 static const std::set<std::string> VALUE_FLAGS = {
     "--data-dir", "--leaf", "--tag", "--kind", "--part",
     "--value", "--chain",
-    "--agent", "--action", "--hours", "--start", "--input", "--output",
-    "--work", "--quality", "--hours-raw", "--labor-units",
+    "--title", "--action", "--hours", "--start", "--input", "--output",
+    "--work", "--like", "--quality", "--hours-raw", "--labor-units",
     "--peer-tip", "--peer-snapshot", "--draft", "--co-sig", "--mode", "--user",
     "--idx", "--depth", "--proof", "--merkle-root", "--target", "--leaf-hash",
     "--reason", "--peer", "--via", "--timeout",
@@ -268,15 +268,9 @@ static std::string record_summary(const Record& rec) {
             ss << "[Reaction]    target:"
                << short_hex(r.target.chain) << "/" << short_hex(r.target.hash)
                << "  value:" << (v >= 0 ? "+" : "") << v;
-        } else if constexpr (std::is_same_v<T, Specialty>) {
-            ss << "[Specialty]   \"" << r.name << "\"";
-        } else if constexpr (std::is_same_v<T, Grade>) {
-            ss << "[Grade]       spec:" << short_hex(r.specialty.hash)
-               << "  level:" << static_cast<int>(r.level);
-        } else if constexpr (std::is_same_v<T, Worker>) {
-            ss << "[Worker]      chain:" << short_hex(r.chain);
         } else if constexpr (std::is_same_v<T, WorkRecord>) {
             ss << "[WorkRecord]  \"" << r.action << "\"  " << r.hours << "h";
+            if (!r.title.empty()) ss << "  [" << r.title << "]";
             if (!r.inputs.empty())  ss << "  in:"  << r.inputs.size();
             if (!r.outputs.empty()) ss << "  out:" << r.outputs.size();
             if (!r.carry.empty()) {
@@ -288,6 +282,8 @@ static std::string record_summary(const Record& rec) {
             ss << "[Acceptance]  work:" << short_hex(r.work.hash)
                << "  " << r.labor_units << " labor-h";
             if (r.carried_units) ss << " +carry:" << *r.carried_units << "h";
+            ss << "  axes:" << r.axes.size();
+            if (r.like) ss << "  like:" << short_hex(r.like->hash);
             ss << "  quality:" << r.quality;
         } else if constexpr (std::is_same_v<T, records::Tool>) {
             ss << "[Tool]        \"" << r.name << "\"  " << r.cost
@@ -484,47 +480,62 @@ static Block fetch_block_from(const std::string& via, const Ref& src) {
     return block;
 }
 
-// Resolve the specialty of a work's agent — Grade → Specialty, local external
-// store first, then the aggregator — and look up today's network rate in GET
-// /economy/rates (records.md §11.2). The grade is only the link here: it prices
-// nothing any more (ИР-022). nullopt on any gap.
-static std::optional<double> lookup_rate(Context& ctx, const std::string& via,
-                                         const Ref& agent_ref) {
-    auto get_record = [&](const Ref& ref) -> std::optional<Record> {
-        std::optional<Block> b = find_external_by_hash(ctx, ref.hash);
-        if (!b) {
-            try {
-                b = fetch_block_from(via, ref);
-                if (!ctx.storage.has_external_block(b->address))
-                    ctx.storage.put_external_block(*b);
-            } catch (const std::exception&) {
-                return std::nullopt;
-            }
+// A record by Ref: the own chain, then the local external store, then the
+// aggregator (verified and cached). nullopt on any gap.
+static std::optional<Record> load_record(Context& ctx, const std::string& via,
+                                         const Ref& ref) {
+    std::optional<Block> b;
+    if (ref.chain == ctx.user_id.bytes) {
+        for (const NodeIndex node : ctx.local_branches()) {
+            std::vector<Block> blocks;
+            try { blocks = ctx.bc.get_branch(ctx.user_id, node); }
+            catch (const BlockchainError&) { continue; }
+            for (const auto& blk : blocks)
+                if (Crypto::hash_block(blk).bytes == ref.hash) { b = blk; break; }
+            if (b) break;
         }
-        if (b->type != BlockType::DATA) return std::nullopt;
-        try { return Codec::decode(b->payload.data(), b->payload.size()); }
-        catch (const CodecError&) { return std::nullopt; }
-    };
+    }
+    if (!b) b = find_external_by_hash(ctx, ref.hash);
+    if (!b && !via.empty()) {
+        try {
+            b = fetch_block_from(via, ref);
+            if (!ctx.storage.has_external_block(b->address))
+                ctx.storage.put_external_block(*b);
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+    }
+    if (!b || b->type != BlockType::DATA) return std::nullopt;
+    try { return Codec::decode(b->payload.data(), b->payload.size()); }
+    catch (const CodecError&) { return std::nullopt; }
+}
 
-    const auto grade_rec = get_record(agent_ref);
-    if (!grade_rec) return std::nullopt;
-    const auto* grade = std::get_if<Grade>(&*grade_rec);
-    if (!grade) return std::nullopt;
-    const auto spec_rec = get_record(grade->specialty);
-    if (!spec_rec) return std::nullopt;
-    const auto* spec = std::get_if<Specialty>(&*spec_rec);
-    if (!spec) return std::nullopt;
-
+// Today's network price of an hour of each axis (records.md §11.2 v5), from
+// GET /economy/rates: axis hash → price. Empty on any gap — the caller falls
+// back to par and says so.
+static std::map<std::array<uint8_t, 32>, double> lookup_axis_prices(const std::string& via) {
+    std::map<std::array<uint8_t, 32>, double> out;
+    if (via.empty()) return out;
     httplib::Client cli(via);  // scheme-aware: plain host:port, http:// or https://
     cli.set_connection_timeout(5);
     const auto res = cli.Get("/economy/rates");
-    if (!res || res->status != 200) return std::nullopt;
-
-    const std::string needle = "\"specialty\":\"" + spec->name + "\",\"rate\":";
-    const auto pos = res->body.find(needle);
-    if (pos == std::string::npos) return std::nullopt;
-    try { return std::stod(res->body.substr(pos + needle.size())); }
-    catch (...) { return std::nullopt; }
+    if (!res || res->status != 200) return out;
+    try {
+        const auto root = records::json::Reader(res->body).read();
+        const auto* axes = root.is_object() ? records::json::find(root.object, "axes")
+                                            : nullptr;
+        if (!axes || !axes->is_array()) return out;
+        for (const auto& e : axes->array) {
+            if (!e.is_object()) continue;
+            const auto* ax = records::json::find(e.object, "axis");
+            const auto* pr = records::json::find(e.object, "price");
+            if (!ax || !ax->is_string() || !pr || !pr->is_number()) continue;
+            out[parse_block_path(ax->string).hash] = pr->number;
+        }
+    } catch (...) {
+        out.clear();
+    }
+    return out;
 }
 
 // Best-effort normalizer provenance for an acceptance (economy.md §2б): the W the
@@ -1038,54 +1049,18 @@ static int cmd_react(const fs::path& data_dir, int argc, char** argv) {
     return cmd_write(data_dir, argc, argv,r);
 }
 
-// bc specialty add <slug> — the name IS the catalog slug (records.md §9.1).
-// It is the network-wide key rates are computed on (records.md §11.2): while it was free
-// text, "Электрик" / "электрик" / "Электромонтёр" produced three different rates
-// and tore the statistics apart. The slug is also what the profile already uses
-// (cat:prof.electrician), so a person and their labour speak one key.
-static int cmd_specialty_add(const fs::path& data_dir, int argc, char** argv) {
-    const auto pos = get_positionals(argc, argv);  // [specialty, add, <slug>]
-    if (pos.size() < 3) {
-        std::cerr << "Usage: bc specialty add <slug>   (e.g. prof.electrician)\n"
-                     "  find it: bc catalog --via URL --search ТЕКСТ\n";
-        return 1;
-    }
-    const std::string slug = pos[2];
-
-    if (!flag_present(argc, argv, "--force")) {
-        if (const auto catalogs = fetch_catalogs(flag_val(argc, argv, "--via")))
-            if (!validate_slugs({"cat:" + slug}, *catalogs, "специальность"))
-                return 1;
-    }
-    return cmd_write(data_dir, argc, argv, Specialty{ slug });
-}
-
-static int cmd_grade_add(const fs::path& data_dir, int argc, char** argv) {
-    const auto pos = get_positionals(argc, argv);  // [grade, add, <specialty_ref>, <level>]
-    if (pos.size() < 4) {
-        std::cerr << "Usage: bc grade add <specialty_chain/hash> <level 1-6>\n";
-        return 1;
-    }
-    const int level = std::stoi(pos[3]);
-    if (level < 1 || level > 6) {
-        std::cerr << "Level must be 1–6\n";
-        return 1;
-    }
-    Grade g;
-    g.specialty = parse_ref(pos[2]);
-    g.level     = static_cast<uint8_t>(level);
-    return cmd_write(data_dir, argc, argv,g);
-}
-
+// bc work log --action TEXT --hours H [--title TEXT] ...
+// The worker is whoever signs the block. There is no specialty or grade to
+// point at (ИР-022 шаг 11): «кем работал» is free text for people, and what the
+// work was is said by the breakdown of its price at acceptance.
 static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
-    const auto agent_s  = flag_val(argc, argv, "--agent");
     const auto action_s = flag_val(argc, argv, "--action");
     const auto hours_s  = flag_val(argc, argv, "--hours");
-    if (agent_s.empty() || action_s.empty() || hours_s.empty()) {
+    if (action_s.empty() || hours_s.empty()) {
         std::cerr << "Usage: bc work log\n"
-                     "    --agent  GRADE_CHAIN/HASH\n"
                      "    --action \"description\"\n"
                      "    --hours  FLOAT\n"
+                     "   [--title  TEXT]            кем работал — вольный текст для людей\n"
                      "   [--start  UNIX_TS]         (default: now)\n"
                      "   [--input  NAME:QTY:UNIT]   (repeatable)\n"
                      "   [--output NAME:QTY:UNIT]   (repeatable)\n"
@@ -1093,9 +1068,9 @@ static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
         return 1;
     }
     WorkRecord wr;
-    wr.agent  = parse_ref(agent_s);
     wr.action = action_s;
     wr.hours  = std::stod(hours_s);
+    wr.title  = flag_val(argc, argv, "--title");
     const auto start_s = flag_val(argc, argv, "--start");
     wr.start_ts = start_s.empty()
                   ? static_cast<int64_t>(std::time(nullptr))
@@ -1122,27 +1097,33 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     const auto quality_s = flag_val(argc, argv, "--quality");
     const auto raw_s     = flag_val(argc, argv, "--hours-raw");
     const auto lu_s      = flag_val(argc, argv, "--labor-units");
+    const auto like_s    = flag_val(argc, argv, "--like");
+    const auto via       = flag_val(argc, argv, "--via");
     std::vector<std::string> axis_args, share_args;
     for (int i = 1; i + 1 < argc; ++i) {
         if (std::string(argv[i]) == "--axis")       axis_args.emplace_back(argv[i + 1]);
         if (std::string(argv[i]) == "--axis-share") share_args.emplace_back(argv[i + 1]);
     }
     if (work_s.empty() || quality_s.empty() ||
-        (axis_args.empty() && share_args.empty())) {
+        (axis_args.empty() && share_args.empty() && like_s.empty())) {
         std::cerr << "Usage: bc accept\n"
                      "    --work         WORK_CHAIN/HASH\n"
                      "    --quality      TEXT\n"
-                     "    --axis ПУТЬ_ОСИ=ЧАСЫ        сколько трудочасов цены ушло\n"
-                     "                                 на эту ось; повторяйте для\n"
-                     "                                 каждой. Сумма обязана точно\n"
-                     "                                 совпасть с оценкой (ИР-022)\n"
-                     "    --axis-share ОСЬ=ДОЛЯ        то же долями (в сумме 1.0);\n"
-                     "                                 часы считает клиент, остаток\n"
+                     "  разбивка цены обязательна (ИР-022) — одним из способов:\n"
+                     "    --axis ПУТЬ_ОСИ=ЧАСЫ        сколько трудочасов цены ушло на эту\n"
+                     "                                 ось; повторяйте для каждой. Сумма\n"
+                     "                                 и есть цена\n"
+                     "    --axis-share ОСЬ=ДОЛЯ        доли цены (в сумме 1.0); остаток\n"
                      "                                 отдаётся последней оси — чтобы\n"
                      "                                 округление не разошлось с ценой\n"
+                     "    --like ПРИЁМКА               «такая же работа, как та»: доли\n"
+                     "                                 берутся у образца, ссылка на него\n"
+                     "                                 остаётся в приёмке\n"
                      "    [--hours-raw   FLOAT]   default: hours of the fetched WorkRecord\n"
-                     "    [--coef        FLOAT]   grade coefficient, default 1.0\n"
-                     "    [--labor-units FLOAT]   default: hours-raw * coef\n";
+                     "    [--k           FLOAT]   price = hours × Σ network prices of the\n"
+                     "                            axes named × k (default k 1.0)\n"
+                     "    [--coef        FLOAT]   manual rate, стч/ч, instead of axis prices\n"
+                     "    [--labor-units FLOAT]   the price outright\n";
         return 1;
     }
 
@@ -1150,8 +1131,9 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     Context ctx(data_dir, leaf);
 
     Acceptance a;
-    a.work      = parse_ref(work_s);
-    a.quality   = quality_s;
+    a.work        = parse_ref(work_s);
+    a.quality     = quality_s;
+    a.labor_units = 0.0;
     for (const auto& p : axis_args) {
         const auto eq = p.rfind('=');
         if (eq == std::string::npos || eq == 0)
@@ -1168,44 +1150,75 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
             throw std::runtime_error("--axis-share ждёт ПУТЬ_ОСИ=ДОЛЯ (путь: цепь/узел/блок/хеш): " + p);
         shares.emplace_back(parse_block_path(p.substr(0, eq)), std::stod(p.substr(eq + 1)));
     }
+
+    // «Такая же работа, как та» (ИР-022 шаг 11): unless this deal names its own
+    // breakdown, the sample's is taken as shares. The reference stays in the
+    // record as provenance — the work cloud is made of it.
+    if (!like_s.empty()) {
+        a.like = parse_ref(like_s);
+        if (a.axes.empty() && shares.empty()) {
+            const auto  rec    = load_record(ctx, via, *a.like);
+            const auto* sample = rec ? std::get_if<Acceptance>(&*rec) : nullptr;
+            if (!sample)
+                throw std::runtime_error("--like: образец не найден или это не приёмка "
+                                         "(bc fetch <ref> --via URL)");
+            if (sample->labor_units <= 0.0)
+                throw std::runtime_error("--like: у образца нулевая цена — долей из неё не вывести");
+            for (const auto& x : sample->axes)
+                shares.emplace_back(x.axis, x.units / sample->labor_units);
+            std::cerr << "разбивка как у образца: " << shares.size() << " ос.\n";
+        }
+    }
     a.timestamp = static_cast<int64_t>(std::time(nullptr));
     a.receiver  = ctx.user_id.bytes;
 
-    if (raw_s.empty() || lu_s.empty()) {
-        // Derive the appraisal from the worker's record (records.md §9.5).
+    if (raw_s.empty()) {
+        // Hours from the worker's record (records.md §9.5).
         const auto block = find_external_by_hash(ctx, a.work.hash);
         if (!block || block->type != BlockType::DATA)
             throw std::runtime_error(
                 "work record not fetched — run 'bc fetch <ref> --via URL' first, "
-                "or pass --hours-raw and --labor-units");
+                "or pass --hours-raw");
         const auto rec = Codec::decode(block->payload.data(), block->payload.size());
         const auto* wr = std::get_if<WorkRecord>(&rec);
         if (!wr) throw std::runtime_error("--work does not reference a WorkRecord");
-        a.hours_raw = raw_s.empty() ? wr->hours : std::stod(raw_s);
-        if (!lu_s.empty()) {
-            a.labor_units = std::stod(lu_s);
+        a.hours_raw = wr->hours;
+    } else {
+        a.hours_raw = std::stod(raw_s);
+    }
+
+    // The price of live labour (economy.md §2а).
+    if (!lu_s.empty()) {
+        a.labor_units = std::stod(lu_s);
+    } else if (!a.axes.empty()) {
+        for (const auto& x : a.axes) a.labor_units += x.units;   // hours named ARE the price
+    } else {
+        // hours × Σ network price of the axes named × k — or a manual rate.
+        const auto coef_s = flag_val(argc, argv, "--coef");
+        double rate = 0.0;
+        if (!coef_s.empty()) {
+            rate = std::stod(coef_s);
         } else {
-            // Appraisal = network rate × negotiated k × hours (economy.md §2а).
-            const auto coef_s = flag_val(argc, argv, "--coef");
-            const auto via    = flag_val(argc, argv, "--via");
-            double rate = 1.0;
-            if (!coef_s.empty()) {
-                rate = std::stod(coef_s);
-            } else if (!via.empty()) {
-                if (const auto r = lookup_rate(ctx, via, wr->agent)) {
-                    rate = *r;
-                    std::cerr << "network rate: " << rate << " стч/h\n";
-                } else {
-                    std::cerr << "rate lookup failed — using 1.0 "
-                                 "(override with --coef)\n";
+            const auto  prices = lookup_axis_prices(via);
+            std::size_t priced = 0;
+            for (const auto& [path, share] : shares) {
+                (void)share;
+                if (const auto it = prices.find(path.hash); it != prices.end()) {
+                    rate += it->second;
+                    ++priced;
                 }
             }
-            const double k = std::stod(flag_val(argc, argv, "--k", "1.0"));
-            a.labor_units = a.hours_raw * rate * k;
+            if (priced > 0) {
+                std::cerr << "сетевая цена названных осей: " << rate << " стч/ч ("
+                          << priced << " из " << shares.size() << " оценены сетью)\n";
+            } else {
+                rate = 1.0;
+                std::cerr << "у названных осей ещё нет сетевой цены — 1.0 стч/ч "
+                             "(задайте --coef или --labor-units)\n";
+            }
         }
-    } else {
-        a.hours_raw   = std::stod(raw_s);
-        a.labor_units = std::stod(lu_s);
+        const double k = std::stod(flag_val(argc, argv, "--k", "1.0"));
+        a.labor_units = a.hours_raw * rate * k;
     }
 
     // v2 (ИР-011): carried cost of the accepted work. carried_units must equal
@@ -1262,7 +1275,7 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
 
     // v3 (economy.md §2б): record the normalizer this appraisal was made against,
     // best-effort — so the оценка reads unambiguously later. Never blocks signing.
-    if (const auto nm = fetch_norm(flag_val(argc, argv, "--via"))) {
+    if (const auto nm = fetch_norm(via)) {
         a.norm = *nm;
         std::cerr << "нормировщик W=" << nm->W << " (из агрегатора, для истории)\n";
     }
@@ -1309,7 +1322,6 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
         std::cerr << "  + перенос " << *a.carried_units << "ч  (к оплате "
                   << a.labor_units + *a.carried_units << "ч)";
     std::cerr << "\n(pay with: bc pay --acceptance <ref>)\n";
-    const auto via = flag_val(argc, argv, "--via");
     if (!via.empty()) upload_block(via, block);
     return 0;
 }
@@ -2791,22 +2803,17 @@ static int cmd_rates(int argc, char** argv) {
     return economy_get(via, "/economy/rates");
 }
 
-// bc cloud --via URL [--slug SLUG] [--coords] — the specialty cloud, read off
-// the settled deals: each specialty's nearest by what its price was made of
-// (ИР-022, specialty-axes.md §10).
+// bc cloud --via URL [--coords] — the work cloud (ИР-022 шаг 11): samples of
+// work others repeated with `bc accept --like`, placed by what their families
+// were paid for (specialty-axes.md §10).
 static int cmd_cloud(int argc, char** argv) {
     const auto via = flag_val(argc, argv, "--via");
     if (via.empty()) {
-        std::cerr << "Usage: bc cloud --via URL [--slug SLUG]\n";
+        std::cerr << "Usage: bc cloud --via URL [--coords]\n";
         return 1;
     }
-    std::string path = "/specialty/cloud";
-    std::vector<std::string> q;
-    if (const auto slug = flag_val(argc, argv, "--slug"); !slug.empty())
-        q.push_back("slug=" + slug);
-    if (flag_present(argc, argv, "--coords")) q.push_back("coords=1");
-    for (std::size_t i = 0; i < q.size(); ++i) path += (i ? "&" : "?") + q[i];
-    return economy_get(via, path);
+    return economy_get(via, flag_present(argc, argv, "--coords")
+                                ? "/economy/cloud?coords=1" : "/economy/cloud");
 }
 
 // bc axis-define --slug danger --ru "Опасность" --description "..."
@@ -3034,26 +3041,36 @@ static int cmd_match(int argc, char** argv) {
                 const Value* d = records::json::find(c.object, "distance_km");
                 std::cout << "      закроет " << short_hex_str(str(c.object, "chain"))
                           << "  " << str(c.object, "slug");
-                // The claim next to its attestation (records.md §14.4): a bare claim reads
-                // «заявлен», an earned one names its witnesses — the reader
-                // decides, nothing is scored.
-                const auto grade = str(c.object, "grade");
-                const Value* al  = records::json::find(c.object, "attested_level");
-                const Value* ac  = records::json::find(c.object, "attested_chains");
-                const Value* ah  = records::json::find(c.object, "attested_hours");
-                const int    att_level  = (al && al->is_number())
-                                              ? static_cast<int>(al->number) : -1;
+                // Accepted work next to the claim (records.md §14.4): what others
+                // accepted, axis by axis — the reader decides, nothing is scored.
+                const auto   grade = str(c.object, "grade");
+                const Value* ac    = records::json::find(c.object, "attested_chains");
+                const Value* ah    = records::json::find(c.object, "attested_hours");
+                const Value* ax    = records::json::find(c.object, "attested_axes");
                 const int    att_chains = (ac && ac->is_number())
                                               ? static_cast<int>(ac->number) : 0;
                 const double att_hours  = (ah && ah->is_number()) ? ah->number : 0;
                 if (att_chains > 0) {
-                    std::cout << ", разряд " << att_level << " (заверен: "
-                              << att_chains << " цеп., " << att_hours << " ч)";
-                    if (!grade.empty() && grade != std::to_string(att_level))
-                        std::cout << " — заявлен " << grade;
-                } else if (!grade.empty()) {
-                    std::cout << ", разряд " << grade << " (заявлен, приёмок нет)";
+                    std::cout << ", принято: " << att_chains << " цеп., "
+                              << att_hours << " ч";
+                    if (ax && ax->is_array() && !ax->array.empty()) {
+                        std::cout << " (";
+                        bool first_axis = true;
+                        for (const auto& e : ax->array) {
+                            if (!e.is_object()) continue;
+                            const auto   label = str(e.object, "label");
+                            const Value* h     = records::json::find(e.object, "hours");
+                            std::cout << (first_axis ? "" : ", ")
+                                      << (label.empty() ? "ось без названия" : label);
+                            if (h && h->is_number()) std::cout << " " << h->number << " ч";
+                            first_axis = false;
+                        }
+                        std::cout << ")";
+                    }
+                } else {
+                    std::cout << ", принятой работы нет";
                 }
+                if (!grade.empty()) std::cout << ", заявлен разряд " << grade;
                 if (d && d->is_number() && d->number >= 0) {
                     std::ostringstream km;
                     km << std::fixed << std::setprecision(1) << d->number;
@@ -3135,7 +3152,7 @@ static std::optional<records::json::Value> find_deal(const std::string& via,
 }
 
 // Own facts of one record shape, scanned across local branches — so the verbs
-// can resolve "my skill" / "my grade" without the person copying hashes.
+// can resolve "my skill" without the person copying hashes.
 struct OwnFact { std::string ref; std::string label; };
 
 template <typename Pick>
@@ -3329,7 +3346,7 @@ static int cmd_deal_hire(const fs::path& data_dir, int argc, char** argv) {
     return 0;
 }
 
-// bc deal work NEED_REF --hours H --action TEXT [--agent GRADE_REF]
+// bc deal work NEED_REF --hours H --action TEXT [--title TEXT]
 // Logs the work AND attaches it to the need («исполняет») in one go — the
 // link is exactly what was lost in direct use of `bc work log` (ИР-006 разрыв 3).
 static int cmd_deal_work(const fs::path& data_dir, int argc, char** argv) {
@@ -3338,38 +3355,15 @@ static int cmd_deal_work(const fs::path& data_dir, int argc, char** argv) {
     const auto action_s = flag_val(argc, argv, "--action");
     if (pos.size() < 3 || hours_s.empty() || action_s.empty()) {
         std::cerr << "Usage: bc deal work NEED_REF --hours H --action TEXT "
-                     "[--agent GRADE_REF] [--tool HASH_PREFIX:USED]... "
+                     "[--title TEXT] [--tool HASH_PREFIX:USED]... "
                      "[--start TS] [--leaf L] [--via URL]\n";
         return 1;
     }
     const NodeIndex leaf = parse_leaf_index(argc, argv);
     Context ctx(data_dir, leaf);
 
-    std::string agent_ref = flag_val(argc, argv, "--agent");
-    if (agent_ref.empty()) {
-        const auto grades = scan_own_facts(ctx, [](const Record& rec)
-                -> std::optional<std::string> {
-            const auto* g = std::get_if<Grade>(&rec);
-            if (!g) return std::nullopt;
-            return "разряд " + std::to_string(static_cast<int>(g->level));
-        });
-        if (grades.size() == 1) {
-            agent_ref = grades[0].ref;
-        } else if (grades.empty()) {
-            std::cerr << "у вас нет разряда — заведите специальность и разряд:\n"
-                         "  bc specialty add prof.<слаг> --via URL\n"
-                         "  bc grade add <spec_ref> <1-6>\n";
-            return 1;
-        } else {
-            std::cerr << "у вас несколько разрядов — укажите --agent REF:\n";
-            for (const auto& g : grades)
-                std::cerr << "  " << g.ref << "  " << g.label << "\n";
-            return 1;
-        }
-    }
-
     WorkRecord wr{};
-    wr.agent    = parse_ref(agent_ref);
+    wr.title    = flag_val(argc, argv, "--title");
     wr.action   = action_s;
     wr.hours    = std::stod(hours_s);
     const auto start_s = flag_val(argc, argv, "--start");
@@ -4431,8 +4425,8 @@ Deals — from found match to settled labour (records.md §8.6; ИР-006):
   deal hire NEED_REF               Hire a volunteer: a pledge naming them
     --executor UID --units N
   deal work NEED_REF               Log work AND attach it to the need in one
-    --hours H --action TEXT            go («исполняет» link) — auto-picks
-    [--agent GRADE_REF]                your only grade
+    --hours H --action TEXT            go («исполняет» link)
+    [--title TEXT]                     «кем работал» — free text for people
   deal settle NEED_REF --via URL   Pay accepted work (settling your pledge,
     [--yes]                            Transfer v4), then ASK to close — the
                                        owner decides, the tool never does
@@ -4474,16 +4468,12 @@ Knowledge graph:
         [--chain CHAIN_HEX]        (default: own chain)
 
 Labor:
-  specialty add <slug>             Add a specialty — the name IS the catalog slug
-    [--via URL] [--force]              (prof.electrician). It is the network-wide
-                                       key rates are keyed on (records.md §11.2): free text
-                                       tore the statistics into "Электрик" /
-                                       "электрик" / "Электромонтёр".
-  grade add <spec_ref> <level>     Add a grade (level 1-6)
   work log                         Log a work event
-    --agent  GRADE_REF
     --action "description"
     --hours  FLOAT
+    [--title TEXT]                     «кем работал» — free text for people
+                                       («электрик, 5-й разряд»); nothing is
+                                       computed on it (ИР-022 шаг 11)
     [--start UNIX_TS]
     [--input  NAME:QTY:UNIT ...]   (repeatable)
     [--output NAME:QTY:UNIT ...]   (repeatable)
@@ -4494,8 +4484,14 @@ Labor:
   accept                           Appraise received work (records.md §9.5)
     --work        WORK_REF             (fetch it first: bc fetch <ref> --via URL)
     --quality     TEXT
+    --axis PATH=HOURS ...              the breakdown is REQUIRED (ИР-022): hours
+    | --axis-share PATH=SHARE ...       per axis (their sum is the price), shares
+    | --like ACCEPT_REF                of the price, or «такая же работа, как
+                                       та» — the sample's shares, kept as
+                                       provenance
     [--hours-raw FLOAT]                default: hours of the fetched WorkRecord
-    [--via URL] [--k FLOAT]            appraisal = network rate * k * hours
+    [--via URL] [--k FLOAT]            price = hours × Σ network prices of the
+                                       axes named × k (economy.md §2а)
     [--coef FLOAT] [--labor-units F]   manual rate / full manual appraisal
                                        carried_units is derived automatically
                                        from the work's carry — never by hand
@@ -4514,13 +4510,15 @@ Means of production (ИР-011, records.md §10.2, records.md §9.4):
   tool list / material list        Own tools/batches: cost, collected, remainder
   tool show / material show PREFIX Audit one carry thread: invariant, forks,
                                        formula, resale ceiling (economy.md §5б)
-  rates --via URL                  Today's specialty rates (signed DailyAggregate)
-  cloud --via URL [--slug SLUG]    Specialty cloud, read off settled deals (ИР-022):
-    [--coords]                         where a specialty sits = what its price was
-                                       made of (share per axis); neighbours = work
-                                       paid for the same things. Signed
-                                       SpecialtyCloud — the geometry rate priors
-                                       read; --coords adds the 2D spectral map
+  rates --via URL                  Today's network prices of axes (signed
+                                       DailyAggregate): what an hour of each
+                                       thing work is made of pays, and W
+  cloud --via URL [--coords]       Work cloud (ИР-022): samples of work others
+                                       repeated with accept --like, each placed
+                                       by what its family was paid for; the
+                                       neighbours are work paid for the same
+                                       things. Signed WorkCloud; --coords adds
+                                       the 2D map
   axis-define --slug ОСЬ           Завести ось в своей цепи (ИР-022). Словарь труда
     --ru "Название"                    решают люди: заводить волен каждый, сила — от
     --description TEXT                 употребления. Отличает хорошую ось от плохой
@@ -4661,8 +4659,6 @@ int main(int argc, char** argv) {
         else if (cmd == "composite" && subcmd == "add")     return cmd_composite_add(data_dir, argc, argv);
         else if (cmd == "copy")                             return cmd_copy(data_dir, argc, argv);
         else if (cmd == "react")                            return cmd_react(data_dir, argc, argv);
-        else if (cmd == "specialty" && subcmd == "add")     return cmd_specialty_add(data_dir, argc, argv);
-        else if (cmd == "grade"     && subcmd == "add")     return cmd_grade_add(data_dir, argc, argv);
         else if (cmd == "work"      && subcmd == "log")     return cmd_work_log(data_dir, argc, argv);
         else if (cmd == "accept")                           return cmd_accept(data_dir, argc, argv);
         else if (cmd == "tool"      && subcmd == "add")     return cmd_tool_add(data_dir, argc, argv);

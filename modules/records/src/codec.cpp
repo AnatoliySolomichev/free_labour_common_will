@@ -145,25 +145,6 @@ void enc_reaction(Buf& out, const Reaction& r) {
     w_uint(out, 2); w_int64(out, static_cast<int64_t>(r.value));
 }
 
-void enc_specialty(Buf& out, const Specialty& s) {
-    w_map(out, 2);
-    w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Specialty));
-    w_uint(out, 1); w_text(out, s.name);
-}
-
-void enc_grade(Buf& out, const Grade& g) {
-    w_map(out, 3);
-    w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Grade));
-    w_uint(out, 1); w_ref(out, g.specialty);
-    w_uint(out, 2); w_uint(out, g.level);
-}
-
-void enc_worker(Buf& out, const Worker& w) {
-    w_map(out, 2);
-    w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Worker));
-    w_uint(out, 1); w_fixed(out, w.chain);
-}
-
 // One carry-thread link (records.md §9.4 v2, ИР-011).
 void w_carry_entry(Buf& out, const CarryEntry& ce) {
     w_map(out, 6);
@@ -177,11 +158,11 @@ void w_carry_entry(Buf& out, const CarryEntry& ce) {
 }
 
 void enc_work_record(Buf& out, const WorkRecord& wr) {
-    // v1 = map(7); v2 adds the carry array (key 7) when non-empty, so old
-    // records keep their exact encoding.
-    w_map(out, 7 + (wr.carry.empty() ? 0 : 1));
+    // Key 1 (agent → Grade) is retired with the grade (ИР-022 шаг 11). The
+    // optional tail — carry (7), title (8) — is written only when present and in
+    // ascending key order, so the encoding stays deterministic.
+    w_map(out, 6 + (wr.carry.empty() ? 0 : 1) + (wr.title.empty() ? 0 : 1));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::WorkRecord));
-    w_uint(out, 1); w_ref(out, wr.agent);
     w_uint(out, 2); w_text(out, wr.action);
     w_uint(out, 3); w_int64(out, wr.start_ts);
     w_uint(out, 4); w_float64(out, wr.hours);
@@ -193,14 +174,15 @@ void enc_work_record(Buf& out, const WorkRecord& wr) {
         w_uint(out, 7); w_arr(out, wr.carry.size());
         for (const auto& ce : wr.carry) w_carry_entry(out, ce);
     }
+    if (!wr.title.empty()) { w_uint(out, 8); w_text(out, wr.title); }
 }
 
 void enc_acceptance(Buf& out, const Acceptance& a) {
-    // v1 = map(7); v2 adds carried_units (key 7); v3 adds norm (key 8). Optional
-    // keys are written in ascending order, each present only when set.
+    // Required: keys 0–6 and the breakdown (9). Optional, each only when set and
+    // in ascending order: carried_units (7), norm (8), like (10).
     if (a.axes.empty())
         throw CodecError("Acceptance: цена обязана быть расписана по осям (ИР-022)");
-    w_map(out, 8 + (a.carried_units ? 1 : 0) + (a.norm ? 1 : 0));
+    w_map(out, 8 + (a.carried_units ? 1 : 0) + (a.norm ? 1 : 0) + (a.like ? 1 : 0));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Acceptance));
     w_uint(out, 1); w_ref(out, a.work);
     w_uint(out, 2); w_fixed(out, a.receiver);
@@ -225,6 +207,7 @@ void enc_acceptance(Buf& out, const Acceptance& a) {
         w_uint(out, 0); w_block_path(out, x.axis);
         w_uint(out, 1); w_float64(out, x.units);
     }
+    if (a.like) { w_uint(out, 10); w_ref(out, *a.like); }   // ИР-022 шаг 11
 }
 
 void enc_material(Buf& out, const Material& m) {
@@ -319,28 +302,28 @@ void enc_pledge_revoke(Buf& out, const PledgeRevoke& pr) {
 }
 
 void enc_daily_aggregate(Buf& out, const DailyAggregate& d) {
+    // v5 (ИР-022 шаг 11): prices of axes, not rates of specialties. Key 2 — the
+    // per-specialty rates — is retired; the axes sit under key 6.
     w_map(out, 6);
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::DailyAggregate));
     w_uint(out, 1); w_int64(out, d.date);
-    w_uint(out, 2); w_arr(out, d.rates.size());
-    for (const auto& r : d.rates) {
-        // v3 (ИР-022): no grade. Key 1 is retired; the others keep their numbers,
-        // so an entry reads the same way with or without it.
-        w_map(out, 5);
-        w_uint(out, 0); w_text(out, r.specialty);
-        w_uint(out, 2); w_float64(out, r.rate);
-        w_uint(out, 3); w_float64(out, r.hours);
-        w_uint(out, 4); w_uint(out, r.deals);
-        w_uint(out, 5); w_float64(out, r.weighted_hours);   // v2 (ИР-021)
-    }
     w_uint(out, 3); w_int64(out, d.timestamp);
-    w_uint(out, 4); w_float64(out, d.W);        // v3 (economy.md §2б)
-    w_uint(out, 5); w_text(out, d.indep);       // v4 (ИР-021)
+    w_uint(out, 4); w_float64(out, d.W);
+    w_uint(out, 5); w_text(out, d.indep);
+    w_uint(out, 6); w_arr(out, d.axes.size());
+    for (const auto& p : d.axes) {
+        w_map(out, 5);
+        w_uint(out, 0); w_block_path(out, p.axis);
+        w_uint(out, 1); w_float64(out, p.price);
+        w_uint(out, 2); w_float64(out, p.hours);
+        w_uint(out, 3); w_uint(out, p.deals);
+        w_uint(out, 4); w_float64(out, p.weighted_hours);
+    }
 }
 
-void enc_specialty_cloud(Buf& out, const SpecialtyCloud& c) {
+void enc_work_cloud(Buf& out, const WorkCloud& c) {
     w_map(out, 7);
-    w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::SpecialtyCloud));
+    w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::WorkCloud));
     w_uint(out, 1); w_int64(out, c.date);
     w_uint(out, 2); w_fixed(out, c.snapshot);
     w_uint(out, 3); w_text(out, c.params);
@@ -348,13 +331,14 @@ void enc_specialty_cloud(Buf& out, const SpecialtyCloud& c) {
     for (const auto& s : c.sources) w_fixed(out, s);
     w_uint(out, 5); w_arr(out, c.points.size());
     for (const auto& p : c.points) {
-        w_map(out, 3);
-        w_uint(out, 0); w_text(out, p.slug);
-        w_uint(out, 1); w_text(out, p.parent);
-        w_uint(out, 2); w_arr(out, p.neighbors.size());
+        w_map(out, 4);
+        w_uint(out, 0); w_ref(out, p.sample);
+        w_uint(out, 1); w_text(out, p.title);
+        w_uint(out, 2); w_uint(out, p.deals);
+        w_uint(out, 3); w_arr(out, p.neighbors.size());
         for (const auto& n : p.neighbors) {
             w_map(out, 2);
-            w_uint(out, 0); w_text(out, n.slug);
+            w_uint(out, 0); w_ref(out, n.sample);
             w_uint(out, 1); w_float64(out, n.weight);
         }
     }
@@ -646,25 +630,6 @@ Reaction dec_reaction_fields(CborReader& r) {
     return rx;
 }
 
-Specialty dec_specialty_fields(CborReader& r) {
-    Specialty s{};
-    expect_key(r, 1); s.name = r.r_text();
-    return s;
-}
-
-Grade dec_grade_fields(CborReader& r) {
-    Grade g{};
-    expect_key(r, 1); g.specialty = dec_ref(r);
-    expect_key(r, 2); g.level     = r.r_uint8();
-    return g;
-}
-
-Worker dec_worker_fields(CborReader& r) {
-    Worker w{};
-    expect_key(r, 1); r.r_fixed(w.chain);
-    return w;
-}
-
 CarryEntry dec_carry_entry(CborReader& r) {
     if (r.r_map() != 6) throw CodecError("CarryEntry: expected 6 fields");
     CarryEntry ce{};
@@ -678,11 +643,9 @@ CarryEntry dec_carry_entry(CborReader& r) {
 }
 
 WorkRecord dec_work_record_fields(CborReader& r, uint64_t field_count) {
-    // 7 = v1; 8 = v2 with the carry array (records.md §9.4).
-    if (field_count != 7 && field_count != 8)
-        throw CodecError("WorkRecord: expected 7 or 8 fields");
+    if (field_count < 6 || field_count > 8)
+        throw CodecError("WorkRecord: expected 6..8 fields");
     WorkRecord wr{};
-    expect_key(r, 1); wr.agent    = dec_ref(r);
     expect_key(r, 2); wr.action   = r.r_text();
     expect_key(r, 3); wr.start_ts = r.r_int();
     expect_key(r, 4); wr.hours    = r.r_float64();
@@ -698,21 +661,32 @@ WorkRecord dec_work_record_fields(CborReader& r, uint64_t field_count) {
         wr.outputs.reserve(static_cast<size_t>(n));
         for (uint64_t i = 0; i < n; ++i) wr.outputs.push_back(dec_resource_qty(r));
     }
-    if (field_count == 8) {
-        expect_key(r, 7);
-        const uint64_t n = r.r_arr();
-        if (n == 0) throw CodecError("WorkRecord: carry present but empty");
-        wr.carry.reserve(static_cast<size_t>(n));
-        for (uint64_t i = 0; i < n; ++i) wr.carry.push_back(dec_carry_entry(r));
+    // The optional tail, by key and ascending: carry (7), title (8). Present
+    // means non-empty — an empty one is never written, so reading one would mean
+    // two encodings of the same record.
+    uint64_t last = 6;
+    for (uint64_t i = 6; i < field_count; ++i) {
+        const uint64_t key = r.r_uint();
+        if (key <= last) throw CodecError("WorkRecord: keys out of order");
+        last = key;
+        if (key == 7) {
+            const uint64_t n = r.r_arr();
+            if (n == 0) throw CodecError("WorkRecord: carry present but empty");
+            wr.carry.reserve(static_cast<size_t>(n));
+            for (uint64_t k = 0; k < n; ++k) wr.carry.push_back(dec_carry_entry(r));
+        } else if (key == 8) {
+            wr.title = r.r_text();
+            if (wr.title.empty()) throw CodecError("WorkRecord: title present but empty");
+        } else {
+            throw CodecError("WorkRecord: unknown field key");
+        }
     }
     return wr;
 }
 
 Acceptance dec_acceptance_fields(CborReader& r, uint64_t field_count) {
-    // 7 = v1; +carried_units (key 7, v2); +norm (key 8, v3). Optional keys read
-    // generically so any subset/order (ascending, deterministic CBOR) decodes.
-    if (field_count < 8 || field_count > 10)
-        throw CodecError("Acceptance: expected 8..10 fields");
+    if (field_count < 8 || field_count > 11)
+        throw CodecError("Acceptance: expected 8..11 fields");
     Acceptance a{};
     expect_key(r, 1); a.work         = dec_ref(r);
     expect_key(r, 2); r.r_fixed(a.receiver);
@@ -720,11 +694,24 @@ Acceptance dec_acceptance_fields(CborReader& r, uint64_t field_count) {
     expect_key(r, 4); a.hours_raw    = r.r_float64();
     expect_key(r, 5); a.labor_units  = r.r_float64();
     expect_key(r, 6); a.timestamp    = r.r_int();
+    // The tail, by key and ascending: carried_units (7), norm (8), the breakdown
+    // (9 — REQUIRED: an acceptance without one does not exist, records.md §9.5
+    // v4), like (10).
+    uint64_t last = 6;
     for (uint64_t i = 7; i < field_count; ++i) {
         const uint64_t key = r.r_uint();
+        if (key <= last) throw CodecError("Acceptance: keys out of order");
+        last = key;
         if (key == 7) {
             a.carried_units = r.r_float64();
-        } else if (key == 9) {                       // v4 (ИР-022): разбивка цены
+        } else if (key == 8) {
+            AcceptanceNorm n{};
+            if (r.r_map() != 3) throw CodecError("AcceptanceNorm: expected 3 fields");
+            expect_key(r, 0); r.r_fixed(n.agg);
+            expect_key(r, 1); n.date = r.r_int();
+            expect_key(r, 2); n.W    = r.r_float64();
+            a.norm = n;
+        } else if (key == 9) {
             const uint64_t n = r.r_arr();
             a.axes.reserve(static_cast<size_t>(n));
             for (uint64_t k = 0; k < n; ++k) {
@@ -734,17 +721,14 @@ Acceptance dec_acceptance_fields(CborReader& r, uint64_t field_count) {
                 expect_key(r, 1); x.units = r.r_float64();
                 a.axes.push_back(std::move(x));
             }
-        } else if (key == 8) {
-            AcceptanceNorm n{};
-            if (r.r_map() != 3) throw CodecError("AcceptanceNorm: expected 3 fields");
-            expect_key(r, 0); r.r_fixed(n.agg);
-            expect_key(r, 1); n.date = r.r_int();
-            expect_key(r, 2); n.W    = r.r_float64();
-            a.norm = n;
+        } else if (key == 10) {
+            a.like = dec_ref(r);
         } else {
-            throw CodecError("Acceptance: unexpected optional key");
+            throw CodecError("Acceptance: unknown field key");
         }
     }
+    if (a.axes.empty())
+        throw CodecError("Acceptance: цена обязана быть расписана по осям (ИР-022)");
     return a;
 }
 
@@ -846,35 +830,35 @@ PledgeRevoke dec_pledge_revoke_fields(CborReader& r) {
 }
 
 DailyAggregate dec_daily_aggregate_fields(CborReader& r, uint64_t field_count) {
+    // v5 only. Older layouts — rates by specialty, by grade, without W — are
+    // refused, not half-read: no backward compatibility (decided 2026-09-11).
+    if (field_count != 6) throw CodecError("DailyAggregate: expected 6 fields (v5)");
     DailyAggregate d{};
-    expect_key(r, 1); d.date = r.r_int();
-    expect_key(r, 2);
+    expect_key(r, 1); d.date      = r.r_int();
+    expect_key(r, 3); d.timestamp = r.r_int();
+    expect_key(r, 4); d.W         = r.r_float64();
+    expect_key(r, 5); d.indep     = r.r_text();
+    expect_key(r, 6);
     {
         const uint64_t n = r.r_arr();
-        d.rates.reserve(static_cast<size_t>(n));
+        d.axes.reserve(static_cast<size_t>(n));
         for (uint64_t i = 0; i < n; ++i) {
-            // v3 only. The graded layouts (grade under key 1) are refused, not
-            // read past: no backward compatibility for the grade (ИР-022,
-            // decided 2026-09-11) — a reader that half-understands an old
-            // aggregate is worse than one that says it cannot.
-            if (r.r_map() != 5) throw CodecError("RateEntry: expected 5 fields (v3)");
-            RateEntry e{};
-            expect_key(r, 0); e.specialty      = r.r_text();
-            expect_key(r, 2); e.rate           = r.r_float64();
-            expect_key(r, 3); e.hours          = r.r_float64();
-            expect_key(r, 4); e.deals          = r.r_uint();
-            expect_key(r, 5); e.weighted_hours = r.r_float64();
-            d.rates.push_back(std::move(e));
+            if (r.r_map() != 5) throw CodecError("AxisPrice: expected 5 fields");
+            AxisPrice p{};
+            expect_key(r, 0); p.axis           = dec_block_path(r);
+            expect_key(r, 1); p.price          = r.r_float64();
+            expect_key(r, 2); p.hours          = r.r_float64();
+            expect_key(r, 3); p.deals          = r.r_uint();
+            expect_key(r, 4); p.weighted_hours = r.r_float64();
+            d.axes.push_back(std::move(p));
         }
     }
-    expect_key(r, 3); d.timestamp = r.r_int();
-    if (field_count >= 5) { expect_key(r, 4); d.W = r.r_float64(); }  // v3 economy.md §2б
-    if (field_count >= 6) { expect_key(r, 5); d.indep = r.r_text(); } // v4 ИР-021
     return d;
 }
 
-SpecialtyCloud dec_specialty_cloud_fields(CborReader& r) {
-    SpecialtyCloud c{};
+WorkCloud dec_work_cloud_fields(CborReader& r, uint64_t field_count) {
+    if (field_count != 7) throw CodecError("WorkCloud: expected 7 fields");
+    WorkCloud c{};
     expect_key(r, 1); c.date = r.r_int();
     expect_key(r, 2); r.r_fixed(c.snapshot);
     expect_key(r, 3); c.params = r.r_text();
@@ -893,17 +877,18 @@ SpecialtyCloud dec_specialty_cloud_fields(CborReader& r) {
         const uint64_t n = r.r_arr();
         c.points.reserve(static_cast<size_t>(n));
         for (uint64_t i = 0; i < n; ++i) {
-            if (r.r_map() != 3) throw CodecError("CloudPoint: expected 3 fields");
+            if (r.r_map() != 4) throw CodecError("CloudPoint: expected 4 fields");
             CloudPoint p{};
-            expect_key(r, 0); p.slug   = r.r_text();
-            expect_key(r, 1); p.parent = r.r_text();
-            expect_key(r, 2);
+            expect_key(r, 0); p.sample = dec_ref(r);
+            expect_key(r, 1); p.title  = r.r_text();
+            expect_key(r, 2); p.deals  = r.r_uint();
+            expect_key(r, 3);
             const uint64_t m = r.r_arr();
             p.neighbors.reserve(static_cast<size_t>(m));
             for (uint64_t j = 0; j < m; ++j) {
                 if (r.r_map() != 2) throw CodecError("CloudNeighbor: expected 2 fields");
                 CloudNeighbor nb{};
-                expect_key(r, 0); nb.slug   = r.r_text();
+                expect_key(r, 0); nb.sample = dec_ref(r);
                 expect_key(r, 1); nb.weight = r.r_float64();
                 p.neighbors.push_back(std::move(nb));
             }
@@ -944,9 +929,6 @@ std::vector<uint8_t> Codec::encode(const Record& rec) {
         else if constexpr (std::is_same_v<T, Composite>)   enc_composite(out, r);
         else if constexpr (std::is_same_v<T, Copy>)        enc_copy(out, r);
         else if constexpr (std::is_same_v<T, Reaction>)    enc_reaction(out, r);
-        else if constexpr (std::is_same_v<T, Specialty>)   enc_specialty(out, r);
-        else if constexpr (std::is_same_v<T, Grade>)       enc_grade(out, r);
-        else if constexpr (std::is_same_v<T, Worker>)      enc_worker(out, r);
         else if constexpr (std::is_same_v<T, WorkRecord>)  enc_work_record(out, r);
         else if constexpr (std::is_same_v<T, Acceptance>)  enc_acceptance(out, r);
         else if constexpr (std::is_same_v<T, Material>)    enc_material(out, r);
@@ -956,7 +938,7 @@ std::vector<uint8_t> Codec::encode(const Record& rec) {
         else if constexpr (std::is_same_v<T, PledgeRevoke>) enc_pledge_revoke(out, r);
         else if constexpr (std::is_same_v<T, DailyAggregate>) enc_daily_aggregate(out, r);
         else if constexpr (std::is_same_v<T, Redemption>)  enc_redemption(out, r);
-        else if constexpr (std::is_same_v<T, SpecialtyCloud>) enc_specialty_cloud(out, r);
+        else if constexpr (std::is_same_v<T, WorkCloud>)      enc_work_cloud(out, r);
         else if constexpr (std::is_same_v<T, AxisDef>)        enc_axis_def(out, r);
     }, rec);
     return out;
@@ -977,9 +959,6 @@ Record Codec::decode(const uint8_t* data, size_t len) {
         case RecordType::Composite:   return dec_composite_fields(r);
         case RecordType::Copy:        return dec_copy_fields(r);
         case RecordType::Reaction:    return dec_reaction_fields(r);
-        case RecordType::Specialty:   return dec_specialty_fields(r);
-        case RecordType::Grade:       return dec_grade_fields(r);
-        case RecordType::Worker:      return dec_worker_fields(r);
         case RecordType::WorkRecord:  return dec_work_record_fields(r, field_count);
         case RecordType::Acceptance:  return dec_acceptance_fields(r, field_count);
         case RecordType::Material:    return dec_material_fields(r);
@@ -989,7 +968,7 @@ Record Codec::decode(const uint8_t* data, size_t len) {
         case RecordType::PledgeRevoke: return dec_pledge_revoke_fields(r);
         case RecordType::DailyAggregate: return dec_daily_aggregate_fields(r, field_count);
         case RecordType::Redemption: return dec_redemption_fields(r);
-        case RecordType::SpecialtyCloud: return dec_specialty_cloud_fields(r);
+        case RecordType::WorkCloud:  return dec_work_cloud_fields(r, field_count);
         case RecordType::AxisDef:
             return dec_axis_def_fields(r, field_count);
         default:

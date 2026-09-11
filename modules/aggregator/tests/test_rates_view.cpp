@@ -1,5 +1,4 @@
 #include "aggregator/rates_view.h"
-#include "aggregator/cloud_view.h"
 #include "aggregator/server.h"
 
 #include <blockchain/crypto.h>
@@ -13,12 +12,13 @@
 #include <filesystem>
 #include <thread>
 
-// Ось для разбивки цены: в этих тестах её содержание не проверяется, важно лишь
-// что приёмки без разбивки не существует (records.md §9.5 v4).
-inline records::BlockPath test_axis() {
+// Ось — по тегу хеша её определения; тег 0x01 — общая ось тестов. Содержание
+// оси здесь не проверяется: важно лишь, что приёмки без разбивки не существует
+// (records.md §9.5 v4) и что цена считается по осям (records.md §11.2 v5).
+inline records::BlockPath test_axis(uint8_t tag = 0x01) {
     records::BlockPath r{};
     r.chain.fill(0x79);
-    r.hash.fill(0x01);
+    r.hash.fill(tag);
     return r;
 }
 
@@ -57,6 +57,14 @@ records::Ref ref_to(const UserId& chain, const Block& block) {
     return r;
 }
 
+// Цена оси по тегу в выдаче дня; nullptr — такой оси в выдаче нет.
+const records::AxisPrice* price_of(const std::vector<records::AxisPrice>& v,
+                                   uint8_t tag) {
+    for (const auto& p : v)
+        if (p.axis == test_axis(tag)) return &p;
+    return nullptr;
+}
+
 } // namespace
 
 class RatesViewTest : public ::testing::Test {
@@ -67,20 +75,12 @@ protected:
     UserId alice_ = make_chain(0xA1);   // worker
     UserId bob_   = make_chain(0xB2);   // payer
 
-    records::Ref grade_ref_{};
-
     void SetUp() override {
         static int cnt = 0;
         db_path_ = std::filesystem::temp_directory_path() /
                    ("bc_rates_test_" + std::to_string(++cnt));
         std::filesystem::remove_all(db_path_);
         storage_ = std::make_unique<AggregatorStorage>(db_path_);
-
-        const Block spec = add(alice_, records::Specialty{"хлебопёк"});
-        records::Grade g{};
-        g.specialty = ref_to(alice_, spec);
-        g.level     = 3;
-        grade_ref_  = ref_to(alice_, add(alice_, g));
     }
 
     void TearDown() override {
@@ -95,10 +95,11 @@ protected:
     }
 
     // One settled deal: work → acceptance (by `payer`) → settlement transfer.
-    // Returns the Acceptance ref.
-    records::Ref settled_deal(const UserId& payer, double hours, double units) {
+    // `lines` — the breakdown {axis tag, units}; by default all on the common axis.
+    records::Ref settled_deal(const UserId& payer, double hours, double units,
+                              std::vector<std::pair<uint8_t, double>> lines = {}) {
+        if (lines.empty()) lines = {{0x01, units}};
         records::WorkRecord wr{};
-        wr.agent = grade_ref_;
         wr.hours = hours;
         const Block work = add(alice_, wr);
 
@@ -107,7 +108,7 @@ protected:
         a.receiver    = payer.bytes;
         a.hours_raw   = hours;
         a.labor_units = units;
-        a.axes        = {{test_axis(), units}};
+        for (const auto& [tag, u] : lines) a.axes.push_back({test_axis(tag), u});
         a.timestamp   = kDay + 100;
         const Block acc = add(payer, a);
 
@@ -126,9 +127,8 @@ TEST_F(RatesViewTest, SettledDealsAverageSmoothAndCarryForward) {
     settled_deal(bob_, 0.2, 0.3);
     settled_deal(bob_, 0.4, 0.5);
 
-    // Unsettled declaration (no payment): must not move the rate.
+    // Unsettled declaration (no payment): must not move the price.
     records::WorkRecord wr{};
-    wr.agent = grade_ref_;
     wr.hours = 1.0;
     const Block work = add(alice_, wr);
     records::Acceptance fake{};
@@ -140,46 +140,46 @@ TEST_F(RatesViewTest, SettledDealsAverageSmoothAndCarryForward) {
     fake.timestamp   = kDay + 100;
     add(bob_, fake);
 
-    // No previous rates → pure day average.
-    const auto fresh = build_daily_rates(*storage_, kDay, {});
-    ASSERT_EQ(fresh.size(), 1u);
-    EXPECT_EQ(fresh[0].specialty, "хлебопёк");
-    EXPECT_NEAR(fresh[0].rate, 0.8 / 0.6, 1e-9);
-    EXPECT_EQ(fresh[0].deals, 2u);
+    // No previous prices → pure day average.
+    const auto fresh = build_daily_prices(*storage_, kDay, {});
+    ASSERT_EQ(fresh.axes.size(), 1u);
+    EXPECT_EQ(fresh.axes[0].axis, test_axis());
+    EXPECT_NEAR(fresh.axes[0].price, 0.8 / 0.6, 1e-9);
+    EXPECT_EQ(fresh.axes[0].deals, 2u);
+    EXPECT_NEAR(fresh.W, 0.8 / 0.6, 1e-9);
 
-    // With yesterday's 1.25: rate = 0.3*1.3333 + 0.7*1.25 = 1.275, and an
-    // untouched specialty carries forward unchanged.
-    const std::vector<records::RateEntry> prev = {
-        {"хлебопёк", 1.25, 0.0, 0},
-        {"кардиохирург", 14.0, 0.0, 0},
+    // With yesterday's 1.25: price = 0.3*1.3333 + 0.7*1.25 = 1.275, and an
+    // untouched axis carries forward unchanged.
+    const std::vector<records::AxisPrice> prev = {
+        {test_axis(),     1.25, 0.0, 0, 0.0},
+        {test_axis(0x0F), 14.0, 0.0, 0, 0.0},
     };
-    const auto smoothed = build_daily_rates(*storage_, kDay, prev);
-    ASSERT_EQ(smoothed.size(), 2u);
-    EXPECT_EQ(smoothed[0].specialty, "кардиохирург");
-    EXPECT_DOUBLE_EQ(smoothed[0].rate, 14.0);
-    EXPECT_EQ(smoothed[0].deals, 0u);
-    EXPECT_NEAR(smoothed[1].rate, 0.3 * (0.8 / 0.6) + 0.7 * 1.25, 1e-9);
+    const auto smoothed = build_daily_prices(*storage_, kDay, prev);
+    ASSERT_EQ(smoothed.axes.size(), 2u);
+    EXPECT_NEAR(price_of(smoothed.axes, 0x01)->price, 0.3 * (0.8 / 0.6) + 0.7 * 1.25, 1e-9);
+    EXPECT_DOUBLE_EQ(price_of(smoothed.axes, 0x0F)->price, 14.0);
+    EXPECT_EQ(price_of(smoothed.axes, 0x0F)->deals, 0u);
 }
 
 TEST_F(RatesViewTest, SelfDealsAndTinyVolumesExcluded) {
     settled_deal(alice_, 0.5, 20.0);          // self-deal: payer == worker
-    const auto rates = build_daily_rates(*storage_, kDay, {});
-    EXPECT_TRUE(rates.empty());
+    EXPECT_TRUE(build_daily_prices(*storage_, kDay, {}).axes.empty());
 
-    settled_deal(bob_, 0.05, 5.0);            // below min_hours, no previous
-    EXPECT_TRUE(build_daily_rates(*storage_, kDay, {}).empty());
-    // ...but with a previous rate the specialty inherits it unchanged.
-    const std::vector<records::RateEntry> prev = {{"хлебопёк", 1.25, 0, 0}};
-    const auto inherited = build_daily_rates(*storage_, kDay, prev);
-    ASSERT_EQ(inherited.size(), 1u);
-    EXPECT_DOUBLE_EQ(inherited[0].rate, 1.25);
+    // Below min_hours, no previous price: the axis gets none. There is no prior
+    // to borrow one from — nobody has paid for it yet.
+    settled_deal(bob_, 0.05, 5.0);
+    EXPECT_TRUE(build_daily_prices(*storage_, kDay, {}).axes.empty());
+    // ...but with a previous price the axis inherits it unchanged.
+    const std::vector<records::AxisPrice> prev = {{test_axis(), 1.25, 0.0, 0, 0.0}};
+    const auto inherited = build_daily_prices(*storage_, kDay, prev);
+    ASSERT_EQ(inherited.axes.size(), 1u);
+    EXPECT_DOUBLE_EQ(inherited.axes[0].price, 1.25);
 }
 
 TEST_F(RatesViewTest, CarriedCostSettlesAtFullPayableButAveragesLaborOnly) {
     // Хлеб с печью (ИР-011, records.md §9.5 v2): labor 6.0 за 6ч плюс
     // перенос печи 0.23625ч. Потолок оплаты = 6.23625.
     records::WorkRecord wr{};
-    wr.agent = grade_ref_;
     wr.hours = 6.0;
     records::CarryEntry ce{};
     ce.src.chain = alice_.bytes;
@@ -202,24 +202,38 @@ TEST_F(RatesViewTest, CarriedCostSettlesAtFullPayableButAveragesLaborOnly) {
     const Block acc = add(bob_, a);
 
     // Paying the labor part alone leaves the deal unsettled («=» records.md §12.8 is
-    // now labor + carried) — it must not move the rates.
+    // labor + carried) — it must not move the prices.
     records::Transfer t{};
     t.from    = bob_.bytes;
     t.to      = alice_.bytes;
     t.origins = { {bob_.bytes, 6.0} };
     t.reason  = ref_to(bob_, acc);
     add(bob_, t);
-    EXPECT_TRUE(build_daily_rates(*storage_, kDay, {}).empty());
+    EXPECT_TRUE(build_daily_prices(*storage_, kDay, {}).axes.empty());
 
-    // Topping up the carried part settles it. The rate is labor/hours = 1.0:
-    // carried cost must NOT distort the price of live labor (records.md §11.2 v2).
+    // Topping up the carried part settles it. The price is labor/hours = 1.0:
+    // carried cost must NOT distort the price of live labor (records.md §11.2).
     records::Transfer t2 = t;
     t2.origins = { {bob_.bytes, 0.23625} };
     add(bob_, t2);
-    const auto rates = build_daily_rates(*storage_, kDay, {});
-    ASSERT_EQ(rates.size(), 1u);
-    EXPECT_NEAR(rates[0].rate, 1.0, 1e-9);
-    EXPECT_EQ(rates[0].deals, 1u);
+    const auto d = build_daily_prices(*storage_, kDay, {});
+    ASSERT_EQ(d.axes.size(), 1u);
+    EXPECT_NEAR(d.axes[0].price, 1.0, 1e-9);
+    EXPECT_EQ(d.axes[0].deals, 1u);
+}
+
+// W — средняя бумага на трудочас сети (economy.md §2б), хотя часы сделки входят
+// во все оси, которые она назвала: Σ цена·часы по осям сходится с тем, что
+// сделки заплатили, а делится на часы, которые они на самом деле заняли.
+TEST_F(RatesViewTest, WIsTheAveragePaperPerLabourHour) {
+    settled_deal(bob_, 2.0, 2.0, {{0x01, 1.0}, {0x02, 1.0}});   // 1.0 за час, две оси
+    settled_deal(bob_, 1.0, 3.0, {{0x01, 3.0}});                // 3.0 за час, одна
+    const auto d = build_daily_prices(*storage_, kDay, {});
+    ASSERT_EQ(d.axes.size(), 2u);
+    EXPECT_NEAR(price_of(d.axes, 0x01)->price, 4.0 / 3.0, 1e-12);   // 4 стч за 3 часа
+    EXPECT_NEAR(price_of(d.axes, 0x02)->price, 0.5, 1e-12);         // 1 стч за 2 часа
+    EXPECT_EQ(price_of(d.axes, 0x01)->deals, 2u);
+    EXPECT_NEAR(d.W, 5.0 / 3.0, 1e-12);                             // 5 стч за 3 часа
 }
 
 TEST_F(RatesViewTest, RatesEndpointPublishesSignedAggregateOnce) {
@@ -241,6 +255,7 @@ TEST_F(RatesViewTest, RatesEndpointPublishesSignedAggregateOnce) {
     ASSERT_TRUE(r1 && r1->status == 200) << (r1 ? r1->body : "no response");
     ASSERT_TRUE(r2 && r2->status == 200);
     EXPECT_EQ(r1->body, r2->body);   // published once, then served from chain
+    EXPECT_NE(r1->body.find("\"axes\":["), std::string::npos);
     ASSERT_NE(r1->body.find("\"block\":\""), std::string::npos);
     // The published block entered the warehouse: fetchable for verification.
     const auto pos = r1->body.find("\"block\":\"");
@@ -252,33 +267,27 @@ TEST_F(RatesViewTest, RatesEndpointPublishesSignedAggregateOnce) {
     ASSERT_TRUE(blk && blk->status == 200);
 }
 
-// Cloud prior (ИР-018, specialty-axes.md §10): a thin, previously-unseen bucket is
-// seeded from its cloud neighbour's rate instead of being skipped.
-TEST_F(RatesViewTest, CloudPriorSeedsThinNewSpecialty) {
-    settled_deal(bob_, 0.05, 5.0);            // "хлебопёк", thin, no previous
-
-    records::SpecialtyCloud cloud{};
-    records::CloudPoint p{};
-    p.slug = "хлебопёк";
-    p.neighbors.push_back({"prof.cook", 1.0});
-    cloud.points.push_back(p);
-
-    const std::vector<records::RateEntry> prev = {{"prof.cook", 1.2, 0.0, 0}};
-
-    const auto rates = build_daily_rates(*storage_, kDay, prev, 0.3, 0.1, &cloud);
-    bool seeded = false;
-    for (const auto& r : rates)
-        if (r.specialty == "хлебопёк") {
-            EXPECT_DOUBLE_EQ(r.rate, 1.2);    // neighbour's rate
-            seeded = true;
-        }
-    EXPECT_TRUE(seeded);
-
-    // Without a cloud the thin bucket stays skipped (unchanged behaviour).
-    bool present = false;
-    for (const auto& r : build_daily_rates(*storage_, kDay, prev))
-        if (r.specialty == "хлебопёк") present = true;
-    EXPECT_FALSE(present);
+// Разбивка ЕСТЬ цена (records.md §9.5 v4): не сходящаяся с ценой описывает
+// какую-то другую сделку — в цены осей она не входит, как не входит в книгу осей.
+TEST_F(RatesViewTest, BreakdownThatDoesNotAddUpIsNotAPrice) {
+    records::WorkRecord wr{};
+    wr.hours = 2.0;
+    const Block work = add(alice_, wr);
+    records::Acceptance a{};
+    a.work        = ref_to(alice_, work);
+    a.receiver    = bob_.bytes;
+    a.hours_raw   = 2.0;
+    a.labor_units = 8.0;
+    a.axes        = {{test_axis(), 2.0}};            // названо 2 из 8
+    a.timestamp   = kDay + 100;
+    const Block acc = add(bob_, a);
+    records::Transfer t{};
+    t.from    = bob_.bytes;
+    t.to      = alice_.bytes;
+    t.origins = { {bob_.bytes, 8.0} };
+    t.reason  = ref_to(bob_, acc);
+    add(bob_, t);
+    EXPECT_TRUE(build_daily_prices(*storage_, kDay, {}).axes.empty());
 }
 
 // ── ИР-021: вес сделки по независимости контрагентов ─────────────────────────
@@ -291,7 +300,6 @@ protected:
     std::filesystem::path              db_path_;
     std::unique_ptr<AggregatorStorage> storage_;
     BlockIndex                         next_index_ = 0;
-    records::Ref                       grade_ref_{};
 
     UserId alice_ = make_chain(0xA1);
     UserId carol_ = make_chain(0xC3);
@@ -303,14 +311,6 @@ protected:
                    ("bc_indep_test_" + std::to_string(++cnt));
         std::filesystem::remove_all(db_path_);
         storage_ = std::make_unique<AggregatorStorage>(db_path_);
-
-        // Одна специальность на всех, и сделки называют одну общую ось (если
-        // тест не говорит иначе): у аномалии общая опора — цена этой оси.
-        const Block spec = add(alice_, records::Specialty{"хлебопёк"});
-        records::Grade g{};
-        g.specialty = ref_to(alice_, spec);
-        g.level     = 3;
-        grade_ref_  = ref_to(alice_, add(alice_, g));
     }
 
     void TearDown() override {
@@ -324,47 +324,18 @@ protected:
         return b;
     }
 
-    // Рассчитанная сделка: worker отработал `hours` по цене `rate` за час,
-    // payer принял и заплатил ровно оценку.
-    void deal(const UserId& worker, const UserId& payer,
-              double hours, double rate, int64_t ts) {
-        records::WorkRecord wr{};
-        wr.agent = grade_ref_;
-        wr.hours = hours;
-        const Block work = add(worker, wr);
-
-        records::Acceptance a{};
-        a.work        = ref_to(worker, work);
-        a.receiver    = payer.bytes;
-        a.hours_raw   = hours;
-        a.labor_units = hours * rate;
-        a.axes        = {{test_axis(), hours * rate}};
-        a.timestamp   = ts;
-        const Block acc = add(payer, a);
-
-        records::Transfer t{};
-        t.from    = payer.bytes;
-        t.to      = worker.bytes;
-        t.origins = { {payer.bytes, hours * rate} };
-        t.reason  = ref_to(payer, acc);
-        add(payer, t);
-    }
-
-    // Сделка с разбивкой по нескольким осям: {тег оси, стч за час}. Ось — по
-    // тегу хеша её определения; тег 0x01 — та же ось, что у deal().
+    // Сделка с разбивкой по осям: {тег оси, стч за час}. Работник `worker`
+    // отработал `hours`, плательщик `payer` принял и заплатил ровно оценку.
     void deal_on(const UserId& payer, const UserId& worker, double hours,
                  const std::vector<std::pair<uint8_t, double>>& per_hour, int64_t ts) {
         records::WorkRecord wr{};
-        wr.agent = grade_ref_;
         wr.hours = hours;
         const Block work = add(worker, wr);
 
         double units = 0.0;
         records::Acceptance a{};
         for (const auto& [tag, r] : per_hour) {
-            records::BlockPath p = test_axis();
-            p.hash.fill(tag);
-            a.axes.push_back({p, r * hours});
+            a.axes.push_back({test_axis(tag), r * hours});
             units += r * hours;
         }
         a.work        = ref_to(worker, work);
@@ -382,12 +353,24 @@ protected:
         add(payer, t);
     }
 
+    // Рассчитанная сделка на общей оси: worker отработал `hours` по цене `rate`.
+    void deal(const UserId& worker, const UserId& payer,
+              double hours, double rate, int64_t ts) {
+        deal_on(payer, worker, hours, {{0x01, rate}}, ts);
+    }
+
     // Фон сети: десять односторонних сделок разных пар по обычной цене 1.0 на
     // общей оси. Задают её сетевую цену, относительно которой меряется аномалия.
     void honest_background(int64_t ts, uint8_t n = 10) {
         for (uint8_t i = 0; i < n; ++i)
             deal(make_chain(static_cast<uint8_t>(0x10 + i)),
                  make_chain(static_cast<uint8_t>(0x30 + i)), 1.0, 1.0, ts);
+    }
+
+    DailyPrices plain() { return build_daily_prices(*storage_, kDay, {}); }
+    DailyPrices weighted(const IndependenceParams& p = {},
+                         const std::vector<records::AxisPrice>& prev = {}) {
+        return build_daily_prices(*storage_, kDay, prev, 0.3, 0.1, &p);
     }
 };
 
@@ -401,17 +384,14 @@ TEST_F(IndependenceTest, HonestReciprocalVillageKeepsFullWeight) {
     }
     deal(alice_, carol_, 1.0, 1.0, kDay + 100);          // сделка дня
 
-    const IndependenceParams indep{};
-    const auto plain = build_daily_rates(*storage_, kDay, {});
-    const auto weighted =
-        build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr, &indep);
-
-    ASSERT_EQ(plain.size(), 1u);
-    ASSERT_EQ(weighted.size(), 1u);
-    // Взаимность есть, аномалии нет → вес полный, ставка не шелохнулась.
-    EXPECT_NEAR(weighted[0].rate, plain[0].rate, 1e-9);
-    EXPECT_NEAR(weighted[0].rate, 1.0, 1e-9);
-    EXPECT_NEAR(weighted[0].hours, plain[0].hours, 1e-9);
+    const auto p = plain();
+    const auto w = weighted();
+    ASSERT_EQ(p.axes.size(), 1u);
+    ASSERT_EQ(w.axes.size(), 1u);
+    // Взаимность есть, аномалии нет → вес полный, цена не шелохнулась.
+    EXPECT_NEAR(w.axes[0].price, p.axes[0].price, 1e-9);
+    EXPECT_NEAR(w.axes[0].price, 1.0, 1e-9);
+    EXPECT_NEAR(w.axes[0].hours, p.axes[0].hours, 1e-9);
 }
 
 TEST_F(IndependenceTest, CollusiveReciprocalPairIsDiscounted) {
@@ -426,40 +406,33 @@ TEST_F(IndependenceTest, CollusiveReciprocalPairIsDiscounted) {
     deal(alice_, carol_, 1.0, 3.0, kDay + 100);          // сговорная сделка дня
     deal(make_chain(0x41), make_chain(0x51), 1.0, 1.0, kDay + 100);  // честная
 
-    const IndependenceParams indep{};
-    const auto plain = build_daily_rates(*storage_, kDay, {});
-    const auto weighted =
-        build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr, &indep);
-
-    ASSERT_EQ(plain.size(), 1u);
-    ASSERT_EQ(weighted.size(), 1u);
-    EXPECT_NEAR(plain[0].rate, 2.0, 1e-9);      // (3.0 + 1.0) / 2 — сговор прошёл
+    const auto p = plain();
+    const auto w = weighted();
+    ASSERT_EQ(p.axes.size(), 1u);
+    ASSERT_EQ(w.axes.size(), 1u);
+    EXPECT_NEAR(p.axes[0].price, 2.0, 1e-9);     // (3.0 + 1.0) / 2 — сговор прошёл
     // Дисконт МЯГКИЙ (развилка B3), а не отсечение: потоки пары 15 и 12, по
     // циклу длины 2 вернулось 12, значит R = 12/15 = 0.8; аномалия втрое выше
-    // медианы корзины → вес 0.2. Среднее дня = (0.2·3 + 1·1) / (0.2 + 1) = 1.333
-    // вместо 2.0: две трети накрутки снято.
-    EXPECT_NEAR(weighted[0].rate, 4.0 / 3.0, 1e-3);
+    // цены оси → вес 0.2. Среднее дня = (0.2·3 + 1·1) / (0.2 + 1) = 1.333 вместо
+    // 2.0: две трети накрутки снято.
+    EXPECT_NEAR(w.axes[0].price, 4.0 / 3.0, 1e-3);
     // Часы остаются сырыми: труд-то был, под вопросом его оценка.
-    EXPECT_NEAR(weighted[0].hours, 2.0, 1e-9);
-    EXPECT_EQ(weighted[0].deals, 2u);
+    EXPECT_NEAR(w.axes[0].hours, 2.0, 1e-9);
+    EXPECT_EQ(w.axes[0].deals, 2u);
 }
 
 TEST_F(IndependenceTest, OneSidedPremiumIsNotDiscounted) {
     const int64_t before = kDay - 86'400 * 30;
     honest_background(before);
     // Дорогая, но ОДНОСТОРОННЯЯ сделка: заказчик у работника ничего не покупал
-    // в ответ. Это законная премия (срочность, дефицит) — трогать её нельзя.
+    // в ответ. Это законная премия — трогать её нельзя.
     deal(alice_, carol_, 1.0, 3.0, kDay + 100);
 
-    const IndependenceParams indep{};
-    const auto plain = build_daily_rates(*storage_, kDay, {});
-    const auto weighted =
-        build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr, &indep);
-
-    ASSERT_EQ(plain.size(), 1u);
-    ASSERT_EQ(weighted.size(), 1u);
-    EXPECT_NEAR(weighted[0].rate, plain[0].rate, 1e-9);
-    EXPECT_NEAR(weighted[0].rate, 3.0, 1e-9);
+    const auto p = plain();
+    const auto w = weighted();
+    ASSERT_EQ(w.axes.size(), 1u);
+    EXPECT_NEAR(w.axes[0].price, p.axes[0].price, 1e-9);
+    EXPECT_NEAR(w.axes[0].price, 3.0, 1e-9);
 }
 
 TEST_F(IndependenceTest, ShortWindowMissesAlternatingCollusion) {
@@ -477,22 +450,20 @@ TEST_F(IndependenceTest, ShortWindowMissesAlternatingCollusion) {
     short_win.window_days = 20;                 // короче периода чередования
     IndependenceParams long_win{};              // 365 дней по умолчанию
 
-    // Вчерашняя ставка корзины — 1.0: за день торговала одна лишь пара, так что
-    // разница видна в том, насколько ей позволено сдвинуть ставку.
-    const std::vector<records::RateEntry> prev = {{"хлебопёк", 1.0, 0.0, 0}};
-    const auto s = build_daily_rates(*storage_, kDay, prev, 0.3, 0.1, nullptr,
-                                     &short_win);
-    const auto l = build_daily_rates(*storage_, kDay, prev, 0.3, 0.1, nullptr,
-                                     &long_win);
-    ASSERT_EQ(s.size(), 1u);
-    ASSERT_EQ(l.size(), 1u);
+    // Вчерашняя цена оси — 1.0: за день торговала одна лишь пара, так что разница
+    // видна в том, насколько ей позволено сдвинуть цену.
+    const std::vector<records::AxisPrice> prev = {{test_axis(), 1.0, 0.0, 0, 0.0}};
+    const auto s = weighted(short_win, prev);
+    const auto l = weighted(long_win, prev);
+    ASSERT_EQ(s.axes.size(), 1u);
+    ASSERT_EQ(l.axes.size(), 1u);
     // Короткое окно слепо: пара выглядит односторонней, доверие ко дню полное →
     // обычное сглаживание 0.3·3.0 + 0.7·1.0 = 1.6.
-    EXPECT_NEAR(s[0].rate, 1.6, 1e-9);
+    EXPECT_NEAR(s.axes[0].price, 1.6, 1e-9);
     // Длинное окно видит взаимность: R = 12/15 = 0.8 → вес 0.2, доверие ко дню
-    // 0.2, сглаживание 0.3·0.2 = 0.06, и вчерашняя ставка почти не двигается:
+    // 0.2, сглаживание 0.3·0.2 = 0.06, и вчерашняя цена почти не двигается:
     // 0.06·3.0 + 0.94·1.0 = 1.12.
-    EXPECT_NEAR(l[0].rate, 1.12, 1e-9);
+    EXPECT_NEAR(l.axes[0].price, 1.12, 1e-9);
 }
 
 TEST_F(IndependenceTest, ThreeChainRingIsCaughtOnlyByCycleSearch) {
@@ -512,23 +483,21 @@ TEST_F(IndependenceTest, ThreeChainRingIsCaughtOnlyByCycleSearch) {
     pairs_only.max_cycle = 2;                  // только пары, как было до B5
     IndependenceParams rings{};                // max_cycle = 4 по умолчанию
 
-    const auto p = build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr,
-                                     &pairs_only);
-    const auto r = build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr,
-                                     &rings);
-    ASSERT_EQ(p.size(), 1u);
-    ASSERT_EQ(r.size(), 1u);
+    const auto p = weighted(pairs_only);
+    const auto r = weighted(rings);
+    ASSERT_EQ(p.axes.size(), 1u);
+    ASSERT_EQ(r.axes.size(), 1u);
     // Парная мера слепа: двухзвенных циклов в кольце нет, вес полный.
-    EXPECT_NEAR(p[0].rate, 2.0, 1e-9);
+    EXPECT_NEAR(p.axes[0].price, 2.0, 1e-9);
     // Поиск циклов находит треугольник: потоки 15/12/12, узкое место 12,
     // R = 12/15 = 0.8 → вес 0.2, среднее дня (0.2·3 + 1·1)/(0.2 + 1) = 1.333.
-    EXPECT_NEAR(r[0].rate, 4.0 / 3.0, 1e-3);
+    EXPECT_NEAR(r.axes[0].price, 4.0 / 3.0, 1e-3);
 }
 
-// Опора — средневзвешенное по часам ВСЕХ сделок корзины (ратифицировано
-// 2026-09-08): сделки не схлопываются по рёбрам. Если большинство честно, то
-// каждая сделка есть настоящий труд и обязана считаться, даже когда двое
-// работают только друг с другом.
+// Опора — среднее арифметическое по сделкам (ратифицировано 2026-09-08): сделки
+// не схлопываются по рёбрам. Если большинство честно, то каждая сделка есть
+// настоящий труд и обязана считаться, даже когда двое работают только друг с
+// другом.
 TEST_F(IndependenceTest, DealMeanReferenceCatchesModerateFlooding) {
     const int64_t before = kDay - 86'400 * 30;
     honest_background(before);                       // 10 сделок по цене 1.0
@@ -539,50 +508,46 @@ TEST_F(IndependenceTest, DealMeanReferenceCatchesModerateFlooding) {
     deal(alice_, carol_, 1.0, 3.0, kDay + 100);                     // сговорная
     deal(make_chain(0x71), make_chain(0x81), 1.0, 1.0, kDay + 100); // честная
 
-    const IndependenceParams indep{};
-    const auto weighted =
-        build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr, &indep);
-    ASSERT_EQ(weighted.size(), 1u);
+    const auto w = weighted();
+    ASSERT_EQ(w.axes.size(), 1u);
     // Сговорная сделка втрое дороже опоры и полностью кругооборотна — её вес
     // падает, и среднее дня тянется к честной цене, а не к 2.0.
-    EXPECT_LT(weighted[0].rate, 1.5);
-    EXPECT_NEAR(weighted[0].hours, 2.0, 1e-9);       // часы сырые: труд был
-    EXPECT_LT(weighted[0].weighted_hours, weighted[0].hours);
+    EXPECT_LT(w.axes[0].price, 1.5);
+    EXPECT_NEAR(w.axes[0].hours, 2.0, 1e-9);         // часы сырые: труд был
+    EXPECT_LT(w.axes[0].weighted_hours, w.axes[0].hours);
 }
 
 // ЧЕМ ЗА ЭТО ПЛАТИМ, честно и в тесте. Опора по рёбрам была неуязвима к числу
 // сделок: пара давала одну точку, сколько бы она ни наторговала. Опора по
-// сделкам этим свойством не обладает — залив корзину, пара утягивает опору к
-// себе и перестаёт выглядеть аномальной.
+// сделкам этим свойством не обладает — залив ось, пара утягивает опору к себе и
+// перестаёт выглядеть аномальной.
 //
 // Замерено на прогоне года (цена ×1.3): при опоре по рёбрам аномалия остаётся
 // 1.28x при любой доле сделок; при среднем по сделкам она сползает
 // 1.28 → 1.21 (28% сделок) → 1.16 (43%) → 1.11 (61%) → 1.07 (75%).
 //
-// Это принятая цена, а не недосмотр: заливать корзину значит заявлять ЧАСЫ, а
-// часы дороги (economy.md §3) — их подделка требует свидетелей и
-// непересекающихся слотов. Кругооборотная половина конъюнкции при этом
-// продолжает работать: заливающая пара взаимна по построению.
-TEST_F(IndependenceTest, FloodingTheBasketBluntsTheAnomalyHalf) {
+// Это принятая цена, а не недосмотр: заливать значит заявлять ЧАСЫ, а часы
+// дороги (economy.md §3) — их подделка требует свидетелей и непересекающихся
+// слотов. Кругооборотная половина конъюнкции при этом продолжает работать:
+// заливающая пара взаимна по построению.
+TEST_F(IndependenceTest, FloodingTheAxisBluntsTheAnomalyHalf) {
     const int64_t before = kDay - 86'400 * 30;
     honest_background(before);                       // 10 честных сделок по 1.0
-    for (int i = 0; i < 30; ++i) {                   // 60 сделок пары: 86% корзины
+    for (int i = 0; i < 30; ++i) {                   // 60 сделок пары: 86% оси
         deal(alice_, carol_, 1.0, 1.3, before);
         deal(carol_, alice_, 1.0, 1.3, before);
     }
     deal(alice_, carol_, 1.0, 1.3, kDay + 100);
     deal(make_chain(0x71), make_chain(0x81), 1.0, 1.0, kDay + 100);
 
-    const IndependenceParams indep{};
-    const auto weighted =
-        build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr, &indep);
-    ASSERT_EQ(weighted.size(), 1u);
+    const auto w = weighted();
+    ASSERT_EQ(w.axes.size(), 1u);
     // Опора уехала к цене пары: аномалия сжалась с 1.30 до ≈1.03. Дисконт не
     // исчезает совсем — его удерживает нижний зажим kappa_min = 1.10, — но
-    // слабеет резко: уцелевает ≈82% объёма против ≈8% у той же пары в
-    // незалитой корзине (CollusiveReciprocalPairIsDiscounted).
-    EXPECT_GT(weighted[0].weighted_hours / weighted[0].hours, 0.75);
-    EXPECT_LT(weighted[0].weighted_hours, weighted[0].hours);   // но и не ноль
+    // слабеет резко: уцелевает ≈82% объёма против ≈8% у той же пары на
+    // незалитой оси (CollusiveReciprocalPairIsDiscounted).
+    EXPECT_GT(w.axes[0].weighted_hours / w.axes[0].hours, 0.75);
+    EXPECT_LT(w.axes[0].weighted_hours, w.axes[0].hours);   // но и не ноль
 }
 
 // Цена оси появляется, когда её назвали хотя бы `min_axis_payers` разных
@@ -595,12 +560,10 @@ TEST_F(IndependenceTest, UnpricedAxesAreNotJudged) {
     deal(carol_, alice_, 1.0, 1.0, before);
     deal(alice_, carol_, 1.0, 9.0, kDay + 100);      // вопиюще дорогая и взаимная
 
-    const IndependenceParams indep{};                // min_axis_payers = 4
-    const auto weighted =
-        build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr, &indep);
-    ASSERT_EQ(weighted.size(), 1u);
-    EXPECT_NEAR(weighted[0].rate, 9.0, 1e-9);        // не судили вовсе
-    EXPECT_NEAR(weighted[0].weighted_hours, weighted[0].hours, 1e-9);
+    const auto w = weighted();                       // min_axis_payers = 4
+    ASSERT_EQ(w.axes.size(), 1u);
+    EXPECT_NEAR(w.axes[0].price, 9.0, 1e-9);         // не судили вовсе
+    EXPECT_NEAR(w.axes[0].weighted_hours, w.axes[0].hours, 1e-9);
 }
 
 // Как только ось назвали четверо разных плательщиков — у неё есть цена, и та же
@@ -614,11 +577,9 @@ TEST_F(IndependenceTest, FourPayersPriceTheAxis) {
     deal(make_chain(0x72), make_chain(0x82), 1.0, 1.0, before);   // четвёртый
     deal(alice_, carol_, 1.0, 9.0, kDay + 100);
 
-    const IndependenceParams indep{};
-    const auto weighted =
-        build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr, &indep);
-    ASSERT_EQ(weighted.size(), 1u);
-    EXPECT_LT(weighted[0].weighted_hours, weighted[0].hours);
+    const auto w = weighted();
+    ASSERT_EQ(w.axes.size(), 1u);
+    EXPECT_LT(w.axes[0].weighted_hours, w.axes[0].hours);
 }
 
 // Вариант «б» (ИР-022, выбран 2026-09-11): опора — сетевая цена того, что сделка
@@ -637,10 +598,10 @@ TEST_F(IndependenceTest, NamedPremiumIsPricedByTheNetwork) {
     }
     deal_on(alice_, carol_, 1.0, {{0x01, 1.0}, {0x02, 0.3}}, kDay + 100);
 
-    const IndependenceParams indep{};
-    const auto w = build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr, &indep);
-    ASSERT_EQ(w.size(), 1u);
-    EXPECT_NEAR(w[0].weighted_hours, w[0].hours, 1e-9);       // не уценена
+    const auto w = weighted();
+    ASSERT_EQ(w.axes.size(), 2u);
+    for (const auto& p : w.axes)
+        EXPECT_NEAR(p.weighted_hours, p.hours, 1e-9);         // не уценена
 }
 
 // Та же надбавка, спрятанная в общую ось, — аномалия: объяснить её нечем.
@@ -657,10 +618,9 @@ TEST_F(IndependenceTest, PremiumHiddenInACommonAxisIsAnAnomaly) {
     }
     deal_on(alice_, carol_, 1.0, {{0x01, 1.3}}, kDay + 100);
 
-    const IndependenceParams indep{};
-    const auto w = build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr, &indep);
-    ASSERT_EQ(w.size(), 1u);
-    EXPECT_LT(w[0].weighted_hours / w[0].hours, 0.5);
+    const auto w = weighted();
+    ASSERT_EQ(w.axes.size(), 1u);
+    EXPECT_LT(w.axes[0].weighted_hours / w.axes[0].hours, 0.5);
 }
 
 // Своя ось не оценивает сама себя. Пара, заведшая ось только для себя, не может
@@ -675,118 +635,8 @@ TEST_F(IndependenceTest, PrivateAxisDoesNotPriceItsOwnInflation) {
     }
     deal_on(alice_, carol_, 1.0, {{0x01, 1.0}, {0x03, 0.3}}, kDay + 100);
 
-    const IndependenceParams indep{};
-    const auto w = build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr, &indep);
-    ASSERT_EQ(w.size(), 1u);
-    EXPECT_LT(w[0].weighted_hours / w[0].hours, 0.5);
-}
-
-// ── Облако из сделок (ИР-022): приор без всякого каталога ─────────────────────
-//
-// Приор спрашивают только о корзине, которая сегодня торговала, а у каждой
-// рассчитанной сделки есть разбивка. Значит, точка в облаке у такой корзины есть
-// всегда, и объявленные `x` приору не нужны (specialty-axes.md §10).
-TEST_F(RatesViewTest, CloudReadOffTheDealsSeedsAThinNewSpecialty) {
-    // Повар торговал неделей раньше — и за то же, за что платят пекарю.
-    const UserId carol = make_chain(0xC3);
-    const Block  spec  = add(carol, records::Specialty{"prof.cook"});
-    records::Grade g{};
-    g.specialty = ref_to(carol, spec);
-    g.level     = 3;
-    const auto cook_grade = ref_to(carol, add(carol, g));
-
-    records::WorkRecord wr{};
-    wr.agent = cook_grade;
-    wr.hours = 4.0;
-    const Block work = add(carol, wr);
-    records::Acceptance a{};
-    a.work        = ref_to(carol, work);
-    a.receiver    = bob_.bytes;
-    a.hours_raw   = 4.0;
-    a.labor_units = 4.8;
-    a.axes        = {{test_axis(), 4.8}};
-    a.timestamp   = kDay - 7 * 86'400;              // не в сегодняшнем дне
-    const Block acc = add(bob_, a);
-    records::Transfer t{};
-    t.from    = bob_.bytes;
-    t.to      = carol.bytes;
-    t.origins = { {bob_.bytes, 4.8} };
-    t.reason  = ref_to(bob_, acc);
-    add(bob_, t);
-
-    settled_deal(bob_, 0.05, 5.0);                  // пекарь: тонко, вчерашней ставки нет
-
-    const auto cloud = build_specialty_cloud(build_specialty_compositions(*storage_),
-                                             kDay, kDay, {});
-    const std::vector<records::RateEntry> prev = {{"prof.cook", 1.2, 0.0, 0}};
-    bool seeded = false;
-    for (const auto& r : build_daily_rates(*storage_, kDay, prev, 0.3, 0.1, &cloud))
-        if (r.specialty == "хлебопёк") {
-            EXPECT_DOUBLE_EQ(r.rate, 1.2);          // ставка соседа по составу цены
-            seeded = true;
-        }
-    EXPECT_TRUE(seeded);
-}
-
-// ── Разряд не делит ставку (ИР-022) ───────────────────────────────────────────
-//
-// Разряд прежде входил в ключ ставки, и час мастера выходил дороже по одному
-// лишь званию — сверх того, за что платила сама сделка. Теперь цена расписана
-// по осям в сделке, и разряд в ключе оплачивал бы названное второй раз.
-TEST_F(RatesViewTest, GradeDoesNotSplitTheRate) {
-    settled_deal(bob_, 2.0, 2.0);                   // разряд 3: 1.0 за час
-
-    const Block spec = add(alice_, records::Specialty{"хлебопёк"});
-    records::Grade g6{};
-    g6.specialty = ref_to(alice_, spec);
-    g6.level     = 6;
-    const auto master = ref_to(alice_, add(alice_, g6));
-    records::WorkRecord wr{};
-    wr.agent = master;
-    wr.hours = 2.0;
-    const Block work = add(alice_, wr);
-    records::Acceptance a{};
-    a.work        = ref_to(alice_, work);
-    a.receiver    = bob_.bytes;
-    a.hours_raw   = 2.0;
-    a.labor_units = 4.0;                            // разряд 6: 2.0 за час
-    a.axes        = {{test_axis(), 4.0}};
-    a.timestamp   = kDay + 200;
-    const Block acc = add(bob_, a);
-    records::Transfer t{};
-    t.from    = bob_.bytes;
-    t.to      = alice_.bytes;
-    t.origins = { {bob_.bytes, 4.0} };
-    t.reason  = ref_to(bob_, acc);
-    add(bob_, t);
-
-    const auto rates = build_daily_rates(*storage_, kDay, {});
-    ASSERT_EQ(rates.size(), 1u);                    // одна ставка, а не две
-    EXPECT_EQ(rates[0].specialty, "хлебопёк");
-    EXPECT_DOUBLE_EQ(rates[0].rate, 6.0 / 4.0);
-    EXPECT_EQ(rates[0].deals, 2u);
-}
-
-// Разбивка ЕСТЬ цена (records.md §9.5 v4): не сходящаяся с ценой описывает
-// какую-то другую сделку — в ставку она не входит, как не входит в книгу осей.
-TEST_F(RatesViewTest, BreakdownThatDoesNotAddUpIsNotARate) {
-    records::WorkRecord wr{};
-    wr.agent = grade_ref_;
-    wr.hours = 2.0;
-    const Block work = add(alice_, wr);
-    records::Acceptance a{};
-    a.work        = ref_to(alice_, work);
-    a.receiver    = bob_.bytes;
-    a.hours_raw   = 2.0;
-    a.labor_units = 8.0;
-    a.axes        = {{test_axis(), 2.0}};            // названо 2 из 8
-    a.timestamp   = kDay + 100;
-    const Block acc = add(bob_, a);
-    records::Transfer t{};
-    t.from    = bob_.bytes;
-    t.to      = alice_.bytes;
-    t.origins = { {bob_.bytes, 8.0} };
-    t.reason  = ref_to(bob_, acc);
-    add(bob_, t);
-    EXPECT_TRUE(build_daily_rates(*storage_, kDay, {}).empty());
+    const auto w  = weighted();
+    const auto* a = price_of(w.axes, 0x01);
+    ASSERT_NE(a, nullptr);
+    EXPECT_LT(a->weighted_hours / a->hours, 0.5);
 }

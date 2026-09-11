@@ -150,11 +150,11 @@ MatchView MatchView::build(const AggregatorStorage& storage,
                         cand.text        = s.text;
                         cand.grade       = s.grade;
                         cand.distance_km = *d;
-                        if (const auto a = attest.best(s.chain, s.slug)) {
-                            cand.attested_level  = a->level;
-                            cand.attested_chains = a->chains;
-                            cand.attested_hours  = a->hours;
-                        }
+                        const auto total = attest.total(s.chain);
+                        cand.attested_chains = total.chains;
+                        cand.attested_hours  = total.hours;
+                        cand.attested_axes   = attest.of(s.chain);
+                        if (cand.attested_axes.size() > 3) cand.attested_axes.resize(3);
                         m.candidates.push_back(std::move(cand));
                         helps[uid].insert(s.chain);
                     }

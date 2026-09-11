@@ -47,6 +47,13 @@ std::string to_hex(const std::array<uint8_t,N>& a) {
     return to_hex(a.data(), N);
 }
 
+// The full path of an axis (records.md §4): chain/node/block/hash — the form
+// `bc accept --axis` takes.
+std::string block_path_str(const records::BlockPath& p) {
+    return to_hex(p.chain) + "/" + std::to_string(p.node) + "/"
+         + std::to_string(p.block) + "/" + to_hex(p.hash);
+}
+
 std::optional<Hash> hex_to_hash(const std::string& s) {
     if (s.size() != 64) return std::nullopt;
     Hash h{};
@@ -108,25 +115,6 @@ std::optional<std::string> read_file(const std::filesystem::path& path) {
     if (!f) return std::nullopt;
     return std::string((std::istreambuf_iterator<char>(f)),
                         std::istreambuf_iterator<char>());
-}
-
-// Catalogs the aggregator serves, if any. The specialty cloud takes only the tree
-// parent from them — the prior's fallback, never the neighbourhood — so their text
-// enters the cloud's snapshot together with the block set.
-struct ServedCatalogs {
-    std::vector<records::Catalog> cats;
-    std::string                   text;
-};
-ServedCatalogs served_catalogs(const std::filesystem::path& dir) {
-    ServedCatalogs s;
-    if (dir.empty()) return s;
-    for (const char* name : {"professions.json", "needs.json"})
-        if (const auto text = read_file(dir / name))
-            try {
-                s.cats.push_back(records::parse_catalog(*text));
-                s.text += *text;
-            } catch (const std::exception&) {}
-    return s;
 }
 
 // ── Profile JSON (records.md §8.6) ────────────────────────────────────────────
@@ -194,6 +182,37 @@ std::string profile_to_json(const UserId& chain, const ChainProfile& profile) {
     }
     s += '}';
     return s;
+}
+
+// Accepted work of a worker, as the reader sees it (records.md §14.4): distinct
+// accepting chains, hours, and the axes that work named most — labelled from
+// the axis definitions in the chains. `null` when nobody accepted anything.
+std::string attested_axes_json(
+        const std::vector<AttestedAxis>&                            axes,
+        const std::map<std::array<uint8_t, 32>, records::AxisDef>& defs) {
+    std::string s = "[";
+    for (std::size_t i = 0; i < axes.size(); ++i) {
+        const auto dit = defs.find(axes[i].axis.hash);
+        if (i) s += ',';
+        s += "{\"axis\":\"" + block_path_str(axes[i].axis)
+           + "\",\"label\":\""
+           + json_escape(dit == defs.end() ? std::string{} : dit->second.ru)
+           + "\",\"chains\":" + std::to_string(axes[i].chains)
+           + ",\"hours\":"     + std::to_string(axes[i].hours) + "}";
+    }
+    return s + "]";
+}
+
+std::string attested_json(const AttestationView&                                   view,
+                          const UserId&                                            worker,
+                          const std::map<std::array<uint8_t, 32>, records::AxisDef>& defs) {
+    const auto total = view.total(worker);
+    if (total.chains == 0) return "null";
+    auto axes = view.of(worker);
+    if (axes.size() > 3) axes.resize(3);
+    return "{\"chains\":" + std::to_string(total.chains)
+         + ",\"hours\":"  + std::to_string(total.hours)
+         + ",\"axes\":"   + attested_axes_json(axes, defs) + "}";
 }
 
 } // anonymous namespace
@@ -651,10 +670,12 @@ void AggregatorServer::setup_routes() {
       + ";calib_min_deals=" + std::to_string(kIndependence.calib_min_deals)
       + ";min_axis_payers=" + std::to_string(kIndependence.min_axis_payers);
 
-    // GET /economy/rates — today's specialty rates (records.md §11.2).
+    // GET /economy/rates — today's axis prices (records.md §11.2 v5).
     // Computed lazily once per day and published as a signed DailyAggregate
     // block in the aggregator's own chain; the block also enters the block
     // warehouse, so it gossips to peers and clients can fetch + verify it.
+    // An axis's label comes from its definition in the chains (ИР-022) and is
+    // for people only; the axis itself is its full path.
     svr.Get("/economy/rates", [&](const httplib::Request& req, httplib::Response& res) {
         if (!own_chain_) {
             res.status = 501;
@@ -663,35 +684,38 @@ void AggregatorServer::setup_routes() {
             return;
         }
         try {
-            // ?day=TS — preview: recompute the raw day average over that
-            // day's deals without publishing (re-checkability: compare with
-            // the published aggregate).
-            if (req.has_param("day")) {
-                const int64_t d = std::stoll(req.get_param_value("day"));
-                const auto rr = build_daily_rates(storage_, d - d % 86'400, {},
-                                                  0.3, 0.1, nullptr,
-                                                  &kIndependence);
-                double sw = 0.0, swr = 0.0;
-                for (const auto& r : rr) { sw += r.hours; swr += r.rate * r.hours; }
-                const double W = sw > 0.0 ? swr / sw : 1.0;
-                std::string body = "{\"preview_day\":" + std::to_string(d)
-                                 + ",\"W\":" + std::to_string(W)
-                                 + ",\"indep\":\"" + json_escape(kIndepParams)
-                                 + "\",\"rates\":[";
-                bool first = true;
-                for (const auto& r : rr) {
-                    if (!first) body += ',';
-                    first = false;
-                    body += "{\"specialty\":\"" + json_escape(r.specialty)
-                         + "\",\"rate\":"  + std::to_string(r.rate)
-                         + ",\"hours\":"   + std::to_string(r.hours)
-                         + ",\"deals\":"   + std::to_string(r.deals)
-                         + ",\"weighted_hours\":"
-                                            + std::to_string(r.weighted_hours)
-                         + "}";
+            const auto defs = build_axis_definitions(storage_);
+            const auto axes_json = [&](const std::vector<records::AxisPrice>& axes,
+                                       bool with_weight) {
+                std::string s = "[";
+                for (size_t i = 0; i < axes.size(); ++i) {
+                    const auto& p   = axes[i];
+                    const auto  dit = defs.find(p.axis.hash);
+                    if (i) s += ',';
+                    s += "{\"axis\":\"" + block_path_str(p.axis)
+                       + "\",\"label\":\""
+                       + json_escape(dit == defs.end() ? std::string{} : dit->second.ru)
+                       + "\",\"price\":" + std::to_string(p.price)
+                       + ",\"hours\":"    + std::to_string(p.hours)
+                       + ",\"deals\":"    + std::to_string(p.deals);
+                    if (with_weight)
+                        s += ",\"weighted_hours\":" + std::to_string(p.weighted_hours);
+                    s += "}";
                 }
-                body += "]}";
-                res.set_content(body, "application/json");
+                return s + "]";
+            };
+
+            // ?day=TS — preview: recompute the day over that day's deals without
+            // publishing (re-checkability: compare with the published aggregate).
+            if (req.has_param("day")) {
+                const int64_t d  = std::stoll(req.get_param_value("day"));
+                const auto    pr = build_daily_prices(storage_, d - d % 86'400, {},
+                                                      0.3, 0.1, &kIndependence);
+                res.set_content("{\"preview_day\":" + std::to_string(d)
+                                + ",\"W\":" + std::to_string(pr.W)
+                                + ",\"indep\":\"" + json_escape(kIndepParams)
+                                + "\",\"axes\":" + axes_json(pr.axes, true) + "}",
+                                "application/json");
                 return;
             }
 
@@ -701,7 +725,7 @@ void AggregatorServer::setup_routes() {
 
             std::optional<records::DailyAggregate> today;
             Hash today_hash{};
-            std::vector<records::RateEntry> previous;
+            std::vector<records::AxisPrice> previous;
             int64_t prev_date = -1;
             for (const Block& b : own_chain_->branch()) {
                 if (b.type != BlockType::DATA) continue;
@@ -714,7 +738,7 @@ void AggregatorServer::setup_routes() {
                         today      = *d;   // a later block for today overrides
                         today_hash = Crypto::hash_block(b);
                     } else if (d->date < day && d->date >= prev_date) {
-                        previous  = d->rates;
+                        previous  = d->axes;
                         prev_date = d->date;
                     }
                 } catch (const records::CodecError&) {}
@@ -724,23 +748,13 @@ void AggregatorServer::setup_routes() {
                 records::DailyAggregate d{};
                 d.date      = day;
                 d.timestamp = now;
-                // Today's rates derive from YESTERDAY's settled deals
-                // (main_ideas.pdf: коэффициенты этого дня → следующего). A thin new
-                // activity is seeded from its neighbours in the specialty cloud,
-                // which is read off the same settled deals (specialty-axes.md §10)
-                // and so needs no catalog; a served one lends tree parents only.
-                const auto served = served_catalogs(catalog_dir_);
-                const auto cloud  = build_specialty_cloud(
-                    build_specialty_compositions(storage_), day, now, {}, {}, 5,
-                    served.cats.empty() ? nullptr : &served.cats);
-                d.rates     = build_daily_rates(storage_, day - 86'400, previous,
-                                                0.3, 0.1, &cloud, &kIndependence);
-                // W = hours-weighted mean of raw rates (economy.md §2б): the client
-                // divides by it so the average labour-hour equals 1.
-                double sw = 0.0, swr = 0.0;
-                for (const auto& r : d.rates) { sw += r.hours; swr += r.rate * r.hours; }
-                d.W = sw > 0.0 ? swr / sw : 1.0;
-                d.indep = kIndepParams;             // v4 (ИР-021)
+                // Today's prices derive from YESTERDAY's settled deals
+                // (main_ideas.pdf: коэффициенты этого дня → следующего).
+                const auto pr = build_daily_prices(storage_, day - 86'400, previous,
+                                                   0.3, 0.1, &kIndependence);
+                d.axes  = pr.axes;
+                d.W     = pr.W;
+                d.indep = kIndepParams;
                 const Block block = own_chain_->append_data(
                     records::Codec::encode(records::Record{d}));
                 try { storage_.add_block(block); } catch (...) {}
@@ -748,23 +762,12 @@ void AggregatorServer::setup_routes() {
                 today_hash = Crypto::hash_block(block);
             }
 
-            std::string body = "{\"date\":" + std::to_string(today->date)
-                + ",\"chain\":\"" + to_hex(own_chain_->uid().bytes)
-                + "\",\"block\":\"" + to_hex(today_hash.bytes)
-                + "\",\"W\":" + std::to_string(today->W)
-                + ",\"rates\":[";
-            bool first = true;
-            for (const auto& r : today->rates) {
-                if (!first) body += ',';
-                first = false;
-                body += "{\"specialty\":\"" + json_escape(r.specialty)
-                     + "\",\"rate\":"  + std::to_string(r.rate)
-                     + ",\"hours\":"   + std::to_string(r.hours)
-                     + ",\"deals\":"   + std::to_string(r.deals)
-                     + "}";
-            }
-            body += "]}";
-            res.set_content(body, "application/json");
+            res.set_content("{\"date\":" + std::to_string(today->date)
+                            + ",\"chain\":\"" + to_hex(own_chain_->uid().bytes)
+                            + "\",\"block\":\"" + to_hex(today_hash.bytes)
+                            + "\",\"W\":" + std::to_string(today->W)
+                            + ",\"axes\":" + axes_json(today->axes, false) + "}",
+                            "application/json");
         } catch (const std::exception& e) {
             res.status = 500;
             res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
@@ -772,21 +775,18 @@ void AggregatorServer::setup_routes() {
         }
     });
 
-    // GET /specialty/cloud — the specialty cloud (records.md §11.7,
-    // specialty-axes.md §10): per specialty, its k nearest by what their settled
-    // deals paid FOR — the share of the price per axis (ИР-022). Read off the deals,
-    // so it needs no catalog; a served one lends tree parents only. Published
-    // once/day as a signed SpecialtyCloud in the aggregator's own chain and
-    // re-checkable via the committed `snapshot`. ?slug=... returns one specialty;
-    // ?coords=1 adds the 2D spectral map.
-    svr.Get("/specialty/cloud", [&](const httplib::Request& req, httplib::Response& res) {
+    // GET /economy/cloud — the work cloud (records.md §11.7, specialty-axes.md
+    // §10): samples of work — acceptances others named with `like` — and, per
+    // sample, its k nearest by what their families were paid FOR (ИР-022 шаг 11).
+    // Published once/day as a signed WorkCloud in the aggregator's own chain and
+    // re-checkable via the committed `snapshot`. ?coords=1 adds the 2D map.
+    svr.Get("/economy/cloud", [&](const httplib::Request& req, httplib::Response& res) {
         try {
-            const auto served = served_catalogs(catalog_dir_);
-            const auto comps  = build_specialty_compositions(storage_);
+            const auto comps = build_work_compositions(storage_);
 
-            // snapshot commits the input: the block set the cloud was read off and
-            // the catalog text its parents came from (sorted hashes → deterministic).
-            std::string input = served.text;
+            // snapshot commits the input: the block set the cloud was read off
+            // (sorted hashes → deterministic).
+            std::string input;
             {
                 auto hs = storage_.all_block_hashes();
                 std::sort(hs.begin(), hs.end(),
@@ -802,9 +802,7 @@ void AggregatorServer::setup_routes() {
             std::vector<std::array<uint8_t, 32>> sources;
             if (own_chain_) sources.push_back(own_chain_->uid().bytes);
 
-            const auto cloud = build_specialty_cloud(
-                comps, day, now, snap.bytes, sources, 5,
-                served.cats.empty() ? nullptr : &served.cats);
+            const auto cloud = build_work_cloud(comps, day, now, snap.bytes, sources, 5);
 
             // Publish once/day (dedupe by scanning the branch), like DailyAggregate.
             std::string block_hex;
@@ -816,7 +814,7 @@ void AggregatorServer::setup_routes() {
                     try {
                         const auto rec = records::Codec::decode(b.payload.data(),
                                                                 b.payload.size());
-                        if (const auto* c = std::get_if<records::SpecialtyCloud>(&rec))
+                        if (const auto* c = std::get_if<records::WorkCloud>(&rec))
                             if (c->date == day) {
                                 have_today = true;
                                 block_hex  = to_hex(Crypto::hash_block(b).bytes);
@@ -831,12 +829,14 @@ void AggregatorServer::setup_routes() {
                 }
             }
 
-            // ?coords=1 — spectral map coordinates on demand (ИР-018 phase 3), not
-            // stored in the record (kept compact, specialty-axes.md §10).
-            std::map<std::string, std::array<double, 2>> coords;
+            // ?coords=1 — spectral map coordinates on demand, not stored in the
+            // record (kept compact, specialty-axes.md §10).
+            std::map<SampleKey, std::array<double, 2>> coords;
             if (req.has_param("coords")) coords = compute_spectral_coords(comps);
 
-            const std::string want = req.has_param("slug") ? req.get_param_value("slug") : "";
+            const auto ref_str = [](const records::Ref& r) {
+                return to_hex(r.chain) + "/" + to_hex(r.hash);
+            };
             std::string body = "{\"date\":" + std::to_string(cloud.date)
                 + ",\"snapshot\":\"" + to_hex(cloud.snapshot)
                 + "\",\"block\":\"" + block_hex
@@ -844,15 +844,12 @@ void AggregatorServer::setup_routes() {
                 + "\",\"points\":[";
             bool first = true;
             for (const auto& p : cloud.points) {
-                if (!want.empty() && p.slug != want) continue;
                 if (!first) body += ',';
                 first = false;
-                // `deals` — сколько сделок стоит за местом точки: состав из одной
-                // сделки — слово одной сделки, и читатель должен это видеть.
-                body += "{\"slug\":\"" + json_escape(p.slug)
-                     + "\",\"parent\":\"" + json_escape(p.parent)
-                     + "\",\"deals\":" + std::to_string(comps.at(p.slug).deals);
-                if (const auto it = coords.find(p.slug); it != coords.end())
+                body += "{\"sample\":\"" + ref_str(p.sample)
+                     + "\",\"title\":\"" + json_escape(p.title)
+                     + "\",\"deals\":" + std::to_string(p.deals);
+                if (const auto it = coords.find(p.sample.hash); it != coords.end())
                     body += ",\"coord\":[" + std::to_string(it->second[0]) + ","
                          + std::to_string(it->second[1]) + "]";
                 body += ",\"neighbors\":[";
@@ -860,7 +857,10 @@ void AggregatorServer::setup_routes() {
                 for (const auto& n : p.neighbors) {
                     if (!nf) body += ',';
                     nf = false;
-                    body += "{\"slug\":\"" + json_escape(n.slug)
+                    const auto nit = comps.find(n.sample.hash);
+                    body += "{\"sample\":\"" + ref_str(n.sample)
+                         + "\",\"title\":\""
+                         + json_escape(nit == comps.end() ? std::string{} : nit->second.title)
                          + "\",\"w\":" + std::to_string(n.weight) + "}";
                 }
                 body += "]}";
@@ -923,7 +923,8 @@ void AggregatorServer::setup_routes() {
                 for (size_t i = 0; i < rent.size(); ++i) {
                     const auto& r = rent[i];
                     if (i) body += ',';
-                    body += "{\"specialty\":\"" + json_escape(r.slug)
+                    body += "{\"worker\":\"" + to_hex(r.worker)
+                         + "\",\"title\":\""   + json_escape(r.title)
                          + "\",\"fact\":"       + std::to_string(r.fact)
                          + ",\"expected\":"     + std::to_string(r.expected)
                          + ",\"resid\":"        + std::to_string(r.resid)
@@ -1220,11 +1221,14 @@ void AggregatorServer::setup_routes() {
             std::string body = "{\"facet\":\"" + json_escape(facet_s)
                              + "\",\"slug\":\"" + json_escape(slug)
                              + "\",\"chains\":[";
-            // The attestation next to the claim (records.md §14.4): the reader
-            // sees «заявлен» vs «заверен N цепями, M часов» and decides.
+            // Accepted work next to the claim (records.md §14.4): the reader sees
+            // the claimed skill and what others accepted, axis by axis, and decides.
             std::optional<AttestationView> attest;
-            if (*facet == ProfileFacet::Skill)
+            std::map<std::array<uint8_t, 32>, records::AxisDef> defs;
+            if (*facet == ProfileFacet::Skill) {
                 attest = AttestationView::build(storage_);
+                defs   = build_axis_definitions(storage_);
+            }
             bool first = true;
             for (const auto& uid : view.by_slug(*facet, slug)) {
                 const auto profile = view.chain(uid);
@@ -1234,15 +1238,9 @@ void AggregatorServer::setup_routes() {
                     if (!first) body += ',';
                     first = false;
                     std::string one = fact_to_json(uid, *fact);
-                    if (attest) {
-                        std::string att = ",\"attested\":null";
-                        if (const auto a = attest->best(uid, slug))
-                            att = ",\"attested\":{\"level\":"
-                                + std::to_string(static_cast<int>(a->level))
-                                + ",\"chains\":" + std::to_string(a->chains)
-                                + ",\"hours\":"  + std::to_string(a->hours) + "}";
-                        one.insert(one.size() - 1, att);
-                    }
+                    if (attest)
+                        one.insert(one.size() - 1,
+                                   ",\"attested\":" + attested_json(*attest, uid, defs));
                     body += one;
                 }
             }
@@ -1284,6 +1282,7 @@ void AggregatorServer::setup_routes() {
                 closed_by[e.slug] = e.closed_by;
 
             const auto view = MatchView::build(storage_, closed_by);
+            const auto defs = build_axis_definitions(storage_);
 
             std::string body = "{\"needs\":[";
             bool first = true;
@@ -1306,9 +1305,9 @@ void AggregatorServer::setup_routes() {
                          + "\",\"text\":\""   + json_escape(c.text)
                          + "\",\"grade\":\""  + json_escape(c.grade)
                          + "\",\"distance_km\":" + std::to_string(c.distance_km)
-                         + ",\"attested_level\":"  + std::to_string(c.attested_level)
                          + ",\"attested_chains\":" + std::to_string(c.attested_chains)
                          + ",\"attested_hours\":"  + std::to_string(c.attested_hours)
+                         + ",\"attested_axes\":"   + attested_axes_json(c.attested_axes, defs)
                          + "}";
                 }
                 body += "]}";

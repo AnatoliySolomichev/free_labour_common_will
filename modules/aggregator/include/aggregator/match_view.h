@@ -1,6 +1,7 @@
 #pragma once
 
 #include "profile_view.h"
+#include "attestation_view.h"
 
 #include <map>
 #include <string>
@@ -30,13 +31,14 @@ struct MatchCandidate {
     Hash        block_hash{};      // the skill fact
     std::string slug;              // prof.*
     std::string text;
-    std::string grade;             // grade: tag — the CLAIM, empty when not stated
-    // Attestation of the claim (records.md §14.4): accepted work at this slug,
-    // counted in distinct accepting chains. level -1 → nothing attested, the
-    // claim is bare. The reader compares claim and attestation and decides.
-    int         attested_level  = -1;
-    std::size_t attested_chains = 0;
-    double      attested_hours  = 0;
+    std::string grade;             // grade: tag — a free-text CLAIM, empty when not stated
+    // What others accepted from this worker (records.md §14.4, ИР-022 шаг 11):
+    // distinct accepting chains, hours, and the axes that work named most. The
+    // skill slug is a search label; what the work was is said by the breakdown.
+    // The reader compares the claim with the accepted work and decides.
+    std::size_t               attested_chains = 0;
+    double                    attested_hours  = 0;
+    std::vector<AttestedAxis> attested_axes;     // at most three, most hours first
     // Distance between the two parties, km. Negative when it does not apply:
     // one side works remotely, or a coordinate is missing.
     double      distance_km = -1;

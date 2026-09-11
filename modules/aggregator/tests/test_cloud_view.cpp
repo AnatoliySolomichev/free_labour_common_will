@@ -10,6 +10,7 @@
 #include <cmath>
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <string>
 
 using namespace aggregator;
@@ -30,20 +31,30 @@ constexpr uint8_t kDanger = 0x01, kPrecision = 0x02, kPhysical = 0x03,
 
 std::array<uint8_t, 32> id(uint8_t tag) { return axis(tag).hash; }
 
-// Состав цены руками: ось → доля.
-SpecialtyComposition comp(std::initializer_list<std::pair<uint8_t, double>> shares,
-                          double carried = 0.0) {
-    SpecialtyComposition c{};
+SampleKey key(uint8_t sample) {
+    SampleKey k{};
+    k.fill(sample);
+    return k;
+}
+
+// Семья руками: образец по тегу, состав цены — ось → доля.
+std::pair<const SampleKey, WorkComposition> family(
+        uint8_t sample, std::initializer_list<std::pair<uint8_t, double>> shares,
+        double carried = 0.0, const std::string& title = "") {
+    WorkComposition c{};
+    c.sample.chain.fill(0xB0);
+    c.sample.hash = key(sample);
+    c.title       = title;
     for (const auto& [tag, s] : shares) c.axes[id(tag)] = s;
     c.carried = carried;
     c.payable = 1.0;
-    c.deals   = 1;
-    return c;
+    c.deals   = 2;
+    return {key(sample), c};
 }
 
-const records::CloudPoint* point(const records::SpecialtyCloud& c, const std::string& slug) {
+const records::CloudPoint* point(const records::WorkCloud& c, uint8_t sample) {
     for (const auto& p : c.points)
-        if (p.slug == slug) return &p;
+        if (p.sample.hash == key(sample)) return &p;
     return nullptr;
 }
 
@@ -62,7 +73,16 @@ records::Ref ref_to(const UserId& chain, const Block& block) {
 
 }  // namespace
 
-// ── Место специальности читается из сделок ────────────────────────────────────
+// ── Семьи образцов читаются из сделок ─────────────────────────────────────────
+
+struct Line { uint8_t axis; double units; };
+struct Opt {
+    std::optional<records::Ref> like;
+    std::string                 title;
+    double                      carried = 0.0;
+    bool                        settle  = true;
+    double                      labour  = -1.0;   // ≥ 0: разбивка с ценой не сходится
+};
 
 class CompositionTest : public ::testing::Test {
 protected:
@@ -70,7 +90,6 @@ protected:
     std::unique_ptr<AggregatorStorage> storage_;
     BlockIndex                         next_index_ = 0;
     UserId                             worker_ = chain_of(0xA1);
-    UserId                             payer_  = chain_of(0xB2);
 
     void SetUp() override {
         static int cnt = 0;
@@ -100,29 +119,17 @@ protected:
         return b;
     }
 
-    records::Ref grade_of(const std::string& specialty, uint8_t level) {
-        const Block spec = add(worker_, records::Specialty{specialty});
-        records::Grade g{};
-        g.specialty = ref_to(worker_, spec);
-        g.level     = level;
-        return ref_to(worker_, add(worker_, g));
-    }
-
-    struct Line { uint8_t axis; double units; };
-
-    // Одна сделка. Разбивка `lines` и есть цена труда, если `labour` не задан
-    // (тогда она с ценой не сходится). `carried` — материалы сверху; `settle`
-    // = false оставляет приёмку неоплаченной.
-    void deal(const records::Ref& grade, const UserId& payer, double hours,
-              const std::vector<Line>& lines, double carried = 0.0,
-              bool settle = true, double labour = -1.0) {
+    // Одна сделка работника `worker_`: разбивка `lines` и есть цена труда.
+    // Возвращает ссылку на приёмку — её можно назвать образцом в следующей.
+    records::Ref deal(const UserId& payer, double hours, const std::vector<Line>& lines,
+                      const Opt& o = {}) {
         double named = 0.0;
         for (const auto& l : lines) named += l.units;
-        const double lab = labour < 0.0 ? named : labour;
+        const double lab = o.labour < 0.0 ? named : o.labour;
 
         records::WorkRecord wr{};
-        wr.agent = grade;
         wr.hours = hours;
+        wr.title = o.title;
         const Block work = add(worker_, wr);
 
         records::Acceptance a{};
@@ -131,61 +138,107 @@ protected:
         a.hours_raw   = hours;
         a.labor_units = lab;
         for (const auto& l : lines) a.axes.push_back({axis(l.axis), l.units});
-        if (carried > 0.0) a.carried_units = carried;
+        if (o.carried > 0.0) a.carried_units = o.carried;
+        a.like        = o.like;
         a.timestamp   = 86'400LL * 100;
         const Block acc = add(payer, a);
-        if (!settle) return;
 
-        records::Transfer t{};
-        t.from    = payer.bytes;
-        t.to      = worker_.bytes;
-        t.origins = { {payer.bytes, lab + carried} };
-        t.reason  = ref_to(payer, acc);
-        add(payer, t);
+        if (o.settle) {
+            records::Transfer t{};
+            t.from    = payer.bytes;
+            t.to      = worker_.bytes;
+            t.origins = { {payer.bytes, lab + o.carried} };
+            t.reason  = ref_to(payer, acc);
+            add(payer, t);
+        }
+        return ref_to(payer, acc);
     }
 };
 
-// Доли — суммы по сделкам, делённые на всё уплаченное, а не среднее долей
-// сделок: короткая работа и долгая не получают равного голоса в том, за что
-// платят специальности. Так же, как средний трудочас — Σ стч / Σ часов.
-TEST_F(CompositionTest, SharesAreWhatWasPaidNotAMeanOfDeals) {
-    const auto welder = grade_of("сварщик", 4);
-    deal(welder, payer_, 4.0, {{kDanger, 3.0}, {kPhysical, 5.0}});        // 8 стч
-    deal(welder, payer_, 1.0, {{kDanger, 0.5}, {kPhysical, 0.5}}, 1.0);   // 1 стч + 1 материалы
+// Образец, который никто не повторил, — просто сделка, а не точка облака.
+TEST_F(CompositionTest, ASampleNobodyRepeatedIsNotAPoint) {
+    deal(chain_of(0xB2), 4.0, {{kDanger, 8.0}}, {std::nullopt, "сварщик"});
+    EXPECT_TRUE(build_work_compositions(*storage_).empty());
+}
 
-    const auto comps = build_specialty_compositions(*storage_);
-    ASSERT_EQ(comps.count("сварщик"), 1u);
-    const auto& c = comps.at("сварщик");
-    EXPECT_EQ(c.deals, 2u);
+// Семья — образец и все, кто на него сослался, напрямую или через того, кто
+// сослался. Название — у образца, а не у последователя: вольный текст, по
+// которому ничего не считается.
+TEST_F(CompositionTest, TheFamilyIsTheSampleAndEveryoneWhoNamedIt) {
+    const auto s = deal(chain_of(0xB2), 4.0, {{kDanger, 3.0}, {kPhysical, 5.0}},
+                        {std::nullopt, "сварщик"});
+    const auto a = deal(chain_of(0xB3), 2.0, {{kDanger, 1.0}, {kPhysical, 3.0}},
+                        {s, "сварка труб"});
+    deal(chain_of(0xB4), 1.0, {{kDanger, 0.5}, {kPhysical, 0.5}}, {a});   // через a — к s
+
+    const auto comps = build_work_compositions(*storage_);
+    ASSERT_EQ(comps.size(), 1u);
+    const auto& c = comps.begin()->second;
+    EXPECT_EQ(comps.begin()->first, s.hash);
+    EXPECT_EQ(c.sample, s);
+    EXPECT_EQ(c.title, "сварщик");
+    EXPECT_EQ(c.deals, 3u);
+    EXPECT_DOUBLE_EQ(c.axes.at(id(kDanger)),   4.5 / 13.0);
+    EXPECT_DOUBLE_EQ(c.axes.at(id(kPhysical)), 8.5 / 13.0);
+}
+
+// Доли — суммы по семье, делённые на всё уплаченное, а не среднее долей сделок:
+// короткая работа и долгая не получают равного голоса. Как средний трудочас.
+TEST_F(CompositionTest, SharesAreWhatWasPaidNotAMeanOfDeals) {
+    const auto s = deal(chain_of(0xB2), 4.0, {{kDanger, 3.0}, {kPhysical, 5.0}});
+    Opt o;
+    o.like    = s;
+    o.carried = 1.0;
+    deal(chain_of(0xB3), 1.0, {{kDanger, 0.5}, {kPhysical, 0.5}}, o);   // 1 стч + 1 материалы
+
+    const auto comps = build_work_compositions(*storage_);
+    ASSERT_EQ(comps.size(), 1u);
+    const auto& c = comps.begin()->second;
     EXPECT_DOUBLE_EQ(c.payable, 10.0);
     EXPECT_DOUBLE_EQ(c.axes.at(id(kDanger)),   3.5 / 10.0);   // среднее долей было бы 0.3125
     EXPECT_DOUBLE_EQ(c.axes.at(id(kPhysical)), 5.5 / 10.0);   // …и 0.4375
     EXPECT_DOUBLE_EQ(c.carried,                1.0 / 10.0);   // …и 0.25
 }
 
-// Не входит то же, что не входит в книгу осей: неоплаченная приёмка,
-// самосделка, разбивка, не сходящаяся с ценой.
+// Не входит то же, что не входит в книгу осей: неоплаченная приёмка, самосделка,
+// разбивка, не сходящаяся с ценой. Такой «последователь» семью не образует.
 TEST_F(CompositionTest, DealsThatDoNotCountAreLeftOut) {
-    const auto welder = grade_of("сварщик", 4);
-    deal(welder, payer_,  4.0, {{kDanger, 8.0}}, 0.0, /*settle=*/false);    // не оплачена
-    deal(welder, worker_, 4.0, {{kDanger, 8.0}});                           // самосделка
-    deal(welder, payer_,  4.0, {{kDanger, 5.0}}, 0.0, true, /*labour=*/8.0); // названо 5 из 8
-    EXPECT_TRUE(build_specialty_compositions(*storage_).empty());
+    const auto s = deal(chain_of(0xB2), 4.0, {{kDanger, 8.0}});
+    Opt unpaid;  unpaid.like = s;  unpaid.settle = false;
+    Opt skewed;  skewed.like = s;  skewed.labour = 8.0;
+    deal(chain_of(0xB3), 4.0, {{kDanger, 8.0}}, unpaid);
+    deal(worker_,        4.0, {{kDanger, 8.0}}, {s});          // самосделка
+    deal(chain_of(0xB4), 4.0, {{kDanger, 5.0}}, skewed);       // названо 5 из 8
+    EXPECT_TRUE(build_work_compositions(*storage_).empty());
 }
 
-// Ставка — высота над картой, а не её координата (specialty-axes.md §7).
-// Кровельщику и жестянщику платят за одно и то же, одному втрое дороже — это одна
-// точка. Иначе «угадай ставку по соседям» стало бы «угадай по тем, у кого похожая
-// ставка».
+// Ставка — высота над картой, а не её координата (specialty-axes.md §7). Двум
+// образцам платят за одно и то же, одному втрое дороже — это одна точка.
 TEST_F(CompositionTest, RateIsAHeightNotACoordinate) {
-    const auto roofer   = grade_of("кровельщик", 4);
-    const auto tinsmith = grade_of("жестянщик", 4);
-    deal(roofer,   payer_, 10.0, {{kDanger,  4.0}, {kPhysical,  6.0}});   // 1.0 за час
-    deal(tinsmith, payer_, 10.0, {{kDanger, 12.0}, {kPhysical, 18.0}});   // 3.0 за час
+    const auto roof = deal(chain_of(0xB2), 10.0, {{kDanger, 4.0}, {kPhysical, 6.0}});
+    deal(chain_of(0xB3), 10.0, {{kDanger, 4.0}, {kPhysical, 6.0}}, {roof});
+    const auto tin = deal(chain_of(0xB4), 10.0, {{kDanger, 12.0}, {kPhysical, 18.0}});
+    deal(chain_of(0xB5), 10.0, {{kDanger, 12.0}, {kPhysical, 18.0}}, {tin});
 
-    const auto comps = build_specialty_compositions(*storage_);
-    EXPECT_NEAR(composition_affinity(comps.at("кровельщик"), comps.at("жестянщик")),
-                1.0, 1e-12);
+    const auto comps = build_work_compositions(*storage_);
+    ASSERT_EQ(comps.size(), 2u);
+    EXPECT_NEAR(composition_affinity(comps.at(roof.hash), comps.at(tin.hash)), 1.0, 1e-12);
+}
+
+// Образца может и не быть в хранилище — семья вокруг него собирается всё равно:
+// точка — это то, на что ссылаются, а не то, что агрегатор успел увидеть.
+TEST_F(CompositionTest, AnUnseenSampleStillGathersItsFamily) {
+    records::Ref far{};
+    far.chain.fill(0xCC);
+    far.hash.fill(0xCD);
+    deal(chain_of(0xB2), 2.0, {{kPhysical, 2.0}}, {far, "повар"});
+    deal(chain_of(0xB3), 3.0, {{kPhysical, 3.0}}, {far, "повар"});
+
+    const auto comps = build_work_compositions(*storage_);
+    ASSERT_EQ(comps.size(), 1u);
+    EXPECT_EQ(comps.begin()->second.sample, far);
+    EXPECT_EQ(comps.begin()->second.deals, 2u);
+    EXPECT_EQ(comps.begin()->second.title, "повар");
 }
 
 // ── Соседство ──────────────────────────────────────────────────────────────────
@@ -194,24 +247,26 @@ TEST_F(CompositionTest, RateIsAHeightNotACoordinate) {
 // и точность), дальше — к сварщику (общая только опасность). С учителем у него нет
 // ничего общего — и учитель ему не «далёкий сосед», а не сосед вовсе.
 TEST(CloudView, NeighboursArePaidForTheSameThings) {
-    const std::map<std::string, SpecialtyComposition> comps = {
-        {"электрик", comp({{kDanger, 0.4}, {kPrecision, 0.6}})},
-        {"монтёр",   comp({{kDanger, 0.5}, {kPrecision, 0.5}})},
-        {"сварщик",  comp({{kDanger, 0.5}, {kPhysical,  0.5}})},
-        {"учитель",  comp({{kPeople, 0.7}, {kKnowledge, 0.3}})},
+    const std::map<SampleKey, WorkComposition> comps = {
+        family(0x10, {{kDanger, 0.4}, {kPrecision, 0.6}}, 0.0, "электрик"),
+        family(0x11, {{kDanger, 0.5}, {kPrecision, 0.5}}, 0.0, "монтёр"),
+        family(0x12, {{kDanger, 0.5}, {kPhysical,  0.5}}, 0.0, "сварщик"),
+        family(0x13, {{kPeople, 0.7}, {kKnowledge, 0.3}}, 0.0, "учитель"),
     };
-    const auto cloud = build_specialty_cloud(comps, 0, 0, {});
+    const auto cloud = build_work_cloud(comps, 0, 0, {});
     EXPECT_EQ(cloud.points.size(), 4u);
 
-    const auto* el = point(cloud, "электрик");
+    const auto* el = point(cloud, 0x10);
     ASSERT_NE(el, nullptr);
+    EXPECT_EQ(el->title, "электрик");
+    EXPECT_EQ(el->deals, 2u);
     ASSERT_EQ(el->neighbors.size(), 2u);
-    EXPECT_EQ(el->neighbors[0].slug, "монтёр");
+    EXPECT_EQ(el->neighbors[0].sample.hash, key(0x11));
     EXPECT_NEAR(el->neighbors[0].weight, std::sqrt(0.2) + std::sqrt(0.3), 1e-12);
-    EXPECT_EQ(el->neighbors[1].slug, "сварщик");
+    EXPECT_EQ(el->neighbors[1].sample.hash, key(0x12));
     EXPECT_NEAR(el->neighbors[1].weight, std::sqrt(0.2), 1e-12);
 
-    const auto* t = point(cloud, "учитель");
+    const auto* t = point(cloud, 0x13);
     ASSERT_NE(t, nullptr);
     EXPECT_TRUE(t->neighbors.empty());
 }
@@ -222,103 +277,78 @@ TEST(CloudView, NeighboursArePaidForTheSameThings) {
 TEST(CloudView, SameNameFromAnotherDefinitionIsAnotherAxis) {
     auto danger_elsewhere = axis(kDanger);
     danger_elsewhere.hash.fill(0xD0);
-    SpecialtyComposition a{}, b{};
-    a.axes[axis(kDanger).hash]     = 1.0;
-    b.axes[danger_elsewhere.hash]  = 1.0;
+    WorkComposition a{}, b{};
+    a.axes[axis(kDanger).hash]    = 1.0;
+    b.axes[danger_elsewhere.hash] = 1.0;
     EXPECT_DOUBLE_EQ(composition_affinity(a, b), 0.0);
 }
 
 // Материалы — тоже то, из чего сложилась цена. Повару и пекарю платят за одно и
 // то же в труде, но половина цены пекаря — мука и печь: сходство √0.5, а не 1.
-// Так капиталоёмкость живёт дальше, без веса, который пришлось бы назначить.
 TEST(CloudView, CarriedMeansAreOneMoreThingThePriceWasMadeOf) {
-    const auto cook  = comp({{kPhysical, 0.6}, {kPrecision, 0.4}});
-    const auto baker = comp({{kPhysical, 0.3}, {kPrecision, 0.2}}, 0.5);
+    const auto cook  = family(0x20, {{kPhysical, 0.6}, {kPrecision, 0.4}}).second;
+    const auto baker = family(0x21, {{kPhysical, 0.3}, {kPrecision, 0.2}}, 0.5).second;
     EXPECT_NEAR(composition_affinity(cook, baker), std::sqrt(0.5), 1e-12);
     EXPECT_DOUBLE_EQ(composition_affinity(cook, baker), composition_affinity(baker, cook));
     EXPECT_NEAR(composition_affinity(baker, baker), 1.0, 1e-12);
 }
 
-// Родитель берётся из каталога и только как запасной ход приора; соседство им не
-// задаётся. Без каталога облако строится всё равно.
-TEST(CloudView, ParentComesFromTheCatalogIfOneIsServed) {
-    const std::map<std::string, SpecialtyComposition> comps = {
-        {"prof.welder", comp({{kDanger,   1.0}})},
-        {"prof.cook",   comp({{kPhysical, 1.0}})},
-    };
-    records::CatalogEntry e;
-    e.slug   = "prof.welder";
-    e.parent = "prof.build";
-    records::Catalog c;
-    c.name    = "professions";
-    c.entries = {e};
-    const std::vector<records::Catalog> cats{c};
-
-    const auto with = build_specialty_cloud(comps, 0, 0, {}, {}, 5, &cats);
-    EXPECT_EQ(point(with, "prof.welder")->parent, "prof.build");
-    EXPECT_EQ(point(with, "prof.cook")->parent, "");
-
-    const auto without = build_specialty_cloud(comps, 0, 0, {});
-    EXPECT_EQ(without.points.size(), 2u);
-    EXPECT_EQ(point(without, "prof.welder")->parent, "");
-}
-
-// k ограничивает соседей; равные веса развязываются слагом, и k записан в params,
-// чтобы свидетель пересчитал той же методикой.
+// k ограничивает соседей; равные веса развязываются хешем образца, и методика
+// записана в params, чтобы свидетель пересчитал так же.
 TEST(CloudView, KBoundsTheNeighboursAndIsCommitted) {
-    std::map<std::string, SpecialtyComposition> comps;
-    for (int i = 0; i < 8; ++i)
-        comps["s" + std::to_string(i)] =
-            comp({{kDanger, 0.5}, {static_cast<uint8_t>(0x10 + i), 0.5}});
-    const auto cloud = build_specialty_cloud(comps, 0, 0, {}, {}, 3);
+    std::map<SampleKey, WorkComposition> comps;
+    for (uint8_t i = 0; i < 8; ++i)
+        comps.insert(family(static_cast<uint8_t>(0x30 + i),
+                            {{kDanger, 0.5}, {static_cast<uint8_t>(0x40 + i), 0.5}}));
+    const auto cloud = build_work_cloud(comps, 0, 0, {}, {}, 3);
     for (const auto& p : cloud.points) EXPECT_EQ(p.neighbors.size(), 3u);
-    EXPECT_EQ(point(cloud, "s0")->neighbors[0].slug, "s1");   // все по 0.5 — по слагу
-    EXPECT_NE(cloud.params.find("basis=deals"), std::string::npos);
+    EXPECT_EQ(point(cloud, 0x30)->neighbors[0].sample.hash, key(0x31));
+    EXPECT_NE(cloud.params.find("basis=samples"), std::string::npos);
     EXPECT_NE(cloud.params.find("k=3"), std::string::npos);
 }
 
 TEST(CloudView, Deterministic) {
-    const std::map<std::string, SpecialtyComposition> comps = {
-        {"a", comp({{kDanger, 0.3}, {kPhysical, 0.7}})},
-        {"b", comp({{kDanger, 0.6}, {kPrecision, 0.4}})},
-        {"c", comp({{kPhysical, 0.2}, {kPrecision, 0.8}}, 0.1)},
+    const std::map<SampleKey, WorkComposition> comps = {
+        family(0x50, {{kDanger, 0.3}, {kPhysical, 0.7}}),
+        family(0x51, {{kDanger, 0.6}, {kPrecision, 0.4}}),
+        family(0x52, {{kPhysical, 0.2}, {kPrecision, 0.8}}, 0.1),
     };
     std::array<uint8_t, 32> snap{};
     snap.fill(0x09);
-    const auto x = build_specialty_cloud(comps, 86'400, 5, snap);
-    const auto y = build_specialty_cloud(comps, 86'400, 5, snap);
+    const auto x = build_work_cloud(comps, 86'400, 5, snap);
+    const auto y = build_work_cloud(comps, 86'400, 5, snap);
     ASSERT_EQ(x.points.size(), y.points.size());
     for (std::size_t i = 0; i < x.points.size(); ++i) {
-        EXPECT_EQ(x.points[i].slug, y.points[i].slug);
+        EXPECT_EQ(x.points[i].sample, y.points[i].sample);
         ASSERT_EQ(x.points[i].neighbors.size(), y.points[i].neighbors.size());
         for (std::size_t j = 0; j < x.points[i].neighbors.size(); ++j)
             EXPECT_EQ(x.points[i].neighbors[j], y.points[i].neighbors[j]);
     }
 }
 
-// Спектральные координаты (ИР-018 фаза 3): детерминированы, и тем, кому платят за
-// похожее, ближе друг к другу, чем к тем, кому платят за другое.
+// Спектральные координаты: детерминированы, и тем, кому платят за похожее, ближе
+// друг к другу, чем к тем, кому платят за другое.
 TEST(CloudView, SpectralCoordsClusterAndDeterministic) {
-    const std::map<std::string, SpecialtyComposition> comps = {
-        {"программист", comp({{kKnowledge, 0.8}, {kPrecision, 0.2}})},
-        {"бухгалтер",   comp({{kKnowledge, 0.7}, {kPrecision, 0.3}})},
-        {"учитель",     comp({{kPeople,    0.7}, {kKnowledge, 0.3}})},
-        {"сварщик",     comp({{kDanger,    0.5}, {kPhysical,  0.5}})},
-        {"монтёр",      comp({{kDanger, 0.4}, {kPhysical, 0.4}, {kPrecision, 0.2}})},
+    const std::map<SampleKey, WorkComposition> comps = {
+        family(0x60, {{kKnowledge, 0.8}, {kPrecision, 0.2}}),   // программист
+        family(0x61, {{kKnowledge, 0.7}, {kPrecision, 0.3}}),   // бухгалтер
+        family(0x62, {{kPeople,    0.7}, {kKnowledge, 0.3}}),   // учитель
+        family(0x63, {{kDanger,    0.5}, {kPhysical,  0.5}}),   // сварщик
+        family(0x64, {{kDanger, 0.4}, {kPhysical, 0.4}, {kPrecision, 0.2}}),   // монтёр
     };
     const auto a = compute_spectral_coords(comps);
     const auto b = compute_spectral_coords(comps);
     ASSERT_EQ(a.size(), 5u);
-    for (const auto& [slug, c] : a) {
-        ASSERT_TRUE(b.count(slug));
-        EXPECT_DOUBLE_EQ(c[0], b.at(slug)[0]);
-        EXPECT_DOUBLE_EQ(c[1], b.at(slug)[1]);
+    for (const auto& [k, c] : a) {
+        ASSERT_TRUE(b.count(k));
+        EXPECT_DOUBLE_EQ(c[0], b.at(k)[0]);
+        EXPECT_DOUBLE_EQ(c[1], b.at(k)[1]);
     }
-    auto dist = [&](const std::string& x, const std::string& y) {
-        const double dx = a.at(x)[0] - a.at(y)[0];
-        const double dy = a.at(x)[1] - a.at(y)[1];
+    auto dist = [&](uint8_t x, uint8_t y) {
+        const double dx = a.at(key(x))[0] - a.at(key(y))[0];
+        const double dy = a.at(key(x))[1] - a.at(key(y))[1];
         return std::sqrt(dx * dx + dy * dy);
     };
-    EXPECT_LT(dist("программист", "бухгалтер"), dist("программист", "сварщик"));
-    EXPECT_LT(dist("сварщик", "монтёр"),        dist("сварщик", "бухгалтер"));
+    EXPECT_LT(dist(0x60, 0x61), dist(0x60, 0x63));
+    EXPECT_LT(dist(0x63, 0x64), dist(0x63, 0x61));
 }

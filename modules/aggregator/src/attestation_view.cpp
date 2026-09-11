@@ -1,9 +1,9 @@
 #include "aggregator/attestation_view.h"
 
 #include <records/codec.h>
-#include <records/types.h>
 
-#include <array>
+#include <algorithm>
+#include <cmath>
 #include <set>
 
 namespace aggregator {
@@ -12,17 +12,9 @@ namespace {
 
 using RefHash = std::array<uint8_t, 32>;
 
-struct GradeInfo {
-    UserId  owner{};
-    uint8_t level = 0;
-    RefHash specialty{};
-    RefHash spec_chain{};   // Ref.chain of the specialty — must be the worker
-};
-
-struct WorkInfo {
-    UserId  owner{};
-    RefHash agent{};        // Grade block hash
-    RefHash agent_chain{};  // Ref.chain of the agent — must be the worker
+struct Accept {
+    UserId              acceptor{};
+    records::Acceptance acc;
 };
 
 } // namespace
@@ -30,11 +22,8 @@ struct WorkInfo {
 AttestationView AttestationView::build(const AggregatorStorage& storage) {
     AttestationView view;
 
-    std::map<RefHash, std::pair<UserId, std::string>> specialties; // hash → (owner, slug)
-    std::map<RefHash, GradeInfo>                      grades;
-    std::map<RefHash, WorkInfo>                       works;
-    struct Accept { UserId acceptor{}; RefHash work{}; double hours_raw = 0; };
-    std::vector<Accept>                               accepts;
+    std::map<RefHash, UserId> works;     // WorkRecord hash → the chain that signed it
+    std::vector<Accept>       accepts;
 
     for (const Hash& bh : storage.all_block_hashes()) {
         const auto block = storage.get_block_by_hash(bh);
@@ -49,63 +38,66 @@ AttestationView AttestationView::build(const AggregatorStorage& storage) {
             continue;
         }
 
-        if (const auto* s = std::get_if<records::Specialty>(&rec)) {
-            specialties[bh.bytes] = {owner, s->name};   // name = catalog slug (records.md §9.1)
-        } else if (const auto* g = std::get_if<records::Grade>(&rec)) {
-            grades[bh.bytes] =
-                GradeInfo{owner, g->level, g->specialty.hash, g->specialty.chain};
-        } else if (const auto* w = std::get_if<records::WorkRecord>(&rec)) {
-            works[bh.bytes] = WorkInfo{owner, w->agent.hash, w->agent.chain};
+        if (std::holds_alternative<records::WorkRecord>(rec)) {
+            works[bh.bytes] = owner;
         } else if (const auto* a = std::get_if<records::Acceptance>(&rec)) {
             if (a->receiver != owner.bytes) continue;   // spoofed receiver
-            accepts.push_back(Accept{owner, a->work.hash, a->hours_raw});
+            accepts.push_back(Accept{owner, *a});
         }
     }
 
-    // Join every acceptance down to (worker, slug, level); refuse any hop
-    // that leaves the worker's own chain — you attest labour, not paperwork.
-    std::map<std::tuple<UserId, std::string, uint8_t>, std::set<UserId>> witnesses;
-    for (const auto& acc : accepts) {
-        const auto work = works.find(acc.work);
+    std::map<std::pair<UserId, RefHash>, std::set<UserId>> witnesses;
+    std::map<UserId, std::set<UserId>>                     all_witnesses;
+    for (const auto& [acceptor, a] : accepts) {
+        const auto work = works.find(a.work.hash);
         if (work == works.end()) continue;
-        const UserId& worker = work->second.owner;
-        if (acc.acceptor == worker) continue;           // the free self-vouch
+        const UserId& worker = work->second;
+        if (a.work.chain != worker.bytes) continue;     // the Ref lies about the chain
+        if (acceptor == worker) continue;               // the free self-vouch
 
-        if (work->second.agent_chain != worker.bytes) continue;
-        const auto grade = grades.find(work->second.agent);
-        if (grade == grades.end() || !(grade->second.owner == worker)) continue;
+        double named = 0.0;
+        for (const auto& x : a.axes) named += x.units;
+        if (std::abs(named - a.labor_units) > 1e-6) continue;   // another deal
 
-        if (grade->second.spec_chain != worker.bytes) continue;
-        const auto spec = specialties.find(grade->second.specialty);
-        if (spec == specialties.end() || !(spec->second.first == worker)) continue;
-
-        const auto key = std::make_tuple(worker, spec->second.second,
-                                         grade->second.level);
-        auto& att = view.att_[key];
-        att.level  = grade->second.level;
-        att.hours += acc.hours_raw;
-        witnesses[key].insert(acc.acceptor);
+        std::set<RefHash> seen;
+        for (const auto& x : a.axes) {
+            if (!seen.insert(x.axis.hash).second) continue;
+            const auto [it, fresh] = view.axes_.try_emplace({worker, x.axis.hash});
+            if (fresh) it->second.axis = x.axis;
+            it->second.hours += a.hours_raw;
+            witnesses[{worker, x.axis.hash}].insert(acceptor);
+        }
+        view.totals_[worker].hours += a.hours_raw;
+        all_witnesses[worker].insert(acceptor);
     }
-    for (const auto& [key, who] : witnesses)
-        view.att_[key].chains = who.size();
+    for (const auto& [key, who] : witnesses) view.axes_[key].chains = who.size();
+    for (const auto& [w, who] : all_witnesses) view.totals_[w].chains = who.size();
 
     return view;
 }
 
-std::optional<GradeAttestation> AttestationView::at_level(
-        const UserId& worker, const std::string& slug, uint8_t level) const {
-    const auto it = att_.find(std::make_tuple(worker, slug, level));
-    if (it == att_.end()) return std::nullopt;
+std::vector<AttestedAxis> AttestationView::of(const UserId& worker) const {
+    std::vector<AttestedAxis> out;
+    for (auto it = axes_.lower_bound({worker, RefHash{}});
+         it != axes_.end() && it->first.first == worker; ++it)
+        out.push_back(it->second);
+    std::sort(out.begin(), out.end(), [](const AttestedAxis& a, const AttestedAxis& b) {
+        if (a.hours != b.hours) return a.hours > b.hours;
+        return a.axis.hash < b.axis.hash;
+    });
+    return out;
+}
+
+std::optional<AttestedAxis> AttestationView::at(
+        const UserId& worker, const std::array<uint8_t, 32>& axis_hash) const {
+    const auto it = axes_.find({worker, axis_hash});
+    if (it == axes_.end()) return std::nullopt;
     return it->second;
 }
 
-std::optional<GradeAttestation> AttestationView::best(
-        const UserId& worker, const std::string& slug) const {
-    std::optional<GradeAttestation> out;
-    for (const auto& [key, att] : att_)
-        if (std::get<0>(key) == worker && std::get<1>(key) == slug)
-            if (!out || att.level > out->level) out = att;
-    return out;
+AttestedTotal AttestationView::total(const UserId& worker) const {
+    const auto it = totals_.find(worker);
+    return it == totals_.end() ? AttestedTotal{} : it->second;
 }
 
 } // namespace aggregator

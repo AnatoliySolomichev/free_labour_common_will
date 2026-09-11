@@ -9,13 +9,13 @@
 
 namespace aggregator {
 
-std::map<std::string, SpecialtyComposition> build_specialty_compositions(
+std::map<SampleKey, WorkComposition> build_work_compositions(
     const AggregatorStorage& storage) {
     using RefHash = std::array<uint8_t, 32>;
-    std::map<RefHash, records::Record> by_hash;
     struct Deal { records::Acceptance acc; UserId payer; };
-    std::map<RefHash, Deal>   deals;
-    std::map<RefHash, double> paid;
+    std::map<RefHash, Deal>                deals;
+    std::map<RefHash, double>              paid;
+    std::map<RefHash, records::WorkRecord> works;
 
     for (const Hash& bh : storage.all_block_hashes()) {
         const auto block = storage.get_block_by_hash(bh);
@@ -28,17 +28,38 @@ std::map<std::string, SpecialtyComposition> build_specialty_compositions(
         } else if (const auto* t = std::get_if<records::Transfer>(&rec)) {
             if (t->from == block->address.user_id.bytes && t->reason)
                 for (const auto& o : t->origins) paid[t->reason->hash] += o.units;
+        } else if (const auto* w = std::get_if<records::WorkRecord>(&rec)) {
+            works[bh.bytes] = *w;
         }
-        by_hash[bh.bytes] = std::move(rec);
     }
 
-    // Sums first, shares at the very end.
-    struct Sum {
-        std::map<RefHash, double> axes;
-        double   carried = 0.0, payable = 0.0;
-        uint64_t deals   = 0;
+    // The sample of a deal: follow `like` while it leads to a known acceptance.
+    // `like` names an EARLIER block by its hash, so a cycle would need a hash
+    // collision; the depth bound is only a guard.
+    const auto sample_of = [&](const RefHash& h, const UserId& author) {
+        records::Ref cur{};
+        cur.chain = author.bytes;
+        cur.hash  = h;
+        for (int depth = 0; depth < 64; ++depth) {
+            const auto it = deals.find(cur.hash);
+            if (it == deals.end() || !it->second.acc.like) break;
+            cur = *it->second.acc.like;
+        }
+        return cur;
     };
-    std::map<std::string, Sum> per_spec;
+    const auto title_of = [&](const records::Acceptance& a) -> std::string {
+        const auto it = works.find(a.work.hash);
+        return it == works.end() ? std::string{} : it->second.title;
+    };
+
+    struct Sum {
+        records::Ref              sample;
+        std::map<RefHash, double> axes;
+        double                    carried = 0.0, payable = 0.0;
+        uint64_t                  deals   = 0;
+        std::string               first_title;   // of the family, in block-hash order
+    };
+    std::map<RefHash, Sum> fam;
     for (const auto& [acc_hash, deal] : deals) {
         const auto& a = deal.acc;
         if (a.axes.empty() || a.hours_raw <= 0.0) continue;
@@ -48,46 +69,41 @@ std::map<std::string, SpecialtyComposition> build_specialty_compositions(
         const auto pit = paid.find(acc_hash);
         if (pit == paid.end() || std::abs(pit->second - payable) > 1e-6) continue;
         if (a.work.chain == deal.payer.bytes) continue;                  // self-deal
-
-        // Разбивка ЕСТЬ цена: не сходящаяся описывает какую-то другую сделку.
         double named = 0.0;
         for (const auto& x : a.axes) named += x.units;
-        if (std::abs(named - a.labor_units) > 1e-6) continue;
+        if (std::abs(named - a.labor_units) > 1e-6) continue;           // another deal
+        if (!works.count(a.work.hash)) continue;       // the work is not on the table
 
-        const auto wit = by_hash.find(a.work.hash);
-        if (wit == by_hash.end()) continue;
-        const auto* wr = std::get_if<records::WorkRecord>(&wit->second);
-        if (!wr) continue;
-        const auto git = by_hash.find(wr->agent.hash);
-        if (git == by_hash.end()) continue;
-        const auto* grade = std::get_if<records::Grade>(&git->second);
-        if (!grade) continue;
-        const auto sit = by_hash.find(grade->specialty.hash);
-        if (sit == by_hash.end()) continue;
-        const auto* spec = std::get_if<records::Specialty>(&sit->second);
-        if (!spec) continue;
-
-        auto& s = per_spec[spec->name];
+        const records::Ref sample = sample_of(acc_hash, deal.payer);
+        auto& s = fam[sample.hash];
+        s.sample = sample;
         for (const auto& x : a.axes) s.axes[x.axis.hash] += x.units;
         s.carried += carried;
         s.payable += payable;
         s.deals   += 1;
+        if (s.first_title.empty()) s.first_title = title_of(a);
     }
 
-    std::map<std::string, SpecialtyComposition> out;
-    for (const auto& [name, s] : per_spec) {
-        SpecialtyComposition c{};
+    std::map<SampleKey, WorkComposition> out;
+    for (const auto& [key, s] : fam) {
+        if (s.deals < kMinFamily) continue;
+        WorkComposition c{};
+        c.sample = s.sample;
+        // The sample's own title when the sample is known, else the family's.
+        if (const auto it = deals.find(key); it != deals.end())
+            c.title = title_of(it->second.acc);
+        if (c.title.empty()) c.title = s.first_title;
         for (const auto& [axis, units] : s.axes) c.axes[axis] = units / s.payable;
         c.carried = s.carried / s.payable;
         c.payable = s.payable;
         c.deals   = s.deals;
-        out.emplace(name, std::move(c));
+        out.emplace(key, std::move(c));
     }
     return out;
 }
 
-double composition_affinity(const SpecialtyComposition& a,
-                            const SpecialtyComposition& b) noexcept {
+double composition_affinity(const WorkComposition& a,
+                            const WorkComposition& b) noexcept {
     // Only what BOTH were paid for counts. The intersection is walked in key order
     // whichever map is the smaller, so (a, b) and (b, a) sum identically.
     const auto& small = a.axes.size() <= b.axes.size() ? a.axes : b.axes;
@@ -106,7 +122,7 @@ namespace {
 
 // Jacobi eigenvalue algorithm for a real symmetric matrix (deterministic — no
 // randomness, converges by zeroing off-diagonals). Fills `val` (eigenvalues) and
-// `vec` (vec[i] = i-th eigenvector). Small n (specialties), O(n³·sweeps) is ample.
+// `vec` (vec[i] = i-th eigenvector). Small n (samples), O(n³·sweeps) is ample.
 void jacobi_eigen(std::vector<std::vector<double>> a,
                   std::vector<double>& val,
                   std::vector<std::vector<double>>& vec) {
@@ -150,58 +166,59 @@ void jacobi_eigen(std::vector<std::vector<double>> a,
 
 }  // namespace
 
-records::SpecialtyCloud build_specialty_cloud(
-    const std::map<std::string, SpecialtyComposition>& comps,
-    int64_t                                            date,
-    int64_t                                            timestamp,
-    const std::array<uint8_t, 32>&                     snapshot,
-    const std::vector<std::array<uint8_t, 32>>&        sources,
-    unsigned                                           k,
-    const std::vector<records::Catalog>*               catalogs) {
-    records::SpecialtyCloud cloud{};
+records::WorkCloud build_work_cloud(
+    const std::map<SampleKey, WorkComposition>&  comps,
+    int64_t                                      date,
+    int64_t                                      timestamp,
+    const std::array<uint8_t, 32>&               snapshot,
+    const std::vector<std::array<uint8_t, 32>>&  sources,
+    unsigned                                     k) {
+    records::WorkCloud cloud{};
     cloud.date      = date;
     cloud.timestamp = timestamp;
     cloud.snapshot  = snapshot;
     cloud.sources   = sources;
-    // v3: read off the deals (ИР-022). v1/v2 placed the catalog's declared axes,
-    // with a danger weight and a capital weight nobody could derive from anything.
-    cloud.params    = "v3;basis=deals;affinity=bhattacharyya;k=" + std::to_string(k);
+    // v4: points are samples of work, read off their families (ИР-022 шаг 11).
+    // v3 placed specialties; v1/v2 the catalogue's declared axes.
+    cloud.params    = "v4;basis=samples;affinity=bhattacharyya;k=" + std::to_string(k)
+                    + ";min_family=" + std::to_string(kMinFamily);
 
-    for (const auto& [slug, comp] : comps) {          // map order = slug order
+    for (const auto& [key, comp] : comps) {           // map order = sample-hash order
         records::CloudPoint p{};
-        p.slug = slug;
-        if (catalogs)
-            for (const auto& cat : *catalogs)
-                if (const auto* e = cat.find(slug)) { p.parent = e->parent; break; }
+        p.sample = comp.sample;
+        p.title  = comp.title;
+        p.deals  = comp.deals;
 
-        std::vector<records::CloudNeighbor> cand;
+        std::vector<std::pair<SampleKey, records::CloudNeighbor>> cand;
         for (const auto& [other, oc] : comps) {
-            if (other == slug) continue;
+            if (other == key) continue;
             const double w = composition_affinity(comp, oc);
-            if (w > 0.0) cand.push_back({other, w});   // nothing in common — no neighbour
+            if (w > 0.0) cand.push_back({other, records::CloudNeighbor{oc.sample, w}});
         }
-        std::sort(cand.begin(), cand.end(),
-                  [](const records::CloudNeighbor& x, const records::CloudNeighbor& y) {
-                      if (x.weight != y.weight) return x.weight > y.weight;
-                      return x.slug < y.slug;
-                  });
+        std::sort(cand.begin(), cand.end(), [](const auto& x, const auto& y) {
+            if (x.second.weight != y.second.weight) return x.second.weight > y.second.weight;
+            return x.first < y.first;
+        });
         if (cand.size() > k) cand.resize(k);
-        p.neighbors = std::move(cand);
+        for (auto& [other, n] : cand) {
+            (void)other;
+            p.neighbors.push_back(std::move(n));
+        }
         cloud.points.push_back(std::move(p));
     }
     return cloud;
 }
 
-std::map<std::string, std::array<double, 2>> compute_spectral_coords(
-    const std::map<std::string, SpecialtyComposition>& comps) {
-    std::vector<const std::string*>          slugs;
-    std::vector<const SpecialtyComposition*> pts;
-    for (const auto& [slug, c] : comps) {
-        slugs.push_back(&slug);
+std::map<SampleKey, std::array<double, 2>> compute_spectral_coords(
+    const std::map<SampleKey, WorkComposition>& comps) {
+    std::vector<SampleKey>                   keys;
+    std::vector<const WorkComposition*>      pts;
+    for (const auto& [key, c] : comps) {
+        keys.push_back(key);
         pts.push_back(&c);
     }
     const int n = static_cast<int>(pts.size());
-    std::map<std::string, std::array<double, 2>> out;
+    std::map<SampleKey, std::array<double, 2>> out;
     if (n < 3) return out;  // too few points for a 2D map
 
     // Affinity W (the same one the neighbours use), then the unnormalized graph
@@ -244,7 +261,7 @@ std::map<std::string, std::array<double, 2>> compute_spectral_coords(
     canon(c2);
 
     for (int i = 0; i < n; ++i)
-        out[*slugs[i]] = {vec[i][c1], vec[i][c2]};
+        out[keys[i]] = {vec[i][c1], vec[i][c2]};
     return out;
 }
 

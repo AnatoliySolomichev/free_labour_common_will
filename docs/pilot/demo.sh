@@ -65,11 +65,9 @@ VERA="$("$BC" --data-dir "$work/vera" identity show | after 'User ID: ')"
 say "Анна: ${ANNA:0:16}…"
 say "Вера: ${VERA:0:16}…"
 
-# ── Анна: специальность, разряд, средства производства ───────────────────────
+# ── Анна: средства производства ─────────────────────────────────────────────
 hr "Анна регистрирует себя и свои средства производства"
-SPEC="$("$BC" --data-dir "$work/anna" specialty add prof.cook --via "$VIA" | after 'hash: ')"
-GRADE="$("$BC" --data-dir "$work/anna" grade add "$ANNA/$SPEC" 4 | after 'hash: ')"
-say "специальность prof.cook, разряд 4"
+say "кем работает — пишет в самой работе вольным текстом: «пекарь, 4-й разряд»"
 
 # Печь: оценка владельца (est) 315ч, ресурс 8000 моточасов.
 TOOL="$("$BC" --data-dir "$work/anna" tool add "Печь подовая" \
@@ -87,7 +85,7 @@ say "мука:  4ч / партия 50 кг  (${MAT_H:0:12}…)"
 
 # ── Анна печёт: печь 6ч + мука 12 кг переносят стоимость в хлеб ───────────────
 hr "Анна печёт 6ч — печь 6ч, мука 12кг переносят стоимость"
-WORK_H="$("$BC" --data-dir "$work/anna" work log --agent "$ANNA/$GRADE" \
+WORK_H="$("$BC" --data-dir "$work/anna" work log --title "пекарь, 4-й разряд" \
           --action "выпечка партии хлеба" --hours 6 --output "хлеб:24:шт" \
           --tool "${TOOL_H:0:12}:6" --material "${MAT_H:0:12}:12" \
           --via "$VIA" | after 'hash: ')"

@@ -8,15 +8,6 @@
 #include <gtest/gtest.h>
 #include <filesystem>
 
-// Ось для разбивки цены: в этих тестах её содержание не проверяется, важно лишь
-// что приёмки без разбивки не существует (records.md §9.5 v4).
-inline records::BlockPath test_axis() {
-    records::BlockPath r{};
-    r.chain.fill(0x79);
-    r.hash.fill(0x01);
-    return r;
-}
-
 using namespace aggregator;
 using namespace blockchain;
 
@@ -35,8 +26,20 @@ records::Ref ref_of(const UserId& chain, const Hash& hash) {
     return r;
 }
 
+// Ось — по тегу хеша её определения.
+records::BlockPath axis(uint8_t tag) {
+    records::BlockPath p{};
+    p.chain.fill(0x79);
+    p.hash.fill(tag);
+    return p;
+}
+constexpr uint8_t kLiveLine = 0x01, kDanger = 0x02;
+
 } // namespace
 
+// Квалификация — это принятая работа, прочитанная по осям (records.md §14.4,
+// ИР-022 шаг 11): «по оси такой-то приняли N цепей, M часов». Разряда, который
+// надо заверять, больше нет.
 class AttestationViewTest : public ::testing::Test {
 protected:
     std::filesystem::path              db_path_;
@@ -71,99 +74,94 @@ protected:
         return Crypto::hash_block(b);
     }
 
-    // Worker's economic foundation: Specialty (slug) + Grade, own chain.
-    std::pair<Hash, Hash> foundation(const UserId& worker,
-                                     const std::string& slug, uint8_t level) {
-        const Hash spec = add(worker, records::Specialty{slug});
-        records::Grade g;
-        g.specialty = ref_of(worker, spec);
-        g.level     = level;
-        return {spec, add(worker, g)};
-    }
-
-    // One accepted job: worker logs `hours` under `grade`, acceptor accepts.
-    void accepted_work(const UserId& worker, const Hash& grade,
-                       const UserId& acceptor, double hours) {
+    // Работа `worker` на `hours` часов, принятая `acceptor` с разбивкой по осям
+    // поровну; `work_chain` — цепь, которую называет ссылка приёмки.
+    void accepted_work(const UserId& worker, const UserId& acceptor, double hours,
+                       std::initializer_list<uint8_t> tags,
+                       const UserId* work_chain = nullptr, double named = -1.0) {
         records::WorkRecord w;
-        w.agent  = ref_of(worker, grade);
         w.action = "работа";
         w.hours  = hours;
         const Hash wh = add(worker, w);
         records::Acceptance a;
-        a.work        = ref_of(worker, wh);
+        a.work        = ref_of(work_chain ? *work_chain : worker, wh);
         a.receiver    = acceptor.bytes;
         a.hours_raw   = hours;
         a.labor_units = hours;
-        a.axes        = {{test_axis(), hours}};
+        const double each = (named < 0.0 ? hours : named) / static_cast<double>(tags.size());
+        for (uint8_t tag : tags) a.axes.push_back({axis(tag), each});
         add(acceptor, a);
     }
 };
 
-// Distinct chains are counted, never acceptances; the worker's own chain never
-// attests itself — that vouch is free.
+// Считаются разные цепи, а не приёмки; собственная цепь работника себя не
+// заверяет — такое поручительство ничего не стоит.
 TEST_F(AttestationViewTest, DistinctChainsAndNoSelfVouch) {
     const UserId anna  = make_owner(0xA1);
     const UserId vera  = make_owner(0xB2);
     const UserId boris = make_owner(0xC3);
 
-    const auto [spec, grade] = foundation(anna, "prof.electrician", 4);
-    accepted_work(anna, grade, vera,  6);
-    accepted_work(anna, grade, vera,  4);   // same chain again — one witness
-    accepted_work(anna, grade, boris, 2);
-    accepted_work(anna, grade, anna,  99);  // self-acceptance — ignored
+    accepted_work(anna, vera,  6, {kLiveLine});
+    accepted_work(anna, vera,  4, {kLiveLine});      // та же цепь — один свидетель
+    accepted_work(anna, boris, 2, {kLiveLine});
+    accepted_work(anna, anna, 99, {kLiveLine});      // сам себя — не в счёт
 
     const auto view = AttestationView::build(*storage_);
-    const auto att  = view.at_level(anna, "prof.electrician", 4);
+    const auto att  = view.at(anna, axis(kLiveLine).hash);
     ASSERT_TRUE(att.has_value());
-    EXPECT_EQ(att->chains, 2u);             // Vera + Boris, not 3 acceptances
-    EXPECT_DOUBLE_EQ(att->hours, 12.0);     // 6+4+2, self excluded
+    EXPECT_EQ(att->chains, 2u);                      // Вера и Борис, а не три приёмки
+    EXPECT_DOUBLE_EQ(att->hours, 12.0);
+    EXPECT_EQ(view.total(anna).chains, 2u);
+    EXPECT_DOUBLE_EQ(view.total(anna).hours, 12.0);
 
-    EXPECT_FALSE(view.at_level(anna, "prof.electrician", 5).has_value());
-    EXPECT_FALSE(view.at_level(vera, "prof.electrician", 4).has_value());
+    EXPECT_FALSE(view.at(anna, axis(kDanger).hash).has_value());
+    EXPECT_FALSE(view.at(vera, axis(kLiveLine).hash).has_value());
+    EXPECT_EQ(view.total(vera).chains, 0u);
 }
 
-// Every hop must stay in the worker's own chain: a Grade or Specialty living
-// elsewhere attests nothing.
-TEST_F(AttestationViewTest, ForeignGradeOrSpecialtyIgnored) {
+// Каждая ось заверяется отдельно: работа, назвавшая две оси, свидетельствует о
+// каждой. Список — по часам, самое заверенное первым.
+TEST_F(AttestationViewTest, EachAxisIsAttestedSeparately) {
+    const UserId anna  = make_owner(0xA1);
+    const UserId vera  = make_owner(0xB2);
+    const UserId boris = make_owner(0xC3);
+
+    accepted_work(anna, vera,  5, {kLiveLine, kDanger});
+    accepted_work(anna, boris, 3, {kLiveLine});
+
+    const auto view = AttestationView::build(*storage_);
+    const auto list = view.of(anna);
+    ASSERT_EQ(list.size(), 2u);
+    EXPECT_EQ(list[0].axis, axis(kLiveLine));
+    EXPECT_DOUBLE_EQ(list[0].hours, 8.0);
+    EXPECT_EQ(list[0].chains, 2u);
+    EXPECT_EQ(list[1].axis, axis(kDanger));
+    EXPECT_DOUBLE_EQ(list[1].hours, 5.0);
+    EXPECT_EQ(list[1].chains, 1u);
+    EXPECT_DOUBLE_EQ(view.total(anna).hours, 8.0);   // часы работы, не сумма по осям
+}
+
+// Работа обязана лежать в той цепи, которую называет ссылка приёмки: чужую
+// работу к своей квалификации не пришьёшь.
+TEST_F(AttestationViewTest, TheWorkMustSitInTheChainItsRefNames) {
     const UserId anna    = make_owner(0xA1);
     const UserId vera    = make_owner(0xB2);
     const UserId mallory = make_owner(0xEE);
 
-    // Mallory logs work pointing at ANNA's grade — not Mallory's own.
-    const auto [spec, anna_grade] = foundation(anna, "prof.electrician", 6);
-    records::WorkRecord w;
-    w.agent  = ref_of(anna, anna_grade);
-    w.action = "чужой разряд";
-    w.hours  = 5;
-    const Hash wh = add(mallory, w);
-    records::Acceptance a;
-    a.work      = ref_of(mallory, wh);
-    a.receiver  = vera.bytes;
-    a.hours_raw = 5;
-    a.axes        = {{test_axis(), 5}};
-    add(vera, a);
+    accepted_work(mallory, vera, 5, {kLiveLine}, &anna);   // блок Мэллори, ссылка — на Анну
 
     const auto view = AttestationView::build(*storage_);
-    EXPECT_FALSE(view.at_level(mallory, "prof.electrician", 6).has_value());
-    EXPECT_FALSE(view.at_level(anna,    "prof.electrician", 6).has_value());
+    EXPECT_TRUE(view.of(anna).empty());
+    EXPECT_TRUE(view.of(mallory).empty());
 }
 
-// best() picks the highest attested level — the reader compares it with the
-// claim and decides; nothing is scored globally.
-TEST_F(AttestationViewTest, BestPicksHighestAttestedLevel) {
+// Разбивка, не сходящаяся с ценой, описывает другую сделку — и ничего не заверяет.
+TEST_F(AttestationViewTest, BreakdownThatDoesNotAddUpAttestsNothing) {
     const UserId anna = make_owner(0xA1);
     const UserId vera = make_owner(0xB2);
-
-    const auto [s3, g3] = foundation(anna, "prof.electrician", 3);
-    const auto [s4, g4] = foundation(anna, "prof.electrician", 4);
-    accepted_work(anna, g3, vera, 100);
-    accepted_work(anna, g4, vera, 8);
+    accepted_work(anna, vera, 4, {kLiveLine}, nullptr, /*named=*/1.0);   // 1 из 4
 
     const auto view = AttestationView::build(*storage_);
-    const auto best = view.best(anna, "prof.electrician");
-    ASSERT_TRUE(best.has_value());
-    EXPECT_EQ(best->level, 4);
-    EXPECT_DOUBLE_EQ(best->hours, 8.0);
-
-    EXPECT_FALSE(view.best(anna, "prof.cook").has_value());
+    EXPECT_TRUE(view.of(anna).empty());
+    EXPECT_EQ(view.total(anna).chains, 0u);
 }

@@ -43,16 +43,17 @@ records::Ref ref_to(const UserId& chain, const Block& block) {
 // Один и тот же остаток — два разных зверя. Различает не величина ренты, а то,
 // КТО её платит: канал схлопывается в одного плательщика, дефицит размазан по
 // всем. Опора — сетевая цена часа каждой оси, прочитанная из самих сделок
-// (records.md §11.11); модели здесь нет, поэтому миру нужна вторая корзина:
-// без остальной сети сравнивать корзину не с чем.
+// (records.md §11.11); модели здесь нет, поэтому миру нужен второй работник: без
+// остальной сети сравнивать не с чем. Строки — по работникам (ИР-022 шаг 11):
+// специальностей больше нет, а канал — это ровно «один плательщик переплачивает
+// одному работнику».
 class RentMapTest : public ::testing::Test {
 protected:
     std::filesystem::path              db_path_;
     std::unique_ptr<AggregatorStorage> storage_;
     BlockIndex                         next_index_ = 0;
-    UserId                             worker_ = chain_of(0xA1);
-    records::Ref                       tailor_{};      // исследуемая корзина
-    records::Ref                       seamstress_{};  // остальная сеть
+    UserId                             tailor_     = chain_of(0xA1);  // исследуемый
+    UserId                             seamstress_ = chain_of(0xA2);  // остальная сеть
 
     void SetUp() override {
         static int cnt = 0;
@@ -60,8 +61,6 @@ protected:
                    ("bc_rent_test_" + std::to_string(++cnt));
         std::filesystem::remove_all(db_path_);
         storage_ = std::make_unique<AggregatorStorage>(db_path_);
-        tailor_     = grade_of("портной", 5);
-        seamstress_ = grade_of("швея", 3);
     }
 
     void TearDown() override {
@@ -84,25 +83,18 @@ protected:
         return b;
     }
 
-    records::Ref grade_of(const std::string& specialty, uint8_t level) {
-        const Block spec = add(worker_, records::Specialty{specialty});
-        records::Grade g{};
-        g.specialty = ref_to(worker_, spec);
-        g.level     = level;
-        return ref_to(worker_, add(worker_, g));
-    }
-
-    // Рассчитанная сделка по цене `rate` за час. `named` < 0 — разбивка равна
-    // цене; иначе разбивка называет `named` часов и с ценой НЕ сходится.
-    void deal(const records::Ref& grade, const UserId& payer, double hours,
-              double rate, int64_t ts, double named = -1.0) {
+    // Рассчитанная сделка работника по цене `rate` за час. `named` < 0 — разбивка
+    // равна цене; иначе разбивка называет `named` часов и с ценой НЕ сходится.
+    void deal(const UserId& worker, const UserId& payer, double hours,
+              double rate, int64_t ts, double named = -1.0,
+              const std::string& title = "") {
         records::WorkRecord wr{};
-        wr.agent = grade;
         wr.hours = hours;
-        const Block work = add(worker_, wr);
+        wr.title = !title.empty() ? title : worker == tailor_ ? "портной" : "швея";
+        const Block work = add(worker, wr);
 
         records::Acceptance a{};
-        a.work        = ref_to(worker_, work);
+        a.work        = ref_to(worker, work);
         a.receiver    = payer.bytes;
         a.hours_raw   = hours;
         a.labor_units = hours * rate;
@@ -112,17 +104,17 @@ protected:
 
         records::Transfer t{};
         t.from    = payer.bytes;
-        t.to      = worker_.bytes;
+        t.to      = worker.bytes;
         t.origins = { {payer.bytes, hours * rate} };
         t.reason  = ref_to(payer, acc);
         add(payer, t);
     }
 
     // `payers` честных плательщиков, каждый месяц по 4 часа по цене `rate`.
-    void village(const records::Ref& grade, double rate, uint8_t payers = 8) {
+    void village(const UserId& worker, double rate, uint8_t payers = 8) {
         for (int m = 0; m < 12; ++m)
             for (uint8_t p = 0; p < payers; ++p)
-                deal(grade, chain_of(static_cast<uint8_t>(0xB0 + p)), 4.0, rate,
+                deal(worker, chain_of(static_cast<uint8_t>(0xB0 + p)), 4.0, rate,
                      kFrom + m * 30LL * 86'400 + 3600);
     }
 
@@ -130,19 +122,19 @@ protected:
         return build_rent_map(build_rent_input(*storage_, kFrom, kTo), min_payers);
     }
 
-    static const RentRow* row(const std::vector<RentRow>& v, const std::string& slug) {
-        for (const auto& r : v) if (r.slug == slug) return &r;
+    static const RentRow* row(const std::vector<RentRow>& v, const UserId& worker) {
+        for (const auto& r : v) if (r.worker == worker.bytes) return &r;
         return nullptr;
     }
 };
 
 // Настоящий дефицит: наценку платят ВСЕ. Рента есть, но за неё платят все
-// восемь поровну. Сеть: швеи по 1.0, портные по 1.6 → цена часа оси 1.3.
+// восемь поровну. Сеть: швее по 1.0, портному по 1.6 → цена часа оси 1.3.
 TEST_F(RentMapTest, ScarcityIsPaidByEveryone) {
     village(seamstress_, 1.0);
     village(tailor_, 1.6);
     const auto rows = rent();
-    const auto* r = row(rows, "портной");
+    const auto* r = row(rows, tailor_);
     ASSERT_NE(r, nullptr);
     EXPECT_TRUE(r->judged);
     EXPECT_NEAR(r->expected, 1.3, 1e-9);
@@ -154,7 +146,7 @@ TEST_F(RentMapTest, ScarcityIsPaidByEveryone) {
 }
 
 // Канал: восемь честных по сетевой цене плюс один плательщик, который каждый
-// месяц платит вдвое. Рента у корзины меньше, чем у дефицита, но платит её ОДИН.
+// месяц платит вдвое. Рента меньше, чем у дефицита, но платит её ОДИН.
 TEST_F(RentMapTest, ChannelCollapsesToOnePayer) {
     village(seamstress_, 1.0);
     village(tailor_, 1.0);
@@ -162,7 +154,7 @@ TEST_F(RentMapTest, ChannelCollapsesToOnePayer) {
         deal(tailor_, chain_of(0xEE), 8.0, 2.0, kFrom + m * 30LL * 86'400 + 7200);
 
     const auto rows = rent();
-    const auto* r = row(rows, "портной");
+    const auto* r = row(rows, tailor_);
     ASSERT_NE(r, nullptr);
     EXPECT_TRUE(r->judged);
     EXPECT_GT(r->resid, 0.0);
@@ -178,33 +170,33 @@ TEST_F(RentMapTest, OneOffSpikeIsNotAStandingRent) {
     deal(tailor_, chain_of(0xEE), 8.0, 3.0, kFrom + 5 * 30LL * 86'400 + 7200);
 
     const auto rows = rent();
-    const auto* r = row(rows, "портной");
+    const auto* r = row(rows, tailor_);
     ASSERT_NE(r, nullptr);
     EXPECT_GT(r->resid, 0.0);
     EXPECT_EQ(r->periods_over, 1u);            // всплеск: один период из двенадцати
     EXPECT_EQ(r->periods_seen, 12u);
 }
 
-// Корзина платит ровно сетевую цену — превышения нет ни у кого. rent_payers = 0
+// Работнику платят ровно сетевую цену — превышения нет ни у кого. rent_payers = 0
 // означает «ренты нет», а не «один плательщик».
 TEST_F(RentMapTest, NoRentMeansNoConcentration) {
     village(seamstress_, 1.0);
     village(tailor_, 1.0);
     const auto rows = rent();
-    const auto* r = row(rows, "портной");
+    const auto* r = row(rows, tailor_);
     ASSERT_NE(r, nullptr);
     EXPECT_TRUE(r->judged);
     EXPECT_NEAR(r->resid, 0.0, 1e-9);
     EXPECT_DOUBLE_EQ(r->rent_payers, 0.0);
 }
 
-// Тонкая корзина не судится: деревня с тремя покупателями концентрирована и
-// честна. Остаток печатается, приговор — нет.
-TEST_F(RentMapTest, ThinBasketIsNotJudged) {
+// Работник с тремя заказчиками не судится: деревня с тремя покупателями
+// концентрирована и честна. Остаток печатается, приговор — нет.
+TEST_F(RentMapTest, ThinWorkerIsNotJudged) {
     village(seamstress_, 1.0);
     village(tailor_, 1.5, 3);
     const auto rows = rent();
-    const auto* r = row(rows, "портной");
+    const auto* r = row(rows, tailor_);
     ASSERT_NE(r, nullptr);
     EXPECT_EQ(r->payers, 3u);
     EXPECT_FALSE(r->judged);                   // три плательщика — не улика
@@ -219,19 +211,19 @@ TEST_F(RentMapTest, WindowExcludesOldDeals) {
     village(tailor_, 1.0);
     deal(tailor_, chain_of(0xEE), 100.0, 5.0, kFrom - 86'400);   // за день до окна
     const auto rows = rent();
-    const auto* r = row(rows, "портной");
+    const auto* r = row(rows, tailor_);
     ASSERT_NE(r, nullptr);
     EXPECT_EQ(r->payers, 8u);
     EXPECT_NEAR(r->resid, 0.0, 1e-9);
 }
 
-// Опора — СЕТЬ, а не сама корзина. Если вся сеть — одна корзина, платящая
-// 1.6, превышения нет: сравнивать не с чем. Это и отличает опору по книге осей
-// от опоры по собственной средней корзины, в которой дефицит растворился бы.
-TEST_F(RentMapTest, ReferenceIsTheNetworkNotTheBasket) {
+// Опора — СЕТЬ, а не сам работник. Если вся сеть — один работник, которому
+// платят 1.6, превышения нет: сравнивать не с чем. Это и отличает опору по книге
+// осей от опоры по собственной средней, в которой дефицит растворился бы.
+TEST_F(RentMapTest, ReferenceIsTheNetworkNotTheWorker) {
     village(tailor_, 1.6);
     const auto rows = rent();
-    const auto* r = row(rows, "портной");
+    const auto* r = row(rows, tailor_);
     ASSERT_NE(r, nullptr);
     EXPECT_NEAR(r->expected, 1.6, 1e-9);
     EXPECT_NEAR(r->resid, 0.0, 1e-9);
@@ -244,8 +236,22 @@ TEST_F(RentMapTest, BreakdownThatDoesNotAddUpIsLeftOut) {
     village(tailor_, 1.0);
     deal(tailor_, chain_of(0xEE), 8.0, 3.0, kFrom + 3600, 5.0);  // 24 цены, 5 названо
     const auto rows = rent();
-    const auto* r = row(rows, "портной");
+    const auto* r = row(rows, tailor_);
     ASSERT_NE(r, nullptr);
     EXPECT_EQ(r->payers, 8u);                  // сделки 0xEE как не было
     EXPECT_NEAR(r->resid, 0.0, 1e-9);
+}
+
+// У строки — название последней работы вольным текстом: люди читают карту по
+// названиям, а не по ключам цепей. По названию ничего не считается.
+TEST_F(RentMapTest, RowCarriesTheLatestTitle) {
+    village(seamstress_, 1.0);
+    village(tailor_, 1.0);
+    deal(tailor_, chain_of(0xB0), 4.0, 1.0, kFrom + 11 * 30LL * 86'400 + 9000, -1.0,
+         "портной, сюртуки");
+    const auto rows = rent();
+    const auto* r = row(rows, tailor_);
+    ASSERT_NE(r, nullptr);
+    EXPECT_EQ(r->title, "портной, сюртуки");
+    EXPECT_EQ(row(rows, seamstress_)->title, "швея");
 }

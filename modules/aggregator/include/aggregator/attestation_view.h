@@ -2,58 +2,67 @@
 
 #include "aggregator.h"
 
+#include <records/types.h>
+
+#include <array>
 #include <map>
 #include <optional>
-#include <string>
-#include <tuple>
+#include <utility>
+#include <vector>
 
 namespace aggregator {
 
-// ── Grade attestation (records.md §14.4; ИР-006 шаг 2, решение 2026-07-14) ────
+// ── Qualification, read off accepted work (records.md §14.4; ИР-022 шаг 11) ──
 //
-// A claimed grade (the profile's grade: tag) is cheap talk — nothing stops
-// grade:6 out of thin air, and the network rate for that level then becomes a
-// dishonest default at acceptance time. So a grade is ATTESTED by accepted
-// work: every Acceptance whose WorkRecord names a Grade of the worker adds one
-// witness. What is counted:
+// There is no grade to attest any more. What a worker can do is what other
+// people accepted from them, axis by axis: «по оси "работа под напряжением"
+// приняли 5 цепей, 112 ч». The breakdown of every acceptance already says what
+// the work was (records.md §9.5 v4), so the attestation needs no record of its
+// own and no ladder — it is the history itself, read back.
 //
-//   - DISTINCT accepting chains, never acceptances — a second chain of your
-//     own must not attest you (it still can, Sybil-cheap; the honest answer to
-//     that is ИР-009's trust flow — this view only refuses the FREE self-vouch:
-//     the worker's own chain is excluded);
-//   - total raw hours accepted at that (specialty slug, level).
+// What is counted, per (worker, axis):
 //
-// Chain of custody, every hop spoof-guarded to the worker's own chain:
-//   Acceptance(receiver == author) → WorkRecord(owner) → agent: Grade(owner ==
-//   worker) → specialty: Specialty(owner == worker, name = catalog slug records.md §9.1).
+//   - DISTINCT accepting chains, never acceptances — and never the worker's own
+//     chain: that vouch is free (a second chain of your own is still possible,
+//     Sybil-cheap; the honest answer to that is ИР-009's trust flow);
+//   - Σ hours_raw of the accepted works that named the axis.
 //
-// Derived and re-checkable, like every aggregator view. The display rule from
-// the discussion: «разряд 4 (заявлен)» vs «разряд 3 (заверен: 5 цепей, 112 ч)»
-// — the reader sees both and decides; no global score is ever computed.
+// Spoof guards: the Acceptance is signed by its receiver, and the work it
+// accepts sits in the chain its Ref names — you attest labour, not paperwork. A
+// breakdown that does not add up to the price describes some other deal and is
+// left out, as everywhere (records.md §9.5).
+//
+// Derived and re-checkable, like every aggregator view; no score is computed.
 
-struct GradeAttestation {
-    uint8_t     level  = 0;
-    std::size_t chains = 0;   // distinct accepting chains (worker excluded)
-    double      hours  = 0;   // Σ hours_raw of those acceptances
+struct AttestedAxis {
+    records::BlockPath axis;          // the AxisDef record
+    std::size_t        chains = 0;    // distinct accepting chains (worker excluded)
+    double             hours  = 0;    // Σ hours_raw of accepted work naming it
+};
+
+// All accepted work of a worker, whatever it named.
+struct AttestedTotal {
+    std::size_t chains = 0;
+    double      hours  = 0;
 };
 
 class AttestationView {
 public:
     static AttestationView build(const AggregatorStorage& storage);
 
-    // Attestation at an exact (worker, specialty slug, level).
-    std::optional<GradeAttestation> at_level(const UserId&      worker,
-                                             const std::string& slug,
-                                             uint8_t            level) const;
+    // Every axis the worker's accepted work named, most hours first (ties by the
+    // axis hash, so two witnesses print the same list).
+    std::vector<AttestedAxis> of(const UserId& worker) const;
 
-    // The strongest attested level for (worker, slug): highest level with at
-    // least one witness. nullopt → nothing attested, any claim is bare.
-    std::optional<GradeAttestation> best(const UserId&      worker,
-                                         const std::string& slug) const;
+    // One axis; nullopt → nobody accepted such work from this worker.
+    std::optional<AttestedAxis> at(const UserId&                  worker,
+                                   const std::array<uint8_t, 32>& axis_hash) const;
+
+    AttestedTotal total(const UserId& worker) const;
 
 private:
-    // (worker, slug, level) → attestation
-    std::map<std::tuple<UserId, std::string, uint8_t>, GradeAttestation> att_;
+    std::map<std::pair<UserId, std::array<uint8_t, 32>>, AttestedAxis> axes_;
+    std::map<UserId, AttestedTotal>                                    totals_;
 };
 
 } // namespace aggregator

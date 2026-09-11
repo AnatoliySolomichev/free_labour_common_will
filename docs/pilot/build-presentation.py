@@ -40,19 +40,16 @@ received_tot = sum(e['received'] for e in econ)
 redeem_pct = 100 * redeemed_tot / issued_tot if issued_tot else 0
 with_redemption = sum(1 for e in econ if e['redeemed'] > 0)
 
-# ставки: свод по разряду за весь год (взвешенно по часам)
-grade_rates = {}
+# цены осей: свод за весь год (взвешенно по часам). Ставок по разряду больше нет
+# (ИР-022 шаг 11): сеть публикует цену часа каждой оси.
+axis_prices = {}
 for mo, blob in rates_by_month.items():
-    for r in ((blob or {}).get('rates') or []):
-        g = grade_rates.setdefault(r['level'], {'w': 0.0, 'wh': 0.0, 'vals': []})
-        g['w'] += r['rate'] * r['hours']; g['wh'] += r['hours']; g['vals'].append(r['rate'])
-grades = []
-for lvl in sorted(grade_rates):
-    g = grade_rates[lvl]
-    grades.append({'level': lvl,
-                   'mean': round(g['w'] / g['wh'], 4) if g['wh'] else 0,
-                   'min': round(min(g['vals']), 3), 'max': round(max(g['vals']), 3),
-                   'n': len(g['vals'])})
+    for a in ((blob or {}).get('axes') or []):
+        g = axis_prices.setdefault(a.get('label') or a['axis'][:12], {'w': 0.0, 'wh': 0.0})
+        g['w'] += a['price'] * a['hours']; g['wh'] += a['hours']
+axes_year = sorted(({'label': k, 'mean': round(v['w'] / v['wh'], 4) if v['wh'] else 0}
+                    for k, v in axis_prices.items()), key=lambda x: -x['mean'])
+grades = []   # диаграмма разрядов в шаблоне пуста и не рисуется
 
 # профессии: сортируем по средней принятой бумаге
 profs = sorted(
@@ -128,7 +125,7 @@ with open(os.path.join(OUT, 'rates-index.csv'), 'w', newline='') as f:
 
 # ── Markdown-дек (слайды через '---') ───────────────────────────────────────
 m = data['meta']; t = data['totals']; ix = data['index_stats']
-top_grades = ' · '.join(f"разряд {g['level']}: {g['mean']:.2f}" for g in grades)
+top_axes = ' · '.join(f"{a['label']}: {a['mean']:.2f}" for a in axes_year[:6]) or '—'
 deck = f"""---
 marp: true
 paginate: true
@@ -181,12 +178,12 @@ title: Год жизни трудовой экономики
 
 ---
 
-## Ставки растут с разрядом
+## Сколько сеть платит за час оси
 
-{top_grades}
+{top_axes}
 
-Ставка — сколько часов бумаги платят за час труда. Разряд 3 в среднем ниже единицы,
-разряд 6 — выше: разница в квалификации оплачивается, но общий баланс сохраняется.
+Цена оси — сколько часов бумаги платят за час работы, назвавшей ось. Цена работы —
+сумма цен её осей: что делает час мастера дороже, названо в разбивке, а не разрядом.
 
 ---
 
@@ -233,7 +230,7 @@ summary = f"""# Год жизни трудовой экономики — выж
   вернули хоть часть — {t['with_redemption']} из {m['population']}.
 - Индекс среднего трудочаса: {ix['mean']} (размах {ix['min']}…{ix['max']}) —
   эмиссия идёт в ногу с реально отработанными часами.
-- Ставки растут с разрядом: {top_grades}.
+- Сеть платит за час оси: {top_axes}.
 - Стыковка закрыла {data['match']['closed']} из {data['match']['total']} потребностей;
   дефицит: {', '.join(data['match']['deficits']) or '—'}.
 - Взаимных заверений в графе: {m['merges']}; пломб {m['seals']}; отзывов ключей {m['revocations']}.

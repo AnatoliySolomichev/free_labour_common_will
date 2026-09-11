@@ -4,13 +4,14 @@
 
 #include <cmath>
 #include <set>
+#include <utility>
 
 namespace aggregator {
 
 RentInput build_rent_input(const AggregatorStorage& storage,
                            int64_t from_ts, int64_t to_ts) {
     using RefHash = std::array<uint8_t, 32>;
-    std::map<RefHash, records::Record> by_hash;
+    std::map<RefHash, records::WorkRecord> works;
     struct Deal { records::Acceptance acc; UserId payer; };
     std::map<RefHash, Deal>   deals;
     std::map<RefHash, double> paid;
@@ -26,12 +27,14 @@ RentInput build_rent_input(const AggregatorStorage& storage,
         } else if (const auto* t = std::get_if<records::Transfer>(&rec)) {
             if (t->from == block->address.user_id.bytes && t->reason)
                 for (const auto& o : t->origins) paid[t->reason->hash] += o.units;
+        } else if (const auto* w = std::get_if<records::WorkRecord>(&rec)) {
+            works[bh.bytes] = *w;
         }
-        by_hash[bh.bytes] = std::move(rec);
     }
 
     RentInput out;
     std::map<RefHash, double> axis_units, axis_hours;
+    std::map<RefHash, std::pair<int64_t, RefHash>> titled;   // worker → (ts, acc) of its title
     for (const auto& [acc_hash, deal] : deals) {
         const auto& a = deal.acc;
         if (a.timestamp < from_ts || a.timestamp >= to_ts) continue;
@@ -47,18 +50,8 @@ RentInput build_rent_input(const AggregatorStorage& storage,
         for (const auto& x : a.axes) named += x.units;
         if (std::abs(named - a.labor_units) > 1e-6) continue;
 
-        const auto wit = by_hash.find(a.work.hash);
-        if (wit == by_hash.end()) continue;
-        const auto* wr = std::get_if<records::WorkRecord>(&wit->second);
-        if (!wr) continue;
-        const auto git = by_hash.find(wr->agent.hash);
-        if (git == by_hash.end()) continue;
-        const auto* grade = std::get_if<records::Grade>(&git->second);
-        if (!grade) continue;
-        const auto sit = by_hash.find(grade->specialty.hash);
-        if (sit == by_hash.end()) continue;
-        const auto* spec = std::get_if<records::Specialty>(&sit->second);
-        if (!spec) continue;
+        const auto wit = works.find(a.work.hash);
+        if (wit == works.end()) continue;              // the work is not on the table
 
         DealTrace t{};
         t.payer  = deal.payer.bytes;
@@ -66,11 +59,21 @@ RentInput build_rent_input(const AggregatorStorage& storage,
         t.units  = a.labor_units;
         t.period = (a.timestamp - from_ts) / (kRentPeriodDays * 86'400);
         for (const auto& x : a.axes) {
-            t.axes[x.axis.hash]    += x.units;
+            t.axes[x.axis.hash]     += x.units;
             axis_units[x.axis.hash] += x.units;
             axis_hours[x.axis.hash] += a.hours_raw;
         }
-        out.baskets[spec->name].push_back(std::move(t));
+        const RefHash worker = a.work.chain;
+        out.workers[worker].push_back(std::move(t));
+
+        if (!wit->second.title.empty()) {
+            const auto when = std::make_pair(a.timestamp, acc_hash);
+            const auto it   = titled.find(worker);
+            if (it == titled.end() || it->second < when) {
+                titled[worker]     = when;
+                out.titles[worker] = wit->second.title;
+            }
+        }
     }
     for (const auto& [axis, u] : axis_units) {
         const double h = axis_hours[axis];
@@ -82,10 +85,12 @@ RentInput build_rent_input(const AggregatorStorage& storage,
 std::vector<RentRow> build_rent_map(const RentInput& in, unsigned min_payers) {
     using RefHash = std::array<uint8_t, 32>;
     std::vector<RentRow> out;
-    out.reserve(in.baskets.size());
-    for (const auto& [key, deals] : in.baskets) {
+    out.reserve(in.workers.size());
+    for (const auto& [worker, deals] : in.workers) {
         RentRow r{};
-        r.slug = key;
+        r.worker = worker;
+        if (const auto it = in.titles.find(worker); it != in.titles.end())
+            r.title = it->second;
 
         double units = 0.0, expected = 0.0;
         std::map<int64_t, std::pair<double, double>> by_period;   // units, expected

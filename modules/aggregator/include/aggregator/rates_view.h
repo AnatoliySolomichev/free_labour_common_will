@@ -12,38 +12,31 @@
 
 namespace aggregator {
 
-// Daily specialty rates (records.md §11.2, economy.md §8.2).
+// Daily axis prices (records.md §11.2 v5, economy.md §8.2).
 //
 // Counts only SETTLED deals of the day [day_start, day_start+86400): an
-// Acceptance with at least one Transfer referencing it; self-deals (payer ==
-// worker) are excluded. The specialty of a deal is resolved through
-// Acceptance → WorkRecord → Grade → Specialty; unresolvable deals do not
-// count — a deal enters the world average only when its whole provenance is
-// on the table.
+// Acceptance paid exactly by its Transfers (labor + carried), not a self-deal,
+// whose work is on the table and whose breakdown adds up to its price. There is
+// no specialty and no grade to resolve any more (ИР-022 шаг 11): the deal says
+// what it paid for, axis by axis, and that is what is averaged.
 //
-// The key is the specialty alone (ИР-022). The grade used to split it, so a
-// master's hour came out dearer by decree of the ladder, on top of whatever the
-// deal paid for; now the deal itemizes its price by axis (records.md §9.5 v4),
-// and a grade in the key would pay a second time for what the breakdown named.
-// The Grade record stays — it is the link from a work to its specialty and a
-// claim of qualification others attest (records.md §14.4) — it just prices
-// nothing.
+// Per axis: day price = Σ units on it / Σ hours of the work that named it (an
+// hour of such work counts once for every axis it named); price = alpha·day +
+// (1−alpha)·previous price, or the pure day price without a previous one. Below
+// min_hours of weighted volume the previous price is inherited unchanged, and an
+// axis with no previous price and no evidence gets none — there is no prior to
+// borrow one from, and there should not be: nobody has paid for it yet.
+// Previous axes with no deals today carry forward.
 //
-// day_avg = Σ labor_units / Σ hours_raw per specialty;
-// rate = alpha*day_avg + (1-alpha)*previous rate (pure day_avg without a
-// previous one). Below min_hours of day volume the previous rate is inherited
-// unchanged; previous entries with no deals today carry forward.
-// When `cloud` is given, a thin bucket with no previous rate is seeded with a
-// PRIOR from the specialty cloud (ИР-018, specialty-axes.md §10): the weighted
-// average of its neighbours' rates (skipping neighbours that have no rate yet),
-// else its tree parent's rate, else 1.0 (normalized par).
-// Without a cloud the bucket is skipped, as before.
+// The default price of a work is then the sum over the axes it names
+// (economy.md §2а): what the network pays for an hour of each thing the work is
+// made of.
 
 // Counterparty independence (ИР-021): how much a deal counts in the averaging.
 //
 // Faking HOURS is expensive (witnesses, non-overlapping slots — economy.md §3),
 // but inflating k costs nothing: a pair A↔B trading both ways at an inflated
-// price moves the network rate of their specialty while their mutual self-issued
+// price moves the network prices of what they name while their mutual self-issued
 // debts cancel out. Excluding self-deals (payer == worker) does not catch it.
 //
 // A pair is only the SHORTEST cycle. A ring A→B→C→A is invisible to any pairwise
@@ -77,9 +70,10 @@ namespace aggregator {
 //                                   honest volume discounted    W shift  collusion
 //                                   grades 3 · 4 · 5 · 6, all            ×1.3 left
 //   basket = specialty × grade      6.0 · 4.7 · 5.0 ·  3.3, 4.7%  −0.18%    8.3%
-//   axes, premium not named         0.0 · 1.2 · 8.9 · 18.0, 7.5%  −1.06%    8.3%
-//   axes, one axis for mastery      0.2 · 5.7 · 5.1 · 15.8, 7.1%  −0.83%    8.3%
-//   axes, a distinct axis per step  7.8 · 6.2 · 6.1 ·  4.5, 6.1%  −0.29%    8.3%
+//   axes, premium not named         0.0 · 1.2 · 8.9 · 18.0, 7.5%  −1.18%    8.3%
+//   axes, one axis for mastery      0.2 · 5.7 · 5.1 · 15.8, 7.1%  −0.84%    8.3%
+//   axes, a distinct axis per step  7.8 · 6.2 · 6.1 ·  4.5, 6.1%  −0.46%    8.3%
+//   (W in the axes rows is the v5 normalizer, read off axis prices.)
 //
 // The sum explains a price by WHICH axes a deal named, never by how much it put
 // on them: everybody naming an axis is compared to that axis's mean. One
@@ -117,23 +111,32 @@ struct IndependenceParams {
     double  kappa_max       = 1.50;
 };
 
+// The day's axis prices and the normalizer.
+struct DailyPrices {
+    std::vector<records::AxisPrice> axes;   // canonical: by axis hash
+    // economy.md §2б: the day's average paper per labour-hour — Σ price·hours
+    // over the axes / Σ hours of the day's deals (1.0 on a day without deals).
+    // Each deal's hours count once per axis it named and its units are split
+    // among them, so the sum adds up to what the deals paid.
+    double W = 1.0;
+};
+
 // When `indep` is given, deals are folded with the independence weight above;
 // `hours`/`deals` in the result stay RAW (the labour did happen — only its
-// valuation is in doubt), while the rate is the weighted average.
+// valuation is in doubt), while the price is the weighted average.
 //
-// The weight also governs how far the day may move the rate. Re-weighting alone
-// cannot fix a basket whose whole day was one colluding pair — the weight
-// cancels between numerator and denominator — so the day's smoothing factor is
-// scaled by the share of volume that survived weighting: a day discounted away
-// leaves yesterday's rate almost untouched. With `indep` absent that share is
-// 1 and the smoothing is exactly as before.
-std::vector<records::RateEntry> build_daily_rates(
-    const AggregatorStorage&              storage,
-    int64_t                               day_start,
-    const std::vector<records::RateEntry>& previous,
-    double                                alpha     = 0.3,
-    double                                min_hours = 0.1,
-    const records::SpecialtyCloud*        cloud     = nullptr,
-    const IndependenceParams*             indep     = nullptr);
+// The weight also governs how far the day may move a price. Re-weighting alone
+// cannot fix an axis whose whole day was one colluding pair — the weight cancels
+// between numerator and denominator — so the day's smoothing factor is scaled by
+// the share of volume that survived weighting: a day discounted away leaves
+// yesterday's price almost untouched. With `indep` absent that share is 1 and
+// the smoothing is plain.
+DailyPrices build_daily_prices(
+    const AggregatorStorage&               storage,
+    int64_t                                day_start,
+    const std::vector<records::AxisPrice>& previous,
+    double                                 alpha     = 0.3,
+    double                                 min_hours = 0.1,
+    const IndependenceParams*              indep     = nullptr);
 
 } // namespace aggregator

@@ -157,43 +157,16 @@ TEST(RecordsCodec, ReactionNeutral) {
     EXPECT_EQ(std::get<Reaction>(roundtrip(r)).value, 0);
 }
 
-// ── Specialty ─────────────────────────────────────────────────────────────────
-
-TEST(RecordsCodec, Specialty) {
-    Specialty s{ "Электрик" };
-    const auto decoded = std::get<Specialty>(roundtrip(s));
-    EXPECT_EQ(decoded.name, s.name);
-}
-
-// ── Grade ─────────────────────────────────────────────────────────────────────
-
-TEST(RecordsCodec, Grade) {
-    Grade g{ make_ref(0x50, 0x51), 3 };
-    const auto decoded = std::get<Grade>(roundtrip(g));
-    EXPECT_EQ(decoded.specialty, g.specialty);
-    EXPECT_EQ(decoded.level,     g.level);
-}
-
-// ── Worker ────────────────────────────────────────────────────────────────────
-
-TEST(RecordsCodec, Worker) {
-    Worker w{};
-    w.chain.fill(0xAB);
-    const auto decoded = std::get<Worker>(roundtrip(w));
-    EXPECT_EQ(decoded.chain, w.chain);
-}
-
 // ── WorkRecord ────────────────────────────────────────────────────────────────
 
 TEST(RecordsCodec, WorkRecordMinimal) {
     WorkRecord wr{};
-    wr.agent    = make_ref(0x10, 0x11);
     wr.action   = "установка розетки";
     wr.start_ts = 1'700'000'000LL;
     wr.hours    = 2.5;
     // empty inputs/outputs
     const auto decoded = std::get<WorkRecord>(roundtrip(wr));
-    EXPECT_EQ(decoded.agent,    wr.agent);
+    EXPECT_TRUE(decoded.title.empty());
     EXPECT_EQ(decoded.action,   wr.action);
     EXPECT_EQ(decoded.start_ts, wr.start_ts);
     EXPECT_DOUBLE_EQ(decoded.hours, wr.hours);
@@ -203,7 +176,6 @@ TEST(RecordsCodec, WorkRecordMinimal) {
 
 TEST(RecordsCodec, WorkRecordWithResources) {
     WorkRecord wr{};
-    wr.agent    = make_ref(0x10, 0x11);
     wr.action   = "фрезеровка";
     wr.start_ts = 1'700'000'000LL;
     wr.hours    = 3.5;
@@ -215,6 +187,28 @@ TEST(RecordsCodec, WorkRecordWithResources) {
     ASSERT_EQ(decoded.outputs.size(), 1u);
     EXPECT_EQ(decoded.inputs[0],  wr.inputs[0]);
     EXPECT_EQ(decoded.outputs[0], wr.outputs[0]);
+}
+
+// Разряда и специальности больше нет (ИР-022 шаг 11): запись работы ни на что не
+// ссылается. «Кем работал» — вольный текст для людей, по которому ничего не
+// считается; пустой поля не занимает.
+TEST(RecordsCodec, WorkRecordTitleIsFreeTextAndOptional) {
+    WorkRecord wr{};
+    wr.action   = "замена проводки";
+    wr.start_ts = 1;
+    wr.hours    = 3.0;
+    EXPECT_EQ(Codec::encode(Record{wr})[0], 0xA6);           // map(6): без хвоста
+    wr.title    = "электрик, 5-й разряд";
+    EXPECT_EQ(std::get<WorkRecord>(roundtrip(wr)).title, wr.title);
+
+    CarryEntry ce{};                                          // оба необязательных
+    ce.src = make_ref(0x61, 0x01); ce.used = 1.0; ce.carried = 0.1; ce.after = 0.1;
+    wr.carry.push_back(ce);
+    const auto bytes = Codec::encode(Record{wr});
+    EXPECT_EQ(bytes[0], 0xA8);                                // 6 + перенос + название
+    const auto d = std::get<WorkRecord>(Codec::decode(bytes));
+    EXPECT_EQ(d.title, wr.title);
+    ASSERT_EQ(d.carry.size(), 1u);
 }
 
 // ── Acceptance ────────────────────────────────────────────────────────────────
@@ -236,6 +230,56 @@ TEST(RecordsCodec, Acceptance) {
     EXPECT_DOUBLE_EQ(decoded.hours_raw,   a.hours_raw);
     EXPECT_DOUBLE_EQ(decoded.labor_units, a.labor_units);
     EXPECT_EQ(decoded.timestamp, a.timestamp);
+}
+
+// «Такая же работа, как та» (ИР-022 шаг 11): приёмка может назвать образец, чью
+// разбивку повторяет. Разбивка при этом выписана целиком — ссылка говорит лишь,
+// откуда она. Хвост читается по ключу: 7, 8, 9, 10 по возрастанию.
+TEST(RecordsCodec, AcceptanceLikeNamesTheSample) {
+    Acceptance a{};
+    a.work        = make_ref(0x53, 0x54);
+    a.receiver.fill(0xCC);
+    a.quality     = "как новый";
+    a.hours_raw   = 2.0;
+    a.labor_units = 2.0;
+    a.axes        = {{make_path(0x79, 0x01), 2.0}};
+    a.timestamp   = 1'700'000'100LL;
+    a.like        = make_ref(0xB1, 0x5A);
+    const auto d = std::get<Acceptance>(roundtrip(a));
+    ASSERT_TRUE(d.like.has_value());
+    EXPECT_EQ(*d.like, *a.like);
+
+    a.carried_units = 0.5;
+    AcceptanceNorm n{};
+    n.agg.fill(0x33); n.date = 86'400; n.W = 1.0;
+    a.norm = n;
+    const auto bytes = Codec::encode(Record{a});
+    EXPECT_EQ(bytes[0], 0xAB);                                // map(11): все поля
+    const auto all = std::get<Acceptance>(Codec::decode(bytes));
+    EXPECT_EQ(*all.like, *a.like);
+    EXPECT_DOUBLE_EQ(*all.carried_units, 0.5);
+    ASSERT_TRUE(all.norm.has_value());
+}
+
+// Приёмки без разбивки не существует и при ЧТЕНИИ: обратной совместимости нет
+// (решение участника 2026-09-11). Запись, из которой вырезан ключ 9, отвергается.
+TEST(RecordsCodec, AcceptanceWithoutAxesIsNotRead) {
+    Acceptance a{};
+    a.work        = make_ref(0x53, 0x54);
+    a.receiver.fill(0xCC);
+    a.quality     = "пройдено";
+    a.hours_raw   = 1.0;
+    a.labor_units = 1.0;
+    a.axes        = {{make_path(0x79, 0x01), 1.0}};
+    a.timestamp   = 7;
+    auto bytes = Codec::encode(Record{a});
+    ASSERT_EQ(bytes[0], 0xA8);                                // семь полей + разбивка
+    const std::vector<uint8_t> key9 = {0x09, 0x81};           // ключ 9, массив из одной
+    const auto at = std::find_end(bytes.begin(), bytes.end(), key9.begin(), key9.end());
+    ASSERT_NE(at, bytes.end());
+    bytes.erase(at, bytes.end());                             // разбивка — последнее поле
+    bytes[0] = 0xA7;
+    EXPECT_THROW(Codec::decode(bytes), CodecError);
 }
 
 // ── Economy (records.md §11) ──────────────────────────────────────────────────
@@ -370,89 +414,64 @@ TEST(RecordsCodec, PledgeRevokeRoundtrip) {
     EXPECT_EQ(decoded.timestamp, pr.timestamp);
 }
 
+// DailyAggregate v5 (ИР-022 шаг 11): цены осей, а не ставки специальностей.
 TEST(RecordsCodec, DailyAggregateRoundtrip) {
     DailyAggregate d{};
     d.date      = 1'700'000'000LL - 1'700'000'000LL % 86400;
     d.timestamp = 1'700'000'042LL;
-    d.rates     = { {"хлебопёк", 1.333, 0.6, 2},
-                    {"кардиохирург", 14.0, 0.75, 1} };
-
-    d.W         = 1.0509;   // v3 (economy.md §2б): нормировщик
-    d.indep     = "v1;window_days=365;max_cycle=4";   // v4 (ИР-021)
-    d.rates[0].weighted_hours = 0.42;   // часть объёма ушла в дисконт
-    d.rates[1].weighted_hours = 0.75;   // всё уцелело
+    d.axes      = { {make_path(0x79, 0x01), 0.41, 6.0, 3, 5.5},
+                    {make_path(0x79, 0x02, 9, 4), 0.34, 2.0, 1, 2.0} };
+    d.W         = 1.0509;
+    d.indep     = "v3;ref=axis_prices;window_days=365";
 
     const auto decoded = std::get<DailyAggregate>(roundtrip(d));
     EXPECT_EQ(decoded.date,      d.date);
     EXPECT_EQ(decoded.timestamp, d.timestamp);
     EXPECT_DOUBLE_EQ(decoded.W,  1.0509);
     EXPECT_EQ(decoded.indep,     d.indep);
-    ASSERT_EQ(decoded.rates.size(), 2u);
-    EXPECT_EQ(decoded.rates[0], d.rates[0]);
-    EXPECT_EQ(decoded.rates[1], d.rates[1]);
-    EXPECT_DOUBLE_EQ(decoded.rates[0].weighted_hours, 0.42);
+    ASSERT_EQ(decoded.axes.size(), 2u);
+    EXPECT_EQ(decoded.axes[0], d.axes[0]);
+    EXPECT_EQ(decoded.axes[1], d.axes[1]);
+    EXPECT_EQ(decoded.axes[1].axis.node, 9u);                 // полный путь уцелел
 
     DailyAggregate empty{};
     empty.date = 0;
     const auto de = std::get<DailyAggregate>(roundtrip(empty));
-    EXPECT_TRUE(de.rates.empty());
-    EXPECT_DOUBLE_EQ(de.W, 1.0);    // default par
-    EXPECT_TRUE(de.indep.empty());  // взвешивание не применялось
+    EXPECT_TRUE(de.axes.empty());
+    EXPECT_DOUBLE_EQ(de.W, 1.0);
+    EXPECT_TRUE(de.indep.empty());
 }
 
-// RateEntry v3 (ИР-022): разряда в ключе нет. Поле 1 снято, остальные номера
-// прежние — массив из одной ставки: map(5), ключ 0 «a», сразу ключ 2.
-TEST(RecordsCodec, RateEntryV3CarriesNoGrade) {
-    DailyAggregate d{};
-    d.date  = 0;
-    d.rates = { {"a", 2.0, 4.0, 2, 4.0} };
-    const auto bytes = Codec::encode(Record{d});
-    const std::vector<uint8_t> entry = {0x81, 0xA5, 0x00, 0x61, 0x61, 0x02};
-    EXPECT_NE(std::search(bytes.begin(), bytes.end(), entry.begin(), entry.end()),
-              bytes.end());
-    const auto back = std::get<DailyAggregate>(Codec::decode(bytes));
-    ASSERT_EQ(back.rates.size(), 1u);
-    EXPECT_EQ(back.rates[0], d.rates[0]);
-}
+// Старые раскладки — ставки по специальности под ключом 2, с разрядом, без W —
+// не читаются: обратной совместимости нет (решение участника 2026-09-11).
+TEST(RecordsCodec, DailyAggregateOldLayoutsAreRefused) {
+    std::vector<uint8_t> no_w;                                // map(4) без W и indep
+    no_w.push_back(0xA4);
+    no_w.push_back(0x00); no_w.push_back(0x18); no_w.push_back(0x71);
+    no_w.push_back(0x01); no_w.push_back(0x00);
+    no_w.push_back(0x02); no_w.push_back(0x80);
+    no_w.push_back(0x03); no_w.push_back(0x00);
+    EXPECT_THROW(Codec::decode(no_w), CodecError);
 
-// Ставка с разрядом — так её писали до 2026-09-10 (шесть полей, разряд под
-// ключом 1). Обратной совместимости нет (решение участника 2026-09-11): такая
-// запись отвергается, а не читается «мимо разряда».
-TEST(RecordsCodec, GradedRateEntryIsRefused) {
-    std::vector<uint8_t> b;
-    b.push_back(0xA5);                          // map(5): агрегат v3
-    b.push_back(0x00); b.push_back(0x18); b.push_back(0x71);  // 0: тип 0x71
-    b.push_back(0x01); b.push_back(0x00);       // 1: date 0
-    b.push_back(0x02); b.push_back(0x81);       // 2: массив из одной ставки
-    b.push_back(0xA6);                          //    map(6): RateEntry v2
-    b.push_back(0x00); b.push_back(0x61); b.push_back(0x61);  // 0: "a"
-    b.push_back(0x01); b.push_back(0x06);       // 1: разряд 6 — прочитать мимо
-    b.push_back(0x02); b.push_back(0xFB);       // 2: rate 2.0
-    for (uint8_t x : {0x40,0x00,0x00,0x00,0x00,0x00,0x00,0x00}) b.push_back(x);
-    b.push_back(0x03); b.push_back(0xFB);       // 3: hours 4.0
-    for (uint8_t x : {0x40,0x10,0x00,0x00,0x00,0x00,0x00,0x00}) b.push_back(x);
-    b.push_back(0x04); b.push_back(0x02);       // 4: deals 2
-    b.push_back(0x05); b.push_back(0xFB);       // 5: weighted_hours 3.0
-    for (uint8_t x : {0x40,0x08,0x00,0x00,0x00,0x00,0x00,0x00}) b.push_back(x);
-    b.push_back(0x03); b.push_back(0x00);       // 3: timestamp 0
-    b.push_back(0x04); b.push_back(0xFB);       // 4: W 1.0
-    for (uint8_t x : {0x3F,0xF0,0x00,0x00,0x00,0x00,0x00,0x00}) b.push_back(x);
-
-    EXPECT_THROW(Codec::decode(b), CodecError);
-}
-
-// A pre-v3 aggregate (4 fields, no W) still decodes, with W defaulting to 1.0.
-TEST(RecordsCodec, DailyAggregateLegacyFourFieldsDecodesWithParW) {
-    // Hand-encode the old layout: map(4){0:type,1:date,2:[],3:timestamp}.
-    std::vector<uint8_t> b;
-    b.push_back(0xA4);                          // map(4)
-    b.push_back(0x00); b.push_back(0x18); b.push_back(0x71);  // 0: 0x71
-    b.push_back(0x01); b.push_back(0x00);       // 1: date 0
-    b.push_back(0x02); b.push_back(0x80);       // 2: [] (empty rates)
-    b.push_back(0x03); b.push_back(0x00);       // 3: timestamp 0
-    const auto d = std::get<DailyAggregate>(Codec::decode(b));
-    EXPECT_TRUE(d.rates.empty());
-    EXPECT_DOUBLE_EQ(d.W, 1.0);
+    std::vector<uint8_t> graded;                              // ставка с разрядом
+    graded.push_back(0xA5);
+    graded.push_back(0x00); graded.push_back(0x18); graded.push_back(0x71);
+    graded.push_back(0x01); graded.push_back(0x00);
+    graded.push_back(0x02); graded.push_back(0x81);
+    graded.push_back(0xA6);
+    graded.push_back(0x00); graded.push_back(0x61); graded.push_back(0x61);
+    graded.push_back(0x01); graded.push_back(0x06);
+    graded.push_back(0x02); graded.push_back(0xFB);
+    for (uint8_t x : {0x40,0x00,0x00,0x00,0x00,0x00,0x00,0x00}) graded.push_back(x);
+    graded.push_back(0x03); graded.push_back(0xFB);
+    for (uint8_t x : {0x40,0x10,0x00,0x00,0x00,0x00,0x00,0x00}) graded.push_back(x);
+    graded.push_back(0x04); graded.push_back(0x02);
+    graded.push_back(0x05); graded.push_back(0xFB);
+    for (uint8_t x : {0x40,0x08,0x00,0x00,0x00,0x00,0x00,0x00}) graded.push_back(x);
+    graded.push_back(0x03); graded.push_back(0x00);
+    graded.push_back(0x04); graded.push_back(0xFB);
+    for (uint8_t x : {0x3F,0xF0,0x00,0x00,0x00,0x00,0x00,0x00}) graded.push_back(x);
+    EXPECT_THROW(Codec::decode(graded), CodecError);
 }
 
 TEST(RecordsCodec, EconomyDeterminism) {
@@ -491,7 +510,6 @@ TEST(RecordsCodec, TruncatedDataThrows) {
 
 TEST(RecordsCodec, SameInputSameBytes) {
     WorkRecord wr{};
-    wr.agent    = make_ref(0xAA, 0xBB);
     wr.action   = "работа";
     wr.start_ts = 1234567890LL;
     wr.hours    = 1.0;
@@ -670,7 +688,6 @@ TEST(RecordsCodec, MaterialBatchPaidWithOrigin) {
 
 TEST(RecordsCodec, WorkRecordV2CarryRoundtrip) {
     WorkRecord wr{};
-    wr.agent    = make_ref(0x10, 0x11);
     wr.action   = "выпечка хлеба";
     wr.start_ts = 1'700'000'000LL;
     wr.hours    = 6.0;
@@ -700,18 +717,17 @@ TEST(RecordsCodec, WorkRecordV2CarryRoundtrip) {
     ASSERT_TRUE(decoded.carry[1].prev.has_value());
 }
 
-TEST(RecordsCodec, WorkRecordV1EncodingUnchangedByEmptyCarry) {
-    // Old records must keep their exact bytes: empty carry encodes as v1.
+TEST(RecordsCodec, WorkRecordEmptyCarryTakesNoField) {
+    // An empty carry is absent from the encoding, not an empty array.
     WorkRecord wr{};
-    wr.agent    = make_ref(0x10, 0x11);
     wr.action   = "розетка";
     wr.start_ts = 1LL;
     wr.hours    = 1.0;
 
     const auto bytes = Codec::encode(Record{wr});
-    // map(7): 0xA7 head — not map(8)
+    // map(6): 0xA6 head — no carry, no title
     ASSERT_FALSE(bytes.empty());
-    EXPECT_EQ(bytes[0], 0xA7);
+    EXPECT_EQ(bytes[0], 0xA6);
     const auto decoded = std::get<WorkRecord>(Codec::decode(bytes));
     EXPECT_TRUE(decoded.carry.empty());
 }
@@ -740,49 +756,49 @@ TEST(RecordsCodec, AcceptanceV2CarriedUnits) {
     EXPECT_FALSE(d1.carried_units.has_value());
 }
 
-// ── SpecialtyCloud (0x75) — облако специальностей (ИР-018, specialty-axes.md §10)
-TEST(RecordsCodec, SpecialtyCloudRoundtrip) {
-    SpecialtyCloud c{};
+// ── WorkCloud (0x75) — облако образцов работ (ИР-022 шаг 11, specialty-axes.md §10)
+TEST(RecordsCodec, WorkCloudRoundtrip) {
+    WorkCloud c{};
     c.date      = 1'700'000'000LL - (1'700'000'000LL % 86'400);
     c.snapshot.fill(0xAB);
-    c.params    = "v1;k=5;danger_w=1.0";
+    c.params    = "v4;basis=samples;affinity=bhattacharyya;k=5";
     std::array<uint8_t, 32> src{}; src.fill(0x11);
     c.sources.push_back(src);
 
     CloudPoint p{};
-    p.slug   = "prof.electrician.live-line";
-    p.parent = "prof.electrician";
-    p.neighbors.push_back({"prof.welder", 0.82});
-    p.neighbors.push_back({"prof.electrician.install", 0.61});
+    p.sample = make_ref(0xB1, 0x5A);
+    p.title  = "электрик, работа под напряжением";
+    p.deals  = 7;
+    p.neighbors.push_back({make_ref(0xB2, 0x5B), 0.82});
+    p.neighbors.push_back({make_ref(0xB3, 0x5C), 0.61});
     c.points.push_back(p);
 
-    CloudPoint q{};   // activity with no parent, no neighbours
-    q.slug = "prof.scribe";
+    CloudPoint q{};                                           // без названия и соседей
+    q.sample = make_ref(0xB4, 0x5D);
+    q.deals  = 2;
     c.points.push_back(q);
-
     c.timestamp = 1'700'000'050LL;
 
-    const auto d = std::get<SpecialtyCloud>(roundtrip(Record{c}));
+    const auto d = std::get<WorkCloud>(roundtrip(Record{c}));
     EXPECT_EQ(d.date, c.date);
     EXPECT_EQ(d.snapshot, c.snapshot);
-    EXPECT_EQ(d.params, "v1;k=5;danger_w=1.0");
+    EXPECT_EQ(d.params, c.params);
     ASSERT_EQ(d.sources.size(), 1u);
     EXPECT_EQ(d.sources[0], src);
     ASSERT_EQ(d.points.size(), 2u);
-    EXPECT_EQ(d.points[0].slug, "prof.electrician.live-line");
-    EXPECT_EQ(d.points[0].parent, "prof.electrician");
+    EXPECT_EQ(d.points[0].sample, p.sample);
+    EXPECT_EQ(d.points[0].title, p.title);
+    EXPECT_EQ(d.points[0].deals, 7u);
     ASSERT_EQ(d.points[0].neighbors.size(), 2u);
-    EXPECT_EQ(d.points[0].neighbors[0].slug, "prof.welder");
-    EXPECT_DOUBLE_EQ(d.points[0].neighbors[0].weight, 0.82);
-    EXPECT_EQ(d.points[1].slug, "prof.scribe");
-    EXPECT_EQ(d.points[1].parent, "");
+    EXPECT_EQ(d.points[0].neighbors[0], p.neighbors[0]);
+    EXPECT_EQ(d.points[1].title, "");
     EXPECT_TRUE(d.points[1].neighbors.empty());
     EXPECT_EQ(d.timestamp, 1'700'000'050LL);
 }
 
-TEST(RecordsCodec, SpecialtyCloudDeterminism) {
-    SpecialtyCloud c{};
-    c.date = 86'400; c.snapshot.fill(1); c.params = "v1"; c.timestamp = 100;
+TEST(RecordsCodec, WorkCloudDeterminism) {
+    WorkCloud c{};
+    c.date = 86'400; c.snapshot.fill(1); c.params = "v4"; c.timestamp = 100;
     EXPECT_EQ(Codec::encode(Record{c}), Codec::encode(Record{c}));
 }
 

@@ -21,9 +21,9 @@ enum class RecordType : uint8_t {
     Copy         = 0x43,
     Reaction     = 0x44,
     // Labor
-    Specialty    = 0x50,
-    Grade        = 0x51,
-    Worker       = 0x52,
+    // 0x50 Specialty, 0x51 Grade, 0x52 Worker — сняты (ИР-022 шаг 11): какой
+    //      была работа, говорит разбивка её цены по осям, а не справочник и
+    //      не ступень лестницы (records.md §9.1); номера не переиспользуются.
     WorkRecord   = 0x53,
     Acceptance   = 0x54,
     // Production
@@ -35,7 +35,7 @@ enum class RecordType : uint8_t {
     Pledge         = 0x72,
     PledgeRevoke   = 0x73,
     Redemption     = 0x74,
-    SpecialtyCloud = 0x75,
+    WorkCloud      = 0x75,
     // 0x76 — AxisAttestation, снята: заверяла значения осей `x`, а у `x` не
     //        осталось читателя — облако стоит на разбивках сделок
     //        (records.md §11.8); номер не переиспользуется.
@@ -140,25 +140,6 @@ struct Reaction {
 
 // ── Labor records (records.md §9) ────────────────────────────────────────────
 
-struct Specialty {
-    static constexpr RecordType TYPE = RecordType::Specialty;
-
-    std::string name;   // "Электрик", "Столяр", "Программист", ...
-};
-
-struct Grade {
-    static constexpr RecordType TYPE = RecordType::Grade;
-
-    Ref     specialty;  // Ref to a Specialty record
-    uint8_t level;      // 1–6
-};
-
-struct Worker {
-    static constexpr RecordType TYPE = RecordType::Worker;
-
-    std::array<uint8_t, 32> chain;  // UserId of the owner (= their root public key)
-};
-
 // Named resource with quantity and unit — used in WorkRecord inputs/outputs
 struct ResourceQty {
     std::string resource;  // name or description of the material/product
@@ -189,17 +170,24 @@ struct CarryEntry {
     }
 };
 
+// One act of work (records.md §9.4). The worker is the chain that signed the
+// block. There is no reference to a specialty or a grade (ИР-022 шаг 11): what
+// the work was is said by the breakdown of its price in the Acceptance
+// (records.md §9.5), not by a catalogue slug or a rung of a ladder.
 struct WorkRecord {
     static constexpr RecordType TYPE = RecordType::WorkRecord;
 
-    Ref         agent;     // Ref to a Grade (or Role) record
     std::string action;    // description of the work performed
     int64_t     start_ts;  // Unix timestamp UTC
     double      hours;     // duration in hours
 
     std::vector<ResourceQty> inputs;   // may be empty
     std::vector<ResourceQty> outputs;  // may be empty
-    std::vector<CarryEntry>  carry;    // v2: cost carried from tools/materials
+    std::vector<CarryEntry>  carry;    // cost carried from tools/materials (ИР-011)
+    // «Кем работал» — free text for people («электрик, 5-й разряд»), a rudiment
+    // of the specialty and the grade. Nothing computes on it. Empty = not
+    // stated, and the field is then absent from the encoding.
+    std::string              title;
 };
 
 // Acceptance = the moment labor-hours come into existence (records.md §9.5)
@@ -243,7 +231,7 @@ struct Acceptance {
     std::array<uint8_t, 32> receiver;     // UserId of the receiver (= owner of this record)
     std::string             quality;      // e.g. "пройдено", "отклонено"
     double                  hours_raw;    // raw hours from WorkRecord
-    double                  labor_units;  // hours_raw * coefficient(grade) on acceptance day
+    double                  labor_units;  // price of live labour; by default hours × Σ network axis prices × k
     int64_t                 timestamp;    // Unix timestamp UTC
     // v2 (ИР-011): Σ carried of the accepted work. Payment ceiling is
     // labor_units + carried_units; rates take labor_units only (records.md §11.2).
@@ -258,10 +246,14 @@ struct Acceptance {
     // residual because there is nothing to add up beyond what is named here, and
     // nothing is inferred, so there is nothing to draw a profile against.
     //
-    // Empty is still decodable — every deal written before ИР-022 has no
-    // breakdown and still paid — but a deal without one does not enter the axis
-    // economy at all (records.md §11.11): it is a payment nobody explained.
+    // Empty is not a record: the codec refuses to write it and to read it.
     std::vector<AcceptanceAxis>    axes;
+    // The earlier acceptance whose breakdown this one repeats — «такая же
+    // работа, как та» (ИР-022 шаг 11). Provenance only: the breakdown above is
+    // still written out in full; `like` says where it came from. Acceptances
+    // linked by `like` form the families the work cloud is made of
+    // (records.md §11.7).
+    std::optional<Ref>             like;
 };
 
 // ── Production records (records.md §10, v2 — ИР-011) ─────────────────────────
@@ -390,82 +382,78 @@ struct PledgeRevoke {
     int64_t timestamp;  // Unix timestamp UTC
 };
 
-// Daily rate of one specialty (records.md §11.2).
+// The network's price of an hour of one axis, for one day (records.md §11.2 v5).
 //
-// v3 (ИР-022): the grade is NOT part of the key any more. It used to split a
-// specialty's rate by grade, so a master's hour came out dearer by decree of the
-// ladder — on top of whatever the deal itself paid for. The deal now itemizes
-// its price by axis (records.md §9.5 v4), and a grade in the key would pay a
-// second time for what the breakdown already named.
-struct RateEntry {
-    std::string specialty;  // global key: the specialty name
-    double      rate;       // стч/hour, after smoothing
-    double      hours;      // Σ hours_raw of the day's settled deals, RAW
-    uint64_t    deals;      // number of settled deals counted
-    // v2 (ИР-021): Σ weight·hours_raw — the volume that survived counterparty
-    // independence weighting. credibility = weighted_hours / hours ∈ [0,1] says
-    // how much of this basket's day was trusted evidence, so a reader sees not
-    // only the rate but how much was discounted to get it.
-    double      weighted_hours = 0.0;
+// v5 (ИР-022 шаг 11): there are no specialty rates any more. A deal names what
+// it paid for, axis by axis, so the network publishes what an hour of each axis
+// pays — and the default price of a work is the sum over the axes it names. A
+// specialty was a label a person picked from a list; an axis is what the deal
+// itself said.
+struct AxisPrice {
+    BlockPath axis;             // the AxisDef record (ИР-022)
+    double    price;            // стч per hour of work naming it, smoothed, RAW (÷ W)
+    double    hours;            // Σ hours_raw of the day's settled deals naming it
+    uint64_t  deals;            // how many of them
+    // Σ weight·hours_raw — the volume that survived counterparty-independence
+    // weighting (ИР-021). credibility = weighted_hours / hours ∈ [0,1].
+    double    weighted_hours = 0.0;
 
-    bool operator==(const RateEntry& o) const noexcept {
-        return specialty == o.specialty && rate == o.rate
-            && hours == o.hours && deals == o.deals
-            && weighted_hours == o.weighted_hours;
+    bool operator==(const AxisPrice& o) const noexcept {
+        return axis == o.axis && price == o.price && hours == o.hours
+            && deals == o.deals && weighted_hours == o.weighted_hours;
     }
 };
 
-// Signed daily specialty rates, written into the aggregator's own chain
+// Signed daily axis prices, written into the aggregator's own chain
 // (records.md §11.2): the block author IS the aggregator. Only settled deals
 // count; every figure is re-checkable against the chains.
 struct DailyAggregate {
     static constexpr RecordType TYPE = RecordType::DailyAggregate;
 
     int64_t                date;       // UTC day start (ts − ts mod 86400)
-    std::vector<RateEntry> rates;      // RAW rates (normalized = rate / W)
+    std::vector<AxisPrice> axes;       // v5: RAW prices (normalized = price / W)
     int64_t                timestamp;  // Unix timestamp UTC
-    // v3 (economy.md §2б): hours-weighted mean of the day's raw rates. The client
-    // divides each rate by W so the network's average labour-hour equals 1 — the
-    // money supply grows in step with hours actually worked. Old (4-field) blocks
-    // decode with W = 1.0 (no normalization).
+    // economy.md §2б: the network's average paper per labour-hour —
+    // Σ price·hours over the axes / Σ hours of the day's deals. The client divides
+    // by W so the average labour-hour equals 1.
     double                 W = 1.0;
-    // v4 (ИР-021): the counterparty-independence parameters this aggregate was
-    // computed with ("v1;window_days=365;max_cycle=4;..."), so a witness
-    // recomputes by the same methodology instead of guessing it — the same
-    // discipline as SpecialtyCloud::params. Empty: no weighting was applied.
+    // ИР-021: the counterparty-independence parameters this aggregate was
+    // computed with, so a witness recomputes by the same methodology instead of
+    // guessing it — the same discipline as WorkCloud::params.
     std::string            indep;
 };
 
-// One neighbour of an activity in the specialty cloud (ИР-018, specialty-axes.md
-// §10): a nearby (specialty, activity) slug and the proximity weight.
+// One neighbour of a sample in the work cloud: another sample and how much the
+// two are paid for the same things (0..1).
 struct CloudNeighbor {
-    std::string slug;   // neighbour activity slug (global rate key)
-    double      weight; // proximity 0..1 (closer → larger), used for rate priors
+    Ref    sample;   // the neighbour sample — an Acceptance
+    double weight;   // affinity 0..1 (1 = the same composition of price)
 
     bool operator==(const CloudNeighbor& o) const noexcept {
-        return slug == o.slug && weight == o.weight;
+        return sample == o.sample && weight == o.weight;
     }
 };
 
-// One point of the specialty cloud: an activity, its tree parent (the prior's
-// fallback) and its k nearest neighbours. Coordinates are NOT published: they are
-// read off the deals the snapshot commits (records.md §11.7), and the map for
-// people is served on demand — only what the rate prior needs is signed.
+// One point of the work cloud (ИР-022 шаг 11): a SAMPLE — an acceptance other
+// deals named with `like`, «такая же работа, как та» — the size of its family and
+// its k nearest samples. A profession is no longer a line in a catalogue: it is a
+// description of work that people keep reusing. Where a sample sits is read off
+// its family's breakdowns, which the snapshot commits (records.md §11.7).
 struct CloudPoint {
-    std::string                slug;      // activity = rate key (records.md §11.2, records.md §14.8)
-    std::string                parent;    // tree parent slug ("" = none) — drift target
-    std::vector<CloudNeighbor> neighbors; // k nearest, by affinity of price composition
+    Ref                        sample;     // the sample acceptance
+    std::string                title;      // its work's free-text title, for people
+    uint64_t                   deals = 0;  // the family: the sample and every deal naming it
+    std::vector<CloudNeighbor> neighbors;  // k nearest, by affinity of price composition
 };
 
-// Signed specialty cloud, written into the aggregator's own chain — twin of
-// DailyAggregate (specialty-axes.md §10, ИР-018). Neighbours + parents drive rate
-// priors for thin/new activities; `snapshot` commits the input block set so anyone
-// recomputes and verifies. Every figure is re-checkable against the chains.
-struct SpecialtyCloud {
-    static constexpr RecordType TYPE = RecordType::SpecialtyCloud;
+// Signed work cloud, written into the aggregator's own chain — twin of
+// DailyAggregate (specialty-axes.md §10). `snapshot` commits the input block set
+// so anyone recomputes and verifies.
+struct WorkCloud {
+    static constexpr RecordType TYPE = RecordType::WorkCloud;
 
     int64_t                             date;      // UTC day start
-    std::array<uint8_t, 32>             snapshot;  // hash of the input block set (+ catalog text)
+    std::array<uint8_t, 32>             snapshot;  // hash of the input block set
     std::string                         params;    // algorithm version + parameters
     std::vector<std::array<uint8_t, 32>> sources;  // chains the input came from
     std::vector<CloudPoint>             points;
@@ -514,9 +502,6 @@ using Record = std::variant<
     Composite,
     Copy,
     Reaction,
-    Specialty,
-    Grade,
-    Worker,
     WorkRecord,
     Acceptance,
     Material,
@@ -526,7 +511,7 @@ using Record = std::variant<
     Pledge,
     PledgeRevoke,
     Redemption,
-    SpecialtyCloud,
+    WorkCloud,
     AxisDef
 >;
 

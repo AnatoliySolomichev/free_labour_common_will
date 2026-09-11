@@ -136,7 +136,6 @@ TEST_F(DealViewTest, StagesDeriveFromWhicheverLinksExist) {
 
     // Worked: Anna logs the work and attaches it with "исполняет".
     records::WorkRecord work;
-    work.agent    = ref_of(anna, skill);   // any ref
     work.action   = "Замена проводки";
     work.start_ts = 1000;
     work.hours    = 6;
@@ -207,7 +206,6 @@ TEST_F(DealViewTest, DealWithoutPledgeReachesPaid) {
 
     const Hash need = add(vera, need_fact("Починить розетку"));
     records::WorkRecord work;
-    work.agent  = ref_of(anna, need);
     work.action = "починил";
     work.hours  = 1;
     const Hash wh = add(anna, work);
@@ -241,7 +239,6 @@ TEST_F(DealViewTest, SeveralWorksUnderOneNeed) {
     const Hash need = add(vera, need_fact("Полная замена проводки"));
     for (int session = 0; session < 3; ++session) {
         records::WorkRecord work;
-        work.agent  = ref_of(anna, need);
         work.action = "заход " + std::to_string(session + 1);
         work.hours  = 2;
         const Hash wh = add(anna, work);
@@ -260,7 +257,6 @@ TEST_F(DealViewTest, DirectDealAnchoredByAcceptance) {
     const UserId anna    = make_owner(0xA1);
 
     records::WorkRecord work;
-    work.agent  = ref_of(anna, Hash::zero());
     work.action = "проводка по дружбе, в мессенджере договорились";
     work.hours  = 3;
     const Hash wh = add(anna, work);
@@ -295,7 +291,6 @@ TEST_F(DealViewTest, ForeignFromSideLinksIgnored) {
     // Mallory "volunteers" with Anna's skill and pins Anna's work — both fake.
     add(mallory, link(ref_of(anna, skill), ref_of(vera, need), "берусь"));
     records::WorkRecord work;
-    work.agent  = ref_of(anna, skill);
     work.action = "чужая работа";
     work.hours  = 5;
     const Hash wh = add(anna, work);

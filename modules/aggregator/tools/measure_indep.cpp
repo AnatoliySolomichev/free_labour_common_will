@@ -154,8 +154,8 @@ public:
               double hours, const Lines& lines, int64_t ts) {
         const UserId p = person(payer), w = person(worker);
         records::WorkRecord wr{};
-        wr.agent = grade(w, spec, level);
         wr.hours = hours;
+        wr.title = spec + ", " + std::to_string(level) + "-й разряд";   // для людей
         const Block work = add(w, wr);
 
         records::Acceptance a{};
@@ -183,8 +183,6 @@ private:
     std::filesystem::path              dir_;
     std::unique_ptr<AggregatorStorage> storage_;
     BlockIndex                         next_ = 0;
-    std::map<std::tuple<std::array<uint8_t, 32>, std::string, int>, records::Ref> grades_;
-
     Block add(const UserId& owner, const records::Record& rec) {
         Block b{};
         b.address           = {owner, 0x7FFF'FFFFu, next_++};
@@ -200,15 +198,6 @@ private:
         return b;
     }
 
-    records::Ref grade(const UserId& w, const std::string& spec, int level) {
-        const auto key = std::make_tuple(w.bytes, spec, level);
-        if (const auto it = grades_.find(key); it != grades_.end()) return it->second;
-        const Block s = add(w, records::Specialty{spec});
-        records::Grade g{};
-        g.specialty = ref_to(w, s);
-        g.level     = static_cast<uint8_t>(level);
-        return grades_[key] = ref_to(w, add(w, g));
-    }
 };
 
 std::vector<Row> read_journal(const std::string& path) {
@@ -326,12 +315,14 @@ int main(int argc, char** argv) {
             w.deal(kAttackB, kAttackA, vspec, vlevel, 6.0, lines, attack_day(m) + 200);
         }
     };
-    // min_hours = 0: ни одна корзина не пропускается, даже целиком ушедшая в дисконт.
-    auto fold = [&](const World& w, int64_t day, double& wh, double& h, double* wr = nullptr) {
-        for (const auto& e : build_daily_rates(w.storage(), day, {}, 0.3, 0.0, nullptr, &indep)) {
+    // min_hours = 0: ни одна ось не пропускается, даже целиком ушедшая в дисконт.
+    // Часы сделки входят в каждую её ось, но вес у всех осей сделки один, поэтому
+    // доля уцелевшего объёма по осям та же, что по сделкам.
+    auto fold = [&](const World& w, int64_t day, double& wh, double& h, double* paid = nullptr) {
+        for (const auto& e : build_daily_prices(w.storage(), day, {}, 0.3, 0.0, &indep).axes) {
             wh += e.weighted_hours;
             h  += e.hours;
-            if (wr && std::isfinite(e.rate)) *wr += e.rate * e.hours;
+            if (paid && std::isfinite(e.price)) *paid += e.price * e.hours;
         }
     };
 
@@ -345,24 +336,26 @@ int main(int argc, char** argv) {
             World w(tmp / "honest");
             build(w, mode, false, std::nullopt);
             std::printf("  честный объём под дисконтом:");
-            double twh = 0.0, th = 0.0;
+            double lost = 0.0, all = 0.0;               // по часам сделок, не осей
             for (int l : levels) {
-                double wh = 0.0, h = 0.0;
+                double wh = 0.0, h = 0.0, hl = 0.0;
                 for (int m : months) fold(w, honest_day(m, l), wh, h);
-                std::printf("  р.%d %.2f%%", l, 100.0 * (1.0 - wh / h));
-                twh += wh;
-                th  += h;
+                for (const auto& r : rows) if (r.level == l) hl += r.hours;
+                const double share = 1.0 - wh / h;
+                std::printf("  р.%d %.2f%%", l, 100.0 * share);
+                lost += share * hl;
+                all  += hl;
             }
-            std::printf("  · всего %.2f%%\n", 100.0 * (1.0 - twh / th));
+            std::printf("  · всего %.2f%%\n", 100.0 * lost / all);
         }
         {
             World w(tmp / "oneday");
             build(w, mode, true, std::nullopt);
-            double wh = 0.0, h = 0.0, wr = 0.0;
-            for (int m : months) fold(w, oneday(m), wh, h, &wr);
+            double wh = 0.0, h = 0.0, paid = 0.0;
+            for (int m : months) fold(w, oneday(m), wh, h, &paid);
             double tu = 0.0, tt = 0.0;
             for (const auto& r : rows) { tu += r.hours * r.coef; tt += r.hours; }
-            const double raw = tu / tt, weighted = wr / h;
+            const double raw = tu / tt, weighted = paid / tt;
             std::printf("  нормировщик W: как есть %.4f, после взвешивания %.4f (сдвиг %+.2f%%)\n",
                         raw, weighted, 100.0 * (weighted / raw - 1.0));
         }

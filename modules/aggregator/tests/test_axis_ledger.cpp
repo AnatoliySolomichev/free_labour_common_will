@@ -53,7 +53,6 @@ protected:
     std::unique_ptr<AggregatorStorage> storage_;
     BlockIndex                         next_index_ = 0;
     UserId                             worker_ = chain_of(0xA1);
-    records::Ref                       grade_ref_{};
 
     void SetUp() override {
         static int cnt = 0;
@@ -61,11 +60,6 @@ protected:
                    ("bc_ledger_test_" + std::to_string(++cnt));
         std::filesystem::remove_all(db_path_);
         storage_ = std::make_unique<AggregatorStorage>(db_path_);
-        const Block spec = add(worker_, records::Specialty{"сварщик"});
-        records::Grade g{};
-        g.specialty = ref_to(worker_, spec);
-        g.level     = 4;
-        grade_ref_  = ref_to(worker_, add(worker_, g));
     }
     void TearDown() override {
         storage_.reset();
@@ -99,7 +93,7 @@ protected:
     records::Ref settled(const UserId& payer, double hours, double units,
                          std::vector<std::pair<records::BlockPath, double>> parts = {}) {
         records::WorkRecord wr{};
-        wr.agent = grade_ref_;
+        wr.title = "сварщик";
         wr.hours = hours;
         const Block work = add(worker_, wr);
 

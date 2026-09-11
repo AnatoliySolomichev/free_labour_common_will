@@ -124,9 +124,9 @@ agg_pid=$!
 for _ in $(seq 1 60); do curl -sf -o /dev/null "$VIA/catalog" && break || sleep 0.25; done
 
 # ── Население ────────────────────────────────────────────────────────────────
-log "▶ создаю население: $POP человек (identity + профиль + разряд), январь"
+log "▶ создаю население: $POP человек (identity + профиль), январь"
 set_month 0
-declare -a CID PROF GRADEREF SKREF GEOTXT NAME LVL CLUSTER
+declare -a CID PROF SKREF GEOTXT NAME LVL CLUSTER
 : > "$OUT/roster.tsv"
 setup_fail=0
 for ((i=0;i<POP;i++)); do
@@ -159,9 +159,6 @@ for ((i=0;i<POP;i++)); do
     # стремление переучиться на дефицитную профессию (у части)
     [[ $(rnd 3) -eq 0 ]] && ftbc "$who" concept add "готов освоить ремонт техники" \
         --tag kind:aspiration --tag cat:prof.appliance-repair --tag retrain:yes --via "$VIA" >/dev/null 2>&1
-    # специальность + разряд (чтобы каждый мог работать)
-    sp="$(ftbc "$who" specialty add "$prof" --via "$VIA" --force | after 'hash: ')"
-    GRADEREF[$i]="${CID[$i]}/$(ftbc "$who" grade add "${CID[$i]}/$sp" "$lvl" --via "$VIA" | after 'hash: ')"
     printf '%d\t%s\t%s\t%d\t%s\t%s\n' "$i" "${CID[$i]}" "$prof" "$lvl" "${GEOTXT[$i]}" "${NAME[$i]}" >> "$OUT/roster.tsv"
     (( i % 25 == 0 )) && log "   … $i/$POP"
 done
@@ -184,6 +181,7 @@ for j in 0 1 2; do
 done
 
 # ── Одна сделка: заказчик c нанимает работника w на h часов ──────────────────
+declare -A SAMPLE   # профессия → приёмка-образец (первая сделка профессии)
 ok_deals=0; fail_deals=0; total_hours=0
 printf 'month\tpayer\tworker\tspecialty\tlevel\thours\tcoef\n' > "$OUT/deals.tsv" 
 do_deal(){
@@ -198,16 +196,24 @@ do_deal(){
     # открытый вопрос экономики (обсуждается, см. docs/economy.md).
     coef="$(awk -v l="${LVL[$w]}" -v j="$(rnd 17)" 'BEGIN{printf "%.2f", 1.0+0.10*(l-4.5)+(j-8)/100}')"
     units="$(awk -v c="$coef" -v h="$h" 'BEGIN{printf "%.4f", c*h}')"
-    wh="$(ftbc "p$w" work log --agent "${GRADEREF[$w]}" --action "услуга" --hours "$h" --via "$VIA" | after 'hash: ')"
+    wh="$(ftbc "p$w" work log --title "${PROF[$w]#prof.}, ${LVL[$w]}-й разряд" --action "услуга" --hours "$h" --via "$VIA" | after 'hash: ')"
     [[ -z "$wh" ]] && { ((fail_deals++)); return; }
     ftbc "p$c" fetch "${CID[$w]}/$wh" --via "$VIA" >/dev/null 2>&1 || { ((fail_deals++)); return; }
+    # Первая сделка профессии становится её ОБРАЗЦОМ; следующие принимаются
+    # «как та» (--like): разбивка копируется, ссылка остаётся — из таких семей
+    # и складывается облако работ (ИР-022 шаг 11).
     shares=()
-    for kv in $(axis_shares "${PROF[$w]}"); do
-        shares+=(--axis-share "$(axis "${kv%%=*}")=${kv##*=}")
-    done
+    if [[ -n "${SAMPLE[${PROF[$w]}]:-}" ]]; then
+        shares=(--like "${SAMPLE[${PROF[$w]}]}")
+    else
+        for kv in $(axis_shares "${PROF[$w]}"); do
+            shares+=(--axis-share "$(axis "${kv%%=*}")=${kv##*=}")
+        done
+    fi
     acc="$(ftbc "p$c" accept --work "${CID[$w]}/$wh" --quality ok --labor-units "$units" \
            "${shares[@]}" --via "$VIA" | after 'acceptance ref: ')"
     [[ -z "$acc" ]] && { ((fail_deals++)); return; }
+    [[ -z "${SAMPLE[${PROF[$w]}]:-}" ]] && SAMPLE[${PROF[$w]}]="$acc"
     xf="$(ftbc "p$c" pay --acceptance "$acc" --via "$VIA" | after 'transfer ref: ')"
     [[ -z "$xf" ]] && { ((fail_deals++)); return; }
     ftbc "p$w" transfer recv "$xf" --via "$VIA" >/dev/null 2>&1
@@ -354,17 +360,16 @@ if isinstance(match,dict) and match.get('rings') is not None:
 # последний месяц, где ставки посчитались — как «текущие» ставки года
 rates_latest=[]; rates_latest_month=None
 for mo in sorted(rates_by_month):
-    rr=(rates_by_month[mo] or {}).get('rates') or []
+    rr=(rates_by_month[mo] or {}).get('axes') or []
     if rr: rates_latest, rates_latest_month = rr, mo
 
-# ИНДЕКС СРЕДНЕГО ТРУДОЧАСА: взвешенное по часам среднее ставок за месяц.
+# ИНДЕКС СРЕДНЕГО ТРУДОЧАСА: нормировщик W за месяц — средняя бумага на трудочас.
 # =1.0 → за час труда создаётся ровно час бумаги (эмиссия в ногу с работой);
 # >1 → инфляция трудочаса, <1 → дефляция. Считается из публичных сделок.
 rates_index={}
 for mo in sorted(rates_by_month):
-    rr=(rates_by_month[mo] or {}).get('rates') or []
-    den=sum(x.get('hours',0) for x in rr)
-    if den: rates_index[mo]=round(sum(x.get('rate',0)*x.get('hours',0) for x in rr)/den,4)
+    rr=(rates_by_month[mo] or {}).get('axes') or []
+    if rr: rates_index[mo]=round((rates_by_month[mo] or {}).get('W',1.0),4)
 
 # распределения
 def hist(vals,edges):
@@ -437,17 +442,16 @@ for prof,b in sorted(by_prof.items(),key=lambda kv:-kv[1]['avg_received']):
     P(f"    {prof:<20}{b['n']:>4}{b['avg_issued']:>9}{b['avg_received']:>9}{b['avg_labor']:>9}")
 
 if rates_latest:
-    P(f"\n  СЕТЕВЫЕ СТАВКИ на {rates_latest_month} (ч оплаты за час труда, по специальности):")
-    for r in sorted(rates_latest,key=lambda r:-r.get('rate',0))[:10]:
-        P(f"    {r.get('specialty',''):<20} ставка {r.get('rate',0):.3f}  "
+    P(f"\n  СЕТЕВЫЕ ЦЕНЫ ОСЕЙ на {rates_latest_month} (стч за час работы, назвавшей ось):")
+    for r in sorted(rates_latest,key=lambda r:-r.get('price',0))[:10]:
+        P(f"    {(r.get('label') or r.get('axis','')[:12]):<22} цена {r.get('price',0):.3f}  "
           f"(сделок {r.get('deals',0)}, ч {r.get('hours',0):.0f})")
-    months_with_rates=sum(1 for mo in rates_by_month if (rates_by_month[mo] or {}).get('rates'))
-    P(f"    (ставки посчитаны для {months_with_rates} мес. из {MONTHS})")
-    lo=min(r.get('rate',0) for r in rates_latest); hi=max(r.get('rate',0) for r in rates_latest)
-    P(f"    размах в этом месяце: {lo:.3f} … {hi:.3f} — есть и ниже, и выше единицы")
+    months_with_rates=sum(1 for mo in rates_by_month if (rates_by_month[mo] or {}).get('axes'))
+    P(f"    (цены посчитаны для {months_with_rates} мес. из {MONTHS})")
+    P("    цена работы по умолчанию — сумма цен её осей; средний трудочас держит W ниже")
 
 if rates_index:
-    P("\n  ИНДЕКС СРЕДНЕГО ТРУДОЧАСА по месяцам (взвешенное по часам среднее ставок):")
+    P("\n  ИНДЕКС СРЕДНЕГО ТРУДОЧАСА по месяцам (нормировщик W — средняя бумага на трудочас):")
     P("    =1.000 → за час труда создаётся ровно час бумаги; >1 инфляция, <1 дефляция")
     vals=list(rates_index.values())
     for mo,v in rates_index.items():

@@ -190,10 +190,8 @@ bcp anna match --via "$VIA"
 
 # ═════════════════════════════════════════════════════════════════════════════
 act "5. Средства производства и амортизация (ИР-011): печь и мука"
-say "Анне-повару нужны разряд и средства производства — они переносят стоимость"
-SPEC_anna=$( bcp anna specialty add prof.cook --via "$VIA" | after 'hash: ')
-GRADE_anna=$(bcp anna grade add "${CID[anna]}/$SPEC_anna" 5 --via "$VIA" | after 'hash: ')
-say "специальность prof.cook, разряд 5"
+say "Анне-повару нужны средства производства — они переносят стоимость"
+say "кем работает — пишет в самой работе вольным текстом; по нему ничего не считается"
 
 TOOL=$(bcp anna tool add "Печь подовая" --cost 315 --life 8000 --serial PP-2019-0417 \
        --note "120000руб / 380руб-ч ≈ 315ч" --via "$VIA" | after 'tool ref: ')
@@ -207,7 +205,7 @@ say "мука:  4ч / партия 50 кг     ($(short "$MAT_H"))"
 # ═════════════════════════════════════════════════════════════════════════════
 act "6. Анна печёт для Дмитрия (need.food) — труд + перенос стоимости"
 say "6ч работы; печь 6 моточасов и мука 12 кг переносят свою стоимость в хлеб"
-WORK_anna=$(bcp anna work log --agent "${CID[anna]}/$GRADE_anna" \
+WORK_anna=$(bcp anna work log --title "повар, 5-й разряд" \
             --action "выпечка обедов для бригады" --hours 6 --output "хлеб:24:шт" \
             --tool "${TOOL_H:0:12}:6" --material "${MAT_H:0:12}:12" --via "$VIA" | after 'hash: ')
 say "печь → 6/8000 × 315 = 0.23625ч ;  мука → 12/50 × 4 = 0.96ч"
@@ -235,8 +233,6 @@ say "Анна держит бумагу Дмитрия на $paid1ч (bc transfe
 # ═════════════════════════════════════════════════════════════════════════════
 act "7. Сделка полного цикла (bc deal): Анна ← Борис закрывает need.electrical"
 say "берусь → найм → работа → приёмка → расчёт; ссылки подставляются сами"
-SPEC_boris=$( bcp boris specialty add prof.electrician --via "$VIA" | after 'hash: ')
-GRADE_boris=$(bcp boris grade add "${CID[boris]}/$SPEC_boris" 4 --via "$VIA" | after 'hash: ')
 
 hr "Борис берётся (bc deal take)"
 bcp boris deal take "$ND_anna" --via "$VIA" | sed 's/^/   /'
@@ -244,7 +240,7 @@ hr "Анна нанимает Бориса на 3ч (bc deal hire)"
 bcp anna deal hire "$ND_anna" --executor "${CID[boris]}" --units 3 --via "$VIA" | sed 's/^/   /'
 hr "Борис делает работу и привязывает её к потребности (bc deal work)"
 WORK_boris=$(bcp boris deal work "$ND_anna" --hours 3 --action "Замена проводки на кухне" \
-             --agent "${CID[boris]}/$GRADE_boris" --via "$VIA" | after 'работа: ' | awk '{print $1}')
+             --title "электрик, 4-й разряд" --via "$VIA" | after 'работа: ' | awk '{print $1}')
 hr "Анна принимает и платит — бумагой Дмитрия, которую держит (оборот!)"
 bcp anna fetch "$WORK_boris" --via "$VIA" >/dev/null
 ACC_boris=$(bcp anna accept --work "$WORK_boris" --quality "аккуратно" --coef 1.0 --axis-share "$(axis precision)=0.45" --axis-share "$(axis knowledge)=0.3" --axis-share "$(axis physical)=0.25" --via "$VIA" | after 'acceptance ref: ')
@@ -256,16 +252,12 @@ say "→ Анна расплатилась бумагой Дмитрия: она
 
 # ═════════════════════════════════════════════════════════════════════════════
 act "8. Кольцо замыкается: Борис → Вера → Дмитрий, бумага возвращается эмитенту"
-SPEC_vera=$( bcp vera specialty add prof.tailor --via "$VIA" | after 'hash: ')
-GRADE_vera=$(bcp vera grade add "${CID[vera]}/$SPEC_vera" 5 --via "$VIA" | after 'hash: ')
-SPEC_dmitry=$( bcp dmitry specialty add prof.carpenter --via "$VIA" | after 'hash: ')
-GRADE_dmitry=$(bcp dmitry grade add "${CID[dmitry]}/$SPEC_dmitry" 6 --via "$VIA" | after 'hash: ')
 
 hr "Вера чинит робу Бориса (need.clothing) — сделка, оплата бумагой Дмитрия"
 bcp vera deal take "$ND_boris" --via "$VIA" >/dev/null
 bcp boris deal hire "$ND_boris" --executor "${CID[vera]}" --units 2 --via "$VIA" >/dev/null
 WORK_vera=$(bcp vera deal work "$ND_boris" --hours 2 --action "Пошив рабочей робы" \
-            --agent "${CID[vera]}/$GRADE_vera" --via "$VIA" | after 'работа: ' | awk '{print $1}')
+            --title "портниха" --via "$VIA" | after 'работа: ' | awk '{print $1}')
 bcp boris fetch "$WORK_vera" --via "$VIA" >/dev/null
 ACC_vera=$(bcp boris accept --work "$WORK_vera" --quality "по фигуре" --coef 1.0 --axis-share "$(axis precision)=0.5" --axis-share "$(axis creativity)=0.3" --axis-share "$(axis knowledge)=0.2" --via "$VIA" | after 'acceptance ref: ')
 PAY3="$(bcp boris pay --acceptance "$ACC_vera" --via "$VIA" 2>&1)"
@@ -280,7 +272,7 @@ TOOL2_H="${TOOL2#*/}"
 MAT2=$(bcp dmitry material add "Доска мебельная" --unit шт --cost 3 --qty 30 \
        --note "оценка партии" --via "$VIA" | after 'material ref: ')
 MAT2_H="${MAT2#*/}"
-WORK_dmitry=$(bcp dmitry work log --agent "${CID[dmitry]}/$GRADE_dmitry" \
+WORK_dmitry=$(bcp dmitry work log --title "столяр, 6-й разряд" \
               --action "Ремонт дверцы шкафа" --hours 5 --output "шкаф:1:шт" \
               --tool "${TOOL2_H:0:12}:5" --material "${MAT2_H:0:12}:10" --via "$VIA" | after 'hash: ')
 # привязать работу к потребности Веры
@@ -311,12 +303,10 @@ for r in d["axes"][:8]:
 ' || say "(книга пуста — ни одной расписанной сделки)"
 
 act "9. Отдельное кольцо через полный bc deal settle: Ирина ← Пётр (need.health)"
-SPEC_petr=$( bcp petr specialty add prof.doctor --via "$VIA" | after 'hash: ')
-GRADE_petr=$(bcp petr grade add "${CID[petr]}/$SPEC_petr" 6 --via "$VIA" | after 'hash: ')
 bcp petr  deal take "$ND_irina" --via "$VIA" >/dev/null
 bcp irina deal hire "$ND_irina" --executor "${CID[petr]}" --units 1 --via "$VIA" >/dev/null
 WORK_petr=$(bcp petr deal work "$ND_irina" --hours 1 --action "Плановый осмотр" \
-            --agent "${CID[petr]}/$GRADE_petr" --via "$VIA" | after 'работа: ' | awk '{print $1}')
+            --title "врач" --via "$VIA" | after 'работа: ' | awk '{print $1}')
 bcp irina fetch "$WORK_petr" --via "$VIA" >/dev/null
 bcp irina accept --work "$WORK_petr" --quality "здорова" --coef 1.0 --axis-share "$(axis responsibility)=0.5" --axis-share "$(axis knowledge)=0.5" --via "$VIA" >/dev/null
 hr "bc deal settle — платит по приёмке и СПРАШИВАЕТ, закрыта ли потребность"
@@ -325,9 +315,7 @@ bcp irina deal settle "$ND_irina" --yes --via "$VIA" | sed 's/^/   /'
 # ═════════════════════════════════════════════════════════════════════════════
 act "10. Явный перевод и кошельки (bc transfer send / wallet)"
 say "Пелагея-медсестра принимает работу Галины и платит прямым переводом"
-SPEC_galina=$( bcp galina specialty add prof.hairdresser --via "$VIA" | after 'hash: ')
-GRADE_galina=$(bcp galina grade add "${CID[galina]}/$SPEC_galina" 4 --via "$VIA" | after 'hash: ')
-WORK_galina=$(bcp galina work log --agent "${CID[galina]}/$GRADE_galina" \
+WORK_galina=$(bcp galina work log --title "парикмахер" \
               --action "Стрижка перед сменой" --hours 1 --via "$VIA" | after 'hash: ')
 bcp pelageya fetch "${CID[galina]}/$WORK_galina" --via "$VIA" >/dev/null
 ACC_galina=$(bcp pelageya accept --work "${CID[galina]}/$WORK_galina" --quality "аккуратно" --coef 1.0 --axis-share "$(axis precision)=0.5" --axis-share "$(axis physical)=0.3" --axis-share "$(axis pace)=0.2" --via "$VIA" | after 'acceptance ref: ')
@@ -337,24 +325,51 @@ hr "кошелёк Анны (держит чужую бумагу) и Дмитр
 say "Анна:";   bcp anna   wallet | sed 's/^/     /'
 say "Дмитрий:"; bcp dmitry wallet | sed 's/^/     /'
 
-hr "сетевые ставки по специальностям (bc rates — подписанный DailyAggregate)"
-bcp anna rates --via "$VIA" | python3 -m json.tool 2>/dev/null | head -20 || bcp anna rates --via "$VIA"
+hr "сетевые цены осей (bc rates — подписанный DailyAggregate; ниже — по сделкам дня)"
+say "цены больше не по специальности: сколько сеть платит за час каждой оси."
+say "цена работы по умолчанию — часы × сумма цен названных осей × k"
+bcp anna rates --via "$VIA" >/dev/null 2>&1 || true
+curl -s "$VIA/economy/rates?day=$(date -u +%s)" > "$work/prices.json" 2>/dev/null || true
+python3 - "$work/prices.json" <<'PY' 2>/dev/null || say "(цены не прочитались)"
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(f"     W = {d.get('W', 1.0):.3f}  — средняя бумага на трудочас")
+for a in sorted(d.get("axes", []), key=lambda a: -a["price"])[:8]:
+    print(f"     {a['label'] or a['axis'][:12]:22s} {a['price']:.3f} стч/ч  ({a['deals']} сд., {a['hours']:.0f} ч)")
+PY
 
-hr "облако специальностей — из сделок, а не из каталога (bc cloud, ИР-022)"
-say "место специальности — из чего сложилась её цена: доли оплаты по осям."
+hr "«такая же работа, как та» — образцы работ (bc accept --like, ИР-022)"
+say "вторая стрижка, вторая проводка и второй обед принимаются по образцу первых:"
+say "разбивка копируется у образца, а ссылка на него остаётся в приёмке"
+W_gal2=$(bcp galina work log --title "парикмахер" --action "Стрижка" --hours 1 --via "$VIA" | after 'hash: ')
+bcp irina fetch "${CID[galina]}/$W_gal2" --via "$VIA" >/dev/null
+A_gal2=$(bcp irina accept --work "${CID[galina]}/$W_gal2" --quality "аккуратно" --like "$ACC_galina" --via "$VIA" | after 'acceptance ref: ')
+bcp irina pay --acceptance "$A_gal2" --via "$VIA" >/dev/null 2>&1 || true
+W_bor2=$(bcp boris work log --title "электрик, 4-й разряд" --action "Розетка в мастерской" --hours 1 --via "$VIA" | after 'hash: ')
+bcp dmitry fetch "${CID[boris]}/$W_bor2" --via "$VIA" >/dev/null
+A_bor2=$(bcp dmitry accept --work "${CID[boris]}/$W_bor2" --quality "работает" --like "$ACC_boris" --via "$VIA" | after 'acceptance ref: ')
+bcp dmitry pay --acceptance "$A_bor2" --via "$VIA" >/dev/null 2>&1 || true
+W_ann2=$(bcp anna work log --title "повар, 5-й разряд" --action "Обед для мастерской" --hours 2 --via "$VIA" | after 'hash: ')
+bcp boris fetch "${CID[anna]}/$W_ann2" --via "$VIA" >/dev/null
+A_ann2=$(bcp boris accept --work "${CID[anna]}/$W_ann2" --quality "вкусно" --like "$ACC_anna" --via "$VIA" | after 'acceptance ref: ')
+bcp boris pay --acceptance "$A_ann2" --via "$VIA" >/dev/null 2>&1 || true
+say "у каждой приёмки теперь like: ссылка на образец (bc list покажет её)"
+
+hr "облако образцов работ — из сделок, а не из каталога (bc cloud, ИР-022)"
+say "точка — образец, который повторили; место — из чего сложилась цена его семьи."
 say "соседи — те, кому платят за похожее; ставка — высота над картой, не координата"
 bcp anna cloud --via "$VIA" > "$work/cloud.json" 2>/dev/null || true
 python3 - "$work/cloud.json" <<'PY' 2>/dev/null || say "(облако не прочиталось)"
 import json, sys
 pts = json.load(open(sys.argv[1])).get("points", [])
 if not pts:
-    print("     расписанных сделок пока нет — облаку не на чем стоять")
+    print("     образцов пока нет — никто не повторил чужую работу через --like")
 for p in pts:
-    near = ", ".join(f"{n['slug']} {n['w']:.2f}" for n in p["neighbors"][:3])
-    print(f"     {p['slug']:20s} {p['deals']} сд.  → {near or 'ни с кем ничего общего'}")
+    near = ", ".join(f"{n['title'] or n['sample'][:8]} {n['w']:.2f}" for n in p["neighbors"][:3])
+    print(f"     {p['title'] or p['sample'][:12]:24s} {p['deals']} сд.  → {near or 'ни с кем ничего общего'}")
 PY
 
-hr "карта ренты по книге осей (bc axis-ledger --rent)"
+hr "карта ренты по работникам (bc axis-ledger --rent)"
 say "опора — сетевая цена часа каждой названной оси, прочитанная из самих сделок;"
 say "модели нет. Невязка — диагностика, не доплата: цена одна, и она уплачена"
 bcp anna axis-ledger --via "$VIA" --rent > "$work/ledger.json" 2>/dev/null || true
@@ -367,7 +382,7 @@ if not rent:
 for r in rent:
     who = ("не судим: плательщиков меньше порога" if r["rent_payers"] is None
            else f"ренту платят {r['rent_payers']:.1f} плательщика")
-    print(f"     {r['specialty']:20s} факт {r['fact']:.2f}  "
+    print(f"     {r['title'] or r['worker'][:12]:22s} факт {r['fact']:.2f}  "
           f"ожидалось {r['expected']:.2f}  невязка {r['resid']:+.2f}  ({who})")
 PY
 

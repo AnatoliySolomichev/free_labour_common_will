@@ -15,25 +15,27 @@ namespace {
 
 using RefHash = std::array<uint8_t, 32>;
 
-struct Accum {
-    double   w_units = 0;   // Σ weight·labor_units
-    double   w_hours = 0;   // Σ weight·hours_raw — denominator of the average
-    double   hours   = 0;   // Σ hours_raw, RAW: the labour did happen
+// One axis's day: Σ weight·units on it, Σ weight·hours and raw hours of the
+// work that named it.
+struct AxisDay {
+    records::BlockPath path;
+    double   w_units = 0;
+    double   w_hours = 0;
+    double   hours   = 0;
     uint64_t deals   = 0;
 };
 
-// A deal whose whole provenance resolved (Acceptance → WorkRecord → Grade →
-// Specialty) and which is exactly settled. `rate` is what this one deal paid
-// per hour — the network rate times the k agreed in it (economy.md §2а).
+// A deal whose provenance is on the table (the Acceptance and the WorkRecord it
+// accepts) and which is exactly settled. `rate` is what this one deal paid per
+// hour.
 struct ResolvedDeal {
-    std::string specialty;
     RefHash     worker{};
     RefHash     payer{};
     double      units  = 0;
     double      hours  = 0;
     double      rate   = 0;
     bool        in_day = false;
-    std::vector<std::pair<RefHash, double>> axes;   // the breakdown: axis → units
+    std::vector<records::AcceptanceAxis> axes;   // the breakdown
 };
 
 // Directed edge of the payment graph: who paid whom.
@@ -114,42 +116,12 @@ double quantile_sorted(const std::vector<double>& v, double q) {
 
 } // namespace
 
-// Prior for a thin, previously-unseen specialty from the cloud
-// (specialty-axes.md §10): weighted mean of neighbours that already have a rate
-// (a neighbour with none is "thin" and skipped) → tree parent's rate → 1.0.
-// Both are other people's actual deals; there is no model step any more (the
-// axis-price regression was removed, records.md §11.9).
-// `prev0` is the immutable yesterday-rate map (not the one being drained).
-static std::optional<double> cloud_prior(
-    const std::string&                   specialty,
-    const records::SpecialtyCloud&       cloud,
-    const std::map<std::string, double>& prev0) {
-    const records::CloudPoint* pt = nullptr;
-    for (const auto& p : cloud.points)
-        if (p.slug == specialty) { pt = &p; break; }
-    if (!pt) return std::nullopt;
-    double sw = 0.0, swr = 0.0;
-    for (const auto& n : pt->neighbors) {
-        const auto it = prev0.find(n.slug);
-        if (it == prev0.end()) continue;          // neighbour has no rate yet → skip
-        sw += n.weight;
-        swr += n.weight * it->second;
-    }
-    if (sw > 0.0) return swr / sw;
-    if (!pt->parent.empty()) {
-        const auto it = prev0.find(pt->parent);
-        if (it != prev0.end()) return it->second;
-    }
-    return 1.0;                                    // normalized par, last resort
-}
-
-std::vector<records::RateEntry> build_daily_rates(
+DailyPrices build_daily_prices(
     const AggregatorStorage&               storage,
     int64_t                                day_start,
-    const std::vector<records::RateEntry>& previous,
+    const std::vector<records::AxisPrice>& previous,
     double                                 alpha,
     double                                 min_hours,
-    const records::SpecialtyCloud*         cloud,
     const IndependenceParams*              indep) {
     const int64_t day_end = day_start + 86'400;
     // Without independence weighting only the day itself is ever looked at, so
@@ -190,7 +162,7 @@ std::vector<records::RateEntry> build_daily_rates(
         by_hash[bh.bytes] = std::move(rec);
     }
 
-    // Resolve the window's settled, fully-resolvable, non-self deals.
+    // Resolve the window's settled, non-self deals whose work is on the table.
     std::vector<ResolvedDeal> resolved;
     resolved.reserve(win_deals.size());
     for (const auto& [acc_hash, deal] : win_deals) {
@@ -215,26 +187,16 @@ std::vector<records::RateEntry> build_daily_rates(
 
         const auto work_it = by_hash.find(deal.acc.work.hash);
         if (work_it == by_hash.end()) continue;
-        const auto* wr = std::get_if<records::WorkRecord>(&work_it->second);
-        if (!wr) continue;
-        const auto grade_it = by_hash.find(wr->agent.hash);
-        if (grade_it == by_hash.end()) continue;
-        const auto* grade = std::get_if<records::Grade>(&grade_it->second);
-        if (!grade) continue;
-        const auto spec_it = by_hash.find(grade->specialty.hash);
-        if (spec_it == by_hash.end()) continue;
-        const auto* spec = std::get_if<records::Specialty>(&spec_it->second);
-        if (!spec) continue;
+        if (!std::holds_alternative<records::WorkRecord>(work_it->second)) continue;
 
         ResolvedDeal rd{};
-        rd.specialty = spec->name;
         rd.worker    = deal.acc.work.chain;
         rd.payer     = deal.payer.bytes;
         rd.units     = deal.acc.labor_units;
         rd.hours     = deal.acc.hours_raw;
         rd.rate      = rd.hours > 0.0 ? rd.units / rd.hours : 0.0;
         rd.in_day    = deal.acc.timestamp >= day_start;
-        for (const auto& x : deal.acc.axes) rd.axes.emplace_back(x.axis.hash, x.units);
+        rd.axes      = deal.acc.axes;
         resolved.push_back(std::move(rd));
     }
 
@@ -260,10 +222,9 @@ std::vector<records::RateEntry> build_daily_rates(
     const auto expected_of = [&](const ResolvedDeal& d) {
         double e = 0.0;
         std::set<RefHash> seen;
-        for (const auto& [axis, units] : d.axes) {
-            (void)units;
-            if (!seen.insert(axis).second) continue;
-            const auto it = known.find(axis);
+        for (const auto& x : d.axes) {
+            if (!seen.insert(x.axis.hash).second) continue;
+            const auto it = known.find(x.axis.hash);
             if (it != known.end()) e += it->second;
         }
         return e;
@@ -277,10 +238,10 @@ std::vector<records::RateEntry> build_daily_rates(
         for (const auto& d : resolved) {
             flow[{d.payer, d.worker}] += d.units;
             std::set<RefHash> seen;
-            for (const auto& [axis, units] : d.axes) {
-                auto& p = pools[axis];
-                p.units += units;
-                if (seen.insert(axis).second) {      // an hour counts once per axis
+            for (const auto& x : d.axes) {
+                auto& p = pools[x.axis.hash];
+                p.units += x.units;
+                if (seen.insert(x.axis.hash).second) {   // an hour counts once per axis
                     p.hours += d.hours;
                     p.payers.insert(d.payer);
                 }
@@ -329,70 +290,78 @@ std::vector<records::RateEntry> build_daily_rates(
         return 1.0 - R * excess;
     };
 
-    // Fold the day's deals per specialty.
-    std::map<std::string, Accum> day;
+    // Fold the day's deals per axis. A deal's hours count once for every axis it
+    // named — an hour of that work paid for each of them — and its units on an
+    // axis go to that axis alone.
+    std::map<RefHash, AxisDay> day;
+    double day_hours = 0.0;
     for (const auto& d : resolved) {
         if (!d.in_day) continue;
         const double w = weight_of(d);
-        auto& acc = day[d.specialty];
-        acc.w_units += w * d.units;
-        acc.w_hours += w * d.hours;
-        acc.hours   += d.hours;
-        acc.deals   += 1;
+        day_hours += d.hours;
+        std::set<RefHash> seen;
+        for (const auto& x : d.axes) {
+            const auto [it, fresh] = day.try_emplace(x.axis.hash);
+            auto& a = it->second;
+            if (fresh) a.path = x.axis;
+            a.w_units += w * x.units;
+            if (seen.insert(x.axis.hash).second) {
+                a.w_hours += w * d.hours;
+                a.hours   += d.hours;
+                a.deals   += 1;
+            }
+        }
     }
 
-    // Smooth against yesterday; carry forward untouched specialties.
-    std::map<std::string, double> prev_rate;
-    for (const auto& p : previous) prev_rate[p.specialty] = p.rate;
-    const std::map<std::string, double> prev0 = prev_rate;
+    // Smooth against yesterday; carry forward untouched axes.
+    std::map<RefHash, records::AxisPrice> prev;
+    for (const auto& p : previous) prev[p.axis.hash] = p;
 
-    std::vector<records::RateEntry> out;
-    for (const auto& [key, acc] : day) {
-        records::RateEntry e{};
-        e.specialty = key;
-        e.hours          = acc.hours;
-        e.deals          = acc.deals;
-        e.weighted_hours = acc.w_hours;   // v2 (ИР-021): сколько объёма уцелело
-        const auto prev = prev_rate.find(key);
-        // Thinness is judged on the WEIGHTED volume: a bucket whose whole day
-        // was discounted away carries no evidence, whatever its raw hours.
-        if (acc.w_hours < min_hours) {
-            if (prev != prev_rate.end()) {
-                e.rate = prev->second;               // inherit unchanged
-            } else if (cloud) {                      // seed a prior from the cloud
-                const auto prior = cloud_prior(key, *cloud, prev0);
-                if (!prior) continue;
-                e.rate = *prior;
-            } else {
-                continue;                            // too little to seed a rate
-            }
+    DailyPrices out;
+    for (const auto& [key, a] : day) {
+        records::AxisPrice e{};
+        e.axis           = a.path;
+        e.hours          = a.hours;
+        e.deals          = a.deals;
+        e.weighted_hours = a.w_hours;   // ИР-021: сколько объёма уцелело
+        const auto pit = prev.find(key);
+        // Thinness is judged on the WEIGHTED volume: an axis whose whole day was
+        // discounted away carries no evidence, whatever its raw hours.
+        if (a.w_hours < min_hours) {
+            if (pit == prev.end()) continue;          // nobody has paid for it yet
+            e.price = pit->second.price;              // inherit unchanged
         } else {
-            const double day_avg = acc.w_units / acc.w_hours;
+            const double day_avg = a.w_units / a.w_hours;
             // Доверие ко дню = доля объёма, пережившая взвешивание. Само по себе
-            // перевзвешивание не спасает корзину, где за день торговала ОДНА
+            // перевзвешивание не спасает ось, где за день торговала ОДНА
             // сговорная пара: вес сокращается в числителе и знаменателе, среднее
             // не меняется. Поэтому вес управляет ещё и тем, насколько день
-            // вправе двигать ставку: день, почти весь ушедший в дисконт,
-            // оставляет вчерашнюю ставку почти нетронутой. При выключенном
-            // взвешивании доверие ровно 1 и поведение прежнее.
+            // вправе двигать цену: день, почти весь ушедший в дисконт, оставляет
+            // вчерашнюю цену почти нетронутой. При выключенном взвешивании
+            // доверие ровно 1 и сглаживание обычное.
             const double credibility =
-                acc.hours > 0.0 ? std::clamp(acc.w_hours / acc.hours, 0.0, 1.0)
-                                : 1.0;
-            const double a = alpha * credibility;
-            e.rate = prev == prev_rate.end()
-                   ? day_avg
-                   : a * day_avg + (1.0 - a) * prev->second;
+                a.hours > 0.0 ? std::clamp(a.w_hours / a.hours, 0.0, 1.0) : 1.0;
+            const double al = alpha * credibility;
+            e.price = pit == prev.end()
+                    ? day_avg
+                    : al * day_avg + (1.0 - al) * pit->second.price;
         }
-        out.push_back(std::move(e));
-        prev_rate.erase(key);
+        out.axes.push_back(std::move(e));
+        if (pit != prev.end()) prev.erase(pit);
     }
-    for (const auto& [key, rate] : prev_rate)
-        out.push_back({key, rate, 0.0, 0, 0.0});
-
-    std::sort(out.begin(), out.end(),
-              [](const records::RateEntry& a, const records::RateEntry& b) {
-                  return a.specialty < b.specialty;
+    for (const auto& [key, p] : prev) {
+        (void)key;
+        out.axes.push_back({p.axis, p.price, 0.0, 0, 0.0});
+    }
+    std::sort(out.axes.begin(), out.axes.end(),
+              [](const records::AxisPrice& a, const records::AxisPrice& b) {
+                  return a.axis.hash < b.axis.hash;
               });
+
+    // W (economy.md §2б). An axis too thin to be priced does not count.
+    double paid_out = 0.0;
+    for (const auto& p : out.axes) paid_out += p.price * p.hours;
+    out.W = day_hours > 0.0 ? paid_out / day_hours : 1.0;
     return out;
 }
 
