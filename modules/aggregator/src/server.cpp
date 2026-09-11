@@ -644,12 +644,12 @@ void AggregatorServer::setup_routes() {
     // Committed alongside the result, like SpecialtyCloud::params: a witness
     // must recompute by the same methodology, not guess which one was used.
     static const std::string kIndepParams =
-        "v2;ref=deal_mean;window_days=" + std::to_string(kIndependence.window_days)
+        "v3;ref=axis_prices;window_days=" + std::to_string(kIndependence.window_days)
       + ";max_cycle="     + std::to_string(kIndependence.max_cycle)
       + ";kappa="         + std::to_string(kIndependence.kappa)
       + ";self_calibrate=" + std::string(kIndependence.self_calibrate ? "1" : "0")
       + ";calib_min_deals=" + std::to_string(kIndependence.calib_min_deals)
-      + ";min_basket_deals=" + std::to_string(kIndependence.min_basket_deals);
+      + ";min_axis_payers=" + std::to_string(kIndependence.min_axis_payers);
 
     // GET /economy/rates — today's specialty rates (records.md §11.2).
     // Computed lazily once per day and published as a signed DailyAggregate

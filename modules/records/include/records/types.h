@@ -405,8 +405,7 @@ struct RateEntry {
     // v2 (ИР-021): Σ weight·hours_raw — the volume that survived counterparty
     // independence weighting. credibility = weighted_hours / hours ∈ [0,1] says
     // how much of this basket's day was trusted evidence, so a reader sees not
-    // only the rate but how much was discounted to get it. Old (5-field)
-    // entries decode with weighted_hours = hours: nothing was discounted.
+    // only the rate but how much was discounted to get it.
     double      weighted_hours = 0.0;
 
     bool operator==(const RateEntry& o) const noexcept {

@@ -400,36 +400,6 @@ TEST(RecordsCodec, DailyAggregateRoundtrip) {
     EXPECT_TRUE(de.indep.empty());  // взвешивание не применялось
 }
 
-// Запись до v2 RateEntry (5 полей, без weighted_hours) считалась без
-// взвешивания независимости, значит весь её объём был зачтён: доверие = 1.
-// Разряд, который v1/v2 несли в ключе, прочитывается и отбрасывается (ИР-022).
-TEST(RecordsCodec, LegacyRateEntryDecodesWithFullCredibility) {
-    std::vector<uint8_t> b;
-    b.push_back(0xA5);                          // map(5): агрегат v3
-    b.push_back(0x00); b.push_back(0x18); b.push_back(0x71);  // 0: тип 0x71
-    b.push_back(0x01); b.push_back(0x00);       // 1: date 0
-    b.push_back(0x02); b.push_back(0x81);       // 2: массив из одной ставки
-    b.push_back(0xA5);                          //    map(5): RateEntry v1
-    b.push_back(0x00); b.push_back(0x61); b.push_back(0x61);  // 0: "a"
-    b.push_back(0x01); b.push_back(0x03);       // 1: level 3
-    b.push_back(0x02); b.push_back(0xFB);       // 2: rate 2.0
-    for (uint8_t x : {0x40,0x00,0x00,0x00,0x00,0x00,0x00,0x00}) b.push_back(x);
-    b.push_back(0x03); b.push_back(0xFB);       // 3: hours 4.0
-    for (uint8_t x : {0x40,0x10,0x00,0x00,0x00,0x00,0x00,0x00}) b.push_back(x);
-    b.push_back(0x04); b.push_back(0x02);       // 4: deals 2
-    b.push_back(0x03); b.push_back(0x00);       // 3: timestamp 0
-    b.push_back(0x04); b.push_back(0xFB);       // 4: W 1.0
-    for (uint8_t x : {0x3F,0xF0,0x00,0x00,0x00,0x00,0x00,0x00}) b.push_back(x);
-
-    const auto d = std::get<DailyAggregate>(Codec::decode(b));
-    ASSERT_EQ(d.rates.size(), 1u);
-    EXPECT_EQ(d.rates[0].specialty, "a");
-    EXPECT_DOUBLE_EQ(d.rates[0].rate, 2.0);
-    EXPECT_DOUBLE_EQ(d.rates[0].hours, 4.0);
-    EXPECT_DOUBLE_EQ(d.rates[0].weighted_hours, 4.0);   // ничего не дисконтировано
-    EXPECT_TRUE(d.indep.empty());
-}
-
 // RateEntry v3 (ИР-022): разряда в ключе нет. Поле 1 снято, остальные номера
 // прежние — массив из одной ставки: map(5), ключ 0 «a», сразу ключ 2.
 TEST(RecordsCodec, RateEntryV3CarriesNoGrade) {
@@ -445,9 +415,10 @@ TEST(RecordsCodec, RateEntryV3CarriesNoGrade) {
     EXPECT_EQ(back.rates[0], d.rates[0]);
 }
 
-// Ставка v2 — такой её писали до 2026-09-10: шесть полей, разряд под ключом 1.
-// Читается по-прежнему; разряд прочитывается и отбрасывается.
-TEST(RecordsCodec, GradedV2RateEntryStillDecodes) {
+// Ставка с разрядом — так её писали до 2026-09-10 (шесть полей, разряд под
+// ключом 1). Обратной совместимости нет (решение участника 2026-09-11): такая
+// запись отвергается, а не читается «мимо разряда».
+TEST(RecordsCodec, GradedRateEntryIsRefused) {
     std::vector<uint8_t> b;
     b.push_back(0xA5);                          // map(5): агрегат v3
     b.push_back(0x00); b.push_back(0x18); b.push_back(0x71);  // 0: тип 0x71
@@ -467,11 +438,7 @@ TEST(RecordsCodec, GradedV2RateEntryStillDecodes) {
     b.push_back(0x04); b.push_back(0xFB);       // 4: W 1.0
     for (uint8_t x : {0x3F,0xF0,0x00,0x00,0x00,0x00,0x00,0x00}) b.push_back(x);
 
-    const auto d = std::get<DailyAggregate>(Codec::decode(b));
-    ASSERT_EQ(d.rates.size(), 1u);
-    EXPECT_EQ(d.rates[0].specialty, "a");
-    EXPECT_DOUBLE_EQ(d.rates[0].rate, 2.0);
-    EXPECT_DOUBLE_EQ(d.rates[0].weighted_hours, 3.0);
+    EXPECT_THROW(Codec::decode(b), CodecError);
 }
 
 // A pre-v3 aggregate (4 fields, no W) still decodes, with W defaulting to 1.0.

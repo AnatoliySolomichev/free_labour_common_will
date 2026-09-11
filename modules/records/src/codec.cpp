@@ -853,24 +853,17 @@ DailyAggregate dec_daily_aggregate_fields(CborReader& r, uint64_t field_count) {
         const uint64_t n = r.r_arr();
         d.rates.reserve(static_cast<size_t>(n));
         for (uint64_t i = 0; i < n; ++i) {
-            const uint64_t nf = r.r_map();
+            // v3 only. The graded layouts (grade under key 1) are refused, not
+            // read past: no backward compatibility for the grade (ИР-022,
+            // decided 2026-09-11) — a reader that half-understands an old
+            // aggregate is worse than one that says it cannot.
+            if (r.r_map() != 5) throw CodecError("RateEntry: expected 5 fields (v3)");
             RateEntry e{};
-            expect_key(r, 0); e.specialty = r.r_text();
-            // v1/v2 carried the grade under key 1; v3 (ИР-022) does not. An old
-            // entry's grade is read past, not kept: a rate has no grade any more.
-            uint64_t key = r.r_uint();
-            const bool graded = key == 1;
-            if (graded) { (void)r.r_uint8(); key = r.r_uint(); }
-            if (key != 2) throw CodecError("RateEntry: expected key 2 (rate)");
-            e.rate = r.r_float64();
-            expect_key(r, 3); e.hours = r.r_float64();
-            expect_key(r, 4); e.deals = r.r_uint();
-            // v2 (ИР-021): pre-v2 entries were computed without independence
-            // weighting, so their whole volume counted — credibility 1.
-            const uint64_t core = graded ? 5 : 4;
-            if (nf == core + 1)  { expect_key(r, 5); e.weighted_hours = r.r_float64(); }
-            else if (nf == core) { e.weighted_hours = e.hours; }
-            else throw CodecError("RateEntry: unexpected field count");
+            expect_key(r, 0); e.specialty      = r.r_text();
+            expect_key(r, 2); e.rate           = r.r_float64();
+            expect_key(r, 3); e.hours          = r.r_float64();
+            expect_key(r, 4); e.deals          = r.r_uint();
+            expect_key(r, 5); e.weighted_hours = r.r_float64();
             d.rates.push_back(std::move(e));
         }
     }

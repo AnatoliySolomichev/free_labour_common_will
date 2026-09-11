@@ -304,8 +304,8 @@ protected:
         std::filesystem::remove_all(db_path_);
         storage_ = std::make_unique<AggregatorStorage>(db_path_);
 
-        // Одна специальность и один разряд на всех: все сделки попадают в одну
-        // корзину, значит у аномалии есть общая опора-медиана.
+        // Одна специальность на всех, и сделки называют одну общую ось (если
+        // тест не говорит иначе): у аномалии общая опора — цена этой оси.
         const Block spec = add(alice_, records::Specialty{"хлебопёк"});
         records::Grade g{};
         g.specialty = ref_to(alice_, spec);
@@ -350,8 +350,40 @@ protected:
         add(payer, t);
     }
 
-    // Фон корзины: десять односторонних сделок разных пар по обычной цене 1.0.
-    // Задают медиану, относительно которой меряется аномалия.
+    // Сделка с разбивкой по нескольким осям: {тег оси, стч за час}. Ось — по
+    // тегу хеша её определения; тег 0x01 — та же ось, что у deal().
+    void deal_on(const UserId& payer, const UserId& worker, double hours,
+                 const std::vector<std::pair<uint8_t, double>>& per_hour, int64_t ts) {
+        records::WorkRecord wr{};
+        wr.agent = grade_ref_;
+        wr.hours = hours;
+        const Block work = add(worker, wr);
+
+        double units = 0.0;
+        records::Acceptance a{};
+        for (const auto& [tag, r] : per_hour) {
+            records::BlockPath p = test_axis();
+            p.hash.fill(tag);
+            a.axes.push_back({p, r * hours});
+            units += r * hours;
+        }
+        a.work        = ref_to(worker, work);
+        a.receiver    = payer.bytes;
+        a.hours_raw   = hours;
+        a.labor_units = units;
+        a.timestamp   = ts;
+        const Block acc = add(payer, a);
+
+        records::Transfer t{};
+        t.from    = payer.bytes;
+        t.to      = worker.bytes;
+        t.origins = { {payer.bytes, units} };
+        t.reason  = ref_to(payer, acc);
+        add(payer, t);
+    }
+
+    // Фон сети: десять односторонних сделок разных пар по обычной цене 1.0 на
+    // общей оси. Задают её сетевую цену, относительно которой меряется аномалия.
     void honest_background(int64_t ts, uint8_t n = 10) {
         for (uint8_t i = 0; i < n; ++i)
             deal(make_chain(static_cast<uint8_t>(0x10 + i)),
@@ -553,16 +585,17 @@ TEST_F(IndependenceTest, FloodingTheBasketBluntsTheAnomalyHalf) {
     EXPECT_LT(weighted[0].weighted_hours, weighted[0].hours);   // но и не ноль
 }
 
-// Ниже min_basket_deals отличить аномалию от нормальной цены не по чему.
-// Отказываемся судить: наказать честную молодую специальность хуже, чем
-// пропустить. Дыра признана и оставлена карте ренты ИР-020.
-TEST_F(IndependenceTest, BasketWithTooFewDealsIsNotJudged) {
+// Цена оси появляется, когда её назвали хотя бы `min_axis_payers` разных
+// плательщиков: ось стоит столько, сколько за неё платят независимые люди
+// (ИР-022). Сделка, ни одна ось которой ещё не оценена, не судится вовсе:
+// наказать честную молодую работу хуже, чем пропустить.
+TEST_F(IndependenceTest, UnpricedAxesAreNotJudged) {
     const int64_t before = kDay - 86'400 * 30;
-    deal(alice_, carol_, 1.0, 1.0, before);          // всего три сделки в корзине
+    deal(alice_, carol_, 1.0, 1.0, before);          // ось назвали двое плательщиков
     deal(carol_, alice_, 1.0, 1.0, before);
     deal(alice_, carol_, 1.0, 9.0, kDay + 100);      // вопиюще дорогая и взаимная
 
-    const IndependenceParams indep{};                // min_basket_deals = 4
+    const IndependenceParams indep{};                // min_axis_payers = 4
     const auto weighted =
         build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr, &indep);
     ASSERT_EQ(weighted.size(), 1u);
@@ -570,13 +603,15 @@ TEST_F(IndependenceTest, BasketWithTooFewDealsIsNotJudged) {
     EXPECT_NEAR(weighted[0].weighted_hours, weighted[0].hours, 1e-9);
 }
 
-// А как только сделок хватает — та же сделка уценивается. Порог отделяет «нечем
-// судить» от «судить есть чем», и это видно по одной добавленной сделке.
-TEST_F(IndependenceTest, OneMoreDealMakesTheBasketJudgeable) {
+// Как только ось назвали четверо разных плательщиков — у неё есть цена, и та же
+// сделка уценивается. Порог считает ПЛАТЕЛЬЩИКОВ, а не сделки: пара сколько
+// угодно раз назовёт свою ось, но оценить её сама не сможет.
+TEST_F(IndependenceTest, FourPayersPriceTheAxis) {
     const int64_t before = kDay - 86'400 * 30;
     deal(alice_, carol_, 1.0, 1.0, before);
     deal(carol_, alice_, 1.0, 1.0, before);
-    deal(make_chain(0x71), make_chain(0x81), 1.0, 1.0, before);   // четвёртая
+    deal(make_chain(0x71), make_chain(0x81), 1.0, 1.0, before);   // третий
+    deal(make_chain(0x72), make_chain(0x82), 1.0, 1.0, before);   // четвёртый
     deal(alice_, carol_, 1.0, 9.0, kDay + 100);
 
     const IndependenceParams indep{};
@@ -584,6 +619,66 @@ TEST_F(IndependenceTest, OneMoreDealMakesTheBasketJudgeable) {
         build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr, &indep);
     ASSERT_EQ(weighted.size(), 1u);
     EXPECT_LT(weighted[0].weighted_hours, weighted[0].hours);
+}
+
+// Вариант «б» (ИР-022, выбран 2026-09-11): опора — сетевая цена того, что сделка
+// НАЗВАЛА. Надбавка мастера, названная своей осью, оценена всеми, кто эту ось
+// называет, и аномалией не является — даже в деревне, где деньги ходят по кругу.
+TEST_F(IndependenceTest, NamedPremiumIsPricedByTheNetwork) {
+    const int64_t before = kDay - 86'400 * 30;
+    honest_background(before);                                // ось A: 1.0 за час
+    for (uint8_t i = 0; i < 4; ++i)                           // четверо платят мастерам
+        deal_on(make_chain(static_cast<uint8_t>(0x50 + i)),
+                make_chain(static_cast<uint8_t>(0x60 + i)), 1.0,
+                {{0x01, 1.0}, {0x02, 0.3}}, before);          // A + мастерство 0.3
+    for (int i = 0; i < 3; ++i) {                             // деревня: круговорот
+        deal_on(alice_, carol_, 1.0, {{0x01, 1.0}, {0x02, 0.3}}, before);
+        deal_on(carol_, alice_, 1.0, {{0x01, 1.0}, {0x02, 0.3}}, before);
+    }
+    deal_on(alice_, carol_, 1.0, {{0x01, 1.0}, {0x02, 0.3}}, kDay + 100);
+
+    const IndependenceParams indep{};
+    const auto w = build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr, &indep);
+    ASSERT_EQ(w.size(), 1u);
+    EXPECT_NEAR(w[0].weighted_hours, w[0].hours, 1e-9);       // не уценена
+}
+
+// Та же надбавка, спрятанная в общую ось, — аномалия: объяснить её нечем.
+TEST_F(IndependenceTest, PremiumHiddenInACommonAxisIsAnAnomaly) {
+    const int64_t before = kDay - 86'400 * 30;
+    honest_background(before);
+    for (uint8_t i = 0; i < 4; ++i)
+        deal_on(make_chain(static_cast<uint8_t>(0x50 + i)),
+                make_chain(static_cast<uint8_t>(0x60 + i)), 1.0,
+                {{0x01, 1.0}, {0x02, 0.3}}, before);
+    for (int i = 0; i < 3; ++i) {
+        deal_on(alice_, carol_, 1.0, {{0x01, 1.3}}, before);
+        deal_on(carol_, alice_, 1.0, {{0x01, 1.3}}, before);
+    }
+    deal_on(alice_, carol_, 1.0, {{0x01, 1.3}}, kDay + 100);
+
+    const IndependenceParams indep{};
+    const auto w = build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr, &indep);
+    ASSERT_EQ(w.size(), 1u);
+    EXPECT_LT(w[0].weighted_hours / w[0].hours, 0.5);
+}
+
+// Своя ось не оценивает сама себя. Пара, заведшая ось только для себя, не может
+// спрятать в неё завышение: пока ось назвали меньше четырёх разных плательщиков,
+// оплата на ней не объяснена, и там, где поток ходит по кругу, она уценивается.
+TEST_F(IndependenceTest, PrivateAxisDoesNotPriceItsOwnInflation) {
+    const int64_t before = kDay - 86'400 * 30;
+    honest_background(before);
+    for (int i = 0; i < 3; ++i) {
+        deal_on(alice_, carol_, 1.0, {{0x01, 1.0}, {0x03, 0.3}}, before);
+        deal_on(carol_, alice_, 1.0, {{0x01, 1.0}, {0x03, 0.3}}, before);
+    }
+    deal_on(alice_, carol_, 1.0, {{0x01, 1.0}, {0x03, 0.3}}, kDay + 100);
+
+    const IndependenceParams indep{};
+    const auto w = build_daily_rates(*storage_, kDay, {}, 0.3, 0.1, nullptr, &indep);
+    ASSERT_EQ(w.size(), 1u);
+    EXPECT_LT(w[0].weighted_hours / w[0].hours, 0.5);
 }
 
 // ── Облако из сделок (ИР-022): приор без всякого каталога ─────────────────────
@@ -672,19 +767,26 @@ TEST_F(RatesViewTest, GradeDoesNotSplitTheRate) {
     EXPECT_EQ(rates[0].deals, 2u);
 }
 
-// Агрегат, опубликованный до v3, несёт по строке на разряд, и после чтения это
-// несколько строк одной специальности. Они сливаются в одну — по часам за
-// каждой, а если часов нет ни у одной, поровну.
-TEST_F(RatesViewTest, PreV3AggregateFoldsItsGradesIntoOneRate) {
-    const std::vector<records::RateEntry> by_hours = {
-        {"хлебопёк", 1.0, 3.0, 1}, {"хлебопёк", 2.0, 1.0, 1}};
-    const auto a = build_daily_rates(*storage_, kDay, by_hours);
-    ASSERT_EQ(a.size(), 1u);
-    EXPECT_DOUBLE_EQ(a[0].rate, (1.0 * 3.0 + 2.0 * 1.0) / 4.0);
-
-    const std::vector<records::RateEntry> carried = {
-        {"хлебопёк", 1.0, 0.0, 0}, {"хлебопёк", 2.0, 0.0, 0}};
-    const auto b = build_daily_rates(*storage_, kDay, carried);
-    ASSERT_EQ(b.size(), 1u);
-    EXPECT_DOUBLE_EQ(b[0].rate, 1.5);
+// Разбивка ЕСТЬ цена (records.md §9.5 v4): не сходящаяся с ценой описывает
+// какую-то другую сделку — в ставку она не входит, как не входит в книгу осей.
+TEST_F(RatesViewTest, BreakdownThatDoesNotAddUpIsNotARate) {
+    records::WorkRecord wr{};
+    wr.agent = grade_ref_;
+    wr.hours = 2.0;
+    const Block work = add(alice_, wr);
+    records::Acceptance a{};
+    a.work        = ref_to(alice_, work);
+    a.receiver    = bob_.bytes;
+    a.hours_raw   = 2.0;
+    a.labor_units = 8.0;
+    a.axes        = {{test_axis(), 2.0}};            // названо 2 из 8
+    a.timestamp   = kDay + 100;
+    const Block acc = add(bob_, a);
+    records::Transfer t{};
+    t.from    = bob_.bytes;
+    t.to      = alice_.bytes;
+    t.origins = { {bob_.bytes, 8.0} };
+    t.reason  = ref_to(bob_, acc);
+    add(bob_, t);
+    EXPECT_TRUE(build_daily_rates(*storage_, kDay, {}).empty());
 }

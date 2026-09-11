@@ -1,22 +1,35 @@
 // Замер ИР-021 на журнале сделок прогона года — самим build_daily_rates.
 //
-// Что меряется:
-//   1. какую долю ЧЕСТНОГО объёма задевает дисконт независимости — по разрядам
-//      и в сумме;
-//   2. какая доля объёма внедрённого СГОВОРА уцелевает. Сговор — пара, каждый
-//      месяц платящая друг другу по 6 ч в самой ходовой специальности по цене
-//      k × средняя её самого ходового разряда: «на k дороже, чем получает их
-//      разряд».
+// Мир строится из журнала: у каждой сделки — разбивка по осям той же таблицей,
+// что axis_shares() в sim-year.sh (шесть групп профессий). Надбавка за разряд в
+// прогоне — 0.10 стч/ч на ступень от 4.5 (6-й разряд — +0.15). Два мира:
+//
+//   «не названа» — надбавка размазана по осям группы, как делает sim-year;
+//   «одной осью» — мастера 5–6-го разрядов кладут её на отдельную ось
+//                  «Уровень решений» (decision из seed-axes.sh), остальное —
+//                  по осям группы. Так мастер «аргументирует надбавку осью».
+//   «по ступеням» — каждая ступень выше 3-й называет свою ось («мастерство-4»,
+//                  «мастерство-5», …) на всю разницу с 3-й: разные умения —
+//                  разные оси, как «работа под напряжением 400 В» и «220 В».
+//
+// Что меряется в каждом мире:
+//   1. доля ЧЕСТНОГО объёма под дисконтом независимости — по разрядам и в сумме;
+//   2. сдвиг нормировщика W (economy.md §2б) — во что уценка превращается для
+//      денег;
+//   3. доля уцелевшего объёма СГОВОРА: пара, каждый месяц платящая друг другу
+//      по 6 ч в самой ходовой специальности по цене k × средняя её самого
+//      ходового разряда. Три способа спрятать завышение: в общих осях группы,
+//      на оси мастерства, на своей оси, которую не называет больше никто.
 //
 // Входные данные одни и те же при любой методике — меняется только то, что
 // считает агрегатор, поэтому числа до и после правки сравнимы напрямую. Каждый
 // вид сделок кладётся в свои сутки (сговор — отдельно, честные — по разряду), и
-// агрегат этих суток читается целиком: окно независимости при этом видит все
-// сделки, а свёртка дня — только нужный вид.
+// агрегат этих суток читается целиком: окно независимости видит все сделки, а
+// свёртка дня — только нужный вид. Для W все честные сделки месяца лежат в одних
+// сутках, как их видит настоящий агрегатор.
 //
-// Прототип docs/pilot/pair-independence.py отстал от методики (медиана и
-// постоянный порог против средней по сделкам и самонастраиваемого порога),
-// поэтому замер идёт кодом агрегатора.
+// Прежний прототип на Python (pair-independence.py) удалён 2026-09-11: он отстал
+// от методики, и замер теперь идёт кодом агрегатора.
 //
 // Запуск: aggregator_measure_indep docs/pilot/sim-out/deals.tsv [k …]
 // Журнал пишет docs/pilot/sim-year.sh. Блоки подписываются случайными ключами;
@@ -28,8 +41,10 @@
 #include <blockchain/serializer.h>
 #include <records/codec.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -40,6 +55,7 @@
 #include <string>
 #include <tuple>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 using namespace aggregator;
@@ -60,6 +76,7 @@ constexpr int     kAttackA = 1'000'001, kAttackB = 1'000'002;
 int64_t month_day(int m)           { return kBase + m * 30LL * kDay; }
 int64_t attack_day(int m)          { return month_day(m) + kDay; }
 int64_t honest_day(int m, int lvl) { return month_day(m) + (2 + lvl) * kDay; }
+int64_t oneday(int m)              { return month_day(m) + 2 * kDay; }
 
 UserId person(int id) {
     UserId u{};
@@ -75,6 +92,52 @@ records::Ref ref_to(const UserId& chain, const Block& block) {
     return r;
 }
 
+// Ось — по слагу: определения осей замеру не нужны, нужна лишь их личность.
+records::BlockPath axis_path(const std::string& slug) {
+    records::BlockPath p{};
+    p.chain.fill(0x79);
+    std::memcpy(p.hash.data(), slug.data(), std::min<std::size_t>(slug.size(), 32));
+    return p;
+}
+
+using Lines = std::vector<std::pair<std::string, double>>;   // ось → стч
+
+// Та же таблица, что axis_shares() в sim-year.sh.
+Lines group_shares(const std::string& spec) {
+    auto in = [&](std::initializer_list<const char*> xs) {
+        for (const char* x : xs) if (spec == x) return true;
+        return false;
+    };
+    if (in({"prof.programmer", "prof.designer", "prof.accountant", "prof.scribe",
+            "prof.sysadmin"}))
+        return {{"knowledge", 0.5}, {"precision", 0.3}, {"creativity", 0.2}};
+    if (in({"prof.doctor", "prof.nurse"}))
+        return {{"responsibility", 0.4}, {"knowledge", 0.35}, {"emotional", 0.25}};
+    if (in({"prof.teacher", "prof.lawyer"}))
+        return {{"knowledge", 0.45}, {"emotional", 0.3}, {"responsibility", 0.25}};
+    if (in({"prof.welder", "prof.builder", "prof.farmer"}))
+        return {{"physical", 0.45}, {"danger", 0.3}, {"endurance", 0.25}};
+    if (in({"prof.electrician", "prof.plumber", "prof.auto-mechanic",
+            "prof.appliance-repair"}))
+        return {{"knowledge", 0.35}, {"precision", 0.35}, {"danger", 0.3}};
+    return {{"physical", 0.4}, {"precision", 0.35}, {"pace", 0.25}};
+}
+
+// Надбавка за разряд в прогоне года (coef в sim-year.sh): 0.10 стч/ч на ступень
+// от 4.5. Её есть что называть только у 5-го и 6-го разрядов.
+double grade_premium(int level) { return level >= 5 ? 0.10 * (level - 4.5) : 0.0; }
+
+const char* const kMasterAxis  = "decision";   // «Уровень решений», seed-axes.sh
+const char* const kPrivateAxis = "our-own";    // ось, которую называет одна пара
+
+// `base` — по долям группы, `extra` — отдельной строкой на ось `extra_axis`.
+Lines split(const std::string& spec, double base, const char* extra_axis, double extra) {
+    Lines out;
+    for (const auto& [axis, share] : group_shares(spec)) out.emplace_back(axis, base * share);
+    if (extra_axis && extra > 0.0) out.emplace_back(extra_axis, extra);
+    return out;
+}
+
 class World {
 public:
     explicit World(std::filesystem::path dir) : dir_(std::move(dir)) {
@@ -88,23 +151,23 @@ public:
     const AggregatorStorage& storage() const { return *storage_; }
 
     void deal(int payer, int worker, const std::string& spec, int level,
-              double hours, double coef, int64_t ts) {
+              double hours, const Lines& lines, int64_t ts) {
         const UserId p = person(payer), w = person(worker);
         records::WorkRecord wr{};
         wr.agent = grade(w, spec, level);
         wr.hours = hours;
         const Block work = add(w, wr);
 
-        const double units = hours * coef;
-        records::BlockPath axis{};
-        axis.chain.fill(0x79);
-        axis.hash.fill(0x01);
         records::Acceptance a{};
+        double units = 0.0;
+        for (const auto& [axis, u] : lines) {
+            a.axes.push_back({axis_path(axis), u});
+            units += u;
+        }
         a.work        = ref_to(w, work);
         a.receiver    = p.bytes;
         a.hours_raw   = hours;
         a.labor_units = units;
-        a.axes        = {{axis, units}};
         a.timestamp   = ts;
         const Block acc = add(p, a);
 
@@ -156,11 +219,11 @@ std::vector<Row> read_journal(const std::string& path) {
     std::getline(f, line);                                   // заголовок
     while (std::getline(f, line)) {
         std::istringstream in(line);
-        Row r;
         std::string field;
         std::vector<std::string> p;
         while (std::getline(in, field, '\t')) p.push_back(field);
         if (p.size() < 7) continue;
+        Row r;
         r.month  = std::stoi(p[0]);
         r.payer  = std::stoi(p[1]);
         r.worker = std::stoi(p[2]);
@@ -173,6 +236,17 @@ std::vector<Row> read_journal(const std::string& path) {
     return rows;
 }
 
+enum class Attack { Hidden, Master, Private };
+enum class Mode   { Hidden, OneAxis, PerStep };
+
+// Ось, на которую мастер кладёт надбавку в данном мире, и сама надбавка, стч/ч.
+std::pair<std::string, double> named_premium(Mode mode, int level) {
+    if (mode == Mode::OneAxis) return {kMasterAxis, grade_premium(level)};
+    if (mode == Mode::PerStep && level > 3)
+        return {"mastery-" + std::to_string(level), 0.10 * (level - 3)};
+    return {"", 0.0};
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -183,7 +257,7 @@ int main(int argc, char** argv) {
     const auto rows = read_journal(argv[1]);
     std::vector<double> ks;
     for (int i = 2; i < argc; ++i) ks.push_back(std::stod(argv[i]));
-    if (ks.empty()) ks = {1.2, 1.3, 1.5};
+    if (ks.empty()) ks = {1.3};
 
     std::set<int> months, levels;
     std::map<std::string, int> by_spec;
@@ -209,79 +283,104 @@ int main(int argc, char** argv) {
     std::printf("ИР-021 на журнале прогона года: %zu сделок, %zu мес.\n",
                 rows.size(), months.size());
     std::printf("методика: window=%lld max_cycle=%zu kappa=%.2f self_calibrate=%d "
-                "calib_min_deals=%zu min_basket_deals=%zu kappa∈[%.2f, %.2f]\n\n",
+                "calib_min_deals=%zu min_axis_payers=%zu kappa∈[%.2f, %.2f]\n",
                 static_cast<long long>(indep.window_days), indep.max_cycle, indep.kappa,
                 indep.self_calibrate ? 1 : 0, indep.calib_min_deals,
-                indep.min_basket_deals, indep.kappa_min, indep.kappa_max);
+                indep.min_axis_payers, indep.kappa_min, indep.kappa_max);
+    std::printf("сговор: пара в %s р.%d (средняя разряда %.3f), по 6 ч в обе стороны "
+                "каждый месяц\n", vspec.c_str(), vlevel, ref);
 
     const auto tmp = std::filesystem::temp_directory_path() /
                      ("bc_measure_indep_" + std::to_string(::getpid()));
-    // `one_day`: all honest deals of a month in ONE day, as a real aggregate sees
-    // them — for the normalizer. Otherwise each grade gets its own day, so the
-    // discount can be read per grade.
-    auto build = [&](World& w, std::optional<double> k, bool one_day = false) {
+
+    auto lines_for = [&](const std::string& spec, int level, double hours, double coef,
+                         Mode mode) {
+        const auto [axis, per_hour] = named_premium(mode, level);
+        const double prem = hours * per_hour;
+        return split(spec, hours * coef - prem, axis.empty() ? nullptr : axis.c_str(), prem);
+    };
+    auto build = [&](World& w, Mode mode, bool one_day,
+                     std::optional<std::pair<Attack, double>> attack) {
         std::map<std::pair<int, int>, int> seq;
         for (const auto& r : rows) {
             const int     n   = seq[{r.month, one_day ? 0 : r.level}]++;
-            const int64_t day = one_day ? month_day(r.month) + 2 * kDay
-                                        : honest_day(r.month, r.level);
-            w.deal(r.payer, r.worker, r.spec, r.level, r.hours, r.coef,
+            const int64_t day = one_day ? oneday(r.month) : honest_day(r.month, r.level);
+            w.deal(r.payer, r.worker, r.spec, r.level, r.hours,
+                   lines_for(r.spec, r.level, r.hours, r.coef, mode),
                    day + 60 + (n * 37) % 80'000);
         }
-        if (k)
-            for (int m : months) {
-                w.deal(kAttackA, kAttackB, vspec, vlevel, 6.0, *k * ref, attack_day(m) + 100);
-                w.deal(kAttackB, kAttackA, vspec, vlevel, 6.0, *k * ref, attack_day(m) + 200);
-            }
+        if (!attack) return;
+        // Честная часть сговора устроена как настоящая сделка того же разряда в
+        // этом мире; завышение ложится туда, куда его прячут.
+        const auto [how, k] = *attack;
+        const double over = 6.0 * (k - 1.0) * ref;
+        Lines lines = lines_for(vspec, vlevel, 6.0, ref, mode);
+        const auto master = named_premium(mode, vlevel).first;
+        const Lines extra =
+            how == Attack::Hidden ? split(vspec, over, nullptr, 0.0)
+          : how == Attack::Master ? Lines{{master.empty() ? kMasterAxis : master, over}}
+                                  : Lines{{kPrivateAxis, over}};
+        lines.insert(lines.end(), extra.begin(), extra.end());
+        for (int m : months) {
+            w.deal(kAttackA, kAttackB, vspec, vlevel, 6.0, lines, attack_day(m) + 100);
+            w.deal(kAttackB, kAttackA, vspec, vlevel, 6.0, lines, attack_day(m) + 200);
+        }
     };
     // min_hours = 0: ни одна корзина не пропускается, даже целиком ушедшая в дисконт.
-    auto fold = [&](const World& w, int64_t day, double& wh, double& h) {
+    auto fold = [&](const World& w, int64_t day, double& wh, double& h, double* wr = nullptr) {
         for (const auto& e : build_daily_rates(w.storage(), day, {}, 0.3, 0.0, nullptr, &indep)) {
             wh += e.weighted_hours;
             h  += e.hours;
+            if (wr && std::isfinite(e.rate)) *wr += e.rate * e.hours;
         }
     };
 
-    {
-        World w(tmp / "honest");
-        build(w, std::nullopt);
-        std::printf("честный объём, задетый дисконтом:\n");
-        double twh = 0.0, th = 0.0;
-        for (int l : levels) {
-            double wh = 0.0, h = 0.0;
-            for (int m : months) fold(w, honest_day(m, l), wh, h);
-            std::printf("  разряд %d: %5.2f%%  (из %.0f ч)\n", l, 100.0 * (1.0 - wh / h), h);
-            twh += wh;
-            th  += h;
+    const std::pair<Mode, const char*> modes[] = {
+        {Mode::Hidden,  "НЕ названа (размазана по осям группы, как в sim-year)"},
+        {Mode::OneAxis, "названа ОДНОЙ осью «Уровень решений» (разряды 5–6)"},
+        {Mode::PerStep, "каждая ступень названа СВОЕЙ осью (мастерство-4, -5, -6)"}};
+    for (const auto& [mode, title] : modes) {
+        std::printf("\nнадбавка мастеров %s:\n", title);
+        {
+            World w(tmp / "honest");
+            build(w, mode, false, std::nullopt);
+            std::printf("  честный объём под дисконтом:");
+            double twh = 0.0, th = 0.0;
+            for (int l : levels) {
+                double wh = 0.0, h = 0.0;
+                for (int m : months) fold(w, honest_day(m, l), wh, h);
+                std::printf("  р.%d %.2f%%", l, 100.0 * (1.0 - wh / h));
+                twh += wh;
+                th  += h;
+            }
+            std::printf("  · всего %.2f%%\n", 100.0 * (1.0 - twh / th));
         }
-        std::printf("  всего:    %5.2f%%  (из %.0f ч)\n\n", 100.0 * (1.0 - twh / th), th);
-    }
-
-    {
-        // Нормировщик W (economy.md §2б): насколько дисконт сдвигает средний
-        // трудочас сети — то, во что уценка веса сделок превращается для денег.
-        World w(tmp / "oneday");
-        build(w, std::nullopt, true);
-        double swr = 0.0, sw = 0.0;
-        for (int m : months)
-            for (const auto& e : build_daily_rates(w.storage(), month_day(m) + 2 * kDay,
-                                                   {}, 0.3, 0.0, nullptr, &indep))
-                if (std::isfinite(e.rate)) { swr += e.rate * e.hours; sw += e.hours; }
-        double tu = 0.0, tt = 0.0;
-        for (const auto& r : rows) { tu += r.hours * r.coef; tt += r.hours; }
-        const double raw = tu / tt, weighted = swr / sw;
-        std::printf("нормировщик W: по сделкам как есть %.4f, после взвешивания %.4f "
-                    "(сдвиг %+.2f%%)\n\n", raw, weighted, 100.0 * (weighted / raw - 1.0));
-    }
-
-    std::printf("сговор: пара в %s р.%d (средняя разряда %.3f), по 6 ч в обе стороны "
-                "каждый месяц\n", vspec.c_str(), vlevel, ref);
-    for (double k : ks) {
-        World w(tmp / ("k" + std::to_string(k)));
-        build(w, k);
-        double wh = 0.0, h = 0.0;
-        for (int m : months) fold(w, attack_day(m), wh, h);
-        std::printf("  k=%.2f: уцелело %5.1f%% объёма сговора\n", k, 100.0 * wh / h);
+        {
+            World w(tmp / "oneday");
+            build(w, mode, true, std::nullopt);
+            double wh = 0.0, h = 0.0, wr = 0.0;
+            for (int m : months) fold(w, oneday(m), wh, h, &wr);
+            double tu = 0.0, tt = 0.0;
+            for (const auto& r : rows) { tu += r.hours * r.coef; tt += r.hours; }
+            const double raw = tu / tt, weighted = wr / h;
+            std::printf("  нормировщик W: как есть %.4f, после взвешивания %.4f (сдвиг %+.2f%%)\n",
+                        raw, weighted, 100.0 * (weighted / raw - 1.0));
+        }
+        for (double k : ks) {
+            std::printf("  сговор ×%.2f уцелел:", k);
+            const std::pair<Attack, const char*> hows[] = {
+                {Attack::Hidden,  "в общих осях"},
+                {Attack::Master,  "на оси мастерства"},
+                {Attack::Private, "на своей оси"}};
+            for (const auto& [how, label] : hows) {
+                World w(tmp / "attack");
+                build(w, mode, false, std::make_pair(how, k));
+                double wh = 0.0, h = 0.0;
+                for (int m : months) fold(w, attack_day(m), wh, h);
+                std::printf("  %s %.1f%%", label, 100.0 * wh / h);
+            }
+            std::printf("\n");
+        }
     }
     return 0;
 }

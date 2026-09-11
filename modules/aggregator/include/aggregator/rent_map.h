@@ -69,7 +69,7 @@ inline constexpr int64_t kRentPeriodDays = 30;
 
 // Below this many distinct payers a basket is not judged at all. Refusing to
 // judge beats slandering a young specialty that honestly has three customers —
-// the same rule, and the same number, as ИР-021's `min_basket_deals`.
+// the same number as ИР-021's `min_axis_payers`.
 inline constexpr unsigned kRentMinPayers = 4;
 
 // Settled deals of the window with their itemized price.

@@ -56,42 +56,46 @@ namespace aggregator {
 // circulate by nature (A works for B, B for C, C for A), and discounting
 // circulation as such costs a quarter of the honest volume (measured on
 // sim-year data — ИР-021). A deal is discounted only when its flow is both
-// circular AND priced above its own basket:
+// circular AND priced above the network's price of what it named:
 //
 //   R      = circulating part of flow(payer→worker) / flow(payer→worker)
-//   anom   = deal rate / reference rate of its specialty's basket
+//   anom   = deal rate / Σ network price per hour of the axes it named
 //   excess = clamp((anom − 1) / (kappa − 1), 0, 1)
 //   weight = 1 − R · excess
 //
-// The reference is the hours-weighted mean over ALL the basket's deals — the
-// same quantity as the day average, since the averaged labour-hour is an
-// arithmetic mean (ratified 2026-09-08, records.md §11.2). Deals are not
-// collapsed by edge: if the majority is honest, each deal is real labour and
-// counts. A pair adding ever more deals drags the reference towards itself
-// smoothly, with no 50% cliff; and flooding a basket means declaring HOURS,
-// which are dear (economy.md §3).
+// The reference is the network's own axis prices (option «б», chosen
+// 2026-09-11): per axis, Σ units on it / Σ hours of the work that named it,
+// over every settled deal of the window — an arithmetic mean over deals, as the
+// averaged labour-hour is (ratified 2026-09-08). A deal's expected price is the
+// sum over what it named, as in the rent map (records.md §11.11). An axis is
+// priced only once `min_axis_payers` distinct payers have named it.
 //
-// The basket is the specialty (ИР-022). Merging its grades has a measured price
-// — aggregator_measure_indep on the sim-year journal:
+// What this reference can and cannot explain, measured with
+// aggregator_measure_indep on the sim-year journal (grade premium there: +0.10
+// per step):
 //
-//                     honest volume discounted     W shift   collusion survives
-//     by grade        3.3 … 6.0 %,  4.70 % all     −0.18 %         8.3 %
-//     by specialty    0.0 … 18.1 %, 7.56 % all     −0.99 %         8.3 %
+//                                   honest volume discounted    W shift  collusion
+//                                   grades 3 · 4 · 5 · 6, all            ×1.3 left
+//   basket = specialty × grade      6.0 · 4.7 · 5.0 ·  3.3, 4.7%  −0.18%    8.3%
+//   axes, premium not named         0.0 · 1.2 · 8.9 · 18.0, 7.5%  −1.06%    8.3%
+//   axes, one axis for mastery      0.2 · 5.7 · 5.1 · 15.8, 7.1%  −0.83%    8.3%
+//   axes, a distinct axis per step  7.8 · 6.2 · 6.1 ·  4.5, 6.1%  −0.29%    8.3%
 //
-// A master's price sits above the specialty's mean and villages circulate, so
-// the conjunction now reads honest masters as suspects; the grade used to hide
-// that by giving masters a basket of their own. Open question (records.md
-// §11.2): move the reference onto the network's axis prices, as the rent map
-// has, so that a premium NAMED in the breakdown is not an anomaly.
+// The sum explains a price by WHICH axes a deal named, never by how much it put
+// on them: everybody naming an axis is compared to that axis's mean. One
+// "mastery" axis shared by grades 5 and 6 leaves the 6th above it; a distinct
+// axis per capability — "under 400 V" next to "under 220 V" — prices each.
+// Collusion survives at 8.3% however it hides the inflation: in the common
+// axes, on a mastery axis, or on an axis of its own that nobody else names.
 //
 // max_cycle is a dial, not a wall: a conspiracy can always use a ring one longer.
 // Each extra link costs the conspirators another accomplice who can defect and
 // expose them, and each increment of max_cycle costs a little honest volume
 // (measured: 1.0% at 2, 2.1% at 3, 2.4% at 4, 2.5% at 5) and exponential search
-// time. What longer rings still evade is left to the rent map of ИР-020.
+// time. What longer rings still evade is left to the rent map (records.md §11.11).
 //
 // This is not merely empirical: collusion only pays when its price is above the
-// basket's standing rate — below it the pair drags its own rate down. A
+// network's price of what it names — below it the pair drags that price down. A
 // profitable pair MUST be a price anomaly, so the conjunction targets exactly
 // those with a motive.
 //
@@ -102,13 +106,13 @@ struct IndependenceParams {
     int64_t window_days     = 365;   // B2: rolling window; 0 disables entirely
     size_t  max_cycle       = 4;     // B5: longest ring cancelled; 2 = pairs only
     double  kappa           = 1.15;  // B1: fallback anomaly threshold
-    bool    self_calibrate  = true;  // derive kappa from the basket's own spread
-    size_t  calib_min_deals = 8;     // below this the basket uses `kappa`
-    // Below this many deals a basket has no trustworthy reference at all, so
-    // nothing is discounted there: refusing to judge beats punishing an honest
-    // young specialty. It leaves a hole for a pair alone in a fresh basket —
-    // that one is left to the rent map (records.md §11.11).
-    size_t  min_basket_deals = 4;
+    bool    self_calibrate  = true;  // derive kappa from the network's spread of anomalies
+    size_t  calib_min_deals = 8;     // fewer judgeable deals in the window → `kappa`
+    // An axis's network price counts only once this many DISTINCT payers have
+    // named it in the window — an axis is worth what independent people pay for
+    // it (ИР-022). A deal none of whose axes has a price yet is not judged at
+    // all: refusing to judge beats punishing an honest young kind of work.
+    size_t  min_axis_payers = 4;
     double  kappa_min       = 1.10;  // clamps for the self-calibrated kappa
     double  kappa_max       = 1.50;
 };

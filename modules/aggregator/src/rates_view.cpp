@@ -33,6 +33,7 @@ struct ResolvedDeal {
     double      hours  = 0;
     double      rate   = 0;
     bool        in_day = false;
+    std::vector<std::pair<RefHash, double>> axes;   // the breakdown: axis → units
 };
 
 // Directed edge of the payment graph: who paid whom.
@@ -205,6 +206,12 @@ std::vector<records::RateEntry> build_daily_rates(
         if (pit == paid.end() ||
             std::abs(pit->second - payable) > 1e-6) continue;
         if (deal.acc.work.chain == deal.payer.bytes) continue;     // self-deal
+        // Разбивка ЕСТЬ цена (records.md §9.5 v4): не сходящаяся описывает
+        // другую сделку — как в книге осей, её нет ни в ставке, ни в опоре.
+        double named = 0.0;
+        for (const auto& x : deal.acc.axes) named += x.units;
+        if (deal.acc.axes.empty() ||
+            std::abs(named - deal.acc.labor_units) > 1e-6) continue;
 
         const auto work_it = by_hash.find(deal.acc.work.hash);
         if (work_it == by_hash.end()) continue;
@@ -227,51 +234,82 @@ std::vector<records::RateEntry> build_daily_rates(
         rd.hours     = deal.acc.hours_raw;
         rd.rate      = rd.hours > 0.0 ? rd.units / rd.hours : 0.0;
         rd.in_day    = deal.acc.timestamp >= day_start;
+        for (const auto& x : deal.acc.axes) rd.axes.emplace_back(x.axis.hash, x.units);
         resolved.push_back(std::move(rd));
     }
 
     // ── ИР-021: counterparty independence over the window ────────────────────
     // Two ingredients, and the discount needs BOTH: how mutual the pair is, and
-    // how far above its own basket the deal is priced.
-    using BasketKey = std::string;                     // the specialty (ИР-022)
+    // how far the deal is priced above the network's price of what it named.
+    //
+    // The reference is the network's own axis prices (option «б», chosen
+    // 2026-09-11): per axis, Σ units on it / Σ hours of the work that named it,
+    // over every settled deal of the window. A deal's expected price per hour is
+    // the sum over the axes it named — the rent map's reference (records.md
+    // §11.11). A premium NAMED in the breakdown is priced by everybody who names
+    // that axis; a premium hidden in the axes everybody names is an anomaly.
+    //
+    // An axis's price counts only once `min_axis_payers` DISTINCT payers have
+    // named it: an axis is worth what independent people pay for it (ИР-022,
+    // strength from use). Until then pay on it is unexplained — not forbidden,
+    // discounted only where the flow also circulates. Otherwise a pair would
+    // invent an axis of its own and price its inflation with it.
     std::map<Edge, double> flow, circ;
-    std::map<BasketKey, std::vector<double>> basket;   // rates per DEAL
-    std::map<BasketKey, std::pair<double, double>> pool;  // basket → [Σ units, Σ hours]
+    std::map<RefHash, double> known;              // axis → network price per hour
+    double kappa = weighted ? indep->kappa : 0.0;
+    const auto expected_of = [&](const ResolvedDeal& d) {
+        double e = 0.0;
+        std::set<RefHash> seen;
+        for (const auto& [axis, units] : d.axes) {
+            (void)units;
+            if (!seen.insert(axis).second) continue;
+            const auto it = known.find(axis);
+            if (it != known.end()) e += it->second;
+        }
+        return e;
+    };
     if (weighted) {
-        // Опора корзины — средневзвешенное по часам ВСЕХ её сделок, ровно та же
-        // величина, что и среднее дня: «усреднённый трудочас» и должен быть
-        // средним арифметическим (ратифицировано 2026-09-08).
-        //
-        // Сделки НЕ схлопываются по рёбрам. Прежде одна пара давала одну точку,
-        // чтобы утопить опору требовалось большинство контрагентов, а не сделок.
-        // Цена этого — выброшенные свидетельства: если большинство честно, то
-        // каждая сделка есть настоящий труд и должна считаться, даже когда двое
-        // работают только друг с другом.
-        //
-        // Замерено, чем платим: пара, торгующая по цене ×1.3 и наращивающая
-        // ЧИСЛО сделок, остаётся видна при опоре по рёбрам всегда (1.28x при
-        // любой доле), а при среднем по сделкам её аномалия сползает
-        // 1.28 → 1.21 (28% сделок) → 1.16 (43%) → 1.11 (61%) → 1.07 (75%) и
-        // ниже порога уходит около 61%. Заливать корзину, однако, значит
-        // заявлять часы, а часы дороги (economy.md §3): их подделка требует
-        // свидетелей и непересекающихся слотов. И кругооборотная половина
-        // конъюнкции продолжает работать — заливающая пара взаимна по
-        // построению. Среднее к тому же спускается плавно, без обрыва на 50%,
-        // который был у медианы по сделкам (та падает 1.24 → 1.00 разом).
+        struct AxisPool {
+            double            units = 0.0, hours = 0.0;
+            std::set<RefHash> payers;
+        };
+        std::map<RefHash, AxisPool> pools;
         for (const auto& d : resolved) {
             flow[{d.payer, d.worker}] += d.units;
-            if (d.rate <= 0.0) continue;
-            auto& p = pool[d.specialty];
-            p.first  += d.units;
-            p.second += d.hours;
-            basket[d.specialty].push_back(d.rate);
+            std::set<RefHash> seen;
+            for (const auto& [axis, units] : d.axes) {
+                auto& p = pools[axis];
+                p.units += units;
+                if (seen.insert(axis).second) {      // an hour counts once per axis
+                    p.hours += d.hours;
+                    p.payers.insert(d.payer);
+                }
+            }
         }
-        for (auto& [key, rates] : basket) std::sort(rates.begin(), rates.end());
+        for (const auto& [axis, p] : pools)
+            if (p.payers.size() >= indep->min_axis_payers && p.hours > 0.0)
+                known[axis] = p.units / p.hours;
         circ = circulation(flow, std::max<size_t>(2, indep->max_cycle));
+
+        // Self-calibrating threshold: "anomalous" relative to how wide the
+        // bargaining in the network actually is, not a global constant. Too few
+        // judgeable deals — the fallback `kappa`.
+        if (indep->self_calibrate) {
+            std::vector<double> anoms;
+            for (const auto& d : resolved) {
+                const double e = expected_of(d);
+                if (e > 0.0 && d.rate > 0.0) anoms.push_back(d.rate / e);
+            }
+            if (anoms.size() >= indep->calib_min_deals) {
+                std::sort(anoms.begin(), anoms.end());
+                kappa = std::clamp(quantile_sorted(anoms, 0.9),
+                                   indep->kappa_min, indep->kappa_max);
+            }
+        }
     }
 
     // Weight of one deal: 1 − R·excess (see rates_view.h). Honest villages are
-    // mutual but priced normally, so excess = 0 keeps their weight at 1.
+    // mutual but priced like the network, so excess = 0 keeps their weight at 1.
     const auto weight_of = [&](const ResolvedDeal& d) -> double {
         if (!weighted) return 1.0;
         const auto fit = flow.find({d.payer, d.worker});
@@ -279,30 +317,14 @@ std::vector<records::RateEntry> build_daily_rates(
         if (fit == flow.end() || cit == circ.end() ||
             fit->second <= 0.0) return 1.0;
         const double R = std::clamp(cit->second / fit->second, 0.0, 1.0);
+        if (d.rate <= 0.0 || kappa <= 1.0) return 1.0;
 
-        const auto bit = basket.find(d.specialty);
-        const auto pit = pool.find(d.specialty);
-        // Too few deals to tell an anomaly from a normal price: refuse to judge
-        // rather than punish an honest young specialty.
-        if (bit == basket.end() || pit == pool.end() ||
-            bit->second.size() < indep->min_basket_deals ||
-            pit->second.second <= 0.0)
-            return 1.0;
-        const double median = pit->second.first / pit->second.second;  // опора
-        if (median <= 0.0 || d.rate <= 0.0) return 1.0;
+        // Nothing it named has a price yet — nothing to compare with. Refuse to
+        // judge rather than punish an honest young kind of work.
+        const double e = expected_of(d);
+        if (e <= 0.0) return 1.0;
 
-        // Self-calibrating threshold: "anomalous" relative to how wide the
-        // bargaining in THIS basket actually is, not a global constant. Thin
-        // baskets have no trustworthy spread, so they fall back to `kappa`.
-        double kappa = indep->kappa;
-        if (indep->self_calibrate &&
-            bit->second.size() >= indep->calib_min_deals) {
-            kappa = std::clamp(quantile_sorted(bit->second, 0.9) / median,
-                               indep->kappa_min, indep->kappa_max);
-        }
-        if (kappa <= 1.0) return 1.0;
-
-        const double anom   = d.rate / median;
+        const double anom   = d.rate / e;
         const double excess = std::clamp((anom - 1.0) / (kappa - 1.0), 0.0, 1.0);
         return 1.0 - R * excess;
     };
@@ -320,23 +342,8 @@ std::vector<records::RateEntry> build_daily_rates(
     }
 
     // Smooth against yesterday; carry forward untouched specialties.
-    // An aggregate published before v3 (ИР-022) has one entry per (specialty,
-    // grade), and they decode as several entries of one specialty. The grade no
-    // longer splits a rate, so they fold into one — weighted by the hours behind
-    // each, or evenly when none carried any.
-    std::map<std::string, std::vector<const records::RateEntry*>> prev_by;
-    for (const auto& p : previous) prev_by[p.specialty].push_back(&p);
     std::map<std::string, double> prev_rate;
-    for (const auto& [spec, es] : prev_by) {
-        if (es.size() == 1) { prev_rate[spec] = es.front()->rate; continue; }
-        double sw = 0.0, swr = 0.0, sr = 0.0;
-        for (const auto* e : es) {
-            sw  += e->hours;
-            swr += e->rate * e->hours;
-            sr  += e->rate;
-        }
-        prev_rate[spec] = sw > 0.0 ? swr / sw : sr / static_cast<double>(es.size());
-    }
+    for (const auto& p : previous) prev_rate[p.specialty] = p.rate;
     const std::map<std::string, double> prev0 = prev_rate;
 
     std::vector<records::RateEntry> out;
