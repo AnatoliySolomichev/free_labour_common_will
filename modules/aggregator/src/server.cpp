@@ -660,7 +660,7 @@ void AggregatorServer::setup_routes() {
     // both paths below — the ?day= preview must recompute by exactly the
     // methodology the published aggregate used, or re-checking is meaningless.
     static const IndependenceParams kIndependence{};
-    // Committed alongside the result, like SpecialtyCloud::params: a witness
+    // Committed alongside the result, like WorkCloud::params: a witness
     // must recompute by the same methodology, not guess which one was used.
     static const std::string kIndepParams =
         "v3;ref=axis_prices;window_days=" + std::to_string(kIndependence.window_days)
