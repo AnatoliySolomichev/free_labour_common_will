@@ -14,8 +14,8 @@
 дал ОТРИЦАТЕЛЬНЫЙ результат, и потому правила из него не выросло.
 
 Запуск:  python3 docs/pilot/form-and-rent.py [--out ПАПКА]
-Зависимости: только stdlib. Нужен прогон sim-year.sh (rates_by_month.json,
-deals.tsv) — без него секции «рента» и часть «формы» пропускаются.
+Зависимости: только stdlib. Нужен прогон sim-year.sh (sim-out/deals.tsv) —
+без него секции «рента» и часть «формы» пропускаются.
 """
 import argparse, collections, csv, importlib.util, json, math, os, random, statistics
 
@@ -72,9 +72,8 @@ def section_form(out_dir):
     print(f"учебный мир ({len(xs)} деятельностей): "
           f"LOO линейной {lin:.4f}, лог {lg:.4f}")
 
-    rates_path = os.path.join(out_dir, "rates_by_month.json")
-    if os.path.exists(rates_path):
-        obs, cat = sim_baskets(rates_path)
+    obs, cat = sim_baskets(out_dir)
+    if obs:
         ws2 = [o["hours"] for o in obs]
         ys2, _ = normalize([o["rate"] for o in obs], ws2)
         xs2 = [[1.0, cat[o["slug"]]["axes"].get("info", 0.0),
@@ -110,20 +109,13 @@ def section_form(out_dir):
 подгонке; лог-подгонка не публикуется вовсе.""")
 
 
-def sim_baskets(rates_path):
+def sim_baskets(out_dir):
+    """Корзины прогона года, у которых в каталоге есть профиль. Сами корзины
+    читаются из журнала генератора — axis-prices.py, sim_baskets."""
     cat_path = os.path.join(ROOT, "docs", "catalogs", "professions.json")
     cat = {e["slug"]: e for e in json.load(open(cat_path))["entries"] if "axes" in e}
-    agg = {}
-    for blob in json.load(open(rates_path)).values():
-        for r in (blob or {}).get("rates") or []:
-            if r["specialty"] not in cat or r["hours"] <= 0:
-                continue
-            a = agg.setdefault((r["specialty"], r["level"]), [0.0, 0.0])
-            a[0] += r["rate"] * r["hours"]
-            a[1] += r["hours"]
-    obs = [{"slug": s, "level": l, "rate": v[0] / v[1], "hours": v[1]}
-           for (s, l), v in sorted(agg.items())]
-    return obs, cat
+    got = ap.sim_baskets(out_dir)
+    return ([o for o in got[0] if o["slug"] in cat] if got else []), cat
 
 
 # ── 2. рента: дефицит или канал ─────────────────────────────────────────────

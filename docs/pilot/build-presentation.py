@@ -45,11 +45,13 @@ with_redemption = sum(1 for e in econ if e['redeemed'] > 0)
 axis_prices = {}
 for mo, blob in rates_by_month.items():
     for a in ((blob or {}).get('axes') or []):
-        g = axis_prices.setdefault(a.get('label') or a['axis'][:12], {'w': 0.0, 'wh': 0.0})
+        g = axis_prices.setdefault(a.get('label') or a['axis'][:12],
+                                   {'w': 0.0, 'wh': 0.0, 'deals': 0})
         g['w'] += a['price'] * a['hours']; g['wh'] += a['hours']
-axes_year = sorted(({'label': k, 'mean': round(v['w'] / v['wh'], 4) if v['wh'] else 0}
+        g['deals'] += a.get('deals', 0)
+axes_year = sorted(({'label': k, 'mean': round(v['w'] / v['wh'], 4) if v['wh'] else 0,
+                     'hours': round(v['wh'], 1), 'deals': v['deals']}
                     for k, v in axis_prices.items()), key=lambda x: -x['mean'])
-grades = []   # диаграмма разрядов в шаблоне пуста и не рисуется
 
 # профессии: сортируем по средней принятой бумаге
 profs = sorted(
@@ -93,7 +95,7 @@ data = {
         'median_received': round(st.median([e['received'] for e in econ]), 2),
     },
     'issued_hist': issued_hist, 'redeem_hist': redeem_hist,
-    'grades': grades, 'professions': profs,
+    'axes': axes_year, 'professions': profs,
     'index': index_series,
     'index_stats': {'mean': round(sum(idx_vals) / len(idx_vals), 4) if idx_vals else 0,
                     'min': round(min(idx_vals), 4) if idx_vals else 0,
@@ -182,8 +184,9 @@ title: Год жизни трудовой экономики
 
 {top_axes}
 
-Цена оси — сколько часов бумаги платят за час работы, назвавшей ось. Цена работы —
-сумма цен её осей: что делает час мастера дороже, названо в разбивке, а не разрядом.
+Цена оси — сколько часов бумаги платят за час работы, назвавшей ось. Цена работы
+по умолчанию — сумма цен её осей. Специальности и разряда в расчёте нет: у работы
+есть вольное название для людей и оси для счёта.
 
 ---
 

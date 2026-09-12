@@ -75,6 +75,12 @@ namespace aggregator {
 //   axes, a distinct axis per step  7.8 · 6.2 · 6.1 ·  4.5, 6.1%  −0.46%    8.3%
 //   (W in the axes rows is the v5 normalizer, read off axis prices.)
 //
+// That journal (2026-08-24, 1368 deals) cannot be regenerated: until 2026-09-12
+// SEED fixed nothing in sim-year.sh. On the reproducible one (SEED=42, 1356
+// deals) the axes rows read 7.3 / 7.2 / 6.6% of honest volume, W −1.11 / −0.80
+// / −0.47%, collusion 8.3%. Four random journals spread by a point or two
+// (records.md §11.2); the conclusions below hold on each.
+//
 // The sum explains a price by WHICH axes a deal named, never by how much it put
 // on them: everybody naming an axis is compared to that axis's mean. One
 // "mastery" axis shared by grades 5 and 6 leaves the 6th above it; a distinct

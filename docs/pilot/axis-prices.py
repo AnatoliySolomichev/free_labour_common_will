@@ -17,11 +17,13 @@
 Два набора данных за один запуск:
   demo — встроенный учебный пример (11 деятельностей, оси знание/опасность/
          люди/мастерство) — числа для презентации «на пальцах»;
-  sim  — реальный прогон года: ставки sim-out/rates_by_month.json
-         (создаёт sim-year.sh) × профили каталога docs/catalogs/professions.json
+  sim  — реальный прогон года: журнал сделок sim-out/deals.tsv
+         (пишет sim-year.sh) × профили каталога docs/catalogs/professions.json
          (оси info/people/danger; material — базовая категория, т.к. тройка
          материя+информация+люди суммируется в 1, specialty-axes.md §4.1)
-         + разряд как ось мастерства.
+         + разряд как ось мастерства. Специальность и разряд в журнале —
+         замысел генератора: в протоколе их нет (ИР-022 шаг 11), и агрегатор
+         ставок по корзинам не публикует.
 
 Выход: консольный отчёт + sim-out/axis-prices.json;
        --html: сборка презентации axes-presentation-template.html
@@ -30,7 +32,7 @@
 Запуск:  python3 docs/pilot/axis-prices.py [--html] [--out ПАПКА]
 Детерминировано: stdlib, нормальные уравнения + ридж-стабилизация, без numpy.
 """
-import json, os, sys, argparse
+import csv, json, os, sys, argparse
 from datetime import date
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -136,9 +138,10 @@ def junk_axis(slug, level=0):
     Нужна как контроль критерия: честный критерий обязан её ОТВЕРГНУТЬ.
     Значения воспроизводимы (FNV-1a от ключа), никакого random.
 
-    Ключ — «<слаг>#<разряд>»: это СОГЛАШЕНИЕ ПРОТОКОЛА, а не деталь реализации.
-    Два свидетеля обязаны нарисовать одну и ту же пустышку, иначе экзамен у них
-    разный. Тот же ключ в `aggregator::junk_axis` (axis_prices.h).
+    Ключ — «<слаг>#<разряд>»: это было СОГЛАШЕНИЕ ПРОТОКОЛА, а не деталь
+    реализации. Два свидетеля обязаны нарисовать одну и ту же пустышку, иначе
+    экзамен у них разный. Тот же ключ был в `aggregator::junk_axis` — снят вместе
+    с регрессией (records.md §11.9).
     """
     name = f'{slug}#{level}'
     h = 2166136261
@@ -226,36 +229,52 @@ def run_demo():
 
 # ── реальный прогон: sim-out + каталог ──────────────────────────────────────
 
-def run_sim(out_dir):
-    rates_path = os.path.join(out_dir, 'rates_by_month.json')
-    cat_path = os.path.join(ROOT, 'docs', 'catalogs', 'professions.json')
-    if not os.path.exists(rates_path):
-        return None
-    months = json.load(open(rates_path))
-    cat = {e['slug']: e for e in json.load(open(cat_path))['entries']
-           if 'axes' in e}
+def sim_baskets(out_dir):
+    """Корзины специальность×разряд прогона года: Σ k·часы / Σ часы.
 
-    agg = {}  # (slug, level) -> [Σ rate·h, Σ h]
-    for blob in months.values():
-        for r in (blob or {}).get('rates') or []:
-            if r['specialty'] not in cat or r['hours'] <= 0:
-                continue
-            a = agg.setdefault((r['specialty'], r['level']), [0.0, 0.0])
-            a[0] += r['rate'] * r['hours']
-            a[1] += r['hours']
-    if not agg:
+    Источник — журнал генератора sim-out/deals.tsv, а не опубликованные ставки:
+    агрегатор ставок по корзинам больше не считает — специальности и разряда в
+    протоколе нет (ИР-022 шаг 11), цена у осей. Генератор же помнит, какой разряд
+    задумал каждому, — из той же истины мира считает aggregator_measure_indep.
+    Возвращает (корзины, число месяцев) или None, если журнала нет.
+    """
+    path = os.path.join(out_dir, 'deals.tsv')
+    if not os.path.exists(path):
         return None
-
+    agg, months = {}, set()  # (slug, level) -> [Σ k·h, Σ h]
+    for r in csv.DictReader(open(path, encoding='utf-8'), delimiter='\t'):
+        h = float(r['hours'])
+        if h <= 0:
+            continue
+        a = agg.setdefault((r['specialty'], int(r['level'])), [0.0, 0.0])
+        a[0] += float(r['coef']) * h
+        a[1] += h
+        months.add(r['month'])
     obs = [{'slug': s, 'level': l, 'rate': v[0] / v[1], 'hours': v[1]}
            for (s, l), v in sorted(agg.items())]
+    return obs, len(months)
+
+
+def run_sim(out_dir):
+    got = sim_baskets(out_dir)
+    if not got:
+        return None
+    cat_path = os.path.join(ROOT, 'docs', 'catalogs', 'professions.json')
+    cat = {e['slug']: e for e in json.load(open(cat_path))['entries']
+           if 'axes' in e}
+    obs = [o for o in got[0] if o['slug'] in cat]
+    n_months = got[1]
+    if not obs:
+        return None
     sw = sum(o['hours'] for o in obs)
     W = sum(o['rate'] * o['hours'] for o in obs) / sw   # economy.md §2б
     for o in obs:
         o['nrate'] = o['rate'] / W
-    # Разряд нормируется ПРОТОКОЛЬНЫМ размахом 1..6 (records.md §9.2), а не тем,
-    # который случайно попался в данных. Размах по данным делал бы β_разряд
-    # несравнимым между свидетелями: у видевшего разряды 3..6 и у видевшего 1..6
-    # это разные единицы, и медиану по агрегаторам брать не от чего.
+    # Разряд нормируется ПРОТОКОЛЬНЫМ размахом 1..6 (так его задавала снятая
+    # запись Grade, records.md §9.2), а не тем, который случайно попался в
+    # данных. Размах по данным делал бы β_разряд несравнимым между свидетелями:
+    # у видевшего разряды 3..6 и у видевшего 1..6 это разные единицы, и медиану
+    # по агрегаторам брать не от чего.
     GRADE_MIN, GRADE_MAX = 1, 6
     span = float(GRADE_MAX - GRADE_MIN)
     gmin = min(o['level'] for o in obs)
@@ -331,7 +350,7 @@ def run_sim(out_dir):
     gate['verdict_b'] = gate_verdict(gate['loo_b'], bar, gate['rows'], gate['cols'])
     gate['verdict_c'] = gate_verdict(gate['loo_c'], bar, gate['rows'], gate['cols'])
 
-    return {'W': round(W, 4), 'months': len(months), 'n_obs': len(obs),
+    return {'W': round(W, 4), 'months': n_months, 'n_obs': len(obs),
             'gate': gate,
             'n_spec': len({o['slug'] for o in obs}),
             'grade_min': gmin, 'grade_max': gmax,
@@ -372,7 +391,7 @@ def report(demo, sim):
           f'рента {d["rent"]:+.2f} ({d["rent_pct"]:+.1f}% к структуре)')
     print()
     if sim is None:
-        print('── прогон года: нет sim-out/rates_by_month.json '
+        print('── прогон года: нет sim-out/deals.tsv '
               '(сначала docs/pilot/sim-year.sh) ──')
         return
     print(f'── прогон года (sim-year.sh): {sim["n_spec"]} специальностей, '

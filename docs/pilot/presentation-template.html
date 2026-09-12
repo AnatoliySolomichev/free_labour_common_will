@@ -198,20 +198,24 @@ footer{padding:48px 0 0; color:var(--muted); font-size:.85rem}
 </section>
 
 <section>
-  <span class="eyebrow">Ставки</span>
-  <h2>Квалификация оплачивается — но баланс сохраняется</h2>
+  <span class="eyebrow">Цены осей</span>
+  <h2>За что сеть платит</h2>
   <div class="prose stack" style="margin-top:14px">
-    <p>Разряд от 3 до 6 задаёт премию к часу. Низкие разряды в среднем ниже единицы,
-    высокие — выше, и вместе они дают среднее около единицы. Разница в квалификации
-    оплачивается, но общий объём эмиссии остаётся привязан к отработанным часам.</p>
+    <p>Каждая сделка расписывает свою цену по осям труда: сколько за знание, сколько
+    за точность, сколько за опасность. Разбивка обязана сойтись с ценой в точности.
+    Из таких разбивок сеть выводит <strong>цену оси</strong> — сколько часов бумаги
+    в среднем платят за час работы, назвавшей эту ось. Никто её не назначает.</p>
+    <p>Цена работы по умолчанию — сумма цен её осей. Специальности и разряда в
+    расчёте нет: у работы есть вольное название для людей и оси для счёта.</p>
   </div>
   <div class="panel">
     <figure>
-      <figcaption>Средняя ставка по разряду за год</figcaption>
-      <div class="chart-scroll"><svg id="c-grades" viewBox="0 0 720 280" role="img"
-        aria-label="Средняя ставка по разряду"></svg></div>
-      <p class="cap">Пунктир — единица: час бумаги за час труда. Усы показывают размах
-      ставок разряда за год.</p>
+      <figcaption>Цена часа по осям, среднее за год</figcaption>
+      <div class="chart-scroll"><svg id="c-axes" viewBox="0 0 720 280" role="img"
+        aria-label="Цена часа по осям, среднее за год"></svg></div>
+      <p class="cap">Часть цены, пришедшаяся на ось, делённая на часы работ, которые её
+      назвали. Час работы засчитывается каждой её оси, поэтому цены осей работы
+      складываются в её цену.</p>
     </figure>
   </div>
 </section>
@@ -402,39 +406,32 @@ document.getElementById("t-withred").textContent = `${t.with_redemption} из ${
     `объём выпущенных обязательств держится вплотную к объёму отработанного времени.`;
 })();
 
-/* ── Ставки по разрядам ─────────────────────────────────────────────────── */
+/* ── Цены осей за год ───────────────────────────────────────────────────── */
 (function () {
-  const svg = document.getElementById("c-grades");
-  const W = 720, H = 280, L = 52, R = 20, T = 22, B = 52;
-  const g = DATA.grades; if (!g.length) return;
-  const lo = Math.min(0.75, Math.min(...g.map(x => x.min)) - .03);
-  const hi = Math.max(1.25, Math.max(...g.map(x => x.max)) + .03);
-  const iw = W - L - R, ih = H - T - B;
-  const Y = v => T + ih - ih * (v - lo) / (hi - lo);
-  const gap = 26, bw = iw / g.length - gap;
+  const svg = document.getElementById("c-axes");
+  const rows = DATA.axes || []; if (!rows.length) return;
+  const W = 720, L = 172, R = 64, T = 10, rowH = 26, B = 34;
+  const H = T + rows.length * rowH + B;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  const iw = W - L - R;
+  const max = Math.max(...rows.map(r => r.mean)) || 1;
+  const X = v => iw * v / max;
   for (let i = 0; i <= 4; i++) {
-    const v = lo + (hi - lo) * i / 4, y = Y(v);
-    svg.appendChild(el("line", { x1: L, x2: W - R, y1: y, y2: y, class: "gridline" }));
-    const tx = el("text", { x: L - 8, y: y + 4, class: "tick", "text-anchor": "end" });
-    tx.textContent = v.toFixed(2); svg.appendChild(tx);
+    const x = L + iw * i / 4;
+    svg.appendChild(el("line", { x1: x, x2: x, y1: T, y2: T + rows.length * rowH, class: i ? "gridline" : "baseline" }));
+    const tx = el("text", { x: x, y: H - 12, class: "tick", "text-anchor": "middle" });
+    tx.textContent = (max * i / 4).toFixed(2); svg.appendChild(tx);
   }
-  const y1 = Y(1);
-  g.forEach((x, i) => {
-    const cx = L + i * (bw + gap) + gap / 2, top = Y(x.mean);
-    const up = x.mean >= 1;
-    const y = up ? top : y1, h = Math.abs(y1 - top);
-    const p = el("path", { d: barPath(cx, y, bw, h, 4, up ? "up" : "down"),
-      class: up ? "s1" : "s2" });
-    bindTip(p, `<b>разряд ${x.level}</b><br>средняя ставка ${x.mean.toFixed(3)}<br>размах ${x.min}…${x.max}<br>наблюдений ${x.n}`);
-    svg.appendChild(p);
-    svg.appendChild(el("line", { x1: cx + bw / 2, x2: cx + bw / 2, y1: Y(x.min), y2: Y(x.max),
-      class: "whisker" }));
-    const v = el("text", { x: cx + bw / 2, y: (up ? top - 9 : Y(x.mean) + 17), class: "datalabel", "text-anchor": "middle" });
-    v.textContent = x.mean.toFixed(3); svg.appendChild(v);
-    const lb = el("text", { x: cx + bw / 2, y: H - B + 22, class: "tick", "text-anchor": "middle" });
-    lb.textContent = "разряд " + x.level; svg.appendChild(lb);
+  rows.forEach((r, i) => {
+    const y = T + i * rowH, bh = 14;
+    const nm = el("text", { x: L - 10, y: y + rowH / 2 + 4, class: "tick", "text-anchor": "end" });
+    nm.textContent = r.label; svg.appendChild(nm);
+    const b = el("path", { d: barPath(L, y + (rowH - bh) / 2, X(r.mean), bh, 4, "right"), class: "s1" });
+    bindTip(b, `<b>${r.label}</b><br>цена часа ${r.mean.toFixed(3)}<br>часов работ, назвавших ось: ${r.hours}<br>сделок: ${r.deals}`);
+    svg.appendChild(b);
+    const v = el("text", { x: L + X(r.mean) + 8, y: y + rowH / 2 + 4, class: "datalabel" });
+    v.textContent = r.mean.toFixed(3); svg.appendChild(v);
   });
-  svg.appendChild(el("line", { x1: L, x2: W - R, y1: y1, y2: y1, class: "reference" }));
 })();
 
 /* ── Профессии: две серии ───────────────────────────────────────────────── */
