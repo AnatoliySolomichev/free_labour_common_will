@@ -64,6 +64,15 @@ struct DealWork {
     double      labor_units = 0;     // appraisal of the live labor
     double      carried = 0;         // carried cost of tools/materials (records.md §9.5 v2)
     double      paid = 0;            // transfers whose reason names the acceptance
+
+    // One work — one recognized acceptance (records.md §9.5, ИР-023). The one
+    // shown above is the recognized acceptance when there is one; these say how
+    // many others' acceptances name the work (self-acceptances aside), how many
+    // of them are paid exactly, and whether it was paid more than once — sold
+    // twice, so that none of them counts.
+    std::size_t acceptances         = 0;
+    std::size_t settled_acceptances = 0;
+    bool        oversold            = false;
 };
 
 struct Deal {

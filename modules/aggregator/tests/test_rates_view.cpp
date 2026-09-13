@@ -640,3 +640,37 @@ TEST_F(IndependenceTest, PrivateAxisDoesNotPriceItsOwnInflation) {
     ASSERT_NE(a, nullptr);
     EXPECT_LT(a->weighted_hours / a->hours, 0.5);
 }
+
+// Одна работа — одна признанная приёмка (records.md §9.5, ИР-023): работа,
+// оплаченная двумя покупателями, продана дважды. Её часы не должны войти в цену
+// дважды — и не входят вовсе, как бы дорого за неё ни заплатили.
+TEST_F(RatesViewTest, WorkPaidByTwoBuyersMovesNoPrice) {
+    const UserId carol = make_chain(0xC7);
+    settled_deal(bob_, 1.0, 1.0);                 // честная сделка дня
+
+    records::WorkRecord wr{};
+    wr.hours = 1.0;
+    const Block work = add(alice_, wr);
+    for (const UserId& buyer : {bob_, carol}) {
+        records::Acceptance a{};
+        a.work        = ref_to(alice_, work);
+        a.receiver    = buyer.bytes;
+        a.hours_raw   = 1.0;
+        a.labor_units = 9.0;
+        a.axes        = {{test_axis(), 9.0}};
+        a.timestamp   = kDay + 100;
+        const Block acc = add(buyer, a);
+
+        records::Transfer t{};
+        t.from    = buyer.bytes;
+        t.to      = alice_.bytes;
+        t.origins = { {buyer.bytes, 9.0} };
+        t.reason  = ref_to(buyer, acc);
+        add(buyer, t);
+    }
+
+    const auto day = build_daily_prices(*storage_, kDay, {});
+    ASSERT_EQ(day.axes.size(), 1u);
+    EXPECT_EQ(day.axes[0].deals, 1u);             // только честная
+    EXPECT_NEAR(day.axes[0].price, 1.0, 1e-9);
+}

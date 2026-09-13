@@ -1092,6 +1092,58 @@ static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
     return 0;
 }
 
+// JSON helpers live further down, with the aggregator verbs.
+static std::optional<records::json::Value> fetch_json(const std::string& via,
+                                                      const std::string& path);
+static std::string jstr(const records::json::Object& o, const char* k);
+static double jnum(const records::json::Object& o, const char* k);
+static const records::json::Value* jarr(const records::json::Object& o,
+                                        const char* k);
+
+// The aggregator's view of one work (GET /deals): the `works[]` entry whose ref
+// is `work_ref`. nullopt when the aggregator is unreachable or does not know it.
+static std::optional<records::json::Value> find_deal_work(const std::string& via,
+                                                          const std::string& work_ref) {
+    const auto root = fetch_json(via, "/deals");
+    if (!root || !root->is_object()) return std::nullopt;
+    const auto* deals = jarr(root->object, "deals");
+    if (!deals) return std::nullopt;
+    for (const auto& d : deals->array) {
+        if (!d.is_object()) continue;
+        if (const auto* ws = jarr(d.object, "works"))
+            for (const auto& w : ws->array)
+                if (w.is_object() && jstr(w.object, "ref") == work_ref) return w;
+    }
+    return std::nullopt;
+}
+
+// An acceptance of `work` already on record — in the own branches or, with
+// --via, anyone's at the aggregator. One work — one recognized acceptance
+// (records.md §9.5, ИР-023): a second one would make the work «продана дважды».
+// Empty when none is known.
+static std::string known_acceptance_of(Context& ctx, const std::string& via,
+                                       const Ref& work) {
+    for (const NodeIndex node : ctx.local_branches()) {
+        std::vector<Block> blocks;
+        try { blocks = ctx.bc.get_branch(ctx.user_id, node); }
+        catch (const BlockchainError&) { continue; }
+        for (const auto& b : blocks) {
+            if (b.type != BlockType::DATA) continue;
+            Record rec;
+            try { rec = Codec::decode(b.payload.data(), b.payload.size()); }
+            catch (const CodecError&) { continue; }
+            const auto* a = std::get_if<Acceptance>(&rec);
+            if (a && a->work.hash == work.hash)
+                return to_hex(ctx.user_id.bytes) + "/" + to_hex(Crypto::hash_block(b).bytes);
+        }
+    }
+    if (via.empty()) return {};
+    const auto w = find_deal_work(via, to_hex(work.chain.data(), 32) + "/" +
+                                       to_hex(work.hash.data(), 32));
+    if (!w || jnum(w->object, "acceptances") < 0.5) return {};
+    return jstr(w->object, "acceptance_ref");
+}
+
 static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     const auto work_s    = flag_val(argc, argv, "--work");
     const auto quality_s = flag_val(argc, argv, "--quality");
@@ -1134,6 +1186,15 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     a.work        = parse_ref(work_s);
     a.quality     = quality_s;
     a.labor_units = 0.0;
+
+    // One work — one recognized acceptance (records.md §9.5, ИР-023): a second
+    // acceptance of the same work would make it «продана дважды».
+    if (!flag_present(argc, argv, "--again"))
+        if (const auto seen = known_acceptance_of(ctx, via, a.work); !seen.empty())
+            throw std::runtime_error(
+                "работа уже принята: " + seen + ". Признаётся одна оплаченная приёмка "
+                "работы (records.md §9.5): вторая сделала бы её «проданной дважды». "
+                "Принять ещё раз сознательно — --again");
     for (const auto& p : axis_args) {
         const auto eq = p.rfind('=');
         if (eq == std::string::npos || eq == 0)
@@ -2735,6 +2796,22 @@ static int do_pay(const fs::path& data_dir, NodeIndex leaf,
                   << paid << "/" << cap << " labor-h, payable " << remaining
                   << "h (records.md §12.8)\n";
         return 1;
+    }
+
+    // One work — one recognized acceptance (records.md §9.5, ИР-023). If another
+    // buyer has already paid for this work, paying again would make it «продана
+    // дважды»: the worker is paid twice for one job and neither deal counts.
+    // Best-effort — only an aggregator that knows the work can tell.
+    if (!via.empty()) {
+        const auto w = find_deal_work(via, to_hex(acceptance->work.chain.data(), 32) + "/" +
+                                           to_hex(acceptance->work.hash.data(), 32));
+        if (w && jnum(w->object, "settled_acceptances") > 0.5) {
+            std::cerr << "refused: эту работу уже оплатил другой покупатель ("
+                      << jstr(w->object, "acceptance_ref") << "). Вторая оплата сделала "
+                         "бы её «проданной дважды»: работник получил бы дважды за одну "
+                         "работу, а в счёт не пошла бы ни одна сделка (records.md §9.5)\n";
+            return 1;
+        }
     }
 
     const std::string me_hex = to_hex(ctx.user_id.bytes);
@@ -4495,6 +4572,9 @@ Labor:
     [--coef FLOAT] [--labor-units F]   manual rate / full manual appraisal
                                        carried_units is derived automatically
                                        from the work's carry — never by hand
+    [--again]                          accept a work that already has an
+                                       acceptance: only one paid acceptance of
+                                       a work counts (records.md §9.5)
 
 Means of production (ИР-011, records.md §10.2, records.md §9.4):
   tool add ИМЯ --cost H --life HRS Register a tool: cost in labor-hours,

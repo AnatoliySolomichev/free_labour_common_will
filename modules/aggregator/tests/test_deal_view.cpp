@@ -322,3 +322,54 @@ TEST_F(DealViewTest, ForChainSeesSeekerAndWorkerSides) {
     EXPECT_EQ(view.for_chain(anna).size(),  1u);   // she volunteered
     EXPECT_EQ(view.for_chain(other).size(), 1u);   // only their own
 }
+
+// Одна работа — одна признанная приёмка (records.md §9.5, ИР-023): вторая
+// приёмка той же работы не затирает первую молча. Сделка одна, показана
+// признанная (оплаченная), число приёмок видно; оплатили вторую — «продана
+// дважды».
+TEST_F(DealViewTest, WorkAcceptedTwiceIsOneDealAndShowsTheCount) {
+    const UserId anna  = make_owner(0xA1);
+    const UserId vera  = make_owner(0xB2);
+    const UserId boris = make_owner(0xC3);
+
+    records::WorkRecord w;
+    w.action = "Проводка";
+    w.hours  = 3;
+    const Hash wh = add(anna, w);
+    const auto accept = [&](const UserId& by) {
+        records::Acceptance a;
+        a.work        = ref_of(anna, wh);
+        a.receiver    = by.bytes;
+        a.hours_raw   = 3;
+        a.labor_units = 3;
+        a.axes        = {{test_axis(), 3.0}};
+        return add(by, a);
+    };
+    const auto pay = [&](const UserId& by, const Hash& acc) {
+        records::Transfer t;
+        t.from    = by.bytes;
+        t.to      = anna.bytes;
+        t.origins = {{by.bytes, 3.0}};
+        t.reason  = ref_of(by, acc);
+        add(by, t);
+    };
+    const Hash by_vera  = accept(vera);
+    const Hash by_boris = accept(boris);
+    pay(boris, by_boris);
+    {
+        const auto view = DealView::build(*storage_);
+        ASSERT_EQ(view.deals().size(), 1u);                   // одна работа — одна сделка
+        const auto& dw = view.deals()[0].works.at(0);
+        EXPECT_EQ(dw.acceptance_hash.bytes, by_boris.bytes);   // показана оплаченная
+        EXPECT_EQ(dw.acceptances, 2u);
+        EXPECT_EQ(dw.settled_acceptances, 1u);
+        EXPECT_FALSE(dw.oversold);
+    }
+
+    pay(vera, by_vera);                                       // оплачена второй раз
+    const auto view = DealView::build(*storage_);
+    ASSERT_EQ(view.deals().size(), 1u);
+    const auto& dw = view.deals()[0].works.at(0);
+    EXPECT_EQ(dw.settled_acceptances, 2u);
+    EXPECT_TRUE(dw.oversold);
+}

@@ -1,4 +1,5 @@
 #include "aggregator/rent_map.h"
+#include "aggregator/recognition.h"
 
 #include <records/codec.h>
 
@@ -35,7 +36,10 @@ RentInput build_rent_input(const AggregatorStorage& storage,
     RentInput out;
     std::map<RefHash, double> axis_units, axis_hours;
     std::map<RefHash, std::pair<int64_t, RefHash>> titled;   // worker → (ts, acc) of its title
+    // One work — one recognized acceptance (records.md §9.5, ИР-023).
+    const auto recognition = recognize_acceptances(storage);
     for (const auto& [acc_hash, deal] : deals) {
+        if (!recognition.recognized.count(acc_hash)) continue;
         const auto& a = deal.acc;
         if (a.timestamp < from_ts || a.timestamp >= to_ts) continue;
         if (a.hours_raw <= 0.0 || a.axes.empty()) continue;

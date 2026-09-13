@@ -1408,7 +1408,11 @@ void AggregatorServer::setup_routes() {
                           + to_hex(w.work_hash.bytes)
                           + "\",\"action\":\"" + json_escape(w.action)
                           + "\",\"hours\":"  + std::to_string(w.hours)
-                          + ",\"accepted\":" + (w.accepted ? "true" : "false");
+                          + ",\"accepted\":" + (w.accepted ? "true" : "false")
+                          + ",\"acceptances\":" + std::to_string(w.acceptances)
+                          + ",\"settled_acceptances\":"
+                          + std::to_string(w.settled_acceptances)
+                          + ",\"oversold\":" + (w.oversold ? "true" : "false");
                     if (w.accepted)
                         body += ",\"acceptance_ref\":\"" + to_hex(w.acceptor.bytes)
                               + "/" + to_hex(w.acceptance_hash.bytes)

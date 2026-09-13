@@ -8,6 +8,7 @@ add_library(records
     src/carry.cpp
     src/credit.cpp
     src/draft.cpp
+    src/acceptance.cpp
 )
 
 target_include_directories(records PUBLIC include)
@@ -25,6 +26,7 @@ add_executable(records_tests
     tests/test_carry.cpp
     tests/test_credit.cpp
     tests/test_draft.cpp
+    tests/test_acceptance.cpp
 )
 
 target_link_libraries(records_tests PRIVATE

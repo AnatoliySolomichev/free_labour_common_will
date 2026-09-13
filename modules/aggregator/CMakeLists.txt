@@ -20,6 +20,7 @@ add_library(aggregator
     src/rent_map.cpp
     src/axis_ledger.cpp
     src/own_chain.cpp
+    src/recognition.cpp
 )
 
 target_include_directories(aggregator

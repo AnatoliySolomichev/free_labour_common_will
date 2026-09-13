@@ -1,4 +1,5 @@
 #include "aggregator/attestation_view.h"
+#include "aggregator/recognition.h"
 
 #include <records/codec.h>
 
@@ -13,6 +14,7 @@ namespace {
 using RefHash = std::array<uint8_t, 32>;
 
 struct Accept {
+    RefHash             hash{};       // the acceptance block
     UserId              acceptor{};
     records::Acceptance acc;
 };
@@ -21,6 +23,10 @@ struct Accept {
 
 AttestationView AttestationView::build(const AggregatorStorage& storage) {
     AttestationView view;
+
+    // One work — one recognized acceptance (records.md §9.5, ИР-023): a job
+    // accepted by five chains is one job, not «приняли пять цепей».
+    const auto recognition = recognize_acceptances(storage);
 
     std::map<RefHash, UserId> works;     // WorkRecord hash → the chain that signed it
     std::vector<Accept>       accepts;
@@ -42,13 +48,14 @@ AttestationView AttestationView::build(const AggregatorStorage& storage) {
             works[bh.bytes] = owner;
         } else if (const auto* a = std::get_if<records::Acceptance>(&rec)) {
             if (a->receiver != owner.bytes) continue;   // spoofed receiver
-            accepts.push_back(Accept{owner, *a});
+            accepts.push_back(Accept{bh.bytes, owner, *a});
         }
     }
 
     std::map<std::pair<UserId, RefHash>, std::set<UserId>> witnesses;
     std::map<UserId, std::set<UserId>>                     all_witnesses;
-    for (const auto& [acceptor, a] : accepts) {
+    for (const auto& [hash, acceptor, a] : accepts) {
+        if (!recognition.recognized.count(hash)) continue;   // not the one that counts
         const auto work = works.find(a.work.hash);
         if (work == works.end()) continue;
         const UserId& worker = work->second;

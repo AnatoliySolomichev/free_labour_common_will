@@ -1,4 +1,5 @@
 #include "aggregator/cloud_view.h"
+#include "aggregator/recognition.h"
 
 #include <records/codec.h>
 
@@ -60,7 +61,10 @@ std::map<SampleKey, WorkComposition> build_work_compositions(
         std::string               first_title;   // of the family, in block-hash order
     };
     std::map<RefHash, Sum> fam;
+    // One work — one recognized acceptance (records.md §9.5, ИР-023).
+    const auto recognition = recognize_acceptances(storage);
     for (const auto& [acc_hash, deal] : deals) {
+        if (!recognition.recognized.count(acc_hash)) continue;
         const auto& a = deal.acc;
         if (a.axes.empty() || a.hours_raw <= 0.0) continue;
         const double carried = a.carried_units ? *a.carried_units : 0.0;

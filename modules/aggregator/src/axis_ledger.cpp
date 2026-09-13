@@ -1,4 +1,5 @@
 #include "aggregator/axis_ledger.h"
+#include "aggregator/recognition.h"
 
 #include <blockchain/crypto.h>
 #include <records/codec.h>
@@ -77,7 +78,11 @@ std::vector<AxisLedgerRow> build_axis_ledger(
     };
     double total_units = 0.0;
 
+    // Одна работа — одна признанная приёмка (records.md §9.5, ИР-023): работа,
+    // оплаченная двумя покупателями, продана дважды — в книгу не идёт ни одна.
+    const auto recognition = recognize_acceptances(storage);
     for (const auto& [acc_hash, deal] : deals) {
+        if (!recognition.recognized.count(acc_hash)) continue;
         const auto& a = deal.acc;
         if (a.axes.empty() || a.hours_raw <= 0.0) continue;   // цена без объяснения
 

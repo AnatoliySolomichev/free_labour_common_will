@@ -1,4 +1,5 @@
 #include "aggregator/rates_view.h"
+#include "aggregator/recognition.h"
 
 #include <records/codec.h>
 
@@ -163,9 +164,13 @@ DailyPrices build_daily_prices(
     }
 
     // Resolve the window's settled, non-self deals whose work is on the table.
+    // One work — one recognized acceptance (records.md §9.5, ИР-023): a work
+    // paid by two buyers was sold twice and moves no price at all.
+    const auto recognition = recognize_acceptances(storage);
     std::vector<ResolvedDeal> resolved;
     resolved.reserve(win_deals.size());
     for (const auto& [acc_hash, deal] : win_deals) {
+        if (!recognition.recognized.count(acc_hash)) continue;
         // Filter (Б) + records.md §12.8 "=": only exactly settled deals enter the
         // averaging — payment must equal the appraisal, an underpaid deal is
         // a hidden discount and must not move the rates (economy.md §4.2).

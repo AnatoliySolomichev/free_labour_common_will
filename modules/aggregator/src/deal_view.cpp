@@ -1,4 +1,5 @@
 #include "aggregator/deal_view.h"
+#include "aggregator/recognition.h"
 
 #include <records/codec.h>
 #include <records/types.h>
@@ -29,7 +30,8 @@ struct AcceptInfo {
     UserId  owner{};      // the customer (receiver, spoof-guarded)
     RefHash work{};       // accepted WorkRecord's block hash
     double  labor_units = 0;
-    double  carried     = 0;  // carried cost of tools/materials (records.md §9.5 v2)
+    double  carried     = 0;      // carried cost of tools/materials (records.md §9.5 v2)
+    bool    self        = false;  // the worker accepting their own work
 };
 
 } // namespace
@@ -130,7 +132,8 @@ DealView DealView::build(const AggregatorStorage& storage) {
             if (a->receiver != owner.bytes) continue;   // spoofed receiver
             accept_infos[bh.bytes] =
                 AcceptInfo{owner, a->work.hash, a->labor_units,
-                           a->carried_units ? *a->carried_units : 0.0};
+                           a->carried_units ? *a->carried_units : 0.0,
+                           a->work.chain == owner.bytes};
         } else if (const auto* p = std::get_if<records::Pledge>(&rec)) {
             UserId target_chain{};
             target_chain.bytes = p->target.chain;
@@ -161,10 +164,24 @@ DealView DealView::build(const AggregatorStorage& storage) {
         for (auto& rp : raw_pledges)
             if (rp.hash == pledge_hash && rp.pledger == owner) rp.revoked = true;
 
-    // Acceptances indexed by the work they appraise.
-    std::map<RefHash, RefHash> acceptance_of_work;   // work hash → acceptance hash
-    for (const auto& [ah, info] : accept_infos)
-        acceptance_of_work[info.work] = ah;
+    // Acceptances indexed by the work they appraise. One work — one recognized
+    // acceptance (records.md §9.5, ИР-023): the recognized one is shown when there
+    // is one, else the first by hash — and the others are counted, not silently
+    // overwritten away.
+    const auto recognition = recognize_acceptances(storage);
+    std::map<RefHash, RefHash>     acceptance_of_work;   // work hash → acceptance hash
+    std::map<RefHash, std::size_t> acceptances_of_work, settled_of_work;
+    for (const auto& [ah, info] : accept_infos) {
+        if (!info.self) {
+            ++acceptances_of_work[info.work];
+            const auto paid = payments.find(ah);
+            if (records::settled_exactly(paid == payments.end() ? 0.0 : paid->second,
+                                         info.labor_units + info.carried))
+                ++settled_of_work[info.work];
+        }
+        if (recognition.recognized.count(ah) || !acceptance_of_work.count(info.work))
+            acceptance_of_work[info.work] = ah;
+    }
 
     auto attach_work = [&](Deal& deal, const RefHash& wh) {
         DealWork dw;
@@ -186,6 +203,11 @@ DealView DealView::build(const AggregatorStorage& storage) {
                 paid != payments.end())
                 dw.paid = paid->second;
         }
+        if (const auto n = acceptances_of_work.find(wh); n != acceptances_of_work.end())
+            dw.acceptances = n->second;
+        if (const auto n = settled_of_work.find(wh); n != settled_of_work.end())
+            dw.settled_acceptances = n->second;
+        dw.oversold = recognition.oversold.count(wh) > 0;
         deal.works.push_back(std::move(dw));
     };
 
@@ -229,11 +251,14 @@ DealView DealView::build(const AggregatorStorage& storage) {
     }
 
     // Direct deals (case 2): an acceptance whose work is linked to no need —
-    // somebody did a job that was never posted. Anchored by the acceptance.
+    // somebody did a job that was never posted. Anchored by the acceptance
+    // shown for the work; a work accepted twice is still one job, one deal.
+    std::set<RefHash> direct_works;
     for (const auto& [ah, info] : accept_infos) {
         if (claimed_works.count(info.work)) continue;
+        if (!direct_works.insert(info.work).second) continue;
         Deal deal;
-        deal.seeker = info.owner;
+        deal.seeker = accept_infos.at(acceptance_of_work.at(info.work)).owner;
         deal.text   = "(прямая сделка — потребность не постилась)";
         attach_work(deal, info.work);
         view.deals_.push_back(std::move(deal));

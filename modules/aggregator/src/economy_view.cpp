@@ -1,4 +1,5 @@
 #include "aggregator/economy_view.h"
+#include "aggregator/recognition.h"
 
 #include <records/codec.h>
 #include <records/types.h>
@@ -35,6 +36,8 @@ EconomyView EconomyView::build(const AggregatorStorage& storage, int64_t now) {
     // Blocks are scanned in hash order, so a revoke may precede its pledge —
     // collect them and apply after the scan.
     std::vector<std::pair<UserId, RefHash>> revokes;
+    // One work — one recognized acceptance (records.md §9.5, ИР-023).
+    const auto recognition = recognize_acceptances(storage);
 
     // Single pass over every known block. Transfers/pledges count only when
     // the record's author field matches the chain that signed the block —
@@ -89,6 +92,7 @@ EconomyView EconomyView::build(const AggregatorStorage& storage, int64_t now) {
             // for (records.md §12.9), so it could never also name the pledge being closed.
             if (t->settles) settlements[t->settles->hash] += total;
         } else if (const auto* a = std::get_if<records::Acceptance>(&rec)) {
+            if (!recognition.recognized.count(bh.bytes)) continue;   // not the one that counts
             UserId worker{};
             worker.bytes = a->work.chain;
             ++view.chains_[worker].works_accepted;

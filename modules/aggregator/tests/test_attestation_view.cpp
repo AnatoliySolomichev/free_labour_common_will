@@ -165,3 +165,47 @@ TEST_F(AttestationViewTest, BreakdownThatDoesNotAddUpAttestsNothing) {
     EXPECT_TRUE(view.of(anna).empty());
     EXPECT_EQ(view.total(anna).chains, 0u);
 }
+
+// Одна работа — одна признанная приёмка (records.md §9.5, ИР-023): цепи,
+// «принявшие» одну и ту же работу, — это одна работа, а не несколько свидетелей.
+// Пока не оплачена ни одна приёмка, выбрать не из чего — не считается ни одна;
+// оплатили одну — считается она, и чужая неоплаченная её не вытесняет.
+TEST_F(AttestationViewTest, OneWorkAcceptedByManyCountsOnce) {
+    const UserId anna  = make_owner(0xA1);
+    const UserId vera  = make_owner(0xB2);
+    const UserId boris = make_owner(0xC3);
+
+    records::WorkRecord w;
+    w.action = "работа";
+    w.hours  = 5;
+    const Hash wh = add(anna, w);
+    const auto accept = [&](const UserId& by) {
+        records::Acceptance a;
+        a.work        = ref_of(anna, wh);
+        a.receiver    = by.bytes;
+        a.hours_raw   = 5;
+        a.labor_units = 5;
+        a.axes        = {{axis(kLiveLine), 5.0}};
+        return add(by, a);
+    };
+    const Hash by_vera = accept(vera);
+    accept(boris);
+    {
+        const auto view = AttestationView::build(*storage_);
+        EXPECT_TRUE(view.of(anna).empty());
+        EXPECT_EQ(view.total(anna).chains, 0u);
+    }
+
+    records::Transfer t;
+    t.from    = vera.bytes;
+    t.to      = anna.bytes;
+    t.origins = {{vera.bytes, 5.0}};
+    t.reason  = ref_of(vera, by_vera);
+    add(vera, t);
+
+    const auto view = AttestationView::build(*storage_);
+    const auto att  = view.at(anna, axis(kLiveLine).hash);
+    ASSERT_TRUE(att.has_value());
+    EXPECT_EQ(att->chains, 1u);                  // Вера — она заплатила
+    EXPECT_DOUBLE_EQ(att->hours, 5.0);           // часы работы — один раз
+}
