@@ -102,28 +102,23 @@ TEST_F(EconomyViewTest, IdeasBoardAndChainDossiers) {
     const Block carol_pledge = add(carol, cp);
     add(carol, records::PledgeRevoke{ref_to(carol, carol_pledge), 10});
 
-    // Alice's work appraised by Bob at 4.2 labor-h.
+    // Alice's work accepted by Bob at 3 labor-h and paid in the same record
+    // (records.md §9.5, ИР-023); `settles` says WHICH promise this closes (v4).
     records::WorkRecord work{};
     work.action = "сборка";
     work.hours  = 4;
     const Block work_block = add(alice, work);
     records::Acceptance acc{};
     acc.work        = ref_to(alice, work_block);
-    acc.receiver    = bob.bytes;
     acc.quality     = "пройдено";
     acc.hours_raw   = 4;
-    acc.labor_units = 4.2;
-    acc.axes        = {{test_axis(), 4.2}};
-    const Block acc_block = add(bob, acc);
-
-    // Transfer v4 (records.md §11.1): `reason` says WHAT is paid for (the acceptance),
-    // `settles` says WHICH promise this closes. A pledge is settled only by
-    // `settles` — `reason` must name the acceptance, so it never could.
+    acc.labor_units = 3.0;
+    acc.axes        = {{test_axis(), 3.0}};
     records::Transfer settle{};
     settle.from    = bob.bytes;
     settle.to      = alice.bytes;
     settle.origins = { {bob.bytes, 3.0} };            // self-issue
-    settle.reason  = ref_to(bob, acc_block);
+    settle.accept  = acc;
     settle.settles = ref_to(bob, bob_pledge);
     add(bob, settle);
 
@@ -154,12 +149,12 @@ TEST_F(EconomyViewTest, IdeasBoardAndChainDossiers) {
     EXPECT_EQ(carol_view->pledges_revoked, 1u);
     EXPECT_DOUBLE_EQ(carol_view->debt(), 0.0);
 
-    // Alice: received 3h, her work accepted once at 4.2 labor-h.
+    // Alice: received 3h, her work accepted once at 3 labor-h.
     const auto alice_view = view.chain(alice);
     ASSERT_TRUE(alice_view.has_value());
     EXPECT_DOUBLE_EQ(alice_view->received, 3.0);
     EXPECT_EQ(alice_view->works_accepted, 1u);
-    EXPECT_DOUBLE_EQ(alice_view->labor_appraised, 4.2);
+    EXPECT_DOUBLE_EQ(alice_view->labor_appraised, 3.0);
 }
 
 TEST_F(EconomyViewTest, ExpiredPledgeAndSpoofedTransferIgnored) {
@@ -177,6 +172,10 @@ TEST_F(EconomyViewTest, ExpiredPledgeAndSpoofedTransferIgnored) {
     spoof.from    = dave.bytes;
     spoof.to      = eve.bytes;
     spoof.origins = { {dave.bytes, 99.0} };
+    spoof.accept  = records::Acceptance{};
+    spoof.accept->work.chain  = eve.bytes;
+    spoof.accept->labor_units = 99.0;
+    spoof.accept->axes        = {{test_axis(), 99.0}};
     add(eve, spoof);
 
     const auto view = EconomyView::build(*storage_, /*now=*/1000);

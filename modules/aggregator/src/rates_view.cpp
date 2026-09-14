@@ -131,77 +131,48 @@ DailyPrices build_daily_prices(
     const int64_t win_start =
         weighted ? day_start - indep->window_days * 86'400 : day_start;
 
-    // One scan: records by block hash (for provenance resolution), the window's
-    // acceptances, and the total paid per acceptance hash.
-    std::map<RefHash, records::Record> by_hash;
-    struct Deal {
-        records::Acceptance acc;
-        UserId              payer;
-    };
-    std::map<RefHash, Deal>   win_deals;
-    std::map<RefHash, double> paid;
-
+    // One scan: the WorkRecords on the table (for provenance resolution).
+    std::set<RefHash> work_hashes;
     for (const Hash& bh : storage.all_block_hashes()) {
         const auto block = storage.get_block_by_hash(bh);
         if (!block || block->type != BlockType::DATA) continue;
-        records::Record rec;
         try {
-            rec = records::Codec::decode(block->payload.data(),
-                                         block->payload.size());
+            const auto rec = records::Codec::decode(block->payload.data(),
+                                                    block->payload.size());
+            if (std::holds_alternative<records::WorkRecord>(rec))
+                work_hashes.insert(bh.bytes);
         } catch (const records::CodecError&) {
-            continue;
         }
-
-        if (const auto* a = std::get_if<records::Acceptance>(&rec)) {
-            if (a->timestamp >= win_start && a->timestamp < day_end)
-                win_deals[bh.bytes] = Deal{*a, block->address.user_id};
-        } else if (const auto* t = std::get_if<records::Transfer>(&rec)) {
-            if (t->from == block->address.user_id.bytes && t->reason)
-                for (const auto& o : t->origins)
-                    paid[t->reason->hash] += o.units;
-        }
-        by_hash[bh.bytes] = std::move(rec);
     }
 
-    // Resolve the window's settled, non-self deals whose work is on the table.
-    // One work — one recognized acceptance (records.md §9.5, ИР-023): a work
-    // paid by two buyers was sold twice and moves no price at all.
-    const auto recognition = recognize_acceptances(storage);
+    // The window's deals whose work is on the table. Filter (Б) and the «=» of
+    // records.md §12.8 hold by construction: the acceptance rides inside its own
+    // payment (records.md §9.5, ИР-023), so every deal is settled exactly and is
+    // never a self-deal. The payment is labor + carried cost of the means of
+    // production (v2); the averaging below takes labor_units only. One work —
+    // one deal: a work paid by two buyers was sold twice and moves no price.
+    const auto deals = read_deals(storage);
     std::vector<ResolvedDeal> resolved;
-    resolved.reserve(win_deals.size());
-    for (const auto& [acc_hash, deal] : win_deals) {
-        if (!recognition.recognized.count(acc_hash)) continue;
-        // Filter (Б) + records.md §12.8 "=": only exactly settled deals enter the
-        // averaging — payment must equal the appraisal, an underpaid deal is
-        // a hidden discount and must not move the rates (economy.md §4.2).
-        // v2 (records.md §9.5): the appraisal is labor + carried cost of the means of
-        // production; the averaging below still takes labor_units only.
-        const double payable = deal.acc.labor_units
-                             + (deal.acc.carried_units ? *deal.acc.carried_units
-                                                       : 0.0);
-        const auto pit = paid.find(acc_hash);
-        if (pit == paid.end() ||
-            std::abs(pit->second - payable) > 1e-6) continue;
-        if (deal.acc.work.chain == deal.payer.bytes) continue;     // self-deal
+    for (const auto& deal : deals.all) {
+        const int64_t ts = deal.transfer.timestamp;
+        if (ts < win_start || ts >= day_end) continue;
+        if (!deals.counts(deal.hash)) continue;
+        const auto& a = deal.accept();
         // Разбивка ЕСТЬ цена (records.md §9.5 v4): не сходящаяся описывает
         // другую сделку — как в книге осей, её нет ни в ставке, ни в опоре.
         double named = 0.0;
-        for (const auto& x : deal.acc.axes) named += x.units;
-        if (deal.acc.axes.empty() ||
-            std::abs(named - deal.acc.labor_units) > 1e-6) continue;
-
-        const auto work_it = by_hash.find(deal.acc.work.hash);
-        if (work_it == by_hash.end()) continue;
-        if (!std::holds_alternative<records::WorkRecord>(work_it->second)) continue;
+        for (const auto& x : a.axes) named += x.units;
+        if (a.axes.empty() || std::abs(named - a.labor_units) > 1e-6) continue;
+        if (!work_hashes.count(a.work.hash)) continue;   // the work is not on the table
 
         ResolvedDeal rd{};
-        rd.worker    = deal.acc.work.chain;
+        rd.worker    = a.work.chain;
         rd.payer     = deal.payer.bytes;
-        rd.units     = deal.acc.labor_units;
-        rd.hours     = deal.acc.hours_raw;
+        rd.units     = a.labor_units;
+        rd.hours     = a.hours_raw;
         rd.rate      = rd.hours > 0.0 ? rd.units / rd.hours : 0.0;
-        rd.in_day    = deal.acc.timestamp >= day_start;
-        rd.axes      = deal.acc.axes;
+        rd.in_day    = ts >= day_start;
+        rd.axes      = a.axes;
         resolved.push_back(std::move(rd));
     }
 

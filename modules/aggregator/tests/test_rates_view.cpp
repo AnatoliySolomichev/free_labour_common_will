@@ -94,7 +94,8 @@ protected:
         return b;
     }
 
-    // One settled deal: work → acceptance (by `payer`) → settlement transfer.
+    // One deal: work → the Transfer that carries its acceptance (by `payer`) —
+    // appraisal and payment in one record (records.md §9.5, ИР-023).
     // `lines` — the breakdown {axis tag, units}; by default all on the common axis.
     records::Ref settled_deal(const UserId& payer, double hours, double units,
                               std::vector<std::pair<uint8_t, double>> lines = {}) {
@@ -105,20 +106,17 @@ protected:
 
         records::Acceptance a{};
         a.work        = ref_to(alice_, work);
-        a.receiver    = payer.bytes;
         a.hours_raw   = hours;
         a.labor_units = units;
         for (const auto& [tag, u] : lines) a.axes.push_back({test_axis(tag), u});
-        a.timestamp   = kDay + 100;
-        const Block acc = add(payer, a);
 
         records::Transfer t{};
-        t.from    = payer.bytes;
-        t.to      = alice_.bytes;
-        t.origins = { {payer.bytes, units} };
-        t.reason  = ref_to(payer, acc);
-        add(payer, t);
-        return ref_to(payer, acc);
+        t.from      = payer.bytes;
+        t.to        = alice_.bytes;
+        t.origins   = { {payer.bytes, units} };
+        t.accept    = a;
+        t.timestamp = kDay + 100;
+        return ref_to(payer, add(payer, t));
     }
 };
 
@@ -127,18 +125,9 @@ TEST_F(RatesViewTest, SettledDealsAverageSmoothAndCarryForward) {
     settled_deal(bob_, 0.2, 0.3);
     settled_deal(bob_, 0.4, 0.5);
 
-    // Unsettled declaration (no payment): must not move the price.
-    records::WorkRecord wr{};
-    wr.hours = 1.0;
-    const Block work = add(alice_, wr);
-    records::Acceptance fake{};
-    fake.work        = ref_to(alice_, work);
-    fake.receiver    = bob_.bytes;
-    fake.hours_raw   = 1.0;
-    fake.labor_units = 40.0;          // "искажающая пропорция"
-    fake.axes        = {{test_axis(), 40.0}};
-    fake.timestamp   = kDay + 100;
-    add(bob_, fake);
+    // An unsettled declaration («искажающая пропорция» without payment) cannot
+    // even be written any more: the acceptance rides inside its payment, and the
+    // codec refuses one that does not pay exactly (records.md §9.5).
 
     // No previous prices → pure day average.
     const auto fresh = build_daily_prices(*storage_, kDay, {});
@@ -162,7 +151,8 @@ TEST_F(RatesViewTest, SettledDealsAverageSmoothAndCarryForward) {
 }
 
 TEST_F(RatesViewTest, SelfDealsAndTinyVolumesExcluded) {
-    settled_deal(alice_, 0.5, 20.0);          // self-deal: payer == worker
+    // A self-deal cannot even be written: nobody accepts their own work.
+    EXPECT_THROW(settled_deal(alice_, 0.5, 20.0), records::CodecError);
     EXPECT_TRUE(build_daily_prices(*storage_, kDay, {}).axes.empty());
 
     // Below min_hours, no previous price: the axis gets none. There is no prior
@@ -193,29 +183,25 @@ TEST_F(RatesViewTest, CarriedCostSettlesAtFullPayableButAveragesLaborOnly) {
 
     records::Acceptance a{};
     a.work          = ref_to(alice_, work);
-    a.receiver      = bob_.bytes;
     a.hours_raw     = 6.0;
     a.labor_units   = 6.0;
     a.axes          = {{test_axis(), 6.0}};
     a.carried_units = 0.23625;
-    a.timestamp     = kDay + 100;
-    const Block acc = add(bob_, a);
 
-    // Paying the labor part alone leaves the deal unsettled («=» records.md §12.8 is
-    // labor + carried) — it must not move the prices.
+    // Paying the labor part alone is not a deal («=» records.md §12.8 is labor +
+    // carried): the codec refuses to write it.
     records::Transfer t{};
-    t.from    = bob_.bytes;
-    t.to      = alice_.bytes;
-    t.origins = { {bob_.bytes, 6.0} };
-    t.reason  = ref_to(bob_, acc);
-    add(bob_, t);
-    EXPECT_TRUE(build_daily_prices(*storage_, kDay, {}).axes.empty());
+    t.from      = bob_.bytes;
+    t.to        = alice_.bytes;
+    t.origins   = { {bob_.bytes, 6.0} };
+    t.accept    = a;
+    t.timestamp = kDay + 100;
+    EXPECT_THROW(records::Codec::encode(t), records::CodecError);
 
-    // Topping up the carried part settles it. The price is labor/hours = 1.0:
-    // carried cost must NOT distort the price of live labor (records.md §11.2).
-    records::Transfer t2 = t;
-    t2.origins = { {bob_.bytes, 0.23625} };
-    add(bob_, t2);
+    // Paid in full, it is. The price is labor/hours = 1.0: carried cost must NOT
+    // distort the price of live labor (records.md §11.2).
+    t.origins = { {bob_.bytes, 6.23625} };
+    add(bob_, t);
     const auto d = build_daily_prices(*storage_, kDay, {});
     ASSERT_EQ(d.axes.size(), 1u);
     EXPECT_NEAR(d.axes[0].price, 1.0, 1e-9);
@@ -275,17 +261,15 @@ TEST_F(RatesViewTest, BreakdownThatDoesNotAddUpIsNotAPrice) {
     const Block work = add(alice_, wr);
     records::Acceptance a{};
     a.work        = ref_to(alice_, work);
-    a.receiver    = bob_.bytes;
     a.hours_raw   = 2.0;
     a.labor_units = 8.0;
     a.axes        = {{test_axis(), 2.0}};            // названо 2 из 8
-    a.timestamp   = kDay + 100;
-    const Block acc = add(bob_, a);
     records::Transfer t{};
-    t.from    = bob_.bytes;
-    t.to      = alice_.bytes;
-    t.origins = { {bob_.bytes, 8.0} };
-    t.reason  = ref_to(bob_, acc);
+    t.from      = bob_.bytes;
+    t.to        = alice_.bytes;
+    t.origins   = { {bob_.bytes, 8.0} };
+    t.accept    = a;
+    t.timestamp = kDay + 100;
     add(bob_, t);
     EXPECT_TRUE(build_daily_prices(*storage_, kDay, {}).axes.empty());
 }
@@ -339,17 +323,15 @@ protected:
             units += r * hours;
         }
         a.work        = ref_to(worker, work);
-        a.receiver    = payer.bytes;
         a.hours_raw   = hours;
         a.labor_units = units;
-        a.timestamp   = ts;
-        const Block acc = add(payer, a);
 
         records::Transfer t{};
-        t.from    = payer.bytes;
-        t.to      = worker.bytes;
-        t.origins = { {payer.bytes, units} };
-        t.reason  = ref_to(payer, acc);
+        t.from      = payer.bytes;
+        t.to        = worker.bytes;
+        t.origins   = { {payer.bytes, units} };
+        t.accept    = a;
+        t.timestamp = ts;
         add(payer, t);
     }
 
@@ -654,18 +636,16 @@ TEST_F(RatesViewTest, WorkPaidByTwoBuyersMovesNoPrice) {
     for (const UserId& buyer : {bob_, carol}) {
         records::Acceptance a{};
         a.work        = ref_to(alice_, work);
-        a.receiver    = buyer.bytes;
         a.hours_raw   = 1.0;
         a.labor_units = 9.0;
         a.axes        = {{test_axis(), 9.0}};
-        a.timestamp   = kDay + 100;
-        const Block acc = add(buyer, a);
 
         records::Transfer t{};
-        t.from    = buyer.bytes;
-        t.to      = alice_.bytes;
-        t.origins = { {buyer.bytes, 9.0} };
-        t.reason  = ref_to(buyer, acc);
+        t.from      = buyer.bytes;
+        t.to        = alice_.bytes;
+        t.origins   = { {buyer.bytes, 9.0} };
+        t.accept    = a;
+        t.timestamp = kDay + 100;
         add(buyer, t);
     }
 

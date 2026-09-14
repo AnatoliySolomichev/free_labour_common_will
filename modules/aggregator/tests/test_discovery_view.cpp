@@ -36,10 +36,17 @@ Block make_block(const UserId& owner, BlockIndex index, BlockType type,
 
 Block make_transfer(const UserId& from, const UserId& to, double units,
                     BlockIndex index) {
+    // Hours move only as a deal — the acceptance inside its payment (records.md §9.5).
+    records::Acceptance a{};
+    a.work.chain  = to.bytes;
+    a.work.hash.fill(static_cast<uint8_t>(index));
+    a.labor_units = units;
+    a.axes        = {{records::BlockPath{}, units}};
     records::Transfer t{};
     t.from    = from.bytes;
     t.to      = to.bytes;
     t.origins = { {from.bytes, units} };
+    t.accept  = a;
     return make_block(from, index, BlockType::DATA, records::Codec::encode(t));
 }
 

@@ -211,78 +211,7 @@ TEST(RecordsCodec, WorkRecordTitleIsFreeTextAndOptional) {
     ASSERT_EQ(d.carry.size(), 1u);
 }
 
-// ── Acceptance ────────────────────────────────────────────────────────────────
-
-TEST(RecordsCodec, Acceptance) {
-    Acceptance a{};
-    a.work        = make_ref(0x53, 0x54);
-    a.receiver.fill(0xCC);
-    a.quality     = "пройдено";
-    a.hours_raw   = 2.5;
-    a.labor_units = 2.5 * 1.2;
-    a.axes        = {{make_path(0x79, 0x01), 2.5 * 1.2}};
-    a.timestamp   = 1'700'000'100LL;
-
-    const auto decoded = std::get<Acceptance>(roundtrip(a));
-    EXPECT_EQ(decoded.work,      a.work);
-    EXPECT_EQ(decoded.receiver,  a.receiver);
-    EXPECT_EQ(decoded.quality,   a.quality);
-    EXPECT_DOUBLE_EQ(decoded.hours_raw,   a.hours_raw);
-    EXPECT_DOUBLE_EQ(decoded.labor_units, a.labor_units);
-    EXPECT_EQ(decoded.timestamp, a.timestamp);
-}
-
-// «Такая же работа, как та» (ИР-022 шаг 11): приёмка может назвать образец, чью
-// разбивку повторяет. Разбивка при этом выписана целиком — ссылка говорит лишь,
-// откуда она. Хвост читается по ключу: 7, 8, 9, 10 по возрастанию.
-TEST(RecordsCodec, AcceptanceLikeNamesTheSample) {
-    Acceptance a{};
-    a.work        = make_ref(0x53, 0x54);
-    a.receiver.fill(0xCC);
-    a.quality     = "как новый";
-    a.hours_raw   = 2.0;
-    a.labor_units = 2.0;
-    a.axes        = {{make_path(0x79, 0x01), 2.0}};
-    a.timestamp   = 1'700'000'100LL;
-    a.like        = make_ref(0xB1, 0x5A);
-    const auto d = std::get<Acceptance>(roundtrip(a));
-    ASSERT_TRUE(d.like.has_value());
-    EXPECT_EQ(*d.like, *a.like);
-
-    a.carried_units = 0.5;
-    AcceptanceNorm n{};
-    n.agg.fill(0x33); n.date = 86'400; n.W = 1.0;
-    a.norm = n;
-    const auto bytes = Codec::encode(Record{a});
-    EXPECT_EQ(bytes[0], 0xAB);                                // map(11): все поля
-    const auto all = std::get<Acceptance>(Codec::decode(bytes));
-    EXPECT_EQ(*all.like, *a.like);
-    EXPECT_DOUBLE_EQ(*all.carried_units, 0.5);
-    ASSERT_TRUE(all.norm.has_value());
-}
-
-// Приёмки без разбивки не существует и при ЧТЕНИИ: обратной совместимости нет
-// (решение участника 2026-09-11). Запись, из которой вырезан ключ 9, отвергается.
-TEST(RecordsCodec, AcceptanceWithoutAxesIsNotRead) {
-    Acceptance a{};
-    a.work        = make_ref(0x53, 0x54);
-    a.receiver.fill(0xCC);
-    a.quality     = "пройдено";
-    a.hours_raw   = 1.0;
-    a.labor_units = 1.0;
-    a.axes        = {{make_path(0x79, 0x01), 1.0}};
-    a.timestamp   = 7;
-    auto bytes = Codec::encode(Record{a});
-    ASSERT_EQ(bytes[0], 0xA8);                                // семь полей + разбивка
-    const std::vector<uint8_t> key9 = {0x09, 0x81};           // ключ 9, массив из одной
-    const auto at = std::find_end(bytes.begin(), bytes.end(), key9.begin(), key9.end());
-    ASSERT_NE(at, bytes.end());
-    bytes.erase(at, bytes.end());                             // разбивка — последнее поле
-    bytes[0] = 0xA7;
-    EXPECT_THROW(Codec::decode(bytes), CodecError);
-}
-
-// ── Economy (records.md §11) ──────────────────────────────────────────────────
+// ── Сделка: приёмка внутри перевода (records.md §9.5, ИР-023) ────────────────
 
 static std::array<uint8_t, 32> make_uid(uint8_t fill) {
     std::array<uint8_t, 32> a{};
@@ -290,92 +219,214 @@ static std::array<uint8_t, 32> make_uid(uint8_t fill) {
     return a;
 }
 
-TEST(RecordsCodec, TransferRoundtripAllOriginKinds) {
+// Сделка: приёмка — внутри своей оплаты. Платит принимающий (0xA1) тому, чья
+// работа принята, ровно труд плюс перенос.
+static Transfer deal_of(const Acceptance& a) {
     Transfer t{};
     t.from      = make_uid(0xA1);
-    t.to        = make_uid(0xB2);
-    t.to_node   = 5;                          // credited branch (per-branch purse)
-    t.origins   = { {make_uid(0xA1), 1.5},    // self-issue (issuer == from)
-                    {make_uid(0xB2), 0.25},   // redemption (issuer == to)
-                    {make_uid(0xC3), 2.0} };  // endorsement
-    t.reason    = make_ref(0x11, 0x22);
-    t.timestamp = 1'700'000'000LL;
-
-    const auto decoded = std::get<Transfer>(roundtrip(t));
-    EXPECT_EQ(decoded.from,      t.from);
-    EXPECT_EQ(decoded.to,        t.to);
-    EXPECT_EQ(decoded.to_node,   5u);
-    EXPECT_EQ(decoded.origins,   t.origins);
-    ASSERT_TRUE(decoded.reason.has_value());
-    EXPECT_EQ(*decoded.reason,   *t.reason);
-    EXPECT_EQ(decoded.timestamp, t.timestamp);
+    t.to        = a.work.chain;
+    t.origins   = { {t.from, a.labor_units + (a.carried_units ? *a.carried_units : 0.0)} };
+    t.accept    = a;
+    t.timestamp = 1'700'000'100LL;
+    return t;
 }
 
-// Transfer v4 (records.md §11.1): `settles` is key 10 and rides after the
-// emission group (7-9), so every combination keeps CBOR keys ascending —
-// deterministic encoding holds for map sizes 7, 8, 10 and 11 alike.
-TEST(RecordsCodec, TransferV4SettlesRoundtripsInEveryCombination) {
-    Transfer base{};
-    base.from      = make_uid(0xA1);
-    base.to        = make_uid(0xB2);
-    base.origins   = { {make_uid(0xA1), 3.0} };   // self-issue
-    base.reason    = make_ref(0x11, 0x22);        // the acceptance being paid
-    base.timestamp = 1'700'000'000LL;
+// Приёмка после круга через кодек — внутри своего перевода.
+static Acceptance roundtrip_accept(const Acceptance& a) {
+    const auto t = std::get<Transfer>(roundtrip(Record{deal_of(a)}));
+    EXPECT_TRUE(t.accept.has_value());
+    return t.accept ? *t.accept : Acceptance{};
+}
 
+static Acceptance plain_acceptance(double units) {
+    Acceptance a{};
+    a.work        = make_ref(0x53, 0x54);
+    a.quality     = "пройдено";
+    a.hours_raw   = units;
+    a.labor_units = units;
+    a.axes        = {{make_path(0x79, 0x01), units}};
+    return a;
+}
+
+TEST(RecordsCodec, DealRoundtrip) {
+    Acceptance a = plain_acceptance(3.0);
+    Transfer   t = deal_of(a);
+    t.to_node = 5;                                    // credited branch (per-branch purse)
+    // Все три вида порций: своя (эмиссия), бумага получателя (погашение), чужая.
+    t.origins = { {make_uid(0xA1), 1.5}, {t.to, 0.5}, {make_uid(0xC3), 1.0} };
+
+    const auto d = std::get<Transfer>(roundtrip(Record{t}));
+    EXPECT_EQ(d.from, t.from);
+    EXPECT_EQ(d.to, t.to);
+    EXPECT_EQ(d.to_node, 5u);
+    EXPECT_EQ(d.origins, t.origins);
+    EXPECT_EQ(d.timestamp, t.timestamp);
+    ASSERT_TRUE(d.accept.has_value());
+    EXPECT_EQ(d.accept->work, a.work);
+    EXPECT_EQ(d.accept->quality, a.quality);
+    EXPECT_DOUBLE_EQ(d.accept->hours_raw, a.hours_raw);
+    EXPECT_DOUBLE_EQ(d.accept->labor_units, a.labor_units);
+    EXPECT_EQ(d.accept->axes, a.axes);
+}
+
+// «Такая же работа, как та» (ИР-022 шаг 11): приёмка может назвать образец, чью
+// разбивку повторяет. Хвост приёмки читается по ключу: 5, 6, 7 по возрастанию.
+TEST(RecordsCodec, AcceptanceLikeNamesTheSample) {
+    Acceptance a = plain_acceptance(2.0);
+    a.quality = "как новый";
+    a.like    = make_ref(0xB1, 0x5A);
+    const auto d = roundtrip_accept(a);
+    ASSERT_TRUE(d.like.has_value());
+    EXPECT_EQ(*d.like, *a.like);
+
+    a.carried_units = 0.5;
+    AcceptanceNorm n{};
+    n.agg.fill(0x33); n.date = 86'400; n.W = 1.0;
+    a.norm = n;
+    const auto all = roundtrip_accept(a);
+    EXPECT_EQ(*all.like, *a.like);
+    EXPECT_DOUBLE_EQ(*all.carried_units, 0.5);
+    ASSERT_TRUE(all.norm.has_value());
+}
+
+// Приёмки без разбивки не существует: кодек её не пишет...
+TEST(RecordsCodec, AcceptanceWithoutAxesIsRefused) {
+    Acceptance a = plain_acceptance(2.0);
+    a.axes.clear();
+    EXPECT_THROW(Codec::encode(Record{deal_of(a)}), CodecError);
+    a.axes = {{make_path(0x79, 0x03), 2.0}};
+    EXPECT_NO_THROW(Codec::encode(Record{deal_of(a)}));
+}
+
+// ...и не читает. Две сделки, различающиеся лишь числом строк разбивки (1 и 2),
+// дают длину одной строки; из первой её вырезают и ставят пустой массив.
+TEST(RecordsCodec, AcceptanceWithoutAxesIsNotRead) {
+    const Acceptance one = plain_acceptance(1.0);
+    Acceptance       two = one;
+    two.axes.push_back(one.axes[0]);
+    auto       b1 = Codec::encode(Record{deal_of(one)});
+    const auto b2 = Codec::encode(Record{deal_of(two)});
+    const auto line = static_cast<std::ptrdiff_t>(b2.size() - b1.size());
+    const std::vector<uint8_t> head = {0x04, 0x81, 0xA2};   // ключ 4, массив из одной, map(2)
+    const auto at = std::find_end(b1.begin(), b1.end(), head.begin(), head.end());
+    ASSERT_NE(at, b1.end());
+    const auto pos = at - b1.begin();
+    b1.erase(b1.begin() + pos + 2, b1.begin() + pos + 2 + line);
+    b1[static_cast<size_t>(pos) + 1] = 0x80;                  // пустой массив
+    EXPECT_THROW(Codec::decode(b1), CodecError);
+}
+
+// Беспричинных переводов нет (records.md §12.9): без приёмки часы не уходят в
+// другую цепь — между своими ветками ходит только чужая бумага.
+TEST(RecordsCodec, TransferWithoutAcceptanceOnlyBetweenOwnBranches) {
+    Transfer t{};
+    t.from      = make_uid(0x01);
+    t.to        = make_uid(0x02);
+    t.origins   = { {make_uid(0x03), 3.0} };
+    t.timestamp = 1LL;
+    EXPECT_THROW(Codec::encode(Record{t}), CodecError);        // в чужую цепь — нельзя
+
+    t.to      = t.from;                                        // своя ветка → своя ветка
+    t.to_node = 9;
+    const auto d = std::get<Transfer>(roundtrip(Record{t}));
+    EXPECT_FALSE(d.accept.has_value());
+    EXPECT_EQ(d.to_node, 9u);
+
+    t.origins = { {t.from, 3.0} };                              // своя бумага себе — нет
+    EXPECT_THROW(Codec::encode(Record{t}), CodecError);
+}
+
+// Треугольника нет по построению: платит принимающий, и платит ровно тому, чья
+// работа принята, ровно оценку — ни меньше, ни больше.
+TEST(RecordsCodec, DealPaysTheWorkerExactlyTheAppraisal) {
+    const Acceptance a = plain_acceptance(3.0);
+    EXPECT_NO_THROW(Codec::encode(Record{deal_of(a)}));
+
+    Transfer under = deal_of(a);
+    under.origins = { {under.from, 2.0} };
+    EXPECT_THROW(Codec::encode(Record{under}), CodecError);    // недоплата
+
+    Transfer over = deal_of(a);
+    over.origins = { {over.from, 4.0} };
+    EXPECT_THROW(Codec::encode(Record{over}), CodecError);     // переплата
+
+    Transfer elsewhere = deal_of(a);
+    elsewhere.to = make_uid(0xEE);                              // платит не работнику
+    EXPECT_THROW(Codec::encode(Record{elsewhere}), CodecError);
+
+    Acceptance own = a;
+    own.work = make_ref(0xA1, 0x54);                            // своя работа
+    EXPECT_THROW(Codec::encode(Record{deal_of(own)}), CodecError);
+}
+
+// Перенос входит в оплату: оплата = труд + перенос (records.md §9.5 v2).
+TEST(RecordsCodec, DealPaysLabourPlusCarried) {
+    Acceptance a = plain_acceptance(6.0);
+    a.carried_units = 1.19625;
+    const Transfer t = deal_of(a);
+    EXPECT_DOUBLE_EQ(t.origins[0].units, 7.19625);
+    const auto d = roundtrip_accept(a);
+    ASSERT_TRUE(d.carried_units.has_value());
+    EXPECT_DOUBLE_EQ(*d.carried_units, 1.19625);
+
+    Transfer labour_only = t;
+    labour_only.origins = { {t.from, 6.0} };
+    EXPECT_THROW(Codec::encode(Record{labour_only}), CodecError);
+}
+
+// Прежний тип 0x54 снят: отдельная приёмка не читается (обратной совместимости
+// нет — решение участника 2026-09-14).
+TEST(RecordsCodec, RetiredAcceptanceRecordIsRefused) {
+    const std::vector<uint8_t> old = { 0xa1, 0x00, 0x18, 0x54 };   // map(1) {0: 0x54}
+    EXPECT_THROW(Codec::decode(old), CodecError);
+}
+
+// Хвост перевода — эмиссия (7–9), обещание (10), приёмка (11) — по возрастанию
+// ключей в любом сочетании (records.md §11.1 v4/v5).
+TEST(RecordsCodec, TransferTailRoundtripsInEveryCombination) {
+    const Transfer base = deal_of(plain_acceptance(3.0));      // самоэмиссия на 3ч
     EmissionLink link{};
     link.seq        = 7;
     link.prev       = make_ref(0x33, 0x44);
     link.debt_after = -3.0;
-
     const Ref pledge = make_ref(0x55, 0x66);
 
-    {   // map(7) — v2/v3 without either
-        const auto d = std::get<Transfer>(roundtrip(base));
+    {   // map(7) — только приёмка
+        const auto bytes = Codec::encode(Record{base});
+        EXPECT_EQ(bytes[0], 0xA7);
+        const auto d = std::get<Transfer>(Codec::decode(bytes));
         EXPECT_FALSE(d.settles.has_value());
         EXPECT_FALSE(d.emission.has_value());
     }
-    {   // map(8) — settles only
+    {   // map(8) — и обещание
         Transfer t = base;
         t.settles  = pledge;
-        const auto d = std::get<Transfer>(roundtrip(t));
+        const auto d = std::get<Transfer>(roundtrip(Record{t}));
         ASSERT_TRUE(d.settles.has_value());
         EXPECT_EQ(*d.settles, pledge);
         EXPECT_FALSE(d.emission.has_value());
     }
-    {   // map(10) — emission only
+    {   // map(10) — и звено эмиссии
         Transfer t = base;
         t.emission = link;
-        const auto d = std::get<Transfer>(roundtrip(t));
+        const auto d = std::get<Transfer>(roundtrip(Record{t}));
         ASSERT_TRUE(d.emission.has_value());
         EXPECT_EQ(d.emission->seq, 7u);
         EXPECT_FALSE(d.settles.has_value());
     }
-    {   // map(11) — both: paying off a promise with freshly issued paper
+    {   // map(11) — всё сразу: закрыть обещание свежевыпущенной бумагой
         Transfer t = base;
         t.emission = link;
         t.settles  = pledge;
-        const auto d = std::get<Transfer>(roundtrip(t));
+        const auto bytes = Codec::encode(Record{t});
+        EXPECT_EQ(bytes[0], 0xAB);
+        const auto d = std::get<Transfer>(Codec::decode(bytes));
         ASSERT_TRUE(d.settles.has_value());
-        EXPECT_EQ(*d.settles, pledge);
         ASSERT_TRUE(d.emission.has_value());
         EXPECT_DOUBLE_EQ(d.emission->debt_after, -3.0);
-        // reason still answers a different question: what the payment is for.
-        ASSERT_TRUE(d.reason.has_value());
-        EXPECT_EQ(*d.reason, *base.reason);
+        ASSERT_TRUE(d.accept.has_value());                     // «за что» — сама приёмка
+        EXPECT_EQ(d.accept->work, base.accept->work);
     }
-}
-
-TEST(RecordsCodec, TransferWithoutReason) {
-    Transfer t{};
-    t.from      = make_uid(0x01);
-    t.to        = make_uid(0x02);
-    t.origins   = { {make_uid(0x01), 3.0} };
-    t.timestamp = 1LL;
-
-    const auto decoded = std::get<Transfer>(roundtrip(t));
-    EXPECT_FALSE(decoded.reason.has_value());
-    ASSERT_EQ(decoded.origins.size(), 1u);
-    EXPECT_DOUBLE_EQ(decoded.origins[0].units, 3.0);
 }
 
 TEST(RecordsCodec, PledgeRoundtripWithAndWithoutOptionals) {
@@ -475,10 +526,7 @@ TEST(RecordsCodec, DailyAggregateOldLayoutsAreRefused) {
 }
 
 TEST(RecordsCodec, EconomyDeterminism) {
-    Transfer t{};
-    t.from    = make_uid(0x01);
-    t.to      = make_uid(0x02);
-    t.origins = { {make_uid(0x01), 0.1} };
+    const Transfer t = deal_of(plain_acceptance(0.1));
     EXPECT_EQ(Codec::encode(t), Codec::encode(t));
 
     Pledge p{};
@@ -522,21 +570,15 @@ TEST(RecordsCodec, SameInputSameBytes) {
 // ── Transfer v3: emission thread (economy.md §4.3) ────────────────────────────
 
 TEST(RecordsCodec, TransferV3EmissionLinkRoundtrip) {
-    Transfer t{};
-    t.from      = make_uid(0xA1);
-    t.to        = make_uid(0xB2);
-    t.to_node   = 7;
-    t.origins   = { {make_uid(0xA1), 10.0} };   // self-issue → threaded
-    t.reason    = make_ref(0x11, 0x22);
-    t.timestamp = 1'700'000'000LL;
-
+    Transfer t = deal_of(plain_acceptance(10.0));   // self-issue → threaded
+    t.to_node = 7;
     EmissionLink link{};
     link.seq        = 3;
     link.prev       = make_ref(0x33, 0x44);
-    link.debt_after = -17.0;                    // "+10 from level -7 → -17"
+    link.debt_after = -17.0;                          // "+10 from level -7 → -17"
     t.emission = link;
 
-    const auto decoded = std::get<Transfer>(roundtrip(t));
+    const auto decoded = std::get<Transfer>(roundtrip(Record{t}));
     ASSERT_TRUE(decoded.emission.has_value());
     EXPECT_EQ(decoded.emission->seq, 3u);
     ASSERT_TRUE(decoded.emission->prev.has_value());
@@ -545,31 +587,23 @@ TEST(RecordsCodec, TransferV3EmissionLinkRoundtrip) {
 }
 
 TEST(RecordsCodec, TransferV3FirstLinkHasNoPrev) {
-    Transfer t{};
-    t.from      = make_uid(0x01);
-    t.to        = make_uid(0x02);
-    t.origins   = { {make_uid(0x01), 7.0} };
-    t.timestamp = 1LL;
+    Transfer t = deal_of(plain_acceptance(7.0));
     EmissionLink link{};
     link.seq        = 0;
     link.debt_after = -7.0;
     t.emission = link;
 
-    const auto decoded = std::get<Transfer>(roundtrip(t));
+    const auto decoded = std::get<Transfer>(roundtrip(Record{t}));
     ASSERT_TRUE(decoded.emission.has_value());
     EXPECT_EQ(decoded.emission->seq, 0u);
     EXPECT_FALSE(decoded.emission->prev.has_value());
     EXPECT_DOUBLE_EQ(decoded.emission->debt_after, -7.0);
 }
 
-TEST(RecordsCodec, TransferV2WithoutEmissionStillDecodes) {
-    Transfer t{};
-    t.from      = make_uid(0x01);
-    t.to        = make_uid(0x02);
-    t.origins   = { {make_uid(0x03), 1.0} };    // pure endorsement, no thread
-    t.timestamp = 2LL;
-
-    const auto decoded = std::get<Transfer>(roundtrip(t));
+TEST(RecordsCodec, TransferWithoutEmissionDecodes) {
+    Transfer t = deal_of(plain_acceptance(1.0));
+    t.origins = { {make_uid(0x03), 1.0} };            // pure endorsement, no thread
+    const auto decoded = std::get<Transfer>(roundtrip(Record{t}));
     EXPECT_FALSE(decoded.emission.has_value());
 }
 
@@ -732,30 +766,6 @@ TEST(RecordsCodec, WorkRecordEmptyCarryTakesNoField) {
     EXPECT_TRUE(decoded.carry.empty());
 }
 
-TEST(RecordsCodec, AcceptanceV2CarriedUnits) {
-    Acceptance a{};
-    a.work          = make_ref(0x53, 0x54);
-    a.receiver.fill(0xCC);
-    a.quality       = "пройдено";
-    a.hours_raw     = 6.0;
-    a.labor_units   = 7.2;
-    a.axes          = {{make_path(0x79, 0x01), 7.2}};
-    a.timestamp     = 1'700'000'100LL;
-    a.carried_units = 1.19625;
-
-    const auto decoded = std::get<Acceptance>(roundtrip(a));
-    ASSERT_TRUE(decoded.carried_units.has_value());
-    EXPECT_DOUBLE_EQ(*decoded.carried_units, 1.19625);
-
-    // Без carried_units — map(8): семь полей плюс разбивка цены, которая с
-    // ИР-022 обязательна (records.md §9.5 v4).
-    a.carried_units.reset();
-    const auto bytes = Codec::encode(Record{a});
-    EXPECT_EQ(bytes[0], 0xA8);
-    const auto d1 = std::get<Acceptance>(Codec::decode(bytes));
-    EXPECT_FALSE(d1.carried_units.has_value());
-}
-
 // ── WorkCloud (0x75) — облако образцов работ (ИР-022 шаг 11, specialty-axes.md §10)
 TEST(RecordsCodec, WorkCloudRoundtrip) {
     WorkCloud c{};
@@ -802,107 +812,51 @@ TEST(RecordsCodec, WorkCloudDeterminism) {
     EXPECT_EQ(Codec::encode(Record{c}), Codec::encode(Record{c}));
 }
 
-// Acceptance v3: norm{agg,date,W} provenance (economy.md §2б), independent of v2.
-TEST(RecordsCodec, AcceptanceV3NormRoundtrip) {
-    records::Acceptance a{};
-    a.work        = records::Ref{};
-    a.receiver.fill(0x22);
-    a.quality     = "пройдено";
-    a.hours_raw   = 6.0;
-    a.labor_units = 6.0;
-    a.axes        = {{make_path(0x79, 0x01), 6.0}};
-    a.timestamp   = 1'700'000'000LL;
-    records::AcceptanceNorm n{};
+// Приёмка v3: norm{agg,date,W} (economy.md §2б) — независимо от переноса.
+TEST(RecordsCodec, AcceptanceNormRoundtrip) {
+    Acceptance a = plain_acceptance(6.0);
+    a.work = records::Ref{};
+    AcceptanceNorm n{};
     n.agg.fill(0x33); n.date = 86'400; n.W = 1.0509;
     a.norm = n;
 
-    // norm WITHOUT carried_units → map(8) with key 8 (not 7).
-    const auto d = std::get<records::Acceptance>(roundtrip(Record{a}));
+    const auto d = roundtrip_accept(a);                        // norm без переноса
     EXPECT_FALSE(d.carried_units.has_value());
     ASSERT_TRUE(d.norm.has_value());
     EXPECT_EQ(d.norm->agg, n.agg);
     EXPECT_EQ(d.norm->date, 86'400);
     EXPECT_DOUBLE_EQ(d.norm->W, 1.0509);
 
-    // Both carried_units AND norm → map(9), keys 7 and 8.
-    a.carried_units = 1.2;
-    const auto both = std::get<records::Acceptance>(roundtrip(Record{a}));
+    a.carried_units = 1.2;                                     // и перенос, и norm
+    const auto both = roundtrip_accept(a);
     ASSERT_TRUE(both.carried_units.has_value());
     EXPECT_DOUBLE_EQ(*both.carried_units, 1.2);
     ASSERT_TRUE(both.norm.has_value());
-    EXPECT_DOUBLE_EQ(both.norm->W, 1.0509);
 
-    // Neither → map(7), classic v1, both nullopt.
-    a.carried_units.reset(); a.norm.reset();
-    const auto v1 = std::get<records::Acceptance>(roundtrip(Record{a}));
-    EXPECT_FALSE(v1.carried_units.has_value());
-    EXPECT_FALSE(v1.norm.has_value());
+    a.carried_units.reset(); a.norm.reset();                   // ни того, ни другого
+    const auto bare = roundtrip_accept(a);
+    EXPECT_FALSE(bare.carried_units.has_value());
+    EXPECT_FALSE(bare.norm.has_value());
 }
 
-// Acceptance v4 (ИР-022) — цена, расписанная по осям, подписана ВМЕСТЕ с ценой.
+// Приёмка v4 (ИР-022) — цена, расписанная по осям, подписана ВМЕСТЕ с ценой.
 TEST(RecordsCodec, AcceptanceAxesRoundtrip) {
-    records::Acceptance a{};
-    a.work        = make_ref(0x53, 0x54);
-    a.receiver.fill(0xB1);
-    a.quality     = "пройдено";
-    a.hours_raw   = 10.0;
+    Acceptance a = plain_acceptance(10.0);
     a.labor_units = 14.0;
-    a.timestamp   = 1'700'000'000LL;
-    a.axes        = {{make_path(0x79, 0x01), 2.8}, {make_path(0x79, 0x02), 5.5},
-                     {make_path(0x79, 0x03), 5.7}};
-
-    const auto d = std::get<records::Acceptance>(roundtrip(Record{a}));
+    a.axes = {{make_path(0x79, 0x01), 2.8}, {make_path(0x79, 0x02), 5.5},
+              {make_path(0x79, 0x03), 5.7}};
+    const auto d = roundtrip_accept(a);
     EXPECT_EQ(d.axes, a.axes);
     EXPECT_DOUBLE_EQ(d.labor_units, 14.0);
     EXPECT_FALSE(d.carried_units.has_value());
 }
 
-// Разбивка независима от carried_units и norm: любое их подмножество читается.
-TEST(RecordsCodec, AcceptanceAxesAlongsideOtherOptionalFields) {
-    records::Acceptance a{};
-    a.work        = make_ref(0x53, 0x54);
-    a.receiver.fill(0xB2);
-    a.hours_raw   = 4.0;
-    a.labor_units = 6.0;
-    a.timestamp   = 5;
-    a.carried_units = 1.5;
-    a.axes        = {{make_path(0x79, 0x03), 6.0}};
-
-    const auto d = std::get<records::Acceptance>(roundtrip(Record{a}));
-    ASSERT_TRUE(d.carried_units.has_value());
-    EXPECT_DOUBLE_EQ(*d.carried_units, 1.5);
-    ASSERT_EQ(d.axes.size(), 1u);
-    EXPECT_EQ(d.axes[0].axis, a.axes[0].axis);
-}
-
-// Приёмки без разбивки НЕ СУЩЕСТВУЕТ: цена без объяснения — это второй вид
-// записи там, где должен быть один. Кодек отказывается её писать, а не пишет
-// «пустой» вариант.
-TEST(RecordsCodec, AcceptanceWithoutAxesIsRefused) {
-    records::Acceptance a{};
-    a.work        = make_ref(0x53, 0x54);
-    a.receiver.fill(0xB3);
-    a.hours_raw   = 2.0;
-    a.labor_units = 2.0;
-    a.timestamp   = 3;
-    EXPECT_THROW(Codec::encode(Record{a}), records::CodecError);
-
-    a.axes = {{make_path(0x79, 0x03), 2.0}};
-    EXPECT_NO_THROW(Codec::encode(Record{a}));
-}
-
 // Ось — полный путь к её определению, а не слаг: слаги сталкиваются, и выбирать
 // между двумя цепями, назвавшими свою ось одинаково, значило бы чьё-то решение.
 TEST(RecordsCodec, AcceptanceAxisIsAReferenceToItsDefinition) {
-    records::Acceptance a{};
-    a.work        = make_ref(0x53, 0x54);
-    a.receiver.fill(0xB4);
-    a.hours_raw   = 1.0;
-    a.labor_units = 1.0;
-    a.timestamp   = 1;
-    a.axes        = {{make_path(0xAA, 0xBB), 1.0}};
-
-    const auto d = std::get<records::Acceptance>(roundtrip(Record{a}));
+    Acceptance a = plain_acceptance(1.0);
+    a.axes = {{make_path(0xAA, 0xBB), 1.0}};
+    const auto d = roundtrip_accept(a);
     ASSERT_EQ(d.axes.size(), 1u);
     EXPECT_EQ(d.axes[0].axis, a.axes[0].axis);      // путь И хеш, целиком
 }
@@ -944,15 +898,9 @@ TEST(RecordsCodec, AxisDefSameAsWithoutParent) {
 // Путь переживает кодек целиком: ветка и номер — не декорация, по ним к блоку
 // идут руками, а хеш проверяет, что там лежит именно он.
 TEST(RecordsCodec, AcceptanceAxisPathKeepsBranchAndIndex) {
-    records::Acceptance a{};
-    a.work        = make_ref(0x53, 0x54);
-    a.receiver.fill(0xB5);
-    a.hours_raw   = 1.0;
-    a.labor_units = 1.0;
-    a.timestamp   = 2;
-    a.axes        = {{make_path(0x79, 0x01, 0x7FFF'FFFFu, 41), 1.0}};
-
-    const auto d = std::get<records::Acceptance>(roundtrip(Record{a}));
+    Acceptance a = plain_acceptance(1.0);
+    a.axes = {{make_path(0x79, 0x01, 0x7FFF'FFFFu, 41), 1.0}};
+    const auto d = roundtrip_accept(a);
     ASSERT_EQ(d.axes.size(), 1u);
     EXPECT_EQ(d.axes[0].axis.node,  0x7FFF'FFFFu);
     EXPECT_EQ(d.axes[0].axis.block, 41u);

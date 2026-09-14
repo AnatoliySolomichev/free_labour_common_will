@@ -13,29 +13,15 @@ namespace {
 
 using RefHash = std::array<uint8_t, 32>;
 
-struct Accept {
-    RefHash             hash{};       // the acceptance block
-    UserId              acceptor{};
-    records::Acceptance acc;
-};
-
 } // namespace
 
 AttestationView AttestationView::build(const AggregatorStorage& storage) {
     AttestationView view;
 
-    // One work — one recognized acceptance (records.md §9.5, ИР-023): a job
-    // accepted by five chains is one job, not «приняли пять цепей».
-    const auto recognition = recognize_acceptances(storage);
-
     std::map<RefHash, UserId> works;     // WorkRecord hash → the chain that signed it
-    std::vector<Accept>       accepts;
-
     for (const Hash& bh : storage.all_block_hashes()) {
         const auto block = storage.get_block_by_hash(bh);
         if (!block || block->type != BlockType::DATA) continue;
-        const UserId owner = block->address.user_id;
-
         records::Record rec;
         try {
             rec = records::Codec::decode(block->payload.data(),
@@ -43,19 +29,21 @@ AttestationView AttestationView::build(const AggregatorStorage& storage) {
         } catch (const records::CodecError&) {
             continue;
         }
-
-        if (std::holds_alternative<records::WorkRecord>(rec)) {
-            works[bh.bytes] = owner;
-        } else if (const auto* a = std::get_if<records::Acceptance>(&rec)) {
-            if (a->receiver != owner.bytes) continue;   // spoofed receiver
-            accepts.push_back(Accept{bh.bytes, owner, *a});
-        }
+        if (std::holds_alternative<records::WorkRecord>(rec))
+            works[bh.bytes] = block->address.user_id;
     }
+
+    // One work — one deal (records.md §9.5, ИР-023): a job paid for by five
+    // chains is one job sold five times, not «приняли пять цепей». The acceptance
+    // rides inside its payment, so qualification reads accepted AND paid work.
+    const auto deals = read_deals(storage);
 
     std::map<std::pair<UserId, RefHash>, std::set<UserId>> witnesses;
     std::map<UserId, std::set<UserId>>                     all_witnesses;
-    for (const auto& [hash, acceptor, a] : accepts) {
-        if (!recognition.recognized.count(hash)) continue;   // not the one that counts
+    for (const auto& deal : deals.all) {
+        if (!deals.counts(deal.hash)) continue;          // not the one that counts
+        const auto&   a        = deal.accept();
+        const UserId& acceptor = deal.payer;
         const auto work = works.find(a.work.hash);
         if (work == works.end()) continue;
         const UserId& worker = work->second;

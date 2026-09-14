@@ -12,25 +12,25 @@ namespace aggregator {
 //
 // A deal is NOT a rigid pipeline. It is a need with a tail of records pointing
 // at it: "берусь" links (takers), pledges, "исполняет" links (work done under
-// it), acceptances of that work, transfers paying those acceptances, and the
-// owner's closing link. Every link is optional — a direct job with no posted
-// need, work done for stock, a need closed by a neighbour's favour are all
-// legal states, not errors. The stage is derived from whichever links exist.
+// it), the deals that accept and pay for that work — a Transfer carrying its
+// acceptance, appraisal and payment in one record (records.md §9.5, ИР-023) —
+// and the owner's closing link. Every link is optional — a direct job with no
+// posted need, work done for stock, a need closed by a neighbour's favour are
+// all legal states, not errors. The stage is derived from whichever links exist.
 //
 // The whole vocabulary is ordinary ConceptLinks — zero new protocol types.
 //
 // Spoof guards mirror the rest of the aggregator: a link binds only records
 // its author owns ("берусь"/"исполняет" — your own skill/work; "закрыто" —
-// your own need), an Acceptance counts only from its receiver, a Transfer
-// only from its sender. Advisory and re-checkable, like every derived view.
+// your own need), a deal counts only from its sender. Advisory and
+// re-checkable, like every derived view.
 
 enum class DealStage {
     Open,      // потребность висит, никто не взялся
     Taken,     // есть «берусь» — ждёт найма
     Hired,     // есть активное обещание — ждёт работы
     Worked,    // работа сделана — ждёт приёмки
-    Accepted,  // принято — ждёт оплаты
-    Paid,      // оплачено сполна — ждёт закрытия хозяином
+    Paid,      // принято и оплачено одной записью — ждёт закрытия хозяином
     Closed,    // снято хозяином
 };
 
@@ -51,7 +51,7 @@ struct DealPledge {
 };
 
 // One WorkRecord attached to the deal by its worker's "исполняет" link,
-// plus whatever acceptance/payment reached it.
+// plus the deal that accepted and paid for it.
 struct DealWork {
     UserId      worker{};
     Hash        work_hash{};
@@ -59,20 +59,18 @@ struct DealWork {
     double      hours = 0;
 
     bool        accepted = false;
-    UserId      acceptor{};          // acceptance owner (the customer)
-    Hash        acceptance_hash{};
+    UserId      acceptor{};          // who accepted and paid (the customer)
+    Hash        acceptance_hash{};   // the deal block: the Transfer carrying the acceptance
     double      labor_units = 0;     // appraisal of the live labor
     double      carried = 0;         // carried cost of tools/materials (records.md §9.5 v2)
-    double      paid = 0;            // transfers whose reason names the acceptance
+    double      paid = 0;            // = labor_units + carried, paid in the same record
 
-    // One work — one recognized acceptance (records.md §9.5, ИР-023). The one
-    // shown above is the recognized acceptance when there is one; these say how
-    // many others' acceptances name the work (self-acceptances aside), how many
-    // of them are paid exactly, and whether it was paid more than once — sold
-    // twice, so that none of them counts.
-    std::size_t acceptances         = 0;
-    std::size_t settled_acceptances = 0;
-    bool        oversold            = false;
+    // One work — one deal (records.md §9.5, ИР-023). The deal shown above is the
+    // recognized one when there is one; `acceptances` says how many deals name
+    // the work, `oversold` — that there are two or more: the work was sold twice
+    // and none of them counts.
+    std::size_t acceptances = 0;
+    bool        oversold    = false;
 };
 
 struct Deal {

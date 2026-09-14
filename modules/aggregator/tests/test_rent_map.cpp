@@ -95,18 +95,17 @@ protected:
 
         records::Acceptance a{};
         a.work        = ref_to(worker, work);
-        a.receiver    = payer.bytes;
         a.hours_raw   = hours;
         a.labor_units = hours * rate;
         a.axes        = {{test_axis(), named < 0.0 ? hours * rate : named}};
-        a.timestamp   = ts;
-        const Block acc = add(payer, a);
 
+        // Приёмка — внутри своей оплаты (records.md §9.5, ИР-023).
         records::Transfer t{};
-        t.from    = payer.bytes;
-        t.to      = worker.bytes;
-        t.origins = { {payer.bytes, hours * rate} };
-        t.reason  = ref_to(payer, acc);
+        t.from      = payer.bytes;
+        t.to        = worker.bytes;
+        t.origins   = { {payer.bytes, hours * rate} };
+        t.accept    = a;
+        t.timestamp = ts;
         add(payer, t);
     }
 

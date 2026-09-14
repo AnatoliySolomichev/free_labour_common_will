@@ -75,26 +75,29 @@ protected:
         return b;
     }
 
-    // `payer` pays `payee` with paper issued by `issuer`.
+    // `payer` accepts `payee`'s work and pays for it with paper issued by
+    // `issuer` — one record, the acceptance inside its payment (records.md §9.5,
+    // ИР-023). Every payment is a deal now: hours move only against accepted work.
     void transfer(const UserId& payer, const UserId& payee,
                   const UserId& issuer, double units) {
+        records::Acceptance a{};
+        a.work.chain  = payee.bytes;
+        a.work.hash.fill(static_cast<uint8_t>(next_index_));
+        a.hours_raw   = units;
+        a.labor_units = units;
+        a.axes        = {{test_axis(), units}};
         records::Transfer t{};
         t.from    = payer.bytes;
         t.to      = payee.bytes;
         t.origins = { {issuer.bytes, units} };
+        t.accept  = a;
         add(payer, t);
     }
 
-    // `acceptor` accepts work done by `worker`, appraised at `units`.
+    // `acceptor` accepts work done by `worker`, appraised at `units`, paying
+    // with own paper.
     void accept_work(const UserId& acceptor, const UserId& worker, double units) {
-        records::Acceptance a{};
-        a.work.chain  = worker.bytes;
-        a.work.hash.fill(static_cast<uint8_t>(next_index_));
-        a.receiver    = acceptor.bytes;
-        a.hours_raw   = units;
-        a.labor_units = units;
-        a.axes        = {{test_axis(), units}};
-        add(acceptor, a);
+        transfer(acceptor, worker, acceptor, units);
     }
 
     ChainFootprint of(const UserId& uid) {
@@ -149,7 +152,7 @@ TEST_F(FootprintViewTest, AcceptedWorkCountsOnlyFromOtherChains) {
                dima = make_chain(0xC3);
     accept_work(vera, anna, 6.0);
     accept_work(dima, anna, 3.0);
-    accept_work(anna, anna, 99.0);          // self-deal: no signal at all
+    EXPECT_THROW(accept_work(anna, anna, 99.0), records::CodecError);   // self-deal: cannot be written
 
     const auto a = of(anna);
     EXPECT_EQ(a.acceptors, 2u);
@@ -158,19 +161,18 @@ TEST_F(FootprintViewTest, AcceptedWorkCountsOnlyFromOtherChains) {
 
 TEST_F(FootprintViewTest, SpoofedRecordsIgnored) {
     const auto anna = make_chain(0xA1), vera = make_chain(0xB2);
-    // Anna writes a transfer claiming Vera is the sender — not Vera's chain.
+    // Anna writes a deal claiming Vera accepted her work and paid — signed by
+    // Anna, claims Vera: neither the paper nor the accepted labour counts.
+    records::Acceptance a{};
+    a.work.chain  = anna.bytes;
+    a.labor_units = 100.0;
+    a.axes        = {{test_axis(), 100.0}};
     records::Transfer t{};
     t.from    = vera.bytes;
     t.to      = anna.bytes;
     t.origins = { {vera.bytes, 100.0} };
+    t.accept  = a;
     add(anna, t);                            // signed by Anna, claims Vera
-    // Anna writes an acceptance claiming Vera received her work.
-    records::Acceptance a{};
-    a.work.chain  = anna.bytes;
-    a.receiver    = vera.bytes;              // ≠ block owner
-    a.labor_units = 50.0;
-    a.axes        = {{test_axis(), 50.0}};
-    add(anna, a);
 
     EXPECT_FALSE(FootprintView::build(*storage_).chain(vera).has_value());
     const auto fp = FootprintView::build(*storage_).chain(anna);
@@ -207,15 +209,20 @@ TEST_F(FootprintViewTest, ClosedFarmVersusOpenChain) {
 }
 
 TEST_F(FootprintViewTest, NoTurnoverIsNotSuspicion) {
-    // A chain that only ever had work accepted has no turnover: closedness
-    // must not read as 1.0-and-guilty. has_turnover() is what gates the claim.
-    const auto anna = make_chain(0xA1), vera = make_chain(0xB2);
-    accept_work(vera, anna, 6.0);
+    // Accepted work is paid in the same record now (records.md §9.5), so a chain
+    // with a footprint always has turnover. The gate stays all the same: with
+    // nothing to measure, closedness must not read as 1.0-and-guilty —
+    // has_turnover() is what gates the claim.
+    const ChainFootprint none{};
+    EXPECT_FALSE(none.has_turnover());
+    EXPECT_DOUBLE_EQ(none.closedness(), 0.0);
+    EXPECT_EQ(none.counterparties, 0u);
 
+    const auto anna = make_chain(0xA1), vera = make_chain(0xB2);
+    accept_work(vera, anna, 6.0);             // one paid deal: turnover, one peer
     const auto a = of(anna);
-    EXPECT_FALSE(a.has_turnover());
-    EXPECT_DOUBLE_EQ(a.closedness(), 0.0);
-    EXPECT_EQ(a.counterparties, 0u);
+    EXPECT_TRUE(a.has_turnover());
+    EXPECT_EQ(a.counterparties, 1u);
 }
 
 TEST_F(FootprintViewTest, UnknownChainHasNoFootprint) {

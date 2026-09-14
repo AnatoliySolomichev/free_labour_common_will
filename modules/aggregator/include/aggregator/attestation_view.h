@@ -27,7 +27,7 @@ namespace aggregator {
 //     Sybil-cheap; the honest answer to that is ИР-009's trust flow);
 //   - Σ hours_raw of the accepted works that named the axis.
 //
-// Spoof guards: the Acceptance is signed by its receiver, and the work it
+// Spoof guards: the deal is signed by the acceptor who pays it, and the work it
 // accepts sits in the chain its Ref names — you attest labour, not paperwork. A
 // breakdown that does not add up to the price describes some other deal and is
 // left out, as everywhere (records.md §9.5).

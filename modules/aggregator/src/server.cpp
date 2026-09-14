@@ -1410,8 +1410,6 @@ void AggregatorServer::setup_routes() {
                           + "\",\"hours\":"  + std::to_string(w.hours)
                           + ",\"accepted\":" + (w.accepted ? "true" : "false")
                           + ",\"acceptances\":" + std::to_string(w.acceptances)
-                          + ",\"settled_acceptances\":"
-                          + std::to_string(w.settled_acceptances)
                           + ",\"oversold\":" + (w.oversold ? "true" : "false");
                     if (w.accepted)
                         body += ",\"acceptance_ref\":\"" + to_hex(w.acceptor.bytes)

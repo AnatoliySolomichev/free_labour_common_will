@@ -278,13 +278,6 @@ static std::string record_summary(const Record& rec) {
                 for (const auto& ce : r.carry) carried += ce.carried;
                 ss << "  carry:" << r.carry.size() << " (" << carried << "h)";
             }
-        } else if constexpr (std::is_same_v<T, Acceptance>) {
-            ss << "[Acceptance]  work:" << short_hex(r.work.hash)
-               << "  " << r.labor_units << " labor-h";
-            if (r.carried_units) ss << " +carry:" << *r.carried_units << "h";
-            ss << "  axes:" << r.axes.size();
-            if (r.like) ss << "  like:" << short_hex(r.like->hash);
-            ss << "  quality:" << r.quality;
         } else if constexpr (std::is_same_v<T, records::Tool>) {
             ss << "[Tool]        \"" << r.name << "\"  " << r.cost
                << "h  life:" << r.life << "h  [" << r.basis << "]";
@@ -298,7 +291,15 @@ static std::string record_summary(const Record& rec) {
             for (const auto& o : r.origins) total += o.units;
             ss << "[Transfer]    to:" << short_hex(r.to)
                << "  " << total << "h  (" << r.origins.size() << " portion(s))";
-            if (r.reason) ss << "  reason:" << short_hex(r.reason->hash);
+            if (r.accept) {   // v5: the deal — acceptance and payment in one record
+                ss << "  accept work:" << short_hex(r.accept->work.hash)
+                   << " " << r.accept->labor_units << " labor-h";
+                if (r.accept->carried_units)
+                    ss << " +carry:" << *r.accept->carried_units << "h";
+                ss << " axes:" << r.accept->axes.size();
+                if (r.accept->like) ss << " like:" << short_hex(r.accept->like->hash);
+                ss << " quality:" << r.accept->quality;
+            }
             if (r.emission)
                 ss << "  link#" << r.emission->seq
                    << " debt:" << r.emission->debt_after;
@@ -1092,7 +1093,14 @@ static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
     return 0;
 }
 
-// JSON helpers live further down, with the aggregator verbs.
+// Payment and JSON helpers live further down, with the economy and aggregator
+// verbs.
+static std::vector<records::OriginQty> pick_portions(Context& ctx,
+                                                     const std::string& to_hex_s,
+                                                     double units);
+static void attach_emission_link(Context& ctx, records::Transfer& t);
+static void print_portions(const records::Transfer& t, const std::string& me_hex,
+                           const std::string& to_hex_s);
 static std::optional<records::json::Value> fetch_json(const std::string& via,
                                                       const std::string& path);
 static std::string jstr(const records::json::Object& o, const char* k);
@@ -1132,8 +1140,8 @@ static std::string known_acceptance_of(Context& ctx, const std::string& via,
             Record rec;
             try { rec = Codec::decode(b.payload.data(), b.payload.size()); }
             catch (const CodecError&) { continue; }
-            const auto* a = std::get_if<Acceptance>(&rec);
-            if (a && a->work.hash == work.hash)
+            const auto* t = std::get_if<records::Transfer>(&rec);
+            if (t && t->accept && t->accept->work.hash == work.hash)
                 return to_hex(ctx.user_id.bytes) + "/" + to_hex(Crypto::hash_block(b).bytes);
         }
     }
@@ -1158,7 +1166,7 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     }
     if (work_s.empty() || quality_s.empty() ||
         (axis_args.empty() && share_args.empty() && like_s.empty())) {
-        std::cerr << "Usage: bc accept\n"
+        std::cerr << "Usage: bc accept — принять работу и оплатить её одной записью\n"
                      "    --work         WORK_CHAIN/HASH\n"
                      "    --quality      TEXT\n"
                      "  разбивка цены обязательна (ИР-022) — одним из способов:\n"
@@ -1175,7 +1183,9 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
                      "    [--k           FLOAT]   price = hours × Σ network prices of the\n"
                      "                            axes named × k (default k 1.0)\n"
                      "    [--coef        FLOAT]   manual rate, стч/ч, instead of axis prices\n"
-                     "    [--labor-units FLOAT]   the price outright\n";
+                     "    [--labor-units FLOAT]   the price outright\n"
+                     "    [--pledge      REF]     the own pledge this deal closes (v4)\n"
+                     "    [--again]               accept a work that already has a deal\n";
         return 1;
     }
 
@@ -1187,13 +1197,17 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     a.quality     = quality_s;
     a.labor_units = 0.0;
 
-    // One work — one recognized acceptance (records.md §9.5, ИР-023): a second
-    // acceptance of the same work would make it «продана дважды».
+    // Самоприёмка ничего не заверяет (records.md §14.4) — кодек её и не запишет.
+    if (a.work.chain == ctx.user_id.bytes)
+        throw std::runtime_error("свою работу не принимают — принимает и платит заказчик "
+                                 "(records.md §9.5)");
+    // One work — one deal (records.md §9.5, ИР-023): a second deal on the same
+    // work would make it «продана дважды».
     if (!flag_present(argc, argv, "--again"))
         if (const auto seen = known_acceptance_of(ctx, via, a.work); !seen.empty())
             throw std::runtime_error(
-                "работа уже принята: " + seen + ". Признаётся одна оплаченная приёмка "
-                "работы (records.md §9.5): вторая сделала бы её «проданной дважды». "
+                "работа уже принята и оплачена: " + seen + ". Признаётся одна сделка "
+                "на работу (records.md §9.5): вторая сделала бы её «проданной дважды». "
                 "Принять ещё раз сознательно — --again");
     for (const auto& p : axis_args) {
         const auto eq = p.rfind('=');
@@ -1219,10 +1233,11 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
         a.like = parse_ref(like_s);
         if (a.axes.empty() && shares.empty()) {
             const auto  rec    = load_record(ctx, via, *a.like);
-            const auto* sample = rec ? std::get_if<Acceptance>(&*rec) : nullptr;
+            const auto* deal   = rec ? std::get_if<records::Transfer>(&*rec) : nullptr;
+            const Acceptance* sample = deal && deal->accept ? &*deal->accept : nullptr;
             if (!sample)
-                throw std::runtime_error("--like: образец не найден или это не приёмка "
-                                         "(bc fetch <ref> --via URL)");
+                throw std::runtime_error("--like: образец не найден или это не сделка с "
+                                         "приёмкой (bc fetch <ref> --via URL)");
             if (sample->labor_units <= 0.0)
                 throw std::runtime_error("--like: у образца нулевая цена — долей из неё не вывести");
             for (const auto& x : sample->axes)
@@ -1230,8 +1245,6 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
             std::cerr << "разбивка как у образца: " << shares.size() << " ос.\n";
         }
     }
-    a.timestamp = static_cast<int64_t>(std::time(nullptr));
-    a.receiver  = ctx.user_id.bytes;
 
     if (raw_s.empty()) {
         // Hours from the worker's record (records.md §9.5).
@@ -1372,17 +1385,36 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
                   "совпадать в точности (ИР-022)");
     }
 
-    // Блок пишется ПОСЛЕ разворота долей и проверки: иначе в цепь ушла бы
-    // приёмка без разбивки, которой не должно существовать.
-    const Block block = append_record(ctx, Record{a});
-    std::cout << "acceptance ref: " << to_hex(ctx.user_id.bytes) << "/"
+    // Приёмка — внутри своей оплаты (records.md §9.5, ИР-023): оценка и перевод
+    // подписываются одной записью, поэтому оплата равна оценке по построению, а
+    // платит тот, кто принимает. Блок пишется ПОСЛЕ разворота долей и проверки:
+    // иначе в цепь ушла бы приёмка без разбивки, которой не должно существовать.
+    const double payable = a.labor_units + (a.carried_units ? *a.carried_units : 0.0);
+    const std::string me_hex = to_hex(ctx.user_id.bytes);
+    const std::string to_s   = to_hex(a.work.chain.data(), 32);
+    records::Transfer t{};
+    t.from      = ctx.user_id.bytes;
+    t.to        = a.work.chain;
+    t.to_node   = DEFAULT_LEAF;
+    t.origins   = pick_portions(ctx, to_s, payable);
+    t.accept    = a;
+    t.timestamp = static_cast<int64_t>(std::time(nullptr));
+    // Transfer v4 (records.md §11.1): which own promise this deal closes.
+    const auto pledge_s = flag_val(argc, argv, "--pledge");
+    if (!pledge_s.empty()) t.settles = parse_ref(pledge_s);
+    // Pay into the purse of the branch that did the work (economy.md §5а).
+    if (const auto work_block = find_external_by_hash(ctx, a.work.hash))
+        t.to_node = work_block->address.node_index;
+    attach_emission_link(ctx, t);   // self-issues are threaded (economy.md §4.3)
+
+    const Block block = append_record(ctx, Record{t});
+    print_portions(t, me_hex, to_s);
+    std::cout << "acceptance ref: " << me_hex << "/"
               << to_hex(Crypto::hash_block(block).bytes) << "\n";
-    std::cerr << "appraised: " << a.labor_units << " labor-h  (raw " << a.hours_raw
-              << "h)";
-    if (a.carried_units)
-        std::cerr << "  + перенос " << *a.carried_units << "ч  (к оплате "
-                  << a.labor_units + *a.carried_units << "ч)";
-    std::cerr << "\n(pay with: bc pay --acceptance <ref>)\n";
+    std::cerr << "принято и оплачено одной записью: " << a.labor_units
+              << " labor-h (raw " << a.hours_raw << "h)";
+    if (a.carried_units) std::cerr << " + перенос " << *a.carried_units << "ч";
+    std::cerr << " = paid " << payable << "h\n";
     if (!via.empty()) upload_block(via, block);
     return 0;
 }
@@ -2551,66 +2583,6 @@ static int cmd_trust(const fs::path& data_dir, int argc, char** argv) {
     return 0;
 }
 
-// bc transfer send --to UID --units N [--origin ISSUER_HEX:UNITS]...
-//                  [--reason REF] [--via URL] [--leaf L]
-static int cmd_transfer_send(const fs::path& data_dir, int argc, char** argv) {
-    const auto to_s      = flag_val(argc, argv, "--to");
-    const auto units_s   = flag_val(argc, argv, "--units");
-    const auto origins_s = flag_all(argc, argv, "--origin");
-    const auto reason_s  = flag_val(argc, argv, "--reason");
-    if (to_s.empty() || (units_s.empty() && origins_s.empty()) || reason_s.empty()) {
-        std::cerr << "Usage: bc transfer send --to UID_HEX --units N --reason REF "
-                     "[--origin ISSUER_HEX:UNITS]... [--via URL] [--leaf L]\n"
-                     "--reason (the settled Acceptance) is mandatory: hours move "
-                     "only against accepted labor (records.md §12.9)\n";
-        return 1;
-    }
-
-    const NodeIndex leaf = parse_leaf_index(argc, argv);
-    Context ctx(data_dir, leaf);
-    const std::string me_hex = to_hex(ctx.user_id.bytes);
-
-    records::Transfer t{};
-    t.from      = ctx.user_id.bytes;
-    t.to        = uid_from_hex(to_s);
-    t.to_node   = DEFAULT_LEAF;
-    t.timestamp = static_cast<int64_t>(std::time(nullptr));
-    const auto to_node_s = flag_val(argc, argv, "--to-node");
-    if (!to_node_s.empty())
-        t.to_node = static_cast<NodeIndex>(std::stoull(to_node_s, nullptr, 0));
-    t.reason = parse_ref(reason_s);
-
-    if (!origins_s.empty()) {
-        // Manual portions.
-        double total = 0;
-        for (const auto& s : origins_s) {
-            const auto colon = s.find(':');
-            if (colon == std::string::npos)
-                throw std::runtime_error("--origin expects ISSUER_HEX:UNITS, got: " + s);
-            records::OriginQty o{};
-            o.issuer = uid_from_hex(s.substr(0, colon));
-            o.units  = std::stod(s.substr(colon + 1));
-            if (o.units <= 0) throw std::runtime_error("--origin units must be positive");
-            total += o.units;
-            t.origins.push_back(o);
-        }
-        if (!units_s.empty() && std::abs(std::stod(units_s) - total) > 1e-9)
-            throw std::runtime_error("--units disagrees with the sum of --origin portions");
-    } else {
-        t.origins = pick_portions(ctx, to_s, std::stod(units_s));
-    }
-    attach_emission_link(ctx, t);   // Transfer v3: self-issues are threaded (economy.md §4.3)
-
-    const Block block = append_record(ctx, Record{t});
-    print_portions(t, me_hex, to_s);
-    std::cout << "transfer ref: " << me_hex << "/"
-              << to_hex(Crypto::hash_block(block).bytes) << "\n";
-
-    const auto via = flag_val(argc, argv, "--via");
-    if (!via.empty()) upload_block(via, block);
-    return 0;
-}
-
 // bc transfer recv <chain>/<hash> --via URL [--leaf L]
 static int cmd_transfer_recv(const fs::path& data_dir, int argc, char** argv) {
     const auto pos = get_positionals(argc, argv);
@@ -2651,11 +2623,12 @@ static int cmd_transfer_recv(const fs::path& data_dir, int argc, char** argv) {
         throw std::runtime_error("transfer is not addressed to this identity");
     if (t->from != block.address.user_id.bytes)
         throw std::runtime_error("transfer 'from' does not match the authoring chain");
-    // Strict equivalence (records.md §12.9): hours move only against accepted
-    // labor — a reason-less transfer is not recognized.
-    if (!t->reason)
+    // Strict equivalence (records.md §12.9): hours move to another chain only as
+    // a deal — the acceptance inside its payment (v5). The codec has already
+    // refused anything else; this names it for the person.
+    if (!t->accept)
         throw std::runtime_error(
-            "transfer carries no reason (Acceptance) — refused (records.md §12.9)");
+            "перевод без приёмки — не оплата труда, такой не принимается (records.md §12.9)");
     // Transfer v3: a self-issuing transfer must be threaded (economy.md §4.3).
     {
         double self_issued = 0;
@@ -2738,122 +2711,6 @@ static int cmd_fetch(const fs::path& data_dir, int argc, char** argv) {
         }
     }
     return 0;
-}
-
-// bc pay --acceptance REF [--units N] [--via URL] [--leaf L]
-// Pays (the remainder of) an own acceptance's appraisal to the worker
-// (records.md §9.5). Refuses to exceed the appraised value — payments for one
-// work never outgrow its labor_units (records.md §12.8).
-// Core of paying an own acceptance — shared by `bc pay` and `bc deal settle`
-// (the deal verbs resolve the refs so nobody copies 64-hex hashes by hand).
-static int do_pay(const fs::path& data_dir, NodeIndex leaf,
-                  const std::string& acc_s, const std::string& units_s,
-                  const std::string& pledge_s, const std::string& via) {
-    Context ctx(data_dir, leaf);
-
-    const Ref acc_ref = parse_ref(acc_s);
-    if (acc_ref.chain != ctx.user_id.bytes)
-        throw std::runtime_error("--acceptance must reference your own record "
-                                 "(the appraiser pays, records.md §9.5)");
-
-    // One branch scan: locate the acceptance and total prior payments for it.
-    std::optional<Acceptance> acceptance;
-    double paid = 0;
-    std::vector<Block> blocks;
-    try { blocks = ctx.bc.get_branch(ctx.user_id, leaf); }
-    catch (const BlockchainError&) {}
-    for (const auto& b : blocks) {
-        if (b.type != BlockType::DATA) continue;
-        Record rec;
-        try { rec = Codec::decode(b.payload.data(), b.payload.size()); }
-        catch (const CodecError&) { continue; }
-        if (Crypto::hash_block(b).bytes == acc_ref.hash) {
-            const auto* a = std::get_if<Acceptance>(&rec);
-            if (!a) throw std::runtime_error("--acceptance does not reference an Acceptance");
-            acceptance = *a;
-        } else if (const auto* t = std::get_if<records::Transfer>(&rec)) {
-            if (t->reason && *t->reason == acc_ref)
-                for (const auto& o : t->origins) paid += o.units;
-        }
-    }
-    if (!acceptance)
-        throw std::runtime_error("acceptance not found in the own branch");
-
-    // Ceiling (records.md §12.8 "=", v2 records.md §9.5): live labor + carried cost of the means
-    // of production. Rates take the labor part only (records.md §11.2).
-    const double carried   = acceptance->carried_units
-                           ? *acceptance->carried_units : 0.0;
-    const double cap       = acceptance->labor_units + carried;
-    const double remaining = cap - paid;
-    if (remaining <= 1e-9) {
-        std::cerr << "already paid in full: " << paid << "/" << cap
-                  << " labor-h — payments must not exceed the appraisal (records.md §12.8)\n";
-        return 1;
-    }
-    const double units   = units_s.empty() ? remaining : std::stod(units_s);
-    if (units > remaining + 1e-9) {
-        std::cerr << "refused: " << units << "h would exceed the appraisal — paid "
-                  << paid << "/" << cap << " labor-h, payable " << remaining
-                  << "h (records.md §12.8)\n";
-        return 1;
-    }
-
-    // One work — one recognized acceptance (records.md §9.5, ИР-023). If another
-    // buyer has already paid for this work, paying again would make it «продана
-    // дважды»: the worker is paid twice for one job and neither deal counts.
-    // Best-effort — only an aggregator that knows the work can tell.
-    if (!via.empty()) {
-        const auto w = find_deal_work(via, to_hex(acceptance->work.chain.data(), 32) + "/" +
-                                           to_hex(acceptance->work.hash.data(), 32));
-        if (w && jnum(w->object, "settled_acceptances") > 0.5) {
-            std::cerr << "refused: эту работу уже оплатил другой покупатель ("
-                      << jstr(w->object, "acceptance_ref") << "). Вторая оплата сделала "
-                         "бы её «проданной дважды»: работник получил бы дважды за одну "
-                         "работу, а в счёт не пошла бы ни одна сделка (records.md §9.5)\n";
-            return 1;
-        }
-    }
-
-    const std::string me_hex = to_hex(ctx.user_id.bytes);
-    const std::string to_s   = to_hex(acceptance->work.chain.data(), 32);
-
-    records::Transfer t{};
-    t.from      = ctx.user_id.bytes;
-    t.to        = acceptance->work.chain;
-    t.to_node   = DEFAULT_LEAF;
-    t.origins   = pick_portions(ctx, to_s, units);
-    t.reason    = acc_ref;
-    t.timestamp = static_cast<int64_t>(std::time(nullptr));
-    // Transfer v4 (records.md §11.1): reason says WHAT is paid for, settles says WHICH
-    // promise this closes. Without it a pledge honestly paid off by labour would
-    // stay "active" forever and expire.
-    if (!pledge_s.empty()) t.settles = parse_ref(pledge_s);
-    // Pay into the purse of the branch that did the work (economy.md §5а).
-    if (const auto work_block = find_external_by_hash(ctx, acceptance->work.hash))
-        t.to_node = work_block->address.node_index;
-    attach_emission_link(ctx, t);   // Transfer v3: self-issues are threaded (economy.md §4.3)
-
-    const Block block = append_record(ctx, Record{t});
-    print_portions(t, me_hex, to_s);
-    std::cout << "paid " << units << "h (" << paid + units << "/" << cap
-              << ")  transfer ref: " << me_hex << "/"
-              << to_hex(Crypto::hash_block(block).bytes) << "\n";
-
-    if (!via.empty()) upload_block(via, block);
-    return 0;
-}
-
-static int cmd_pay(const fs::path& data_dir, int argc, char** argv) {
-    const auto acc_s = flag_val(argc, argv, "--acceptance");
-    if (acc_s.empty()) {
-        std::cerr << "Usage: bc pay --acceptance REF [--units N] [--pledge REF] "
-                     "[--via URL] [--leaf L]\n";
-        return 1;
-    }
-    return do_pay(data_dir, parse_leaf_index(argc, argv), acc_s,
-                  flag_val(argc, argv, "--units"),
-                  flag_val(argc, argv, "--pledge"),
-                  flag_val(argc, argv, "--via"));
 }
 
 // Shared GET for the aggregator economy view (records.md §13). Prints the
@@ -3324,10 +3181,22 @@ static int cmd_deal_list(const fs::path& data_dir, int argc, char** argv) {
         else if (stage == "нанят" && !i_seek)
             hint = "bc deal work " + need_ref +
                    " --hours H --action \"...\" --via " + via;
-        else if (stage == "работа сделана" && i_seek && !work_ref.empty())
+        else if (stage == "работа сделана" && i_seek && !work_ref.empty()) {
             hint = "bc fetch " + work_ref + " --via " + via +
                    "  &&  bc accept --work " + work_ref + " --via " + via;
-        else if ((stage == "принято" || stage == "оплачено") && i_seek)
+            // своё активное обещание по сделке закрывается той же записью (v4)
+            if (const auto* ps = jarr(d.object, "pledges"))
+                for (const auto& p : ps->array) {
+                    if (!p.is_object()) continue;
+                    const auto* revoked = records::json::find(p.object, "revoked");
+                    if (revoked && revoked->boolean) continue;
+                    if (jstr(p.object, "pledger") == me &&
+                        jnum(p.object, "settled") + 1e-9 < jnum(p.object, "units")) {
+                        hint += " --pledge " + jstr(p.object, "ref");
+                        break;
+                    }
+                }
+        } else if (stage == "оплачено" && i_seek)
             hint = "bc deal settle " + need_ref + " --via " + via;
         if (!hint.empty()) std::cout << "    → ваш ход: " << hint << "\n";
         std::cout << "\n";
@@ -3469,9 +3338,9 @@ static int cmd_deal_work(const fs::path& data_dir, int argc, char** argv) {
 }
 
 // bc deal settle NEED_REF --via URL [--leaf L] [--yes]
-// Pays every accepted-but-unpaid work of the deal (settling the own pledge,
-// Transfer v4), then OFFERS to close: payment ≠ need closed — partial pay and
-// multi-stage needs are real, so the owner is asked, never overruled (records.md §8.6).
+// OFFERS to close the need. Accepting and paying is one record already (bc
+// accept, records.md §9.5); a paid work ≠ need closed — multi-stage needs are
+// real, so the owner is asked, never overruled (records.md §8.6).
 static int cmd_deal_settle(const fs::path& data_dir, int argc, char** argv) {
     const auto pos = get_positionals(argc, argv);
     const auto via = flag_val(argc, argv, "--via");
@@ -3492,39 +3361,17 @@ static int cmd_deal_settle(const fs::path& data_dir, int argc, char** argv) {
         return 1;
     }
 
-    // my active pledge on this deal → Transfer.settles (v4)
-    std::string pledge_ref;
-    if (const auto* ps = jarr(deal->object, "pledges"))
-        for (const auto& p : ps->array) {
-            if (!p.is_object()) continue;
-            const auto* revoked = records::json::find(p.object, "revoked");
-            if (revoked && revoked->boolean) continue;
-            if (jstr(p.object, "pledger") == me_hex &&
-                jnum(p.object, "settled") + 1e-9 < jnum(p.object, "units")) {
-                pledge_ref = jstr(p.object, "ref");
-                break;
-            }
-        }
-
-    // pay every accepted work that is not yet paid in full
-    std::size_t paid_now = 0;
+    // Приёмка и оплата — одна запись (bc accept); здесь остаётся только решить,
+    // закрыта ли потребность.
+    std::size_t paid_works = 0;
     if (const auto* ws = jarr(deal->object, "works"))
         for (const auto& w : ws->array) {
-            if (!w.is_object()) continue;
-            const auto* accepted = records::json::find(w.object, "accepted");
-            if (!accepted || !accepted->boolean) continue;
-            // Payable = live labor + carried cost of tools/materials (records.md §9.5 v2);
-            // an aggregator that predates carry simply reports carried = 0.
-            if (jnum(w.object, "paid") + 1e-9 >=
-                jnum(w.object, "labor_units") + jnum(w.object, "carried"))
-                continue;
-            const auto acc_ref = jstr(w.object, "acceptance_ref");
-            std::cout << "— оплата приёмки " << acc_ref << "\n";
-            if (do_pay(data_dir, leaf, acc_ref, "", pledge_ref, via) != 0)
-                return 1;
-            ++paid_now;
+            const auto* accepted =
+                w.is_object() ? records::json::find(w.object, "accepted") : nullptr;
+            if (accepted && accepted->boolean) ++paid_works;
         }
-    if (paid_now == 0) std::cout << "неоплаченных приёмок нет\n";
+    if (paid_works == 0)
+        std::cout << "принятых и оплаченных работ нет — сначала bc accept\n";
 
     // offer to close — the owner decides, the tool never does
     std::string close_from;   // the acceptance the need was closed BY (records.md §8.6)
@@ -3725,10 +3572,9 @@ static int cmd_pledge_add(const fs::path& data_dir, int argc, char** argv) {
     const Block block = append_record(ctx, Record{p});
     std::cout << "pledge ref: " << to_hex(ctx.user_id.bytes) << "/"
               << to_hex(Crypto::hash_block(block).bytes) << "\n";
-    // Transfer v4 (records.md §11.1): a pledge is closed by paying for ACCEPTED work and
-    // naming the pledge in --pledge. Paying "against the pledge itself" was the
-    // old dead path — records.md §12.9 refuses a transfer whose reason is not an acceptance.
-    std::cerr << "(settle with: bc pay --acceptance <acc ref> --pledge <pledge ref>; "
+    // Transfer v4 (records.md §11.1): a pledge is closed by the deal that accepts and
+    // pays for the work, naming the pledge in --pledge.
+    std::cerr << "(settle with: bc accept --work <work ref> ... --pledge <pledge ref>; "
                  "revoke with: bc pledge revoke)\n";
     const auto via = flag_val(argc, argv, "--via");
     if (!via.empty()) upload_block(via, block);
@@ -3788,9 +3634,7 @@ static int cmd_pledge_list(const fs::path& data_dir, int argc, char** argv) {
             auto it = pledges.find(to_hex(pr->pledge.hash.data(), 32));
             if (it != pledges.end()) it->second.revoked = true;
         } else if (const auto* t = std::get_if<records::Transfer>(&rec)) {
-            // Settlement is named by `settles`, never by `reason` (Transfer v4,
-            // records.md §11.1): reason must point at the Acceptance being paid
-            // for (records.md §12.9), so it could never also name the pledge being closed.
+            // Settlement is named by `settles` (Transfer v4, records.md §11.1).
             if (!t->settles || t->settles->chain != ctx.user_id.bytes) continue;
             auto it = pledges.find(to_hex(t->settles->hash.data(), 32));
             if (it == pledges.end()) continue;
@@ -4558,7 +4402,9 @@ Labor:
     [--material HASH_PREFIX:QTY ...]   tool (tool-hours) or material batch
                                        (units) into this work (ИР-011): the
                                        CLI runs each carry thread itself
-  accept                           Appraise received work (records.md §9.5)
+  accept                           Accept received work AND pay for it: one
+                                       record, the payment equals the appraisal
+                                       (records.md §9.5)
     --work        WORK_REF             (fetch it first: bc fetch <ref> --via URL)
     --quality     TEXT
     --axis PATH=HOURS ...              the breakdown is REQUIRED (ИР-022): hours
@@ -4572,9 +4418,10 @@ Labor:
     [--coef FLOAT] [--labor-units F]   manual rate / full manual appraisal
                                        carried_units is derived automatically
                                        from the work's carry — never by hand
-    [--again]                          accept a work that already has an
-                                       acceptance: only one paid acceptance of
-                                       a work counts (records.md §9.5)
+    [--pledge REF]                     the own pledge this deal closes
+    [--again]                          accept a work that already has a deal:
+                                       only one deal per work counts
+                                       (records.md §9.5)
 
 Means of production (ИР-011, records.md §10.2, records.md §9.4):
   tool add ИМЯ --cost H --life HRS Register a tool: cost in labor-hours,
@@ -4608,12 +4455,6 @@ Means of production (ИР-011, records.md §10.2, records.md §9.4):
                                        и отметка «осью пользуются без описания».
                                        --rent: карта ренты — что корзина заплатила
                                        сверх сетевой цены названных осей и КТО
-  pay --acceptance REF             Pay the worker up to the appraisal (records.md §12.8)
-    [--units N] [--via URL]            default: the unpaid remainder
-    [--pledge REF]                     Transfer v4 (records.md §11.1): --acceptance says
-                                       WHAT is paid for, --pledge says WHICH
-                                       promise this closes. Without it a pledge
-                                       paid off by labour stays "active" forever.
   fetch <chain>/<hash> --via URL   Fetch any foreign block for local reading
 
 Merge over a relay (sync.md §4.1):
@@ -4669,12 +4510,7 @@ Key revocation (blockchain.md §6.7; warehouse — sync.md §7.2):
 Economy (records.md §11 — именные трудочасы, records.md §12.7):
   wallet [--leaf N]                Branch purse (economy.md §5а: the --leaf
                                        branch's holdings) + chain-wide debt
-  transfer send                    Move labor-hours; spends from the --leaf
-    --to UID_HEX --units N             purse: receiver's paper first, then other
-    [--to-node N]                      held paper, self-issue for the rest;
-    [--origin ISSUER_HEX:UNITS]...     --to-node picks the credited purse
-    [--reason REF] [--via URL]         (--via also uploads the block for the receiver)
-  transfer recv <chain>/<hash>     Fetch an incoming transfer from an aggregator,
+  transfer recv <chain>/<hash>     Fetch an incoming deal (bc accept of your work),
     --via URL                          store it and acknowledge on-chain (Copy)
   pledge add --target REF          Promise labor-hours for a work/idea
     --units N [--executor UID_HEX] [--expires UNIX_TS]
@@ -4790,8 +4626,11 @@ int main(int argc, char** argv) {
         else if (cmd == "directory")                        return cmd_directory(argc, argv);
         else if (cmd == "needs"     && subcmd == "list")    return cmd_needs_list(argc, argv);
         else if (cmd == "fetch")                            return cmd_fetch(data_dir, argc, argv);
-        else if (cmd == "pay")                              return cmd_pay(data_dir, argc, argv);
-        else if (cmd == "transfer"  && subcmd == "send")    return cmd_transfer_send(data_dir, argc, argv);
+        else if (cmd == "pay" || (cmd == "transfer" && subcmd == "send")) {
+            std::cerr << "снято: часы двигаются только сделкой — приёмка и оплата одной "
+                         "записью, bc accept (records.md §9.5)\n";
+            return 1;
+        }
         else if (cmd == "transfer"  && subcmd == "recv")    return cmd_transfer_recv(data_dir, argc, argv);
         else if (cmd == "pledge"    && subcmd == "add")     return cmd_pledge_add(data_dir, argc, argv);
         else if (cmd == "pledge"    && subcmd == "revoke")  return cmd_pledge_revoke(data_dir, argc, argv);

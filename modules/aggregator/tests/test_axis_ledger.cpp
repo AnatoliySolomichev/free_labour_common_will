@@ -99,20 +99,18 @@ protected:
 
         records::Acceptance a{};
         a.work        = ref_to(worker_, work);
-        a.receiver    = payer.bytes;
         a.hours_raw   = hours;
         a.labor_units = units;
-        a.timestamp   = 1000;
         for (auto& [axis, u] : parts) a.axes.push_back({axis, u});
-        const Block acc = add(payer, a);
 
+        // Приёмка — внутри своей оплаты (records.md §9.5, ИР-023).
         records::Transfer t{};
-        t.from    = payer.bytes;
-        t.to      = worker_.bytes;
-        t.origins = { {payer.bytes, units} };
-        t.reason  = ref_to(payer, acc);
-        add(payer, t);
-        return ref_to(payer, acc);
+        t.from      = payer.bytes;
+        t.to        = worker_.bytes;
+        t.origins   = { {payer.bytes, units} };
+        t.accept    = a;
+        t.timestamp = 1000;
+        return ref_to(payer, add(payer, t));
     }
 
 };

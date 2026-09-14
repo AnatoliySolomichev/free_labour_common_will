@@ -165,17 +165,16 @@ public:
             units += u;
         }
         a.work        = ref_to(w, work);
-        a.receiver    = p.bytes;
         a.hours_raw   = hours;
         a.labor_units = units;
-        a.timestamp   = ts;
-        const Block acc = add(p, a);
 
+        // Приёмка — внутри своей оплаты (records.md §9.5, ИР-023).
         records::Transfer t{};
-        t.from    = p.bytes;
-        t.to      = w.bytes;
-        t.origins = { {p.bytes, units} };
-        t.reason  = ref_to(p, acc);
+        t.from      = p.bytes;
+        t.to        = w.bytes;
+        t.origins   = { {p.bytes, units} };
+        t.accept    = a;
+        t.timestamp = ts;
         add(p, t);
     }
 

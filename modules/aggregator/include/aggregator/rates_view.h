@@ -14,8 +14,8 @@ namespace aggregator {
 
 // Daily axis prices (records.md §11.2 v5, economy.md §8.2).
 //
-// Counts only SETTLED deals of the day [day_start, day_start+86400): an
-// Acceptance paid exactly by its Transfers (labor + carried), not a self-deal,
+// Counts the deals of the day [day_start, day_start+86400): a Transfer carrying
+// its acceptance (records.md §9.5) — settled exactly by construction, never a self-deal —
 // whose work is on the table and whose breakdown adds up to its price. There is
 // no specialty and no grade to resolve any more (ИР-022 шаг 11): the deal says
 // what it paid for, axis by axis, and that is what is averaged.

@@ -151,37 +151,27 @@ TEST_F(DealViewTest, StagesDeriveFromWhicheverLinksExist) {
         EXPECT_FALSE(d.works[0].accepted);
     }
 
-    // Accepted: Vera appraises at 6 labor-h.
-    records::Acceptance acc;
+    // Paid: Vera accepts at 6 labor-h and pays in the same record, settling her
+    // pledge (v4). There is no «accepted, unpaid» (records.md §9.5, ИР-023).
+    records::Acceptance acc{};
     acc.work        = ref_of(anna, work_hash);
-    acc.receiver    = vera.bytes;
     acc.quality     = "пройдено";
     acc.hours_raw   = 6;
     acc.labor_units = 6;
-    acc.timestamp   = 1000;
     acc.axes        = {{test_axis(), 6}};
-    const Hash acc_hash = add(vera, acc);
-    {
-        const auto view = DealView::build(*storage_);
-        const auto& d = view.deals()[0];
-        EXPECT_EQ(d.stage(), DealStage::Accepted);
-        EXPECT_DOUBLE_EQ(d.appraised(), 6);
-        EXPECT_DOUBLE_EQ(d.paid(), 0);
-    }
-
-    // Paid: the transfer pays the acceptance AND settles the pledge (v4).
     records::Transfer pay{};
     pay.from      = vera.bytes;
     pay.to        = anna.bytes;
     pay.origins   = { {vera.bytes, 6.0} };
-    pay.reason    = ref_of(vera, acc_hash);
+    pay.accept    = acc;
     pay.settles   = ref_of(vera, pledge_hash);
     pay.timestamp = 1000;
-    add(vera, pay);
+    const Hash acc_hash = add(vera, pay);
     {
         const auto view = DealView::build(*storage_);
         const auto& d = view.deals()[0];
         EXPECT_EQ(d.stage(), DealStage::Paid);
+        EXPECT_DOUBLE_EQ(d.appraised(), 6);
         EXPECT_DOUBLE_EQ(d.paid(), 6);
         ASSERT_EQ(d.pledges.size(), 1u);
         EXPECT_DOUBLE_EQ(d.pledges[0].settled, 6);
@@ -211,18 +201,15 @@ TEST_F(DealViewTest, DealWithoutPledgeReachesPaid) {
     const Hash wh = add(anna, work);
     add(anna, link(ref_of(anna, wh), ref_of(vera, need), "исполняет"));
 
-    records::Acceptance acc;
+    records::Acceptance acc{};
     acc.work        = ref_of(anna, wh);
-    acc.receiver    = vera.bytes;
     acc.labor_units = 1;
     acc.axes        = {{test_axis(), 1}};
-    const Hash ah = add(vera, acc);
-
     records::Transfer pay{};
     pay.from    = vera.bytes;
     pay.to      = anna.bytes;
     pay.origins = { {vera.bytes, 1.0} };
-    pay.reason  = ref_of(vera, ah);
+    pay.accept  = acc;
     add(vera, pay);
 
     const auto view = DealView::build(*storage_);
@@ -261,19 +248,23 @@ TEST_F(DealViewTest, DirectDealAnchoredByAcceptance) {
     work.hours  = 3;
     const Hash wh = add(anna, work);
 
-    records::Acceptance acc;
+    records::Acceptance acc{};
     acc.work        = ref_of(anna, wh);
-    acc.receiver    = friend_.bytes;
     acc.labor_units = 3;
     acc.axes        = {{test_axis(), 3}};
-    add(friend_, acc);
+    records::Transfer pay{};
+    pay.from    = friend_.bytes;
+    pay.to      = anna.bytes;
+    pay.origins = { {friend_.bytes, 3.0} };
+    pay.accept  = acc;
+    add(friend_, pay);
 
     const auto view = DealView::build(*storage_);
     ASSERT_EQ(view.deals().size(), 1u);
     const auto& d = view.deals()[0];
     EXPECT_FALSE(d.need_hash.has_value());
     EXPECT_EQ(d.seeker, friend_);
-    EXPECT_EQ(d.stage(), DealStage::Accepted);
+    EXPECT_EQ(d.stage(), DealStage::Paid);
 }
 
 // ── Spoof guards ─────────────────────────────────────────────────────────────
@@ -323,11 +314,10 @@ TEST_F(DealViewTest, ForChainSeesSeekerAndWorkerSides) {
     EXPECT_EQ(view.for_chain(other).size(), 1u);   // only their own
 }
 
-// Одна работа — одна признанная приёмка (records.md §9.5, ИР-023): вторая
-// приёмка той же работы не затирает первую молча. Сделка одна, показана
-// признанная (оплаченная), число приёмок видно; оплатили вторую — «продана
-// дважды».
-TEST_F(DealViewTest, WorkAcceptedTwiceIsOneDealAndShowsTheCount) {
+// Одна работа — одна сделка (records.md §9.5, ИР-023): вторая сделка на ту же
+// работу не затирает первую молча — сделка одна, число сделок видно, работа
+// «продана дважды».
+TEST_F(DealViewTest, WorkPaidTwiceIsOneDealAndShowsTheCount) {
     const UserId anna  = make_owner(0xA1);
     const UserId vera  = make_owner(0xB2);
     const UserId boris = make_owner(0xC3);
@@ -336,40 +326,35 @@ TEST_F(DealViewTest, WorkAcceptedTwiceIsOneDealAndShowsTheCount) {
     w.action = "Проводка";
     w.hours  = 3;
     const Hash wh = add(anna, w);
-    const auto accept = [&](const UserId& by) {
-        records::Acceptance a;
+    const auto deal = [&](const UserId& by) {
+        records::Acceptance a{};
         a.work        = ref_of(anna, wh);
-        a.receiver    = by.bytes;
         a.hours_raw   = 3;
         a.labor_units = 3;
         a.axes        = {{test_axis(), 3.0}};
-        return add(by, a);
+        records::Transfer t{};
+        t.from      = by.bytes;
+        t.to        = anna.bytes;
+        t.origins   = {{by.bytes, 3.0}};
+        t.accept    = a;
+        t.timestamp = 1000;
+        return add(by, t);
     };
-    const auto pay = [&](const UserId& by, const Hash& acc) {
-        records::Transfer t;
-        t.from    = by.bytes;
-        t.to      = anna.bytes;
-        t.origins = {{by.bytes, 3.0}};
-        t.reason  = ref_of(by, acc);
-        add(by, t);
-    };
-    const Hash by_vera  = accept(vera);
-    const Hash by_boris = accept(boris);
-    pay(boris, by_boris);
+    const Hash by_vera = deal(vera);
     {
         const auto view = DealView::build(*storage_);
-        ASSERT_EQ(view.deals().size(), 1u);                   // одна работа — одна сделка
+        ASSERT_EQ(view.deals().size(), 1u);
         const auto& dw = view.deals()[0].works.at(0);
-        EXPECT_EQ(dw.acceptance_hash.bytes, by_boris.bytes);   // показана оплаченная
-        EXPECT_EQ(dw.acceptances, 2u);
-        EXPECT_EQ(dw.settled_acceptances, 1u);
+        EXPECT_EQ(dw.acceptance_hash.bytes, by_vera.bytes);
+        EXPECT_EQ(dw.acceptances, 1u);
         EXPECT_FALSE(dw.oversold);
+        EXPECT_DOUBLE_EQ(dw.paid, 3.0);                        // оплачено той же записью
     }
 
-    pay(vera, by_vera);                                       // оплачена второй раз
+    deal(boris);                                              // та же работа — второй раз
     const auto view = DealView::build(*storage_);
-    ASSERT_EQ(view.deals().size(), 1u);
+    ASSERT_EQ(view.deals().size(), 1u);                       // одна работа — одна сделка
     const auto& dw = view.deals()[0].works.at(0);
-    EXPECT_EQ(dw.settled_acceptances, 2u);
-    EXPECT_TRUE(dw.oversold);
+    EXPECT_EQ(dw.acceptances, 2u);                            // вторая не затёрла первую
+    EXPECT_TRUE(dw.oversold);                                 // продана дважды
 }

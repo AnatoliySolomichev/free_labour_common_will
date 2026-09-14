@@ -1,4 +1,5 @@
 #include "records/codec.h"
+#include "records/acceptance.h"
 #include <cstring>
 #include <limits>
 
@@ -177,37 +178,65 @@ void enc_work_record(Buf& out, const WorkRecord& wr) {
     if (!wr.title.empty()) { w_uint(out, 8); w_text(out, wr.title); }
 }
 
-void enc_acceptance(Buf& out, const Acceptance& a) {
-    // Required: keys 0–6 and the breakdown (9). Optional, each only when set and
-    // in ascending order: carried_units (7), norm (8), like (10).
+// The acceptance (records.md §9.5): since ИР-023 not a record of its own but the
+// `accept` field of the buyer's Transfer — a nested map. Required: 0 work,
+// 1 quality, 2 hours_raw, 3 labor_units, 4 the breakdown; optional, each only
+// when set and in ascending order: 5 carried_units, 6 norm, 7 like.
+void w_acceptance(Buf& out, const Acceptance& a) {
     if (a.axes.empty())
         throw CodecError("Acceptance: цена обязана быть расписана по осям (ИР-022)");
-    w_map(out, 8 + (a.carried_units ? 1 : 0) + (a.norm ? 1 : 0) + (a.like ? 1 : 0));
-    w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Acceptance));
-    w_uint(out, 1); w_ref(out, a.work);
-    w_uint(out, 2); w_fixed(out, a.receiver);
-    w_uint(out, 3); w_text(out, a.quality);
-    w_uint(out, 4); w_float64(out, a.hours_raw);
-    w_uint(out, 5); w_float64(out, a.labor_units);
-    w_uint(out, 6); w_int64(out, a.timestamp);
-    if (a.carried_units) { w_uint(out, 7); w_float64(out, *a.carried_units); }
-    if (a.norm) {
-        w_uint(out, 8);
-        w_map(out, 3);
-        w_uint(out, 0); w_fixed(out, a.norm->agg);
-        w_uint(out, 1); w_int64(out, a.norm->date);
-        w_uint(out, 2); w_float64(out, a.norm->W);
-    }
-    // v4 (ИР-022): цена, расписанная по осям. НЕ опционально — приёмки без
-    // разбивки не существует: цена без объяснения это два разных вида записи
-    // там, где должен быть один.
-    w_uint(out, 9); w_arr(out, a.axes.size());
+    w_map(out, 5 + (a.carried_units ? 1 : 0) + (a.norm ? 1 : 0) + (a.like ? 1 : 0));
+    w_uint(out, 0); w_ref(out, a.work);
+    w_uint(out, 1); w_text(out, a.quality);
+    w_uint(out, 2); w_float64(out, a.hours_raw);
+    w_uint(out, 3); w_float64(out, a.labor_units);
+    // Цена, расписанная по осям. НЕ опционально — приёмки без разбивки не
+    // существует: цена без объяснения это два разных вида записи там, где
+    // должен быть один (ИР-022).
+    w_uint(out, 4); w_arr(out, a.axes.size());
     for (const auto& x : a.axes) {
         w_map(out, 2);
         w_uint(out, 0); w_block_path(out, x.axis);
         w_uint(out, 1); w_float64(out, x.units);
     }
-    if (a.like) { w_uint(out, 10); w_ref(out, *a.like); }   // ИР-022 шаг 11
+    if (a.carried_units) { w_uint(out, 5); w_float64(out, *a.carried_units); }
+    if (a.norm) {
+        w_uint(out, 6);
+        w_map(out, 3);
+        w_uint(out, 0); w_fixed(out, a.norm->agg);
+        w_uint(out, 1); w_int64(out, a.norm->date);
+        w_uint(out, 2); w_float64(out, a.norm->W);
+    }
+    if (a.like) { w_uint(out, 7); w_ref(out, *a.like); }   // ИР-022 шаг 11
+}
+
+// What a Transfer must be to exist at all (records.md §11.1 v5, ИР-023) —
+// checked on write and on read, so a record that breaks it can be neither
+// signed with this codec nor taken in from anyone else's.
+void check_transfer(const Transfer& t) {
+    if (!t.accept) {
+        // Without an acceptance only own paper may move, between own branches
+        // (economy.md §5а): hours never go to another chain without accepted
+        // labour behind them (records.md §12.9).
+        if (t.to != t.from)
+            throw CodecError("Transfer: перевод другой цепи без приёмки — беспричинный "
+                             "(records.md §12.9)");
+        for (const auto& o : t.origins)
+            if (o.issuer == t.from)
+                throw CodecError("Transfer: между своими ветками своя бумага не ходит");
+        return;
+    }
+    const Acceptance& a = *t.accept;
+    if (t.to == t.from)
+        throw CodecError("Transfer: самоприёмка ничего не заверяет (records.md §14.4)");
+    if (a.work.chain != t.to)
+        throw CodecError("Transfer: платят тому, чья работа принята — to ≠ цепь работы");
+    double paid = 0.0;
+    for (const auto& o : t.origins) paid += o.units;
+    const double payable = a.labor_units + (a.carried_units ? *a.carried_units : 0.0);
+    if (!settled_exactly(paid, payable))
+        throw CodecError("Transfer: оплата обязана ровно равняться приёмке — труд плюс "
+                         "перенос (records.md §12.8)");
 }
 
 void enc_material(Buf& out, const Material& m) {
@@ -243,11 +272,12 @@ void enc_tool(Buf& out, const Tool& t) {
 }
 
 void enc_transfer(Buf& out, const Transfer& t) {
-    // v2 = map(7); v3 adds the emission-thread link (keys 7-9, economy.md §4.3);
-    // v4 adds the settled pledge (key 10, records.md §11.1). Keys stay ascending,
-    // so deterministic encoding (RFC 8949 §4.2.1) holds for every combination:
-    // 7, 8 (settles), 10 (emission), 11 (both).
-    w_map(out, 7 + (t.emission ? 3 : 0) + (t.settles ? 1 : 0));
+    // v5 (ИР-023): the acceptance rides inside its payment (key 11); key 5 — the
+    // old `reason` → Acceptance — is retired and not reused. Keys stay ascending,
+    // so deterministic encoding (RFC 8949 §4.2.1) holds for every combination of
+    // the optional tail: emission link (7–9), settled pledge (10), accept (11).
+    check_transfer(t);
+    w_map(out, 6 + (t.emission ? 3 : 0) + (t.settles ? 1 : 0) + (t.accept ? 1 : 0));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Transfer));
     w_uint(out, 1); w_fixed(out, t.from);
     w_uint(out, 2); w_fixed(out, t.to);
@@ -258,8 +288,6 @@ void enc_transfer(Buf& out, const Transfer& t) {
         w_uint(out, 0); w_fixed(out, o.issuer);
         w_uint(out, 1); w_float64(out, o.units);
     }
-    w_uint(out, 5);
-    if (t.reason) w_ref(out, *t.reason); else w_null(out);
     w_uint(out, 6); w_int64(out, t.timestamp);
     if (t.emission) {
         w_uint(out, 7); w_uint(out, t.emission->seq);
@@ -268,6 +296,7 @@ void enc_transfer(Buf& out, const Transfer& t) {
         w_uint(out, 9); w_float64(out, t.emission->debt_after);
     }
     if (t.settles) { w_uint(out, 10); w_ref(out, *t.settles); }
+    if (t.accept)  { w_uint(out, 11); w_acceptance(out, *t.accept); }
 }
 
 void enc_redemption(Buf& out, const Redemption& rd) {
@@ -684,44 +713,44 @@ WorkRecord dec_work_record_fields(CborReader& r, uint64_t field_count) {
     return wr;
 }
 
-Acceptance dec_acceptance_fields(CborReader& r, uint64_t field_count) {
-    if (field_count < 8 || field_count > 11)
-        throw CodecError("Acceptance: expected 8..11 fields");
+Acceptance dec_acceptance(CborReader& r) {
+    const uint64_t n = r.r_map();
+    if (n < 5 || n > 8) throw CodecError("Acceptance: expected 5..8 fields");
     Acceptance a{};
-    expect_key(r, 1); a.work         = dec_ref(r);
-    expect_key(r, 2); r.r_fixed(a.receiver);
-    expect_key(r, 3); a.quality      = r.r_text();
-    expect_key(r, 4); a.hours_raw    = r.r_float64();
-    expect_key(r, 5); a.labor_units  = r.r_float64();
-    expect_key(r, 6); a.timestamp    = r.r_int();
-    // The tail, by key and ascending: carried_units (7), norm (8), the breakdown
-    // (9 — REQUIRED: an acceptance without one does not exist, records.md §9.5
-    // v4), like (10).
-    uint64_t last = 6;
-    for (uint64_t i = 7; i < field_count; ++i) {
+    expect_key(r, 0); a.work        = dec_ref(r);
+    expect_key(r, 1); a.quality     = r.r_text();
+    expect_key(r, 2); a.hours_raw   = r.r_float64();
+    expect_key(r, 3); a.labor_units = r.r_float64();
+    // The breakdown — REQUIRED: an acceptance without one does not exist
+    // (records.md §9.5 v4).
+    expect_key(r, 4);
+    {
+        const uint64_t k = r.r_arr();
+        a.axes.reserve(static_cast<size_t>(k));
+        for (uint64_t i = 0; i < k; ++i) {
+            if (r.r_map() != 2) throw CodecError("AcceptanceAxis: expected 2 fields");
+            AcceptanceAxis x{};
+            expect_key(r, 0); x.axis  = dec_block_path(r);
+            expect_key(r, 1); x.units = r.r_float64();
+            a.axes.push_back(std::move(x));
+        }
+    }
+    // The tail, by key and ascending: carried_units (5), norm (6), like (7).
+    uint64_t last = 4;
+    for (uint64_t i = 5; i < n; ++i) {
         const uint64_t key = r.r_uint();
         if (key <= last) throw CodecError("Acceptance: keys out of order");
         last = key;
-        if (key == 7) {
+        if (key == 5) {
             a.carried_units = r.r_float64();
-        } else if (key == 8) {
-            AcceptanceNorm n{};
+        } else if (key == 6) {
+            AcceptanceNorm nm{};
             if (r.r_map() != 3) throw CodecError("AcceptanceNorm: expected 3 fields");
-            expect_key(r, 0); r.r_fixed(n.agg);
-            expect_key(r, 1); n.date = r.r_int();
-            expect_key(r, 2); n.W    = r.r_float64();
-            a.norm = n;
-        } else if (key == 9) {
-            const uint64_t n = r.r_arr();
-            a.axes.reserve(static_cast<size_t>(n));
-            for (uint64_t k = 0; k < n; ++k) {
-                if (r.r_map() != 2) throw CodecError("AcceptanceAxis: expected 2 fields");
-                AcceptanceAxis x{};
-                expect_key(r, 0); x.axis  = dec_block_path(r);
-                expect_key(r, 1); x.units = r.r_float64();
-                a.axes.push_back(std::move(x));
-            }
-        } else if (key == 10) {
+            expect_key(r, 0); r.r_fixed(nm.agg);
+            expect_key(r, 1); nm.date = r.r_int();
+            expect_key(r, 2); nm.W    = r.r_float64();
+            a.norm = nm;
+        } else if (key == 7) {
             a.like = dec_ref(r);
         } else {
             throw CodecError("Acceptance: unknown field key");
@@ -761,10 +790,11 @@ Tool dec_tool_fields(CborReader& r) {
 }
 
 Transfer dec_transfer_fields(CborReader& r, uint64_t field_count) {
-    // 7 = v2; 10 = v3 (emission); 8 = v4 (settles); 11 = v4 with both.
-    if (field_count != 7 && field_count != 8 &&
-        field_count != 10 && field_count != 11)
-        throw CodecError("Transfer: expected 7, 8, 10 or 11 fields");
+    // v5 (ИР-023): 6 required fields, then an optional ascending tail — emission
+    // link (7–9, all three), settled pledge (10), accept (11). Key 5 — the
+    // retired `reason` — is refused like any unknown key.
+    if (field_count < 6 || field_count > 11)
+        throw CodecError("Transfer: expected 6..11 fields");
     Transfer t{};
     expect_key(r, 1); r.r_fixed(t.from);
     expect_key(r, 2); r.r_fixed(t.to);
@@ -786,18 +816,33 @@ Transfer dec_transfer_fields(CborReader& r, uint64_t field_count) {
             t.origins.push_back(o);
         }
     }
-    expect_key(r, 5); t.reason    = dec_opt_ref(r);
     expect_key(r, 6); t.timestamp = r.r_int();
-    if (field_count == 10 || field_count == 11) {
-        EmissionLink link{};
-        expect_key(r, 7); link.seq        = r.r_uint();
-        expect_key(r, 8); link.prev       = dec_opt_ref(r);
-        expect_key(r, 9); link.debt_after = r.r_float64();
-        t.emission = link;
+    uint64_t read = 6, last = 6;
+    while (read < field_count) {
+        const uint64_t key = r.r_uint();
+        if (key <= last) throw CodecError("Transfer: keys out of order");
+        if (key == 7) {
+            if (field_count - read < 3) throw CodecError("Transfer: truncated emission link");
+            EmissionLink link{};
+            link.seq = r.r_uint();
+            expect_key(r, 8); link.prev       = dec_opt_ref(r);
+            expect_key(r, 9); link.debt_after = r.r_float64();
+            t.emission = link;
+            read += 3;
+            last  = 9;
+        } else if (key == 10) {
+            t.settles = dec_ref(r);
+            read += 1;
+            last  = 10;
+        } else if (key == 11) {
+            t.accept = dec_acceptance(r);
+            read += 1;
+            last  = 11;
+        } else {
+            throw CodecError("Transfer: unknown field key");
+        }
     }
-    if (field_count == 8 || field_count == 11) {
-        expect_key(r, 10); t.settles = dec_ref(r);
-    }
+    check_transfer(t);
     return t;
 }
 
@@ -930,7 +975,6 @@ std::vector<uint8_t> Codec::encode(const Record& rec) {
         else if constexpr (std::is_same_v<T, Copy>)        enc_copy(out, r);
         else if constexpr (std::is_same_v<T, Reaction>)    enc_reaction(out, r);
         else if constexpr (std::is_same_v<T, WorkRecord>)  enc_work_record(out, r);
-        else if constexpr (std::is_same_v<T, Acceptance>)  enc_acceptance(out, r);
         else if constexpr (std::is_same_v<T, Material>)    enc_material(out, r);
         else if constexpr (std::is_same_v<T, Tool>)        enc_tool(out, r);
         else if constexpr (std::is_same_v<T, Transfer>)    enc_transfer(out, r);
@@ -946,12 +990,15 @@ std::vector<uint8_t> Codec::encode(const Record& rec) {
 
 Record Codec::decode(const uint8_t* data, size_t len) {
     CborReader r(data, len);
-    // Field count is owned by per-type decoders; Transfer needs it to tell
-    // v2 (7 fields) from v3 with an emission link (10 fields).
+    // Field count is owned by per-type decoders; Transfer needs it to know how
+    // long its optional tail is (emission, settles, accept).
     const uint64_t field_count = r.r_map();
     expect_key(r, 0);   // type discriminator is always key 0
     const uint8_t disc = r.r_uint8();
 
+    if (disc == 0x54)   // Acceptance — снята (ИР-023), номер не переиспользуется
+        throw CodecError("Acceptance (0x54) снята: приёмка — поле перевода "
+                         "Transfer.accept (records.md §9.5)");
     switch (static_cast<RecordType>(disc)) {
         case RecordType::FraudClaim:  return dec_fraud_claim_fields(r);
         case RecordType::Concept:     return dec_concept_fields(r);
@@ -960,7 +1007,6 @@ Record Codec::decode(const uint8_t* data, size_t len) {
         case RecordType::Copy:        return dec_copy_fields(r);
         case RecordType::Reaction:    return dec_reaction_fields(r);
         case RecordType::WorkRecord:  return dec_work_record_fields(r, field_count);
-        case RecordType::Acceptance:  return dec_acceptance_fields(r, field_count);
         case RecordType::Material:    return dec_material_fields(r);
         case RecordType::Tool:        return dec_tool_fields(r);
         case RecordType::Transfer:    return dec_transfer_fields(r, field_count);

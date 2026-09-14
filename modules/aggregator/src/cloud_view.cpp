@@ -13,26 +13,19 @@ namespace aggregator {
 std::map<SampleKey, WorkComposition> build_work_compositions(
     const AggregatorStorage& storage) {
     using RefHash = std::array<uint8_t, 32>;
-    struct Deal { records::Acceptance acc; UserId payer; };
-    std::map<RefHash, Deal>                deals;
-    std::map<RefHash, double>              paid;
     std::map<RefHash, records::WorkRecord> works;
-
     for (const Hash& bh : storage.all_block_hashes()) {
         const auto block = storage.get_block_by_hash(bh);
         if (!block || block->type != BlockType::DATA) continue;
         records::Record rec;
         try { rec = records::Codec::decode(block->payload.data(), block->payload.size()); }
         catch (const records::CodecError&) { continue; }
-        if (const auto* a = std::get_if<records::Acceptance>(&rec)) {
-            deals[bh.bytes] = Deal{*a, block->address.user_id};
-        } else if (const auto* t = std::get_if<records::Transfer>(&rec)) {
-            if (t->from == block->address.user_id.bytes && t->reason)
-                for (const auto& o : t->origins) paid[t->reason->hash] += o.units;
-        } else if (const auto* w = std::get_if<records::WorkRecord>(&rec)) {
-            works[bh.bytes] = *w;
-        }
+        if (const auto* w = std::get_if<records::WorkRecord>(&rec)) works[bh.bytes] = *w;
     }
+    // Every deal is paid exactly by construction (records.md §9.5, ИР-023).
+    const auto deals = read_deals(storage);
+    std::map<RefHash, const DealEntry*> deal_at;   // deal block hash → the deal
+    for (const auto& d : deals.all) deal_at[d.hash] = &d;
 
     // The sample of a deal: follow `like` while it leads to a known acceptance.
     // `like` names an EARLIER block by its hash, so a cycle would need a hash
@@ -42,9 +35,9 @@ std::map<SampleKey, WorkComposition> build_work_compositions(
         cur.chain = author.bytes;
         cur.hash  = h;
         for (int depth = 0; depth < 64; ++depth) {
-            const auto it = deals.find(cur.hash);
-            if (it == deals.end() || !it->second.acc.like) break;
-            cur = *it->second.acc.like;
+            const auto it = deal_at.find(cur.hash);
+            if (it == deal_at.end() || !it->second->accept().like) break;
+            cur = *it->second->accept().like;
         }
         return cur;
     };
@@ -61,24 +54,20 @@ std::map<SampleKey, WorkComposition> build_work_compositions(
         std::string               first_title;   // of the family, in block-hash order
     };
     std::map<RefHash, Sum> fam;
-    // One work — one recognized acceptance (records.md §9.5, ИР-023).
-    const auto recognition = recognize_acceptances(storage);
-    for (const auto& [acc_hash, deal] : deals) {
-        if (!recognition.recognized.count(acc_hash)) continue;
-        const auto& a = deal.acc;
+    // One work — one deal (records.md §9.5, ИР-023).
+    for (const auto& deal : deals.all) {
+        if (!deals.counts(deal.hash)) continue;
+        const auto& a = deal.accept();
         if (a.axes.empty() || a.hours_raw <= 0.0) continue;
         const double carried = a.carried_units ? *a.carried_units : 0.0;
         const double payable = a.labor_units + carried;
         if (payable <= 0.0) continue;
-        const auto pit = paid.find(acc_hash);
-        if (pit == paid.end() || std::abs(pit->second - payable) > 1e-6) continue;
-        if (a.work.chain == deal.payer.bytes) continue;                  // self-deal
         double named = 0.0;
         for (const auto& x : a.axes) named += x.units;
         if (std::abs(named - a.labor_units) > 1e-6) continue;           // another deal
         if (!works.count(a.work.hash)) continue;       // the work is not on the table
 
-        const records::Ref sample = sample_of(acc_hash, deal.payer);
+        const records::Ref sample = sample_of(deal.hash, deal.payer);
         auto& s = fam[sample.hash];
         s.sample = sample;
         for (const auto& x : a.axes) s.axes[x.axis.hash] += x.units;
@@ -94,8 +83,8 @@ std::map<SampleKey, WorkComposition> build_work_compositions(
         WorkComposition c{};
         c.sample = s.sample;
         // The sample's own title when the sample is known, else the family's.
-        if (const auto it = deals.find(key); it != deals.end())
-            c.title = title_of(it->second.acc);
+        if (const auto it = deal_at.find(key); it != deal_at.end())
+            c.title = title_of(it->second->accept());
         if (c.title.empty()) c.title = s.first_title;
         for (const auto& [axis, units] : s.axes) c.axes[axis] = units / s.payable;
         c.carried = s.carried / s.payable;

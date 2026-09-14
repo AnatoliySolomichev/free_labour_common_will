@@ -1,24 +1,23 @@
 #pragma once
 
-// One work — one recognized acceptance (records.md §9.5, ИР-023).
+// One work — one deal (records.md §9.5, ИР-023).
 //
-// An acceptance certifies that the work was received and appraises it. Two
-// acceptances of one work are one work sold twice: its hours would enter the
-// axis prices twice, the carried cost of the means of production would be paid
-// twice off a single carry link, and qualification would count one job as
-// "accepted by two chains". So at most one acceptance per work counts, and the
-// rule is the same for every reader — aggregator and client — so that they never
-// disagree about which deal happened:
+// Since 2026-09-14 an acceptance is not a record of its own but the `accept`
+// field of the buyer's Transfer: the appraisal and its payment are one signed
+// record, so every deal is paid exactly by construction and the one who accepts
+// is the one who pays. What is left to police is the work itself. Two deals
+// naming one WorkRecord are one work sold twice: its hours would enter the axis
+// prices twice, the carried cost of the means of production would be paid twice
+// off a single carry link, and qualification would count one job as «приняли
+// две цепи». So:
 //
-//   exactly one settled acceptance  → it counts;
-//   two or more settled             → the work was sold twice: none counts,
-//                                     and the work is reported as oversold;
-//   none settled                    → the work's acceptance counts if it is
-//                                     the only one.
+//   a work with one deal      → the deal counts;
+//   a work with two or more   → it was sold twice: none counts, and the work
+//                               is reported as oversold.
 //
-// Settled beats unsettled, so an acceptance nobody paid for cannot push out an
-// honest one: it costs nothing to write and weighs nothing. Making a work
-// "sold twice" takes paying for it for real.
+// The rule is the same for every reader — aggregator and client — so that they
+// never disagree about which deal happened. Selling one work to many buyers in
+// portions is the product thread of ИР-023, not several deals on one record.
 
 #include <array>
 #include <cstdint>
@@ -27,25 +26,23 @@
 
 namespace records {
 
-// One acceptance as the rule sees it. Self-acceptances and acceptances written
-// by someone other than their receiver are not claims at all: the first vouch
-// for nothing (records.md §14.4), the second are forgeries.
-struct AcceptanceClaim {
-    std::array<uint8_t, 32> acceptance{};     // hash of the Acceptance block
-    std::array<uint8_t, 32> work{};           // hash of the WorkRecord it appraises
-    bool                    settled = false;  // paid exactly (settled_exactly)
+// One deal as the rule sees it: a Transfer carrying an acceptance, written by
+// its own sender.
+struct DealClaim {
+    std::array<uint8_t, 32> deal{};   // hash of the Transfer block
+    std::array<uint8_t, 32> work{};   // hash of the WorkRecord its acceptance names
 };
 
-struct AcceptanceRecognition {
-    std::set<std::array<uint8_t, 32>> recognized;  // acceptances that count
-    std::set<std::array<uint8_t, 32>> oversold;    // works settled more than once
+struct DealRecognition {
+    std::set<std::array<uint8_t, 32>> recognized;  // deals that count
+    std::set<std::array<uint8_t, 32>> oversold;    // works with more than one deal
 };
 
-AcceptanceRecognition recognize_acceptances(const std::vector<AcceptanceClaim>& claims);
+DealRecognition recognize_deals(const std::vector<DealClaim>& claims);
 
-// Whether an acceptance is paid exactly: the transfers naming it in `reason`
-// add up to labor_units + carried_units (records.md §12.8 "="). With no payment
-// at all it is not settled, even at a zero price — nothing changed hands.
+// Whether a payment is exact: its portions add up to labor_units + carried_units
+// (records.md §12.8 "="). A deal pays something — nothing changing hands is not a
+// deal, even at a zero price.
 bool settled_exactly(double paid, double payable) noexcept;
 
 } // namespace records

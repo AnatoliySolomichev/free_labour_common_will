@@ -25,7 +25,9 @@ enum class RecordType : uint8_t {
     //      была работа, говорит разбивка её цены по осям, а не справочник и
     //      не ступень лестницы (records.md §9.1); номера не переиспользуются.
     WorkRecord   = 0x53,
-    Acceptance   = 0x54,
+    // 0x54 — Acceptance, снята (2026-09-14, ИР-023): приёмка — поле перевода
+    //        `Transfer.accept`, оценка и оплата одной записью (records.md §9.5);
+    //        номер не переиспользуется.
     // Production
     Material     = 0x60,
     Tool         = 0x61,
@@ -190,7 +192,6 @@ struct WorkRecord {
     std::string              title;
 };
 
-// Acceptance = the moment labor-hours come into existence (records.md §9.5)
 // v3 (economy.md §2б): the normalizer this appraisal was made against, so a
 // historical оценка reads unambiguously ("10.5 стч at W=1.03") after the method
 // changes. Points at the DailyAggregate used: aggregator chain + its date + W.
@@ -224,17 +225,19 @@ struct AcceptanceAxis {
     }
 };
 
+// The acceptance: what was received, how good, what it is worth and why
+// (records.md §9.5). Since 2026-09-14 (ИР-023) not a record of its own but the
+// `accept` field of the buyer's Transfer — the appraisal and its payment are one
+// signed record, so the payment equals the appraisal by construction and the one
+// who accepts is the one who pays. Who accepted, and when, is that Transfer's
+// `from` and `timestamp`.
 struct Acceptance {
-    static constexpr RecordType TYPE = RecordType::Acceptance;
-
-    Ref                     work;         // Ref to WorkRecord
-    std::array<uint8_t, 32> receiver;     // UserId of the receiver (= owner of this record)
-    std::string             quality;      // e.g. "пройдено", "отклонено"
-    double                  hours_raw;    // raw hours from WorkRecord
-    double                  labor_units;  // price of live labour; by default hours × Σ network axis prices × k
-    int64_t                 timestamp;    // Unix timestamp UTC
-    // v2 (ИР-011): Σ carried of the accepted work. Payment ceiling is
-    // labor_units + carried_units; rates take labor_units only (records.md §11.2).
+    Ref         work;         // Ref to the WorkRecord, in the chain the Transfer pays
+    std::string quality;      // e.g. "пройдено", "отклонено"
+    double      hours_raw;    // raw hours from WorkRecord
+    double      labor_units;  // price of live labour; by default hours × Σ network axis prices × k
+    // v2 (ИР-011): Σ carried of the accepted work. The payment is labor_units +
+    // carried_units exactly; rates take labor_units only (records.md §11.2).
     std::optional<double>          carried_units;
     // v3 (economy.md §2б): normalizer provenance, best-effort at accept time.
     std::optional<AcceptanceNorm>  norm;
@@ -270,7 +273,7 @@ struct Material {
     double             cost;    // batch cost, labor-hours
     double             qty;     // batch size in unit (carry-thread capacity)
     std::string        basis;   // "paid" | "est"
-    std::optional<Ref> src;     // paid: the purchase Acceptance
+    std::optional<Ref> src;     // paid: the purchase — the Transfer carrying its acceptance
     std::optional<Ref> origin;  // previous record of this batch (reissue)
     std::string        note;    // est: how the estimate was made; may be empty
 };
@@ -287,7 +290,7 @@ struct Tool {
     double             cost;    // acquisition cost, labor-hours
     double             life;    // design life, tool-hours (thread capacity)
     std::string        basis;   // "paid" | "est"
-    std::optional<Ref> src;     // paid: the purchase Acceptance
+    std::optional<Ref> src;     // paid: the purchase — the Transfer carrying its acceptance
     std::optional<Ref> origin;  // previous record of this instance (reissue)
     std::string        note;    // est: how the estimate was made; may be empty
 };
@@ -326,24 +329,25 @@ struct EmissionLink {
 // issuer == from → self-issue: a new debt/claim pair is born (records.md §12.2);
 // issuer == to   → redemption: the paper returns to its debtor and annihilates;
 // otherwise      → endorsement: someone else's paper passed along.
-// v3 (economy.md §4.2/economy.md §4.3): reason is mandatory for recognition (strict
-// equivalence — hours move only against accepted labor); a self-issuing
-// transfer must carry its emission-thread link.
+// A self-issuing transfer carries its emission-thread link (v3, economy.md §4.3).
 //
-// v4 (records.md §11.1, ИР-006): `reason` and `settles` answer two different
-// questions and so must be two fields. One `reason` could not do both: records.md §12.9
-// demands it point at an Acceptance ("what am I paying for"), which left a
-// Pledge honestly paid off by labour marked active forever.
+// v5 (ИР-023, 2026-09-14): WHAT is paid for is not a reference to an acceptance
+// but the acceptance itself — `accept`. A deal is one record: the appraisal and
+// its payment signed together, so the payment equals the appraisal exactly and
+// the one who accepts is the one who pays — «платит один, принимает другой» cannot
+// even be written. A transfer without `accept` may only move own paper between
+// own branches (economy.md §5а). The codec refuses anything else; the old
+// `reason` (key 5) is retired. `settles` still names the Pledge a deal closes (v4).
 struct Transfer {
     static constexpr RecordType TYPE = RecordType::Transfer;
 
-    std::array<uint8_t, 32> from;      // sender chain (= owner of this record)
-    std::array<uint8_t, 32> to;        // receiver chain
-    uint32_t                to_node;   // receiver branch — whose purse is credited
-    std::vector<OriginQty>  origins;   // named portions; total = transfer amount
-    std::optional<Ref>      reason;    // WHAT for: Acceptance (mandatory, records.md §12.9)
-    std::optional<Ref>      settles;   // WHICH promise this closes: Pledge (v4)
-    int64_t                 timestamp; // Unix timestamp UTC
+    std::array<uint8_t, 32>   from;      // sender chain (= owner of this record) = the acceptor
+    std::array<uint8_t, 32>   to;        // receiver chain = the worker
+    uint32_t                  to_node;   // receiver branch — whose purse is credited
+    std::vector<OriginQty>    origins;   // named portions; total = labor + carried of `accept`
+    std::optional<Acceptance> accept;    // WHAT for: the acceptance itself (v5)
+    std::optional<Ref>        settles;   // WHICH promise this closes: Pledge (v4)
+    int64_t                   timestamp; // Unix timestamp UTC
     // Present iff origins contain a self-issued portion (issuer == from).
     std::optional<EmissionLink> emission;
 };
@@ -503,7 +507,6 @@ using Record = std::variant<
     Copy,
     Reaction,
     WorkRecord,
-    Acceptance,
     Material,
     Tool,
     Transfer,

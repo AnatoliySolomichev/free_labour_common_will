@@ -34,23 +34,9 @@ std::vector<AxisLedgerRow> build_axis_ledger(
     const std::map<std::array<uint8_t, 32>, records::AxisDef>* defs) {
 
     using RefHash = std::array<uint8_t, 32>;
-    struct Deal { records::Acceptance acc; UserId payer; };
-    std::map<RefHash, Deal>   deals;
-    std::map<RefHash, double> paid;
-
-    for (const Hash& bh : storage.all_block_hashes()) {
-        const auto block = storage.get_block_by_hash(bh);
-        if (!block || block->type != BlockType::DATA) continue;
-        records::Record rec;
-        try { rec = records::Codec::decode(block->payload.data(), block->payload.size()); }
-        catch (const records::CodecError&) { continue; }
-        if (const auto* a = std::get_if<records::Acceptance>(&rec)) {
-            deals[bh.bytes] = Deal{*a, block->address.user_id};
-        } else if (const auto* t = std::get_if<records::Transfer>(&rec)) {
-            if (t->from == block->address.user_id.bytes && t->reason)
-                for (const auto& o : t->origins) paid[t->reason->hash] += o.units;
-        }
-    }
+    // Every deal is paid exactly by construction — the acceptance rides inside
+    // its own payment (records.md §9.5, ИР-023).
+    const auto deals = read_deals(storage);
 
     struct Acc {
         double   units = 0.0, hours = 0.0;
@@ -78,19 +64,12 @@ std::vector<AxisLedgerRow> build_axis_ledger(
     };
     double total_units = 0.0;
 
-    // Одна работа — одна признанная приёмка (records.md §9.5, ИР-023): работа,
-    // оплаченная двумя покупателями, продана дважды — в книгу не идёт ни одна.
-    const auto recognition = recognize_acceptances(storage);
-    for (const auto& [acc_hash, deal] : deals) {
-        if (!recognition.recognized.count(acc_hash)) continue;
-        const auto& a = deal.acc;
+    // Одна работа — одна сделка (records.md §9.5, ИР-023): работа, оплаченная
+    // двумя покупателями, продана дважды — в книгу не идёт ни одна.
+    for (const auto& deal : deals.all) {
+        if (!deals.counts(deal.hash)) continue;
+        const auto& a = deal.accept();
         if (a.axes.empty() || a.hours_raw <= 0.0) continue;   // цена без объяснения
-
-        const double carried = a.carried_units ? *a.carried_units : 0.0;
-        const auto pit = paid.find(acc_hash);
-        if (pit == paid.end() ||
-            std::abs(pit->second - (a.labor_units + carried)) > 1e-6) continue;
-        if (a.work.chain == deal.payer.bytes) continue;                 // самосделка
 
         // Разбивка ЕСТЬ цена, а не мнение рядом с ней.
         double named = 0.0;

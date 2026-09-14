@@ -13,41 +13,27 @@ RentInput build_rent_input(const AggregatorStorage& storage,
                            int64_t from_ts, int64_t to_ts) {
     using RefHash = std::array<uint8_t, 32>;
     std::map<RefHash, records::WorkRecord> works;
-    struct Deal { records::Acceptance acc; UserId payer; };
-    std::map<RefHash, Deal>   deals;
-    std::map<RefHash, double> paid;
-
     for (const Hash& bh : storage.all_block_hashes()) {
         const auto block = storage.get_block_by_hash(bh);
         if (!block || block->type != BlockType::DATA) continue;
         records::Record rec;
         try { rec = records::Codec::decode(block->payload.data(), block->payload.size()); }
         catch (const records::CodecError&) { continue; }
-        if (const auto* a = std::get_if<records::Acceptance>(&rec)) {
-            deals[bh.bytes] = Deal{*a, block->address.user_id};
-        } else if (const auto* t = std::get_if<records::Transfer>(&rec)) {
-            if (t->from == block->address.user_id.bytes && t->reason)
-                for (const auto& o : t->origins) paid[t->reason->hash] += o.units;
-        } else if (const auto* w = std::get_if<records::WorkRecord>(&rec)) {
-            works[bh.bytes] = *w;
-        }
+        if (const auto* w = std::get_if<records::WorkRecord>(&rec)) works[bh.bytes] = *w;
     }
+    // Every deal is paid exactly by construction (records.md §9.5, ИР-023).
+    const auto deals = read_deals(storage);
 
     RentInput out;
     std::map<RefHash, double> axis_units, axis_hours;
     std::map<RefHash, std::pair<int64_t, RefHash>> titled;   // worker → (ts, acc) of its title
-    // One work — one recognized acceptance (records.md §9.5, ИР-023).
-    const auto recognition = recognize_acceptances(storage);
-    for (const auto& [acc_hash, deal] : deals) {
-        if (!recognition.recognized.count(acc_hash)) continue;
-        const auto& a = deal.acc;
-        if (a.timestamp < from_ts || a.timestamp >= to_ts) continue;
+    // One work — one deal (records.md §9.5, ИР-023).
+    for (const auto& deal : deals.all) {
+        if (!deals.counts(deal.hash)) continue;
+        const auto&   a  = deal.accept();
+        const int64_t ts = deal.transfer.timestamp;
+        if (ts < from_ts || ts >= to_ts) continue;
         if (a.hours_raw <= 0.0 || a.axes.empty()) continue;
-        const double carried = a.carried_units ? *a.carried_units : 0.0;
-        const auto pit = paid.find(acc_hash);
-        if (pit == paid.end() ||
-            std::abs(pit->second - (a.labor_units + carried)) > 1e-6) continue;
-        if (a.work.chain == deal.payer.bytes) continue;                  // self-deal
 
         // Разбивка ЕСТЬ цена: не сходящаяся описывает какую-то другую сделку.
         double named = 0.0;
@@ -61,7 +47,7 @@ RentInput build_rent_input(const AggregatorStorage& storage,
         t.payer  = deal.payer.bytes;
         t.hours  = a.hours_raw;
         t.units  = a.labor_units;
-        t.period = (a.timestamp - from_ts) / (kRentPeriodDays * 86'400);
+        t.period = (ts - from_ts) / (kRentPeriodDays * 86'400);
         for (const auto& x : a.axes) {
             t.axes[x.axis.hash]     += x.units;
             axis_units[x.axis.hash] += x.units;
@@ -71,7 +57,7 @@ RentInput build_rent_input(const AggregatorStorage& storage,
         out.workers[worker].push_back(std::move(t));
 
         if (!wit->second.title.empty()) {
-            const auto when = std::make_pair(a.timestamp, acc_hash);
+            const auto when = std::make_pair(ts, deal.hash);
             const auto it   = titled.find(worker);
             if (it == titled.end() || it->second < when) {
                 titled[worker]     = when;

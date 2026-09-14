@@ -225,9 +225,8 @@ do_deal(){
            "${shares[@]}" --via "$VIA" | after 'acceptance ref: ')"
     [[ -z "$acc" ]] && { ((fail_deals++)); return; }
     [[ -z "${SAMPLE[${PROF[$w]}]:-}" ]] && SAMPLE[${PROF[$w]}]="$acc"
-    xf="$(ftbc "p$c" pay --acceptance "$acc" --via "$VIA" | after 'transfer ref: ')"
-    [[ -z "$xf" ]] && { ((fail_deals++)); return; }
-    ftbc "p$w" transfer recv "$xf" --via "$VIA" >/dev/null 2>&1
+    # Приёмка и оплата — одна запись (records.md §9.5, ИР-023): bc accept платит сам.
+    ftbc "p$w" transfer recv "$acc" --via "$VIA" >/dev/null 2>&1
     ((ok_deals++)); total_hours=$(( total_hours + h ))
     # журнал сделок для анализа независимости контрагентов (ИР-021):
     # кто кому платил, за какую специальность/разряд, сколько часов и по какому k

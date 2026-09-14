@@ -134,24 +134,22 @@ protected:
 
         records::Acceptance a{};
         a.work        = ref_to(worker_, work);
-        a.receiver    = payer.bytes;
         a.hours_raw   = hours;
         a.labor_units = lab;
         for (const auto& l : lines) a.axes.push_back({axis(l.axis), l.units});
         if (o.carried > 0.0) a.carried_units = o.carried;
         a.like        = o.like;
-        a.timestamp   = 86'400LL * 100;
-        const Block acc = add(payer, a);
 
-        if (o.settle) {
-            records::Transfer t{};
-            t.from    = payer.bytes;
-            t.to      = worker_.bytes;
-            t.origins = { {payer.bytes, lab + o.carried} };
-            t.reason  = ref_to(payer, acc);
-            add(payer, t);
-        }
-        return ref_to(payer, acc);
+        // Приёмка — внутри своей оплаты (records.md §9.5, ИР-023): неоплаченной
+        // приёмки больше не бывает — без оплаты сделки просто нет.
+        if (!o.settle) return records::Ref{};
+        records::Transfer t{};
+        t.from      = payer.bytes;
+        t.to        = worker_.bytes;
+        t.origins   = { {payer.bytes, lab + o.carried} };
+        t.accept    = a;
+        t.timestamp = 86'400LL * 100;
+        return ref_to(payer, add(payer, t));
     }
 };
 
@@ -200,14 +198,16 @@ TEST_F(CompositionTest, SharesAreWhatWasPaidNotAMeanOfDeals) {
     EXPECT_DOUBLE_EQ(c.carried,                1.0 / 10.0);   // …и 0.25
 }
 
-// Не входит то же, что не входит в книгу осей: неоплаченная приёмка, самосделка,
-// разбивка, не сходящаяся с ценой. Такой «последователь» семью не образует.
+// Не входит то же, что не входит в книгу осей: разбивка, не сходящаяся с ценой.
+// Неоплаченной приёмки и самосделки больше нельзя даже записать — приёмка едет
+// внутри своей оплаты (records.md §9.5). Такой «последователь» семью не образует.
 TEST_F(CompositionTest, DealsThatDoNotCountAreLeftOut) {
     const auto s = deal(chain_of(0xB2), 4.0, {{kDanger, 8.0}});
     Opt unpaid;  unpaid.like = s;  unpaid.settle = false;
     Opt skewed;  skewed.like = s;  skewed.labour = 8.0;
-    deal(chain_of(0xB3), 4.0, {{kDanger, 8.0}}, unpaid);
-    deal(worker_,        4.0, {{kDanger, 8.0}}, {s});          // самосделка
+    deal(chain_of(0xB3), 4.0, {{kDanger, 8.0}}, unpaid);       // не записана вовсе
+    EXPECT_THROW(deal(worker_, 4.0, {{kDanger, 8.0}}, {s}),    // самосделку не записать
+                 records::CodecError);
     deal(chain_of(0xB4), 4.0, {{kDanger, 5.0}}, skewed);       // названо 5 из 8
     EXPECT_TRUE(build_work_compositions(*storage_).empty());
 }

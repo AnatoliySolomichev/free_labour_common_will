@@ -27,9 +27,9 @@ FootprintView FootprintView::build(const AggregatorStorage& storage) {
     // Layer-2 tallies keyed by the chain they describe.
     std::map<UserId, std::set<UserId>> redeemer_sets, acceptor_sets;
     std::map<UserId, double>           redeemed_to_others, labor_outward;
-    // One work — one recognized acceptance (records.md §9.5, ИР-023): one job
-    // accepted by two chains is not «two outsiders took the labour».
-    const auto recognition = recognize_acceptances(storage);
+    // One work — one deal (records.md §9.5, ИР-023): one job paid for by two
+    // chains is not «two outsiders took the labour».
+    const auto deals = read_deals(storage);
 
     for (const Hash& bh : storage.all_block_hashes()) {
         const auto block = storage.get_block_by_hash(bh);
@@ -73,14 +73,12 @@ FootprintView FootprintView::build(const AggregatorStorage& storage) {
             }
             adj[from][to] += total;
             adj[to][from] += total;
-        } else if (const auto* a = std::get_if<records::Acceptance>(&rec)) {
-            if (a->receiver != owner.bytes) continue;  // spoofed receiver
-            if (!recognition.recognized.count(bh.bytes)) continue;   // not the one that counts
-            UserId worker{};
-            worker.bytes = a->work.chain;
-            if (worker == owner) continue;             // self-deal: no signal
-            acceptor_sets[worker].insert(owner);
-            labor_outward[worker] += a->labor_units;
+            // Labour taken by an outsider: the acceptance rides inside its payment
+            // (records.md §9.5), and the worker is the one paid.
+            if (t->accept && deals.counts(bh.bytes)) {
+                acceptor_sets[to].insert(from);
+                labor_outward[to] += t->accept->labor_units;
+            }
         }
     }
 

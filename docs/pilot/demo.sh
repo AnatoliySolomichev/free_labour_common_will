@@ -105,22 +105,21 @@ say "заведено осей: $(wc -l < "$AXREFS"), каждая со свои
 say "цена теперь расписывается по ним и обязана сойтись в точности"
 
 # ── Вера принимает и платит ──────────────────────────────────────────────────
-hr "Вера принимает работу — приёмка суммирует труд и перенос"
+hr "Вера принимает работу и платит — одной записью (records.md §9.5)"
 "$BC" --data-dir "$work/vera" fetch "$ANNA/$WORK_H" --via "$VIA" >/dev/null
 "$BC" --data-dir "$work/vera" fetch "$ANNA/$TOOL_H"  --via "$VIA" >/dev/null
 "$BC" --data-dir "$work/vera" fetch "$ANNA/$MAT_H"   --via "$VIA" >/dev/null
 # Оценка 6ч труда: Вера расписывает её по осям — сумма обязана дать ровно 6.0.
-ACC="$("$BC" --data-dir "$work/vera" accept --work "$ANNA/$WORK_H" \
+# Оплата — в той же записи: труд 6ч + печь 0.236ч + мука 0.96ч = 7.19625ч.
+pay_out="$("$BC" --data-dir "$work/vera" accept --work "$ANNA/$WORK_H" \
        --quality "пройдено" --coef 1.0 \
        --axis "$(axis physical)=2.4" \
        --axis "$(axis knowledge)=2.1" \
        --axis "$(axis pace)=1.5" \
-       --via "$VIA" | after 'acceptance ref: ')"
-say "разбивка: физический труд 2.4 + знание 2.1 + темп 1.5 = 6.0ч"
-
-hr "Вера платит — потолок = труд 6ч + печь 0.236ч + мука 0.96ч = 7.19625ч"
-pay_out="$("$BC" --data-dir "$work/vera" pay --acceptance "$ACC" --via "$VIA" 2>&1)"
+       --via "$VIA" 2>&1)"
+ACC="$(printf '%s\n' "$pay_out" | after 'acceptance ref: ')"
 echo "$pay_out" | sed 's/^/   /'
+say "разбивка: физический труд 2.4 + знание 2.1 + темп 1.5 = 6.0ч"
 
 # ── Взгляд на экономический след Анны ────────────────────────────────────────
 hr "Вера смотрит на след Анны (bc trust): слой 1 + слои 2–3"
@@ -134,13 +133,14 @@ check() { # описание, факт, ожидание
     else printf '   ✗ %s: получили «%s», ждали «%s»\n' "$1" "$2" "$3"; fail=1; fi
 }
 paid="$(echo "$pay_out" | grep -o 'paid [0-9.]*' | head -1 | awk '{print $2}')"
-check "оплата ровно по потолку labor+carried" "$paid" "7.19625"
+check "оплата ровно по оценке: труд + перенос" "$paid" "7.19625"
 
-# Повторная оплата обязана отклониться (потолок уже исчерпан).
-if "$BC" --data-dir "$work/vera" pay --acceptance "$ACC" --via "$VIA" >/dev/null 2>&1; then
-    echo "   ✗ повторная оплата прошла, а должна была отклониться"; fail=1
+# Повторная приёмка той же работы обязана отклониться (одна работа — одна сделка).
+if "$BC" --data-dir "$work/vera" accept --work "$ANNA/$WORK_H" --quality "ещё раз" \
+        --coef 1.0 --axis "$(axis physical)=6.0" --via "$VIA" >/dev/null 2>&1; then
+    echo "   ✗ повторная приёмка прошла, а должна была отклониться"; fail=1
 else
-    echo "   ✓ повторная оплата отклонена (потолок §12.8)"
+    echo "   ✓ повторная приёмка отклонена (одна работа — одна сделка, records.md §9.5)"
 fi
 
 # Переоценка печи ВВЕРХ обязана отклониться (перевыпуск только вниз).
