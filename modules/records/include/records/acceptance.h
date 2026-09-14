@@ -16,6 +16,10 @@
 //   addressed deals of two buyers     → the seller gave one result twice: none
 //                                       counts, and both addresses are the seller's.
 //
+// A result is the work as a whole, or one portion of one of its lots
+// (records.md §9.8 v2): a hundred buyers of one bake are a hundred deals, and a
+// work sold whole and in portions at once is the seller's double sale.
+//
 // Only the one who sold a result can spoil its deal. A stranger willing to pay
 // cannot — that was the flaw of the earlier «two deals — none counts» rule.
 // One result — one counted deal, because its hours would otherwise enter the axis
@@ -23,8 +27,8 @@
 // count as «приняли две цепи».
 //
 // The rule is the same for every reader — aggregator and client — so that they
-// never disagree about which deal happened. Selling one lot to many buyers in
-// portions is the lot sub-thread of ИР-023, not several deals on one record.
+// never disagree about which deal happened. Selling one lot to many buyers is
+// selling it in portions — each a result and a link of the lot's sub-thread.
 
 #include "records/types.h"
 
@@ -60,16 +64,23 @@ struct DealClaim {
     // The work sits in its worker's goods thread, on hours no other work of the
     // chain claims (records.md §9.4 v4, records/goods_thread.h).
     bool                    sound = true;
+    // The release this deal completed when it bought a portion of a lot
+    // (records.md §9.8 v2) — each portion is a result of its own. Absent: the
+    // deal bought the work's whole result.
+    std::optional<std::array<uint8_t, 32>> portion;
 };
 
 struct DealRecognition {
     std::set<std::array<uint8_t, 32>> recognized;   // deals that count
     std::set<std::array<uint8_t, 32>> repeated;     // the same buyer paid again
     std::set<std::array<uint8_t, 32>> contested;    // deals on a result given to two buyers
-    std::set<std::array<uint8_t, 32>> unsound;      // deals on a work outside the thread or on crossing hours
+    std::set<std::array<uint8_t, 32>> unsound;      // deals on an unsound result (see unsound_results)
     std::set<std::array<uint8_t, 32>> unaddressed;  // void: the seller named no such buyer
-    std::set<std::array<uint8_t, 32>> oversold;     // WORKS given to two buyers or more
-    std::set<std::array<uint8_t, 32>> unsound_works;  // WORKS outside the thread or on crossing hours
+    // RESULTS given to two buyers or more — and WORKS sold whole and in portions.
+    std::set<std::array<uint8_t, 32>> oversold;
+    // RESULTS (a work, or the release of a portion) whose work is outside the
+    // thread or on crossing hours, or whose portion is off its lot.
+    std::set<std::array<uint8_t, 32>> unsound_results;
 
     // Hours really moved: every addressed deal — the one that counts, a repeat,
     // one of a double sale, or one on an unsound work. A void deal moves nothing.

@@ -134,3 +134,106 @@ TEST(LaborThread, AWorkOfNoHoursCrossesNothing) {
     EXPECT_TRUE(t.sound(h(1)));
     EXPECT_TRUE(t.sound(h(2)));
 }
+
+// ── Партии (records.md §9.8 v2, records.md §9.9) ─────────────────────────────
+
+namespace {
+
+// A link of lot 0 of kChain: its seq, qty and after, the previous link by hash
+// byte; a release carries its term, a write-off does not.
+ObservedLotLink lot(uint8_t hash, uint64_t seq, double qty, double after,
+                    std::optional<uint8_t> prev, std::optional<int64_t> expires = std::nullopt,
+                    std::vector<uint8_t> returns = {}, int64_t ts = 1000, bool taken = false) {
+    ObservedLotLink l{};
+    l.hash       = h(hash);
+    l.link.qty   = qty;
+    l.link.seq   = seq;
+    l.link.after = after;
+    if (prev) l.link.prev = Ref{kChain, h(*prev)};
+    for (const auto r : returns) l.link.returns.push_back(Ref{kChain, h(r)});
+    l.timestamp = ts;
+    l.expires   = expires;
+    l.taken     = taken;
+    return l;
+}
+
+} // namespace
+
+// Хлеб: сто буханок, отпущено 30 и 50, списано 5 — остаток 15, всё сходится.
+TEST(Lot, AStraightSubThreadChecksOut) {
+    const auto st = check_lot(kChain, 100, {lot(1, 0, 30, 30, {}, 2000),
+                                            lot(2, 1, 50, 80, 1, 2000),
+                                            lot(3, 2, 5, 85, 2)});
+    EXPECT_EQ(st.valid, (Hashes{h(1), h(2), h(3)}));
+    EXPECT_DOUBLE_EQ(st.remaining(), 15.0);
+    EXPECT_FALSE(st.gaps);
+}
+
+// Больше, чем в партии, не отпустить: звено сверх партии не сходится.
+TEST(Lot, MoreThanTheLotHoldsIsRefused) {
+    const auto st = check_lot(kChain, 100, {lot(1, 0, 90, 90, {}), lot(2, 1, 20, 110, 1)});
+    EXPECT_EQ(st.invalid, Hashes{h(2)});
+    EXPECT_DOUBLE_EQ(st.remaining(), 10.0);
+}
+
+// Два звена с одним номером — две продажи из одного остатка: не признаётся ни одно
+// (партия судится строго — решение участника, ИР-023).
+TEST(Lot, TwoSalesFromOneRemainderAreBothRefused) {
+    const auto st = check_lot(kChain, 100, {lot(1, 0, 60, 60, {}),
+                                            lot(2, 1, 40, 100, 1),
+                                            lot(3, 1, 40, 100, 1)});
+    EXPECT_EQ(st.invalid, (Hashes{h(2), h(3)}));
+    EXPECT_EQ(st.equivocated_seqs, std::vector<uint64_t>{1});
+    EXPECT_DOUBLE_EQ(st.remaining(), 40.0);
+}
+
+// Отпуск, истёкший невзятым, возвращается в запас следующим звеном: 4 + 6 − 4.
+TEST(Lot, AnExpiredUntakenReleaseGoesBackToStock) {
+    const auto st = check_lot(kChain, 10, {lot(1, 0, 4, 4, {}, 500),
+                                           lot(2, 1, 6, 6, 1, std::nullopt, {1}, 1000)});
+    EXPECT_EQ(st.valid, (Hashes{h(1), h(2)}));
+    EXPECT_DOUBLE_EQ(st.remaining(), 4.0);
+}
+
+// Вернуть нельзя отпуск ещё живой, уже взятый покупателем, и списание — у него
+// нет срока, возвращать нечего.
+TEST(Lot, AFalseReturnIsRefused) {
+    auto st = check_lot(kChain, 10, {lot(1, 0, 4, 4, {}, 5000),
+                                     lot(2, 1, 6, 6, 1, std::nullopt, {1}, 1000)});
+    EXPECT_EQ(st.invalid, Hashes{h(2)});
+    st = check_lot(kChain, 10, {lot(1, 0, 4, 4, {}, 500, {}, 400, /*taken=*/true),
+                                lot(2, 1, 6, 6, 1, std::nullopt, {1}, 1000)});
+    EXPECT_EQ(st.invalid, Hashes{h(2)});
+    st = check_lot(kChain, 10, {lot(1, 0, 4, 4, {}),
+                                lot(2, 1, 6, 6, 1, std::nullopt, {1}, 1000)});
+    EXPECT_EQ(st.invalid, Hashes{h(2)});
+}
+
+// Предыдущего звена нет на столе — пробел, а не вина.
+TEST(Lot, AGapIsNotAFault) {
+    const auto st = check_lot(kChain, 100, {lot(3, 2, 10, 50, 2)});
+    EXPECT_EQ(st.valid, Hashes{h(3)});
+    EXPECT_TRUE(st.gaps);
+    EXPECT_DOUBLE_EQ(st.remaining(), 50.0);
+}
+
+// Доля работы в порции: доля выхода × порция / размер выхода.
+TEST(Lot, ThePartOfTheWorkAPortionCarries) {
+    WorkRecord bread{};
+    bread.hours   = 10;
+    bread.outputs = {{"хлеб", 100, "шт"}};
+    LotLink l{};
+    l.qty = 25;
+    EXPECT_DOUBLE_EQ(*portion_fraction(bread, l), 0.25);
+
+    WorkRecord saw{};
+    saw.outputs = {{"доски", 2.0, "м³", 0.9, std::nullopt}, {"опилки", 0.5, "м³", 0.1, std::nullopt}};
+    l.out = 1;
+    l.qty = 0.25;
+    EXPECT_NEAR(*portion_fraction(saw, l), 0.05, 1e-12);          // половина опилок — 5 % работы
+    saw.outputs[0].share.reset();
+    saw.outputs[1].share.reset();
+    EXPECT_FALSE(portion_fraction(saw, l).has_value());           // без долей не оценить
+    l.out = 7;
+    EXPECT_FALSE(portion_fraction(bread, l).has_value());         // нет такого выхода
+}

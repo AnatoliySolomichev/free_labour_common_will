@@ -150,6 +150,18 @@ std::string json_escape(const std::string& s) {
     return out;
 }
 
+// One lot as JSON (records.md §9.8 v2): how much of an output went where.
+std::string lot_json(const aggregator::LotSummary& l, const records::ResourceQty& o) {
+    return "{\"out\":" + std::to_string(l.out) + ",\"resource\":\"" + json_escape(o.resource)
+         + "\",\"qty\":" + std::to_string(l.qty) + ",\"unit\":\"" + json_escape(o.unit)
+         + "\",\"sold\":" + std::to_string(l.sold)
+         + ",\"written_off\":" + std::to_string(l.written_off)
+         + ",\"reserved\":" + std::to_string(l.reserved)
+         + ",\"remaining\":" + std::to_string(l.remaining)
+         + ",\"faults\":" + std::to_string(l.faults)
+         + ",\"gaps\":" + (l.gaps ? "true" : "false") + "}";
+}
+
 // Tags are emitted verbatim: an attribute the view does not model (geo, radius,
 // working hours) still reaches the consumer. That is the point — the profile
 // convention evolves in docs and catalogs, not in this code.
@@ -707,6 +719,35 @@ void AggregatorServer::setup_routes() {
                 }
                 return s + "]";
             };
+
+            // ?date=TS — the aggregate published for that day, as it was signed:
+            // the prices a product made that day is valued at (ИР-023, вопрос 2).
+            // The last one of the date stands (records.md §14.5).
+            if (req.has_param("date")) {
+                const int64_t d    = std::stoll(req.get_param_value("date"));
+                const int64_t date = d - d % 86'400;
+                std::optional<records::DailyAggregate> found;
+                for (const Block& b : own_chain_->branch()) {
+                    if (b.type != BlockType::DATA) continue;
+                    records::Record rec;
+                    try { rec = records::Codec::decode(b.payload.data(), b.payload.size()); }
+                    catch (const records::CodecError&) { continue; }
+                    if (const auto* agg = std::get_if<records::DailyAggregate>(&rec);
+                        agg && agg->date == date)
+                        found = *agg;
+                }
+                if (!found) {
+                    res.status = 404;
+                    res.set_content("{\"error\":\"no aggregate published for that day\"}",
+                                    "application/json");
+                    return;
+                }
+                res.set_content("{\"date\":" + std::to_string(found->date)
+                                + ",\"W\":" + std::to_string(found->W)
+                                + ",\"axes\":" + axes_json(found->axes, true) + "}",
+                                "application/json");
+                return;
+            }
 
             // ?day=TS — preview: recompute the day over that day's deals without
             // publishing (re-checkability: compare with the published aggregate).
@@ -1468,7 +1509,17 @@ void AggregatorServer::setup_routes() {
                 body += "{\"ref\":\"" + to_hex(r.seller.bytes) + "/" + to_hex(r.hash)
                       + "\",\"to\":\"" + to_hex(r.release.to)
                       + "\",\"expires\":" + std::to_string(r.release.expires)
-                      + ",\"timestamp\":" + std::to_string(r.release.timestamp) + "}";
+                      + ",\"timestamp\":" + std::to_string(r.release.timestamp)
+                      + ",\"taken\":" + (deals.taken.count(r.hash) ? "true" : "false");
+                if (r.release.lot) {       // a portion (records.md §9.8 v2)
+                    const auto lot   = deals.lots.find({wh, r.release.lot->out});
+                    const bool valid = lot != deals.lots.end() && lot->second.valid.count(r.hash);
+                    body += ",\"out\":" + std::to_string(r.release.lot->out)
+                          + ",\"qty\":" + std::to_string(r.release.lot->qty)
+                          + ",\"after\":" + std::to_string(r.release.lot->after)
+                          + ",\"valid\":" + (valid ? "true" : "false");
+                }
+                body += "}";
             }
             body += "],\"deals\":[";
             first = true;
@@ -1478,6 +1529,7 @@ void AggregatorServer::setup_routes() {
                 const char* state = rc.recognized.count(d.hash) ? "recognized"
                                   : rc.repeated.count(d.hash)   ? "repeated"
                                   : rc.contested.count(d.hash)  ? "contested"
+                                  : rc.unsound.count(d.hash)    ? "unsound"
                                   :                               "unaddressed";
                 double paid = 0;
                 for (const auto& o : d.transfer.origins) paid += o.units;
@@ -1487,7 +1539,16 @@ void AggregatorServer::setup_routes() {
                       + "\",\"payer\":\"" + to_hex(d.payer.bytes)
                       + "\",\"timestamp\":" + std::to_string(d.transfer.timestamp)
                       + ",\"state\":\"" + state + "\""
-                      + ",\"paid\":" + std::to_string(paid) + "}";
+                      + ",\"paid\":" + std::to_string(paid);
+                if (d.accept().release) {  // what it completed — a portion is a result of its own
+                    bool portion = false;
+                    for (const auto& r : deals.releases)
+                        if (r.hash == d.accept().release->hash) portion = r.release.lot.has_value();
+                    body += ",\"release\":\"" + to_hex(d.accept().release->chain) + "/"
+                          + to_hex(d.accept().release->hash) + "\",\"portion\":"
+                          + (portion ? "true" : "false");
+                }
+                body += "}";
             }
             body += "],\"oversold\":";
             body += rc.oversold.count(wh) ? "true" : "false";
@@ -1512,6 +1573,13 @@ void AggregatorServer::setup_routes() {
                 for (std::size_t i = 0; i < crosses.size(); ++i)
                     body += std::string(i ? "," : "") + "\"" + to_hex(ch) + "/"
                           + to_hex(crosses[i]) + "\"";
+                body += "]";
+                // The work's lots (records.md §9.8 v2): how much of each went where.
+                const auto lots = lot_summaries(deals, wh);
+                body += ",\"lots\":[";
+                for (std::size_t i = 0; i < lots.size(); ++i)
+                    body += std::string(i ? "," : "")
+                          + lot_json(lots[i], w->second.record.outputs[lots[i].out]);
                 body += "]";
             }
             body += "}";
@@ -1561,12 +1629,6 @@ void AggregatorServer::setup_routes() {
                 return {};
             };
 
-            // Confirmed labor: some deal on it moved hours.
-            std::set<std::array<uint8_t, 32>> sold;
-            for (const auto& d : deals.all)
-                if (d.accept().work.chain == uid.bytes && deals.moves_hours(d.hash))
-                    sold.insert(d.accept().work.hash);
-
             std::vector<std::pair<std::array<uint8_t, 32>, const WorkOnTable*>> works;
             for (const auto& [h, w] : deals.works)
                 if (w.worker == uid) works.emplace_back(h, &w);
@@ -1592,26 +1654,36 @@ void AggregatorServer::setup_routes() {
                       + "\",\"start\":" + std::to_string(iv.first)
                       + ",\"end\":" + std::to_string(iv.second)
                       + ",\"hours\":" + std::to_string(r.hours)
-                      + ",\"sold\":" + (sold.count(h) ? "true" : "false");
+                      + ",\"sold\":" + (deals.sold_whole.count(h) ? "true" : "false");
                 if (r.thread)
                     body += ",\"seq\":" + std::to_string(r.thread->seq)
                           + ",\"prev\":" + std::to_string(r.thread->prev.size());
                 if (r.customer) body += ",\"customer\":\"" + to_hex(*r.customer) + "\"";
                 if (*fault) body += ",\"fault\":\"" + std::string(fault) + "\"";
+                if (!r.customer && !r.outputs.empty()) {   // work for stock: its lots
+                    const auto lots = lot_summaries(deals, h);
+                    body += ",\"lots\":[";
+                    for (std::size_t i = 0; i < lots.size(); ++i)
+                        body += std::string(i ? "," : "")
+                              + lot_json(lots[i], r.outputs[lots[i].out]);
+                    body += "]";
+                }
                 body += ",\"axes\":[";
                 for (std::size_t i = 0; i < r.axes.size(); ++i)
                     body += std::string(i ? "," : "") + "{\"axis\":\""
                           + block_path_str(r.axes[i].axis) + "\",\"share\":"
                           + std::to_string(r.axes[i].share) + "}";
                 body += "]}";
-                // Labor not yet confirmed: sound, and no deal has moved hours for it.
-                if (!sold.count(h) && th.sound(h)) {
-                    unconfirmed += r.hours;
-                    if (r.axes.empty()) without_axes += r.hours;
+                // Labor not yet confirmed: sound, and neither paid for whole nor sold
+                // or written off in portions (records.md §9.8 v2).
+                if (th.sound(h)) {
+                    const double open = unconfirmed_hours(deals, h);
+                    unconfirmed += open;
+                    if (r.axes.empty()) without_axes += open;
                     for (const auto& x : r.axes) {
                         auto& slot = by_axis[block_path_str(x.axis)];
                         if (slot.first.empty()) slot.first = label_of(x.axis);
-                        slot.second += x.share * r.hours;
+                        slot.second += x.share * open;
                     }
                 }
             }

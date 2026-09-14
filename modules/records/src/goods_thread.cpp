@@ -76,4 +76,75 @@ LaborThread check_labor_thread(const std::array<uint8_t, 32>& chain,
     return out;
 }
 
+std::optional<double> portion_fraction(const WorkRecord& wr, const LotLink& lot) noexcept {
+    if (lot.out >= wr.outputs.size()) return std::nullopt;
+    const ResourceQty& o = wr.outputs[lot.out];
+    if (!(o.qty > 0.0)) return std::nullopt;
+    if (!o.share && wr.outputs.size() > 1) return std::nullopt;
+    return (o.share ? *o.share : 1.0) * lot.qty / o.qty;
+}
+
+LotState check_lot(const std::array<uint8_t, 32>& chain, double qty,
+                   const std::vector<ObservedLotLink>& links) {
+    using Hash32 = std::array<uint8_t, 32>;
+    constexpr double EPS = 1e-6;   // the carry thread's tolerance (records.md §9.4)
+
+    LotState st;
+    st.qty = qty;
+    std::map<Hash32, const ObservedLotLink*> by_hash;
+    for (const auto& l : links) by_hash.emplace(l.hash, &l);
+
+    std::map<uint64_t, std::size_t> per_seq;
+    std::map<Hash32, std::size_t>   returned;   // release → links returning it
+    for (const auto& [hash, l] : by_hash) {
+        ++per_seq[l->link.seq];
+        for (const auto& r : l->link.returns) ++returned[r.hash];
+    }
+    for (const auto& [seq, n] : per_seq)
+        if (n > 1) st.equivocated_seqs.push_back(seq);
+
+    for (const auto& [hash, l] : by_hash) {
+        const LotLink& k = l->link;
+        bool ok = per_seq[k.seq] == 1;                    // one sale per remainder
+        if (k.after > qty + EPS) ok = false;               // more than the lot holds
+
+        double back = 0;
+        bool   returns_known = true;
+        for (const auto& r : k.returns) {
+            if (r.chain != chain) { ok = false; continue; }
+            const auto it = by_hash.find(r.hash);
+            if (it == by_hash.end()) { returns_known = false; st.gaps = true; continue; }
+            const ObservedLotLink& b = *it->second;
+            if (!b.expires || *b.expires > l->timestamp || b.taken ||
+                returned[r.hash] > 1 || b.link.seq >= k.seq)
+                ok = false;
+            back += b.link.qty;
+        }
+
+        if (!k.prev) {
+            if (std::abs(k.after - k.qty) > EPS) ok = false;   // the first link: after = qty
+        } else if (k.prev->chain != chain) {
+            ok = false;                                          // a sub-thread is one chain's
+        } else if (const auto it = by_hash.find(k.prev->hash); it == by_hash.end()) {
+            st.gaps = true;                                      // not received: a gap, not a fault
+        } else {
+            const LotLink& p = it->second->link;
+            if (p.seq + 1 != k.seq) ok = false;
+            else if (returns_known && std::abs(p.after + k.qty - back - k.after) > EPS) ok = false;
+        }
+        (ok ? st.valid : st.invalid).insert(hash);
+    }
+
+    uint64_t top = 0;
+    bool     any = false;
+    for (const auto& hash : st.valid) {
+        const LotLink& k = by_hash.at(hash)->link;
+        if (!any || k.seq > top) { top = k.seq; st.used = k.after; any = true; }
+    }
+    if (any)
+        for (uint64_t s = 0; s <= top; ++s)
+            if (!per_seq.count(s)) { st.gaps = true; break; }
+    return st;
+}
+
 } // namespace records

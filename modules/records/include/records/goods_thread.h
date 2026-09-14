@@ -59,4 +59,41 @@ struct LaborThread {
 LaborThread check_labor_thread(const std::array<uint8_t, 32>& chain,
                                const std::vector<ObservedWork>& works);
 
+// ── Lots: an output sold in portions (records.md §9.8 v2, records.md §9.9) ───
+
+// The part of a work that a portion of its lot carries: the output's share of
+// the work's hours (1 when the work has one output) × qty / the output's qty.
+// nullopt when the portion cannot be valued: no such output, an output of no
+// size, or several outputs without declared shares.
+std::optional<double> portion_fraction(const WorkRecord& wr, const LotLink& lot) noexcept;
+
+// One link of a lot's sub-thread as seen in a block of the chain: the release of
+// a portion, or a write-off.
+struct ObservedLotLink {
+    std::array<uint8_t, 32> hash{};          // the Release or WriteOff block
+    LotLink                 link;
+    int64_t                 timestamp = 0;   // the record's own
+    std::optional<int64_t>  expires;         // releases only — a write-off is final
+    bool                    taken = false;   // a release some addressed deal completed
+};
+
+struct LotState {
+    double qty = 0;                                 // the lot: the output's size
+    std::set<std::array<uint8_t, 32>> valid;        // links that check out, or cannot be checked yet
+    std::set<std::array<uint8_t, 32>> invalid;      // over the lot, arithmetic off, a false return, equivocated
+    std::vector<uint64_t> equivocated_seqs;         // one seq in two blocks: two sales from one remainder
+    bool   gaps = false;                            // links or returns not on the table
+    double used = 0;                                // taken from the lot at the newest valid link
+
+    double remaining() const noexcept { return qty - used; }
+};
+
+// Digest the sub-thread of ONE lot of `chain` — any order; the same block seen
+// twice is one. Strict like the carry thread: a link checks out only against
+// its own previous link, and two links with one seq are both refused. A return
+// is honest only for an earlier release of this lot that expired before the
+// returning link, was taken by nobody and is returned once.
+LotState check_lot(const std::array<uint8_t, 32>& chain, double qty,
+                   const std::vector<ObservedLotLink>& links);
+
 } // namespace records

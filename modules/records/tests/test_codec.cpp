@@ -1011,3 +1011,80 @@ TEST(RecordsCodec, ProposedAxesMustBeABreakdown) {
     wr.axes   = {{make_path(0x79, 0x01), 1.0}};
     EXPECT_EQ(std::get<WorkRecord>(roundtrip(wr)).axes, wr.axes);
 }
+
+// ── Партии: доли выходов, ценник, отпуск порции, списание (records.md §9.4 v5,
+//    records.md §9.8 v2, records.md §9.9) ─────────────────────────────────────
+
+TEST(RecordsCodec, OutputShareAndPriceTagRoundtrip) {
+    WorkRecord wr{};
+    wr.action  = "распил";
+    wr.hours   = 8.0;
+    wr.outputs = {{"доски", 2.0, "м³", 0.9, 1.1}, {"опилки", 0.5, "м³", 0.1, std::nullopt}};
+    EXPECT_EQ(std::get<WorkRecord>(roundtrip(wr)).outputs, wr.outputs);
+}
+
+// Доля и ценник — у партии, то есть у выхода; доли — у всех выходов и в сумме 1.
+TEST(RecordsCodec, SharesAndTagsBelongToLotsAndAddUp) {
+    WorkRecord wr{};
+    wr.action = "распил";
+    wr.hours  = 8.0;
+    wr.inputs = {{"бревно", 3.0, "м³", 1.0, std::nullopt}};                 // доля у входа
+    EXPECT_THROW(Codec::encode(Record{wr}), CodecError);
+    wr.inputs  = {};
+    wr.outputs = {{"доски", 2.0, "м³", 0.9, std::nullopt}, {"опилки", 0.5, "м³"}};   // не у всех
+    EXPECT_THROW(Codec::encode(Record{wr}), CodecError);
+    wr.outputs = {{"доски", 2.0, "м³", 0.7, std::nullopt},
+                  {"опилки", 0.5, "м³", 0.2, std::nullopt}};                // в сумме 0.9
+    EXPECT_THROW(Codec::encode(Record{wr}), CodecError);
+    wr.outputs = {{"хлеб", 100.0, "шт", std::nullopt, 0.0}};                 // ценник 0
+    EXPECT_THROW(Codec::encode(Record{wr}), CodecError);
+}
+
+static LotLink lot_link(uint64_t seq, double qty, double after) {
+    LotLink l{};
+    l.qty   = qty;
+    l.seq   = seq;
+    l.after = after;
+    if (seq > 0) l.prev = make_ref(0x53, static_cast<uint8_t>(0x60 + seq));
+    return l;
+}
+
+TEST(RecordsCodec, ReleaseOfAPortionRoundtrip) {
+    Release rl = release_of(0xB2);
+    rl.lot = lot_link(2, 5.0, 17.0);
+    rl.lot->returns = {make_ref(0x53, 0x61)};
+    const auto d = std::get<Release>(roundtrip(Record{rl}));
+    ASSERT_TRUE(d.lot.has_value());
+    EXPECT_EQ(*d.lot, *rl.lot);
+}
+
+TEST(RecordsCodec, WriteOffRoundtrip) {
+    WriteOff wo{};
+    wo.work      = make_ref(0x53, 0x54);
+    wo.lot       = lot_link(0, 2.0, 2.0);
+    wo.reason    = "подгорели";
+    wo.timestamp = 1;
+    const auto d = std::get<WriteOff>(roundtrip(Record{wo}));
+    EXPECT_EQ(d.work, wo.work);
+    EXPECT_EQ(d.lot, wo.lot);
+    EXPECT_EQ(d.reason, wo.reason);
+}
+
+// Звено партии, которое нельзя было написать по правилу, — не запись.
+TEST(RecordsCodec, LotLinkThatCouldNotBeWrittenIsRefused) {
+    WriteOff wo{};
+    wo.work      = make_ref(0x53, 0x54);
+    wo.reason    = "бой";
+    wo.timestamp = 1;
+    wo.lot = lot_link(0, 0.0, 0.0);                                           // пустая порция
+    EXPECT_THROW(Codec::encode(Record{wo}), CodecError);
+    wo.lot = lot_link(0, 1.0, 1.0);
+    wo.lot.prev = make_ref(0x53, 0x61);                                       // первое, а предыдущее есть
+    EXPECT_THROW(Codec::encode(Record{wo}), CodecError);
+    wo.lot = lot_link(0, 1.0, 1.0);
+    wo.lot.returns = {make_ref(0x53, 0x61)};                                  // первому нечего возвращать
+    EXPECT_THROW(Codec::encode(Record{wo}), CodecError);
+    wo.lot = lot_link(3, 1.0, 4.0);
+    wo.lot.returns = {make_ref(0x53, 0x62), make_ref(0x53, 0x61)};            // не по порядку
+    EXPECT_THROW(Codec::encode(Record{wo}), CodecError);
+}

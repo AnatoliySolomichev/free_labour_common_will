@@ -245,6 +245,33 @@ static ResourceQty parse_rq(const std::string& s) {
     return { s.substr(0, p1), std::stod(s.substr(p1 + 1, p2 - p1 - 1)), s.substr(p2 + 1) };
 }
 
+// --output ИМЯ:КОЛИЧЕСТВО:ЕДИНИЦА[:ДОЛЯ[:K]] — a lot (records.md §9.4 v5): the
+// share of the work's hours when one work yields several outputs, and the price
+// tag k. An empty field is absent: «хлеб:100:шт::1.2» — a tag and no share.
+static ResourceQty parse_output(const std::string& s) {
+    std::vector<std::string> parts;
+    for (std::size_t from = 0;;) {
+        const auto colon = s.find(':', from);
+        parts.push_back(s.substr(from, colon == std::string::npos ? std::string::npos
+                                                                  : colon - from));
+        if (colon == std::string::npos) break;
+        from = colon + 1;
+    }
+    if (parts.size() < 3 || parts.size() > 5)
+        throw std::runtime_error("--output ждёт ИМЯ:КОЛИЧЕСТВО:ЕДИНИЦА[:ДОЛЯ[:K]], получено: " + s);
+    ResourceQty rq{parts[0], std::stod(parts[1]), parts[2]};
+    if (parts.size() > 3 && !parts[3].empty()) rq.share = std::stod(parts[3]);
+    if (parts.size() > 4 && !parts[4].empty()) rq.k     = std::stod(parts[4]);
+    return rq;
+}
+
+// A quantity as people write it: 3, 2.5 — not 3.000000.
+static std::string qty_str(double v) {
+    std::ostringstream ss;
+    ss << v;
+    return ss.str();
+}
+
 // ── Record summary for list ───────────────────────────────────────────────────
 
 static std::string record_summary(const Record& rec) {
@@ -288,6 +315,13 @@ static std::string record_summary(const Record& rec) {
         } else if constexpr (std::is_same_v<T, records::Release>) {
             ss << "[Release]     work:" << short_hex(r.work.hash)
                << "  to:" << short_hex(r.to) << "  expires:" << r.expires;
+            if (r.lot)
+                ss << "  lot:" << r.lot->out << " qty:" << r.lot->qty
+                   << " #" << r.lot->seq << " after:" << r.lot->after;
+        } else if constexpr (std::is_same_v<T, records::WriteOff>) {
+            ss << "[WriteOff]    work:" << short_hex(r.work.hash) << "  lot:" << r.lot.out
+               << " qty:" << r.lot.qty << " #" << r.lot.seq << " after:" << r.lot.after
+               << "  \"" << r.reason << "\"";
         } else if constexpr (std::is_same_v<T, records::Tool>) {
             ss << "[Tool]        \"" << r.name << "\"  " << r.cost
                << "h  life:" << r.life << "h  [" << r.basis << "]";
@@ -521,15 +555,16 @@ static std::optional<Record> load_record(Context& ctx, const std::string& via,
     catch (const CodecError&) { return std::nullopt; }
 }
 
-// Today's network price of an hour of each axis (records.md §11.2 v5), from
-// GET /economy/rates: axis hash → price. Empty on any gap — the caller falls
-// back to par and says so.
-static std::map<std::array<uint8_t, 32>, double> lookup_axis_prices(const std::string& via) {
+// Network prices of an hour of each axis (records.md §11.2 v5) from an
+// /economy/rates response: axis hash → price. Empty on any gap — the caller
+// falls back and says so.
+static std::map<std::array<uint8_t, 32>, double> axis_prices_at(const std::string& via,
+                                                                const std::string& path) {
     std::map<std::array<uint8_t, 32>, double> out;
     if (via.empty()) return out;
     httplib::Client cli(via);  // scheme-aware: plain host:port, http:// or https://
     cli.set_connection_timeout(5);
-    const auto res = cli.Get("/economy/rates");
+    const auto res = cli.Get(path);
     if (!res || res->status != 200) return out;
     try {
         const auto root = records::json::Reader(res->body).read();
@@ -547,6 +582,19 @@ static std::map<std::array<uint8_t, 32>, double> lookup_axis_prices(const std::s
         out.clear();
     }
     return out;
+}
+
+// Today's prices.
+static std::map<std::array<uint8_t, 32>, double> lookup_axis_prices(const std::string& via) {
+    return axis_prices_at(via, "/economy/rates");
+}
+
+// The prices a product made on day `ts` is valued at (ИР-023, вопрос 2): the
+// DailyAggregate the aggregator published that day. Empty when none was — the
+// caller falls back to today's prices and says so.
+static std::map<std::array<uint8_t, 32>, double> lookup_axis_prices_on(const std::string& via,
+                                                                       int64_t ts) {
+    return axis_prices_at(via, "/economy/rates?date=" + std::to_string(ts));
 }
 
 // Best-effort normalizer provenance for an acceptance (economy.md §2б): the W the
@@ -1173,7 +1221,8 @@ static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
                      "   [--axis-share ОСЬ=ДОЛЯ]    предложенная разбивка часов по осям,\n"
                      "                              сумма 1 — покупатель её подтверждает\n"
                      "   [--input  NAME:QTY:UNIT]   (repeatable)\n"
-                     "   [--output NAME:QTY:UNIT]   (repeatable)\n"
+                     "   [--output ИМЯ:КОЛ:ЕД[:ДОЛЯ[:K]]] партия (repeatable, records.md §9.4):\n"
+                     "                              ДОЛЯ часов при нескольких выходах, K — ценник\n"
                      "   [--tool   HASH_PREFIX:USED] (repeatable — перенос стоимости, ИР-011)\n";
         return 1;
     }
@@ -1192,7 +1241,7 @@ static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
                   : static_cast<int64_t>(std::stoll(start_s));
     wr.axes = parse_axis_shares(flag_all(argc, argv, "--axis-share"));
     for (const auto& s : flag_all(argc, argv, "--input"))  wr.inputs.push_back(parse_rq(s));
-    for (const auto& s : flag_all(argc, argv, "--output")) wr.outputs.push_back(parse_rq(s));
+    for (const auto& s : flag_all(argc, argv, "--output")) wr.outputs.push_back(parse_output(s));
 
     const NodeIndex leaf = parse_leaf_index(argc, argv);
     Context ctx(data_dir, leaf);
@@ -1229,8 +1278,10 @@ static const records::json::Value* jarr(const records::json::Object& o,
 
 // The own deal on `work` already on record in the own branches: its ref, or
 // empty. One result — one deal (records.md §9.5, ИР-023): a second deal of the
-// same buyer buys nothing, it only overpays.
-static std::string own_deal_on(Context& ctx, const Ref& work) {
+// same buyer buys nothing, it only overpays. A portion of a lot is a result of
+// its own (records.md §9.8 v2): `portion` narrows the search to that release.
+static std::string own_deal_on(Context& ctx, const Ref& work,
+                               const std::optional<Ref>& portion = std::nullopt) {
     for (const NodeIndex node : ctx.local_branches()) {
         std::vector<Block> blocks;
         try { blocks = ctx.bc.get_branch(ctx.user_id, node); }
@@ -1241,7 +1292,8 @@ static std::string own_deal_on(Context& ctx, const Ref& work) {
             try { rec = Codec::decode(b.payload.data(), b.payload.size()); }
             catch (const CodecError&) { continue; }
             const auto* t = std::get_if<records::Transfer>(&rec);
-            if (t && t->accept && t->accept->work == work)
+            if (t && t->accept && t->accept->work == work &&
+                (!portion || t->accept->release == portion))
                 return to_hex(ctx.user_id.bytes) + "/" + to_hex(Crypto::hash_block(b).bytes);
         }
     }
@@ -1310,21 +1362,7 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     if (a.work.chain == ctx.user_id.bytes)
         throw std::runtime_error("свою работу не принимают — принимает и платит заказчик "
                                  "(records.md §9.5)");
-    // Один результат — одна сделка (records.md §9.5, ИР-023). Своя повторная
-    // ничего не купит, только переплатит; сделка рядом с чужой либо ничтожна (не
-    // по адресу), либо делает результат «проданным дважды». Обхода нет.
-    if (const auto mine = own_deal_on(ctx, a.work); !mine.empty())
-        throw std::runtime_error("вы уже приняли и оплатили эту работу: " + mine +
-                                 " (records.md §9.5)");
     const auto status = fetch_work_status(via, a.work);
-    if (status && status->is_object())
-        if (const auto* ds = jarr(status->object, "deals"))
-            for (const auto& d : ds->array)
-                if (d.is_object() && jstr(d.object, "state") != "unaddressed")
-                    throw std::runtime_error(
-                        "работа уже продана: сделка " + jstr(d.object, "ref") +
-                        ". Один результат — одна сделка (records.md §9.5): вторая по "
-                        "адресу сделала бы его «проданным дважды»");
 
     // Кому достаётся результат, решает продавец (records.md §9.5): заказчик в
     // записи труда (records.md §9.4) или отпуск на имя покупателя
@@ -1352,6 +1390,8 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
                 if (!r.is_object() || jstr(r.object, "to") != to_hex(ctx.user_id.bytes))
                     continue;
                 if (jnum(r.object, "expires") <= static_cast<double>(now)) continue;
+                if (const auto* tk = records::json::find(r.object, "taken"); tk && tk->boolean)
+                    continue;   // already bought
                 const Ref  rref = parse_ref(jstr(r.object, "ref"));
                 const auto rrec = load_record(ctx, via, rref);
                 const auto* rl  = rrec ? std::get_if<records::Release>(&*rrec) : nullptr;
@@ -1403,6 +1443,62 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
                 "(records.md §9.4)");
         }
     }
+    // Порция партии (records.md §9.8 v2): её часы и перенос — доля работы в этой
+    // порции; ценник — k, поставленный производителем при изготовлении, по ценам
+    // осей дня производства (ИР-023, вопрос 2).
+    const bool                  portion  = release && release->lot;
+    double                      fraction = 1.0;
+    const records::ResourceQty* lot_of   = nullptr;
+    if (portion) {
+        if (!work)
+            throw std::runtime_error("порция партии: запись работы не найдена — нужен --via");
+        const auto f = records::portion_fraction(*work, *release->lot);
+        if (!f)
+            throw std::runtime_error("порцию не оценить: у работы нет такого выхода или у "
+                                     "нескольких выходов не объявлены доли (records.md §9.4)");
+        fraction = *f;
+        lot_of   = &work->outputs[release->lot->out];
+        std::cerr << "порция партии «" << lot_of->resource << "»: " << qty_str(release->lot->qty)
+                  << " " << lot_of->unit << " из " << qty_str(lot_of->qty)
+                  << " — доля работы " << fraction << "\n";
+    }
+
+    // Один результат — одна сделка (records.md §9.5, ИР-023); порция — свой
+    // результат. Своя повторная ничего не купит, только переплатит; сделка рядом с
+    // чужой по адресу сделала бы результат «проданным дважды». Обхода нет.
+    const std::string release_ref =
+        a.release ? to_hex(a.release->chain) + "/" + to_hex(a.release->hash) : std::string{};
+    if (const auto mine = own_deal_on(ctx, a.work, portion ? a.release : std::optional<Ref>{});
+        !mine.empty())
+        throw std::runtime_error(std::string("вы уже приняли и оплатили ") +
+                                 (portion ? "эту порцию: " : "эту работу: ") + mine +
+                                 " (records.md §9.5)");
+    if (status && status->is_object()) {
+        if (const auto* ds = jarr(status->object, "deals"))
+            for (const auto& d : ds->array) {
+                if (!d.is_object() || jstr(d.object, "state") == "unaddressed") continue;
+                const auto* p = records::json::find(d.object, "portion");
+                const bool theirs_portion = p && p->boolean;
+                // Целиком — ни рядом с какой; порция — не рядом с продажей целиком и
+                // не та же порция второй раз.
+                if (!portion || !theirs_portion || jstr(d.object, "release") == release_ref)
+                    throw std::runtime_error(
+                        "работа уже продана: сделка " + jstr(d.object, "ref") +
+                        ". Один результат — одна сделка (records.md §9.5): вторая по "
+                        "адресу сделала бы его «проданным дважды»");
+            }
+        // Звено партии, которое не сходится, — порция сверх партии или продажа из
+        // одного остатка дважды: платить за неё — отдать часы за чужой обман.
+        if (portion)
+            if (const auto* rs = jarr(status->object, "releases"))
+                for (const auto& r : rs->array)
+                    if (r.is_object() && jstr(r.object, "ref") == release_ref)
+                        if (const auto* v = records::json::find(r.object, "valid"); v && !v->boolean)
+                            throw std::runtime_error(
+                                "звено партии не сходится — порция сверх партии или продана из "
+                                "одного остатка дважды; в счёт не пойдёт (records.md §9.8)");
+    }
+
     for (const auto& p : axis_args) {
         const auto eq = p.rfind('=');
         if (eq == std::string::npos || eq == 0)
@@ -1456,7 +1552,7 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
             throw std::runtime_error(
                 "запись работы не найдена — 'bc fetch <ref> --via URL' или --via, "
                 "или задайте --hours-raw");
-        a.hours_raw = work->hours;
+        a.hours_raw = work->hours * fraction;   // порция несёт свою долю работы
     } else {
         a.hours_raw = std::stod(raw_s);
     }
@@ -1473,7 +1569,13 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
         if (!coef_s.empty()) {
             rate = std::stod(coef_s);
         } else {
-            const auto  prices = lookup_axis_prices(via);
+            auto prices = lot_of ? lookup_axis_prices_on(via, work->start_ts)
+                                 : std::map<std::array<uint8_t, 32>, double>{};
+            if (lot_of)
+                std::cerr << (prices.empty() ? "цен осей дня производства агрегатор не "
+                                               "публиковал — по сегодняшним\n"
+                                             : "цены осей дня производства\n");
+            if (prices.empty()) prices = lookup_axis_prices(via);
             std::size_t priced = 0;
             for (const auto& [path, share] : shares) {
                 (void)share;
@@ -1491,7 +1593,11 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
                              "(задайте --coef или --labor-units)\n";
             }
         }
-        const double k = std::stod(flag_val(argc, argv, "--k", "1.0"));
+        double k = std::stod(flag_val(argc, argv, "--k", "1.0"));
+        if (flag_val(argc, argv, "--k").empty() && lot_of && lot_of->k) {
+            k = *lot_of->k;
+            std::cerr << "ценник производителя: k = " << k << "\n";
+        }
         a.labor_units = a.hours_raw * rate * k;
     }
 
@@ -1507,9 +1613,11 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
                 if (wr && !wr->carry.empty()) {
                     double carried = 0;
                     for (const auto& ce : wr->carry) carried += ce.carried;
-                    a.carried_units = carried;
-                    std::cerr << "перенос средств производства: " << carried
-                              << "ч, позиции:\n";
+                    // Порция несёт свою долю переноса (records.md §9.8 v2).
+                    a.carried_units = carried * fraction;
+                    std::cerr << "перенос средств производства: " << *a.carried_units << "ч";
+                    if (fraction < 1.0) std::cerr << " (доля порции из " << carried << "ч)";
+                    std::cerr << ", позиции:\n";
                     for (const auto& ce : wr->carry) {
                         const auto ablock = find_external_by_hash(ctx, ce.src.hash);
                         std::optional<AssetInfo> info;
@@ -1619,36 +1727,155 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     return 0;
 }
 
-// bc release WORK --to CHAIN [--days N | --until TS] [--via URL] [--leaf L]
-// Отпуск (records.md §9.8, ИР-023): the seller gives the result of an own work to
-// a named buyer. Only that buyer's deal completes it, and only before the term;
-// without it (or a customer on the work itself) a deal on the work is void.
+// A work named on the command line as the own chain's: its hash alone, or
+// CHAIN/HASH that must be the own chain.
+static Ref own_work_arg(Context& ctx, const std::string& arg) {
+    Ref work{};
+    if (arg.find('/') == std::string::npos) {
+        work.chain = ctx.user_id.bytes;
+        if (!from_hex(arg, work.hash.data(), 32))
+            throw std::runtime_error("РАБОТА: ожидался хеш записи труда (64 hex) или ЦЕПЬ/ХЕШ");
+    } else {
+        work = parse_ref(arg);
+    }
+    if (work.chain != ctx.user_id.bytes)
+        throw std::runtime_error("это чужая работа — отпускает и списывает её результат тот, "
+                                 "кто его сделал (records.md §9.8)");
+    return work;
+}
+
+// The own links of one lot (records.md §9.8 v2): releases of portions and
+// write-offs of output `out` of `work`, every local branch. `whole` — the work
+// was released whole; `portions` — some output of it goes by portions.
+struct OwnLot {
+    std::vector<records::ObservedLotLink> links;
+    bool whole    = false;
+    bool portions = false;
+};
+
+static OwnLot own_lot(Context& ctx, const Ref& work, uint32_t out) {
+    OwnLot lot;
+    for (const NodeIndex node : ctx.local_branches()) {
+        std::vector<Block> blocks;
+        try { blocks = ctx.bc.get_branch(ctx.user_id, node); }
+        catch (const BlockchainError&) { continue; }
+        for (const auto& b : blocks) {
+            if (b.type != BlockType::DATA) continue;
+            Record rec;
+            try { rec = Codec::decode(b.payload.data(), b.payload.size()); }
+            catch (const CodecError&) { continue; }
+            const auto hash = Crypto::hash_block(b).bytes;
+            if (const auto* rl = std::get_if<records::Release>(&rec); rl && rl->work == work) {
+                if (!rl->lot) { lot.whole = true; continue; }
+                lot.portions = true;
+                if (rl->lot->out == out)
+                    lot.links.push_back({hash, *rl->lot, rl->timestamp, rl->expires, false});
+            } else if (const auto* wo = std::get_if<records::WriteOff>(&rec);
+                       wo && wo->work == work) {
+                lot.portions = true;
+                if (wo->lot.out == out)
+                    lot.links.push_back({hash, wo->lot, wo->timestamp, std::nullopt, false});
+            }
+        }
+    }
+    return lot;
+}
+
+// The next link of a lot's sub-thread (records.md §9.8 v2): after the newest own
+// link of the lot, taking `qty`. With --via the releases of the lot that expired
+// with nobody taking them go back into stock by this very link (`returns`) —
+// whether a release was taken only the aggregator knows, so without it nothing
+// is returned. A portion the lot no longer holds is refused.
+static records::LotLink next_lot_link(Context& ctx, const std::string& via, const Ref& work,
+                                      const WorkRecord& wr, uint32_t out, double qty,
+                                      int64_t now) {
+    if (out >= wr.outputs.size())
+        throw std::runtime_error("у работы нет выхода №" + std::to_string(out) +
+                                 " — нет и партии (records.md §9.4)");
+    const records::ResourceQty& o = wr.outputs[out];
+    if (wr.outputs.size() > 1 && !o.share)
+        throw std::runtime_error("у работы несколько выходов, а долей часов нет — порцию не "
+                                 "оценить; объявите их при записи работы: --output "
+                                 "ИМЯ:КОЛ:ЕД:ДОЛЯ (records.md §9.4)");
+    if (!(qty > 0.0)) throw std::runtime_error("--qty: порция должна быть больше нуля");
+    const OwnLot lot = own_lot(ctx, work, out);
+    if (lot.whole)
+        throw std::runtime_error("работа уже отпущена целиком — продать её ещё и порциями "
+                                 "значило бы продать дважды (records.md §9.5)");
+
+    records::LotLink link{};
+    link.out = out;
+    link.qty = qty;
+    const records::ObservedLotLink*   newest = nullptr;
+    std::set<std::array<uint8_t, 32>> returned;
+    for (const auto& l : lot.links) {
+        if (!newest || l.link.seq > newest->link.seq) newest = &l;
+        for (const auto& r : l.link.returns) returned.insert(r.hash);
+    }
+    double before = 0.0;
+    if (newest) {
+        link.seq  = newest->link.seq + 1;
+        link.prev = Ref{ctx.user_id.bytes, newest->hash};
+        before    = newest->link.after;
+        std::set<std::array<uint8_t, 32>> taken;
+        bool known = false;
+        if (const auto st = fetch_work_status(via, work); st && st->is_object()) {
+            const auto* k = records::json::find(st->object, "known");
+            known = k && k->boolean;
+            if (const auto* rs = jarr(st->object, "releases"))
+                for (const auto& r : rs->array) {
+                    if (!r.is_object()) continue;
+                    const auto* t = records::json::find(r.object, "taken");
+                    if (t && t->boolean) taken.insert(parse_ref(jstr(r.object, "ref")).hash);
+                }
+        }
+        double back = 0.0;
+        if (known)
+            for (const auto& l : lot.links)
+                if (l.expires && *l.expires <= now && !taken.count(l.hash) &&
+                    !returned.count(l.hash)) {
+                    link.returns.push_back(Ref{ctx.user_id.bytes, l.hash});
+                    back += l.link.qty;
+                }
+        std::sort(link.returns.begin(), link.returns.end(), [](const Ref& x, const Ref& y) {
+            return std::tie(x.chain, x.hash) < std::tie(y.chain, y.hash);
+        });
+        if (back > 0.0)
+            std::cerr << "партия: в запас вернулось " << qty_str(back) << " " << o.unit
+                      << " — отпуски истекли, их никто не взял\n";
+        before -= back;
+    }
+    link.after = before + qty;
+    if (link.after > o.qty + 1e-9)
+        throw std::runtime_error("в партии «" + o.resource + "» осталось " +
+                                 qty_str(o.qty - before) + " " + o.unit +
+                                 " — больше не отпустить и не списать (records.md §9.8)");
+    return link;
+}
+
+// bc release WORK --to CHAIN [--qty Q [--out N]] [--days N | --until TS] [--via URL]
+// Отпуск (records.md §9.8, ИР-023): the seller gives the result of an own work —
+// whole, or a portion of one of its lots — to a named buyer. Only that buyer's
+// deal completes it, and only before the term; without it (or a customer on the
+// work itself) a deal on the work is void.
 static int cmd_release(const fs::path& data_dir, int argc, char** argv) {
     const auto pos  = get_positionals(argc, argv);
     const auto to_s = flag_val(argc, argv, "--to");
     if (pos.size() < 2 || to_s.empty()) {
-        std::cerr << "Usage: bc release РАБОТА --to ЦЕПЬ [--days N | --until UNIX_TS]\n"
-                     "                  [--via URL] [--leaf L]\n"
-                     "  отдать результат своей работы покупателю (records.md §9.8):\n"
-                     "  засчитана будет только его сделка и только до срока\n"
-                     "  (по умолчанию 7 дней). РАБОТА — хеш своей записи труда или ЦЕПЬ/ХЕШ\n";
+        std::cerr << "Usage: bc release РАБОТА --to ЦЕПЬ [--qty КОЛИЧЕСТВО [--out N]]\n"
+                     "                  [--days N | --until UNIX_TS] [--via URL] [--leaf L]\n"
+                     "  отдать результат своей работы покупателю (records.md §9.8): засчитана\n"
+                     "  будет только его сделка и только до срока (по умолчанию 7 дней).\n"
+                     "  --qty — порция партии: выхода N (по умолчанию 0), звено её подниточки;\n"
+                     "  больше, чем в партии осталось, не отпустить. РАБОТА — хеш своей\n"
+                     "  записи труда или ЦЕПЬ/ХЕШ\n";
         return 1;
     }
     const auto      via  = flag_val(argc, argv, "--via");
     const NodeIndex leaf = parse_leaf_index(argc, argv);
     Context ctx(data_dir, leaf);
 
-    Ref work{};
-    if (pos[1].find('/') == std::string::npos) {
-        work.chain = ctx.user_id.bytes;
-        if (!from_hex(pos[1], work.hash.data(), 32))
-            throw std::runtime_error("РАБОТА: ожидался хеш записи труда (64 hex) или ЦЕПЬ/ХЕШ");
-    } else {
-        work = parse_ref(pos[1]);
-    }
-    if (work.chain != ctx.user_id.bytes)
-        throw std::runtime_error("отпускают только свою работу — результат отдаёт тот, "
-                                 "кто его сделал (records.md §9.8)");
+    const Ref         work = own_work_arg(ctx, pos[1]);
     const auto        wrec = load_record(ctx, "", work);
     const WorkRecord* wr   = wrec ? std::get_if<WorkRecord>(&*wrec) : nullptr;
     if (!wr) throw std::runtime_error("своей записи труда с таким хешем нет");
@@ -1659,56 +1886,128 @@ static int cmd_release(const fs::path& data_dir, int argc, char** argv) {
     rl.timestamp = static_cast<int64_t>(std::time(nullptr));
     if (rl.to == ctx.user_id.bytes)
         throw std::runtime_error("отпуск себе ничего не отпускает");
-    if (wr->customer && *wr->customer == rl.to) {
-        std::cerr << "работа и так на заказ этой цепи — результат отпущен ей самой "
-                     "записью труда (records.md §9.4), отпуск не нужен\n";
-        return 0;
-    }
     const auto until_s = flag_val(argc, argv, "--until");
     rl.expires = !until_s.empty()
         ? static_cast<int64_t>(std::stoll(until_s))
         : rl.timestamp + static_cast<int64_t>(
               std::stod(flag_val(argc, argv, "--days", "7")) * 86400.0);
 
-    // Один результат — одна сделка (records.md §9.5): не отпускаем проданное и не
-    // отпускаем второму, пока жив отпуск первому — это была бы двойная продажа, и
-    // подписана она была бы нами.
-    for (const NodeIndex node : ctx.local_branches()) {
-        std::vector<Block> blocks;
-        try { blocks = ctx.bc.get_branch(ctx.user_id, node); }
-        catch (const BlockchainError&) { continue; }
-        for (const auto& b : blocks) {
-            if (b.type != BlockType::DATA) continue;
-            Record rec;
-            try { rec = Codec::decode(b.payload.data(), b.payload.size()); }
-            catch (const CodecError&) { continue; }
-            const auto* prev = std::get_if<records::Release>(&rec);
-            if (prev && prev->work == work && prev->to != rl.to &&
-                prev->expires > rl.timestamp)
-                throw std::runtime_error(
-                    "работа уже отпущена " + short_hex(prev->to) + " до " +
-                    std::to_string(prev->expires) + " — второй отпуск до срока "
-                    "первого был бы двойной продажей (records.md §9.8)");
+    const auto qty_s = flag_val(argc, argv, "--qty");
+    if (!qty_s.empty()) {
+        // Порция партии (records.md §9.8 v2): звено подниточки — после последнего.
+        if (wr->customer)
+            throw std::runtime_error("работа на заказ — результат целиком отпущен заказчику "
+                                     "(records.md §9.4); порциями продают работу на склад");
+        const auto out = static_cast<uint32_t>(std::stoul(flag_val(argc, argv, "--out", "0")));
+        rl.lot = next_lot_link(ctx, via, work, *wr, out, std::stod(qty_s), rl.timestamp);
+    } else {
+        if (wr->customer && *wr->customer == rl.to) {
+            std::cerr << "работа и так на заказ этой цепи — результат отпущен ей самой "
+                         "записью труда (records.md §9.4), отпуск не нужен\n";
+            return 0;
         }
+        // Один результат — одна сделка (records.md §9.5): не отпускаем проданное,
+        // не отпускаем второму, пока жив отпуск первому, и не отпускаем целиком
+        // то, что уже идёт порциями, — это была бы двойная продажа, и подписана
+        // она была бы нами.
+        for (const NodeIndex node : ctx.local_branches()) {
+            std::vector<Block> blocks;
+            try { blocks = ctx.bc.get_branch(ctx.user_id, node); }
+            catch (const BlockchainError&) { continue; }
+            for (const auto& b : blocks) {
+                if (b.type != BlockType::DATA) continue;
+                Record rec;
+                try { rec = Codec::decode(b.payload.data(), b.payload.size()); }
+                catch (const CodecError&) { continue; }
+                if (const auto* prev = std::get_if<records::Release>(&rec);
+                    prev && prev->work == work) {
+                    if (prev->lot)
+                        throw std::runtime_error("работа уже продаётся порциями — отпустить её "
+                                                 "целиком значило бы продать дважды "
+                                                 "(records.md §9.5)");
+                    if (prev->to != rl.to && prev->expires > rl.timestamp)
+                        throw std::runtime_error(
+                            "работа уже отпущена " + short_hex(prev->to) + " до " +
+                            std::to_string(prev->expires) + " — второй отпуск до срока "
+                            "первого был бы двойной продажей (records.md §9.8)");
+                }
+                if (const auto* wo = std::get_if<records::WriteOff>(&rec);
+                    wo && wo->work == work)
+                    throw std::runtime_error("из партий этой работы уже списано — целиком её не "
+                                             "отпустить (records.md §9.9)");
+            }
+        }
+        if (const auto st = fetch_work_status(via, work); st && st->is_object())
+            if (const auto* ds = jarr(st->object, "deals"))
+                for (const auto& d : ds->array)
+                    if (d.is_object() && jstr(d.object, "state") != "unaddressed")
+                        throw std::runtime_error("работа уже продана: сделка " +
+                                                 jstr(d.object, "ref") + " (records.md §9.5)");
+        if (wr->customer)
+            std::cerr << "⚠ работа была на заказ " << short_hex(*wr->customer)
+                      << " — отпуская её другому, вы отдаёте результат второй раз; если "
+                         "заказчик тоже заплатит, это двойная продажа (records.md §9.5)\n";
     }
-    if (const auto st = fetch_work_status(via, work); st && st->is_object()) {
-        if (const auto* ds = jarr(st->object, "deals"))
-            for (const auto& d : ds->array)
-                if (d.is_object() && jstr(d.object, "state") != "unaddressed")
-                    throw std::runtime_error("работа уже продана: сделка " +
-                                             jstr(d.object, "ref") + " (records.md §9.5)");
-    }
-    if (wr->customer)
-        std::cerr << "⚠ работа была на заказ " << short_hex(*wr->customer)
-                  << " — отпуская её другому, вы отдаёте результат второй раз; если "
-                     "заказчик тоже заплатит, это двойная продажа (records.md §9.5)\n";
 
     const Block block = append_record(ctx, Record{rl});
     std::cout << "release ref: " << to_hex(ctx.user_id.bytes) << "/"
               << to_hex(Crypto::hash_block(block).bytes) << "\n";
-    std::cerr << "отпуск: результат работы " << short_hex(work.hash) << " → "
-              << short_hex(rl.to) << ", срок " << rl.expires << " (через "
+    if (rl.lot) {
+        const auto& o = wr->outputs[rl.lot->out];
+        std::cerr << "отпуск порции: " << qty_str(rl.lot->qty) << " " << o.unit << " «"
+                  << o.resource << "» → " << short_hex(rl.to) << ", в партии осталось "
+                  << qty_str(o.qty - rl.lot->after) << " " << o.unit;
+    } else {
+        std::cerr << "отпуск: результат работы " << short_hex(work.hash) << " → "
+                  << short_hex(rl.to);
+    }
+    std::cerr << ", срок " << rl.expires << " (через "
               << (rl.expires - rl.timestamp) / 86400.0 << " дн.)\n";
+    if (!via.empty()) upload_block(via, block);
+    return 0;
+}
+
+// bc writeoff WORK --qty Q [--out N] --reason TEXT [--via URL] [--leaf L]
+// Списание (records.md §9.9): part of a lot leaves it without a sale — spoiled,
+// lost, used up — by a link of the lot's sub-thread, so the remainder stays
+// checkable and the loss stays visible in the own chain.
+static int cmd_writeoff(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos    = get_positionals(argc, argv);
+    const auto qty_s  = flag_val(argc, argv, "--qty");
+    const auto reason = flag_val(argc, argv, "--reason");
+    if (pos.size() < 2 || qty_s.empty() || reason.empty()) {
+        std::cerr << "Usage: bc writeoff РАБОТА --qty КОЛИЧЕСТВО --reason ТЕКСТ [--out N]\n"
+                     "                   [--via URL] [--leaf L]\n"
+                     "  списать часть партии без продажи — испорчено, потеряно,\n"
+                     "  израсходовано (records.md §9.9): звено подниточки партии\n";
+        return 1;
+    }
+    const auto      via  = flag_val(argc, argv, "--via");
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+
+    const Ref         work = own_work_arg(ctx, pos[1]);
+    const auto        wrec = load_record(ctx, "", work);
+    const WorkRecord* wr   = wrec ? std::get_if<WorkRecord>(&*wrec) : nullptr;
+    if (!wr) throw std::runtime_error("своей записи труда с таким хешем нет");
+    if (wr->customer)
+        throw std::runtime_error("работа на заказ — её результат у заказчика, из своего запаса "
+                                 "списывать нечего (records.md §9.9)");
+
+    records::WriteOff wo{};
+    wo.work      = work;
+    wo.reason    = reason;
+    wo.timestamp = static_cast<int64_t>(std::time(nullptr));
+    const auto out = static_cast<uint32_t>(std::stoul(flag_val(argc, argv, "--out", "0")));
+    wo.lot = next_lot_link(ctx, via, work, *wr, out, std::stod(qty_s), wo.timestamp);
+
+    const Block block = append_record(ctx, Record{wo});
+    const auto& o = wr->outputs[out];
+    std::cout << "writeoff ref: " << to_hex(ctx.user_id.bytes) << "/"
+              << to_hex(Crypto::hash_block(block).bytes) << "\n";
+    std::cerr << "списано: " << qty_str(wo.lot.qty) << " " << o.unit << " «" << o.resource
+              << "» — " << reason << "; в партии осталось " << qty_str(o.qty - wo.lot.after)
+              << " " << o.unit << "\n";
     if (!via.empty()) upload_block(via, block);
     return 0;
 }
@@ -1757,6 +2056,19 @@ static int cmd_thread(const fs::path& data_dir, int argc, char** argv) {
                         : fault == "broken"     ? "  ⚠ битое звено"
                         : fault == "crossing"   ? "  ✗ часы заняты другой работой" : "")
                       << "\n";
+            if (const auto* lots = jarr(x, "lots"))       // records.md §9.8 v2
+                for (const auto& l : lots->array) {
+                    if (!l.is_object()) continue;
+                    const auto& y = l.object;
+                    std::cout << "      партия «" << jstr(y, "resource") << "» " << jnum(y, "qty")
+                              << " " << jstr(y, "unit") << ": продано " << jnum(y, "sold")
+                              << ", ждёт оплаты " << jnum(y, "reserved")
+                              << ", списано " << jnum(y, "written_off")
+                              << ", в запасе " << jnum(y, "remaining");
+                    if (jnum(y, "faults") > 0)
+                        std::cout << "  ✗ звеньев не сходится: " << jnum(y, "faults");
+                    std::cout << "\n";
+                }
         }
     if (const auto* ov = jarr(o, "overlaps"); ov && !ov->array.empty()) {
         std::cout << "  одни и те же часы в двух работах — подписано самой цепью:\n";
@@ -4803,7 +5115,9 @@ Labor:
     [--axis-share PATH=SHARE ...]      proposed breakdown of the hours by
                                        axis (Σ 1); the buyer confirms it
     [--input  NAME:QTY:UNIT ...]   (repeatable)
-    [--output NAME:QTY:UNIT ...]   (repeatable)
+    [--output NAME:QTY:UNIT[:SHARE[:K]] ...]  a lot (repeatable, records.md §9.4):
+                                       SHARE of the hours when several outputs,
+                                       K — the price tag
     [--tool  HASH_PREFIX:USED ...] (repeatable) carry the cost of an own
     [--material HASH_PREFIX:QTY ...]   tool (tool-hours) or material batch
                                        (units) into this work (ИР-011): the
@@ -4834,6 +5148,10 @@ Labor:
   release WORK --to CHAIN          Give the result of an own work to a buyer
     [--days N | --until UNIX_TS]       (records.md §9.8): only their deal counts,
     [--via URL]                        and only before the term (default 7 days)
+    [--qty Q [--out N]]                a portion of lot N — a link of the lot's
+                                       sub-thread; never more than it holds
+  writeoff WORK --qty Q --reason T  Write off part of a lot — spoiled, lost,
+    [--out N] [--via URL]              used up (records.md §9.9)
   thread [CHAIN] --via URL         The goods thread (records.md §9.4): works in
                                        time, faults (outside the thread, broken
                                        links, hours sold twice), labor not yet
@@ -4996,6 +5314,7 @@ int main(int argc, char** argv) {
         else if (cmd == "accept")                           return cmd_accept(data_dir, argc, argv);
         else if (cmd == "release")                          return cmd_release(data_dir, argc, argv);
         else if (cmd == "thread")                           return cmd_thread(data_dir, argc, argv);
+        else if (cmd == "writeoff")                         return cmd_writeoff(data_dir, argc, argv);
         else if (cmd == "tool"      && subcmd == "add")     return cmd_tool_add(data_dir, argc, argv);
         else if (cmd == "tool"      && subcmd == "list")    return cmd_tool_list(data_dir, argc, argv);
         else if (cmd == "tool"      && subcmd == "show")    return cmd_tool_show(data_dir, argc, argv);

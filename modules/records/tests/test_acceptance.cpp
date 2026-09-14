@@ -150,9 +150,35 @@ TEST(DealRecognition, ADealOnAnUnsoundWorkMovesHoursButDoesNotCount) {
     const auto r = recognize_deals({c, claim(0xE1, kWork, kMallory, 900, /*addressed=*/false)});
     EXPECT_TRUE(r.recognized.empty());
     EXPECT_EQ(r.unsound, Hashes{h(0xA1)});
-    EXPECT_EQ(r.unsound_works, Hashes{h(kWork)});
+    EXPECT_EQ(r.unsound_results, Hashes{h(kWork)});
     EXPECT_TRUE(r.moves_hours(h(0xA1)));
     EXPECT_EQ(r.unaddressed, Hashes{h(0xE1)});                 // ничтожная остаётся ничтожной
+}
+
+// Порция партии — свой результат (records.md §9.8 v2): три покупателя хлеба —
+// три признанные сделки; работа, проданная и целиком, и порциями, — двойная
+// продажа; порция, чьё звено не сходится, — оплата без статистики.
+TEST(DealRecognition, PortionsAreResultsOfTheirOwn) {
+    const auto portion = [](uint8_t deal, uint8_t payer, uint8_t release) {
+        DealClaim c = claim(deal, kWork, payer);
+        c.portion = h(release);
+        return c;
+    };
+    auto r = recognize_deals({portion(0xA1, kVera, 0x71), portion(0xA2, kBoris, 0x72),
+                              portion(0xA3, kMallory, 0x73)});
+    EXPECT_EQ(r.recognized, (Hashes{h(0xA1), h(0xA2), h(0xA3)}));
+
+    r = recognize_deals({portion(0xA1, kVera, 0x71), claim(0xB1, kWork, kBoris)});
+    EXPECT_TRUE(r.recognized.empty());
+    EXPECT_EQ(r.oversold, Hashes{h(kWork)});
+    EXPECT_EQ(r.contested, (Hashes{h(0xA1), h(0xB1)}));
+
+    DealClaim off = portion(0xA1, kVera, 0x71);
+    off.sound = false;                                         // звено сверх партии
+    r = recognize_deals({off, portion(0xA2, kBoris, 0x72)});
+    EXPECT_EQ(r.recognized, Hashes{h(0xA2)});
+    EXPECT_EQ(r.unsound, Hashes{h(0xA1)});
+    EXPECT_EQ(r.unsound_results, Hashes{h(0x71)});
 }
 
 TEST(DealRecognition, SettledExactly) {

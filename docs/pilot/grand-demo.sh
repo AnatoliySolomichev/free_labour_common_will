@@ -369,6 +369,19 @@ say "у каждой приёмки теперь like: ссылка на обр�
 hr "нить труда Галины — все её работы подряд, без пересечений (bc thread, records.md §9.4)"
 bcp galina thread --via "$VIA" | sed 's/^/   /'
 
+hr "партия на склад: пироги порциями, списание и остаток (bc release --qty, bc writeoff, records.md §9.8)"
+say "Анна печёт 12 пирогов без заказа, ценник k = 1.1; отпускает Борису 5, Ирине 4, 2 подгорели"
+W_pies=$(bcp anna work log --title "повар, 5-й разряд" --action "Пироги на витрину" --hours 3 \
+         --output "пирог:12:шт::1.1" --axis-share "$(axis physical)=0.5" \
+         --axis-share "$(axis knowledge)=0.5" --via "$VIA" | after 'hash: ')
+bcp anna release "$W_pies" --to "${CID[boris]}" --qty 5 --days 2 --via "$VIA" 2>&1 | sed 's/^/   /'
+bcp anna release "$W_pies" --to "${CID[irina]}" --qty 4 --days 2 --via "$VIA" 2>&1 | sed 's/^/   /'
+bcp boris accept --work "${CID[anna]}/$W_pies" --quality "свежие" --via "$VIA" 2>&1 | sed 's/^/   /'
+bcp irina accept --work "${CID[anna]}/$W_pies" --quality "свежие" --via "$VIA" 2>&1 | sed 's/^/   /'
+bcp anna writeoff "$W_pies" --qty 2 --reason "подгорели" --via "$VIA" 2>&1 | sed 's/^/   /'
+say "нить Анны: у пирогов видно, сколько продано, списано и осталось"
+bcp anna thread --via "$VIA" | sed 's/^/   /'
+
 hr "облако образцов работ — из сделок, а не из каталога (bc cloud, ИР-022)"
 say "точка — образец, который повторили; место — из чего сложилась цена его семьи."
 say "соседи — те, кому платят за похожее; ставка — высота над картой, не координата"
@@ -538,6 +551,10 @@ if bcp galina work log --action "та же укладка ещё раз" --hours
         --start "$(( $(date +%s) - 1800 ))" --via "$VIA" >/dev/null 2>&1; then
     echo "   ✗ работа на уже заявленных часах записалась"; fail=1
 else echo "   ✓ одни и те же часы дважды не записать (нить труда, records.md §9.4)"; fi
+# больше, чем осталось в партии, не отпустить (records.md §9.8)
+if bcp anna release "$W_pies" --to "${CID[dmitry]}" --qty 5 --via "$VIA" >/dev/null 2>&1; then
+    echo "   ✗ отпущено больше, чем осталось в партии"; fail=1
+else echo "   ✓ больше, чем осталось в партии, не отпустить (records.md §9.8)"; fi
 # переоценка печи ВВЕРХ обязана отклониться (перевыпуск только вниз)
 if bcp anna tool add "Печь подовая" --cost 400 --life 8000 --origin "$TOOL" --note "хочу дороже" >/dev/null 2>&1; then
     echo "   ✗ переоценка вверх прошла, а должна была отклониться"; fail=1

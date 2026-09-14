@@ -93,11 +93,15 @@ void w_block_path(Buf& out, const BlockPath& p) {
     w_uint(out, 3); w_fixed(out, p.hash);
 }
 
+// Keys 0–2 always; an output may carry share (3) and k (4) — each only when
+// set, in ascending order (records.md §9.4 v5).
 void w_resource_qty(Buf& out, const ResourceQty& rq) {
-    w_map(out, 3);
+    w_map(out, 3 + (rq.share ? 1 : 0) + (rq.k ? 1 : 0));
     w_uint(out, 0); w_text(out, rq.resource);
     w_uint(out, 1); w_float64(out, rq.qty);
     w_uint(out, 2); w_text(out, rq.unit);
+    if (rq.share) { w_uint(out, 3); w_float64(out, *rq.share); }
+    if (rq.k)     { w_uint(out, 4); w_float64(out, *rq.k); }
 }
 
 // ── Per-type encoders ─────────────────────────────────────────────────────────
@@ -189,6 +193,24 @@ void check_work_record(const WorkRecord& wr) {
         if (std::abs(sum - 1.0) > 1e-9)
             throw CodecError("WorkRecord: доли осей в сумме обязаны давать 1 (records.md §9.4)");
     }
+    // Share and price tag belong to outputs — to lots (records.md §9.4 v5).
+    for (const auto& in : wr.inputs)
+        if (in.share || in.k)
+            throw CodecError("WorkRecord: доля и ценник бывают только у выхода работы");
+    std::size_t with_share = 0;
+    double      shares     = 0.0;
+    for (const auto& o : wr.outputs) {
+        if (o.share) {
+            if (!(*o.share > 0.0) || !std::isfinite(*o.share))
+                throw CodecError("WorkRecord: доля выхода обязана быть положительной");
+            ++with_share;
+            shares += *o.share;
+        }
+        if (o.k && (!(*o.k > 0.0) || !std::isfinite(*o.k)))
+            throw CodecError("WorkRecord: ценник k обязан быть положительным");
+    }
+    if (with_share != 0 && (with_share != wr.outputs.size() || std::abs(shares - 1.0) > 1e-9))
+        throw CodecError("WorkRecord: доли — у всех выходов и в сумме 1 (records.md §9.4)");
 }
 
 void enc_work_record(Buf& out, const WorkRecord& wr) {
@@ -296,6 +318,39 @@ void check_transfer(const Transfer& t) {
                          "перенос (records.md §12.8)");
 }
 
+// What a lot link must be to exist (records.md §9.8 v2) — on write and on read.
+void check_lot_link(const LotLink& l) {
+    if (!(l.qty > 0.0) || !std::isfinite(l.qty))
+        throw CodecError("LotLink: порция обязана быть положительной");
+    if (!(l.after >= 0.0) || !std::isfinite(l.after))
+        throw CodecError("LotLink: взятое из партии — неотрицательное число");
+    if ((l.seq == 0) != !l.prev)
+        throw CodecError("LotLink: у первого звена партии нет предыдущего, у остальных есть");
+    if (l.seq == 0 && !l.returns.empty())
+        throw CodecError("LotLink: первому звену партии нечего возвращать");
+    for (size_t i = 1; i < l.returns.size(); ++i)
+        if (!(std::tie(l.returns[i - 1].chain, l.returns[i - 1].hash) <
+              std::tie(l.returns[i].chain, l.returns[i].hash)))
+            throw CodecError("LotLink: возвраты — по возрастанию, без повторов");
+}
+
+// Keys: 0 out, 1 qty, 2 seq, 3 prev (null for the first), 4 after, 5 returns —
+// the last only when non-empty.
+void w_lot_link(Buf& out, const LotLink& l) {
+    check_lot_link(l);
+    w_map(out, 5 + (l.returns.empty() ? 0 : 1));
+    w_uint(out, 0); w_uint(out, l.out);
+    w_uint(out, 1); w_float64(out, l.qty);
+    w_uint(out, 2); w_uint(out, l.seq);
+    w_uint(out, 3);
+    if (l.prev) w_ref(out, *l.prev); else w_null(out);
+    w_uint(out, 4); w_float64(out, l.after);
+    if (!l.returns.empty()) {
+        w_uint(out, 5); w_arr(out, l.returns.size());
+        for (const auto& r : l.returns) w_ref(out, r);
+    }
+}
+
 // What a Release must be to exist (records.md §9.8) — checked on write and on
 // read, like the transfer.
 void check_release(const Release& rl) {
@@ -306,15 +361,26 @@ void check_release(const Release& rl) {
 }
 
 // The release (records.md §9.8): the seller names who gets the result. Keys:
-// 0 type, 1 work, 2 to, 3 expires, 4 timestamp.
+// 0 type, 1 work, 2 to, 3 expires, 4 timestamp, 5 lot (v2 — a portion).
 void enc_release(Buf& out, const Release& rl) {
     check_release(rl);
-    w_map(out, 5);
+    w_map(out, 5 + (rl.lot ? 1 : 0));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Release));
     w_uint(out, 1); w_ref(out, rl.work);
     w_uint(out, 2); w_fixed(out, rl.to);
     w_uint(out, 3); w_int64(out, rl.expires);
     w_uint(out, 4); w_int64(out, rl.timestamp);
+    if (rl.lot) { w_uint(out, 5); w_lot_link(out, *rl.lot); }
+}
+
+// The write-off (records.md §9.9): 0 type, 1 work, 2 lot, 3 reason, 4 timestamp.
+void enc_write_off(Buf& out, const WriteOff& w) {
+    w_map(out, 5);
+    w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::WriteOff));
+    w_uint(out, 1); w_ref(out, w.work);
+    w_uint(out, 2); w_lot_link(out, w.lot);
+    w_uint(out, 3); w_text(out, w.reason);
+    w_uint(out, 4); w_int64(out, w.timestamp);
 }
 
 void enc_material(Buf& out, const Material& m) {
@@ -678,11 +744,21 @@ std::optional<int64_t> dec_opt_int(CborReader& r) {
 }
 
 ResourceQty dec_resource_qty(CborReader& r) {
-    if (r.r_map() != 3) throw CodecError("ResourceQty: expected 3 fields");
+    const uint64_t n = r.r_map();
+    if (n < 3 || n > 5) throw CodecError("ResourceQty: expected 3..5 fields");
     ResourceQty rq{};
     expect_key(r, 0); rq.resource = r.r_text();
     expect_key(r, 1); rq.qty      = r.r_float64();
     expect_key(r, 2); rq.unit     = r.r_text();
+    uint64_t last = 2;
+    for (uint64_t i = 3; i < n; ++i) {
+        const uint64_t key = r.r_uint();
+        if (key <= last) throw CodecError("ResourceQty: keys out of order");
+        last = key;
+        if      (key == 3) rq.share = r.r_float64();
+        else if (key == 4) rq.k     = r.r_float64();
+        else throw CodecError("ResourceQty: unknown field key");
+    }
     return rq;
 }
 
@@ -952,15 +1028,51 @@ Transfer dec_transfer_fields(CborReader& r, uint64_t field_count) {
     return t;
 }
 
+LotLink dec_lot_link(CborReader& r) {
+    const uint64_t n = r.r_map();
+    if (n < 5 || n > 6) throw CodecError("LotLink: expected 5..6 fields");
+    LotLink l{};
+    expect_key(r, 0);
+    {
+        const uint64_t v = r.r_uint();
+        if (v > 0xFFFF'FFFFull) throw CodecError("LotLink: bad out");
+        l.out = static_cast<uint32_t>(v);
+    }
+    expect_key(r, 1); l.qty   = r.r_float64();
+    expect_key(r, 2); l.seq   = r.r_uint();
+    expect_key(r, 3); l.prev  = dec_opt_ref(r);
+    expect_key(r, 4); l.after = r.r_float64();
+    if (n == 6) {
+        expect_key(r, 5);
+        const uint64_t m = r.r_arr();
+        if (m == 0) throw CodecError("LotLink: returns present but empty");
+        l.returns.reserve(static_cast<size_t>(m));
+        for (uint64_t i = 0; i < m; ++i) l.returns.push_back(dec_ref(r));
+    }
+    check_lot_link(l);
+    return l;
+}
+
 Release dec_release_fields(CborReader& r, uint64_t field_count) {
-    if (field_count != 5) throw CodecError("Release: expected 5 fields");
+    if (field_count < 5 || field_count > 6) throw CodecError("Release: expected 5..6 fields");
     Release rl{};
     expect_key(r, 1); rl.work      = dec_ref(r);
     expect_key(r, 2); r.r_fixed(rl.to);
     expect_key(r, 3); rl.expires   = r.r_int();
     expect_key(r, 4); rl.timestamp = r.r_int();
+    if (field_count == 6) { expect_key(r, 5); rl.lot = dec_lot_link(r); }
     check_release(rl);
     return rl;
+}
+
+WriteOff dec_write_off_fields(CborReader& r, uint64_t field_count) {
+    if (field_count != 5) throw CodecError("WriteOff: expected 5 fields");
+    WriteOff w{};
+    expect_key(r, 1); w.work      = dec_ref(r);
+    expect_key(r, 2); w.lot       = dec_lot_link(r);
+    expect_key(r, 3); w.reason    = r.r_text();
+    expect_key(r, 4); w.timestamp = r.r_int();
+    return w;
 }
 
 Redemption dec_redemption_fields(CborReader& r) {
@@ -1093,6 +1205,7 @@ std::vector<uint8_t> Codec::encode(const Record& rec) {
         else if constexpr (std::is_same_v<T, Reaction>)    enc_reaction(out, r);
         else if constexpr (std::is_same_v<T, WorkRecord>)  enc_work_record(out, r);
         else if constexpr (std::is_same_v<T, Release>)     enc_release(out, r);
+        else if constexpr (std::is_same_v<T, WriteOff>)    enc_write_off(out, r);
         else if constexpr (std::is_same_v<T, Material>)    enc_material(out, r);
         else if constexpr (std::is_same_v<T, Tool>)        enc_tool(out, r);
         else if constexpr (std::is_same_v<T, Transfer>)    enc_transfer(out, r);
@@ -1126,6 +1239,7 @@ Record Codec::decode(const uint8_t* data, size_t len) {
         case RecordType::Reaction:    return dec_reaction_fields(r);
         case RecordType::WorkRecord:  return dec_work_record_fields(r, field_count);
         case RecordType::Release:     return dec_release_fields(r, field_count);
+        case RecordType::WriteOff:    return dec_write_off_fields(r, field_count);
         case RecordType::Material:    return dec_material_fields(r);
         case RecordType::Tool:        return dec_tool_fields(r);
         case RecordType::Transfer:    return dec_transfer_fields(r, field_count);

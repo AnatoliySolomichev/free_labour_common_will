@@ -29,6 +29,7 @@ enum class RecordType : uint8_t {
     //        `Transfer.accept`, оценка и оплата одной записью (records.md §9.5);
     //        номер не переиспользуется.
     Release      = 0x57,   // отпуск: продавец называет покупателя (records.md §9.8)
+    WriteOff     = 0x58,   // списание части партии (records.md §9.9)
     // Production
     Material     = 0x60,
     Tool         = 0x61,
@@ -143,14 +144,25 @@ struct Reaction {
 
 // ── Labor records (records.md §9) ────────────────────────────────────────────
 
-// Named resource with quantity and unit — used in WorkRecord inputs/outputs
+// Named resource with quantity and unit — used in WorkRecord inputs/outputs.
+// An output is a lot (records.md §9.4 v5, ИР-023): its identity is the path to
+// the WorkRecord plus its index, and it is sold whole or in portions — links of
+// the lot's sub-thread (records.md §9.8 v2).
 struct ResourceQty {
     std::string resource;  // name or description of the material/product
-    double      qty;
+    double      qty = 0;
     std::string unit;      // "кг", "м³", "шт", "л", ...
+    // Outputs only (v5). `share` — the part of the work's hours this output
+    // carries when one work yields several (the sawmill's boards and sawdust):
+    // declared by the producer, confirmed by the buyer; Σ over the outputs = 1.
+    // `k` — the price tag: the producer's k over the axis prices of the
+    // production day (economy.md §2а, ИР-023); the buyer agrees or not.
+    std::optional<double> share;
+    std::optional<double> k;
 
     bool operator==(const ResourceQty& o) const noexcept {
-        return resource == o.resource && qty == o.qty && unit == o.unit;
+        return resource == o.resource && qty == o.qty && unit == o.unit
+            && share == o.share && k == o.k;
     }
 };
 
@@ -231,6 +243,26 @@ struct WorkRecord {
     std::vector<AxisShare>    axes;
 };
 
+// A link of a lot's sub-thread (records.md §9.8 v2, ИР-023): a portion taken from
+// one output of a work — released to a buyer or written off. One sub-thread per
+// lot across the whole chain (prev is a Ref, it crosses branches) and strict,
+// like the carry thread: two links with one seq are two sales from one
+// remainder. `after` checks out against the previous link alone, so the
+// remainder of a lot is known in O(1).
+struct LotLink {
+    uint32_t           out   = 0;   // index into the work's outputs
+    double             qty   = 0;   // taken by this link, in the output's unit
+    uint64_t           seq   = 0;   // link counter of the lot's sub-thread
+    std::optional<Ref> prev;        // the previous link; absent for the first
+    double             after = 0;   // taken from the lot after this link; ≤ the output's qty
+    std::vector<Ref>   returns;     // expired releases of this lot nobody took — back in stock
+
+    bool operator==(const LotLink& o) const noexcept {
+        return out == o.out && qty == o.qty && seq == o.seq && prev == o.prev
+            && after == o.after && returns == o.returns;
+    }
+};
+
 // A release (records.md §9.8, ИР-023): the seller gives the result of an own work
 // to a named buyer. Only that buyer's deal can complete it, and only before
 // `expires`. Without a release — or a customer on the WorkRecord itself — a deal
@@ -243,6 +275,22 @@ struct Release {
     std::array<uint8_t, 32> to{};           // the buyer — only their deal completes it
     int64_t                 expires   = 0;  // the deal counts only if its timestamp < expires
     int64_t                 timestamp = 0;
+    // v2 (ИР-023): a portion of one output instead of the whole result — a link
+    // of that lot's sub-thread (records.md §9.8).
+    std::optional<LotLink>  lot;
+};
+
+// A write-off (records.md §9.9, ИР-023): part of a lot leaves it without a sale —
+// spoiled, lost, used up. A link of the lot's sub-thread like the release of a
+// portion, so the remainder stays checkable and the loss stays visible in the
+// seller's own chain.
+struct WriteOff {
+    static constexpr RecordType TYPE = RecordType::WriteOff;
+
+    Ref         work;              // own WorkRecord whose output the lot is
+    LotLink     lot;
+    std::string reason;            // «подгорели», «бой при перевозке»
+    int64_t     timestamp = 0;
 };
 
 // v3 (economy.md §2б): the normalizer this appraisal was made against, so a
@@ -565,6 +613,7 @@ using Record = std::variant<
     Reaction,
     WorkRecord,
     Release,
+    WriteOff,
     Material,
     Tool,
     Transfer,

@@ -731,3 +731,59 @@ TEST_F(RatesViewTest, HoursSoldTwiceAndWorkOutsideTheThreadMoveNoPrice) {
     EXPECT_EQ(day.axes[0].deals, 1u);             // только честная
     EXPECT_NEAR(day.axes[0].price, 1.0, 1e-9);
 }
+
+// Партия (records.md §9.8 v2): хлеб на склад, отпущенный порциями трём
+// покупателям, — три сделки, у каждой своя доля часов; порция сверх партии цены
+// не двигает — продавец отпустил больше, чем испёк.
+TEST_F(RatesViewTest, PortionsOfALotAreDealsOfTheirOwn) {
+    const UserId carol = make_chain(0xC7);
+    const UserId dave  = make_chain(0xD4);
+    records::WorkRecord bake{};
+    bake.hours   = 10.0;                          // 10 ч на сто буханок
+    bake.outputs = {{"хлеб", 100.0, "шт"}};
+    const Block work = add(alice_, bake);
+
+    std::optional<records::Ref> prev;
+    uint64_t seq   = 0;
+    double   taken = 0;
+    const auto sell = [&](const UserId& buyer, double qty) {
+        records::Release rl{};
+        rl.work      = ref_to(alice_, work);
+        rl.to        = buyer.bytes;
+        rl.timestamp = kDay;
+        rl.expires   = kDay + 1000;
+        records::LotLink lot{};
+        lot.qty   = qty;
+        lot.seq   = seq++;
+        lot.prev  = prev;
+        lot.after = (taken += qty);
+        rl.lot    = lot;
+        const Block rb = add(alice_, rl);
+        prev = ref_to(alice_, rb);
+
+        const double hours = 10.0 * qty / 100.0;  // часы порции
+        records::Acceptance a{};
+        a.work        = ref_to(alice_, work);
+        a.release     = ref_to(alice_, rb);
+        a.hours_raw   = hours;
+        a.labor_units = hours;
+        a.axes        = {{test_axis(), hours}};
+        records::Transfer t{};
+        t.from      = buyer.bytes;
+        t.to        = alice_.bytes;
+        t.origins   = { {buyer.bytes, hours} };
+        t.accept    = a;
+        t.timestamp = kDay + 100;
+        add(buyer, t);
+    };
+    sell(bob_, 30);
+    sell(carol, 50);
+    sell(dave, 20);                               // вся партия
+    sell(bob_, 10);                               // сверх партии: after = 110 > 100
+
+    const auto day = build_daily_prices(*storage_, kDay, {});
+    ASSERT_EQ(day.axes.size(), 1u);
+    EXPECT_EQ(day.axes[0].deals, 3u);
+    EXPECT_NEAR(day.axes[0].hours, 10.0, 1e-9);   // часы трёх порций — вся работа
+    EXPECT_NEAR(day.axes[0].price, 1.0, 1e-9);
+}
