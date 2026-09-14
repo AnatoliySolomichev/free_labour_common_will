@@ -234,8 +234,9 @@ deal(){
     rate="$(awk -v b="$base" -v n="$noise" -v m="$mult" 'BEGIN{printf "%.4f", b*(1+n/100)*m}')"
     units="$(awk -v r="$rate" -v h="$h" 'BEGIN{printf "%.4f", r*h}')"
     [[ "$kd" == hleb ]] && extra=(--tool "${TOOL_H:0:12}:$h" --material "${MAT_H:0:12}:12")
+    # Работа на заказ клиента: результат отпущен ему самой записью (records.md §9.4).
     wh="$(ftbc "$w" work log --title "${KT[$kd]}" --action "${KT[$kd]}" --hours "$h" \
-          "${extra[@]}" --via "$VIA" | after 'hash: ')"
+          --for "${CID[$c]}" "${extra[@]}" --via "$VIA" | after 'hash: ')"
     [[ -z "$wh" ]] && { ((fail++)); return; }
     ftbc "$c" fetch "${CID[$w]}/$wh" --via "$VIA" >/dev/null 2>&1 || { ((fail++)); return; }
     if [[ -n "${SAMPLE[$sk]:-}" ]]; then

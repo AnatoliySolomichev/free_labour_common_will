@@ -28,6 +28,7 @@ enum class RecordType : uint8_t {
     // 0x54 — Acceptance, снята (2026-09-14, ИР-023): приёмка — поле перевода
     //        `Transfer.accept`, оценка и оплата одной записью (records.md §9.5);
     //        номер не переиспользуется.
+    Release      = 0x57,   // отпуск: продавец называет покупателя (records.md §9.8)
     // Production
     Material     = 0x60,
     Tool         = 0x61,
@@ -190,6 +191,25 @@ struct WorkRecord {
     // of the specialty and the grade. Nothing computes on it. Empty = not
     // stated, and the field is then absent from the encoding.
     std::string              title;
+    // v3 (ИР-023): the customer, when the work was ordered in advance — the
+    // result is released to them by this very record (records.md §9.4), no
+    // separate Release needed. Absent by default: work for stock, or without an
+    // agreement, is released afterwards (records.md §9.8).
+    std::optional<std::array<uint8_t, 32>> customer;
+};
+
+// A release (records.md §9.8, ИР-023): the seller gives the result of an own work
+// to a named buyer. Only that buyer's deal can complete it, and only before
+// `expires`. Without a release — or a customer on the WorkRecord itself — a deal
+// on the work is void (records.md §9.5): who gets the result is decided by the
+// one who made it, not by whoever is willing to pay.
+struct Release {
+    static constexpr RecordType TYPE = RecordType::Release;
+
+    Ref                     work;           // own WorkRecord whose result is released
+    std::array<uint8_t, 32> to{};           // the buyer — only their deal completes it
+    int64_t                 expires   = 0;  // the deal counts only if its timestamp < expires
+    int64_t                 timestamp = 0;
 };
 
 // v3 (economy.md §2б): the normalizer this appraisal was made against, so a
@@ -257,6 +277,10 @@ struct Acceptance {
     // linked by `like` form the families the work cloud is made of
     // (records.md §11.7).
     std::optional<Ref>             like;
+    // The release this deal completes (records.md §9.8, ИР-023): the seller's
+    // record naming the payer as the buyer. Absent when the work itself names the
+    // payer as its customer (records.md §9.4).
+    std::optional<Ref>             release;
 };
 
 // ── Production records (records.md §10, v2 — ИР-011) ─────────────────────────
@@ -507,6 +531,7 @@ using Record = std::variant<
     Copy,
     Reaction,
     WorkRecord,
+    Release,
     Material,
     Tool,
     Transfer,

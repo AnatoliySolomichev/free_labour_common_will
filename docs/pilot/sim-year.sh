@@ -207,7 +207,8 @@ do_deal(){
     # открытый вопрос экономики (обсуждается, см. docs/economy.md).
     coef="$(awk -v l="${LVL[$w]}" -v j="$(rnd 17)" 'BEGIN{printf "%.2f", 1.0+0.10*(l-4.5)+(j-8)/100}')"
     units="$(awk -v c="$coef" -v h="$h" 'BEGIN{printf "%.4f", c*h}')"
-    wh="$(ftbc "p$w" work log --title "${PROF[$w]#prof.}, ${LVL[$w]}-й разряд" --action "услуга" --hours "$h" --via "$VIA" | after 'hash: ')"
+    # Работа на заказ клиента: результат отпущен ему самой записью (records.md §9.4).
+    wh="$(ftbc "p$w" work log --title "${PROF[$w]#prof.}, ${LVL[$w]}-й разряд" --action "услуга" --hours "$h" --for "${CID[$c]}" --via "$VIA" | after 'hash: ')"
     [[ -z "$wh" ]] && { ((fail_deals++)); return; }
     ftbc "p$c" fetch "${CID[$w]}/$wh" --via "$VIA" >/dev/null 2>&1 || { ((fail_deals++)); return; }
     # Первая сделка профессии становится её ОБРАЗЦОМ; следующие принимаются

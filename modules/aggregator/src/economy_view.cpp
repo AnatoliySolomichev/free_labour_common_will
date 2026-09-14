@@ -73,6 +73,9 @@ EconomyView EconomyView::build(const AggregatorStorage& storage, int64_t now) {
                 revokes.emplace_back(owner, pr->pledge.hash);
         } else if (const auto* t = std::get_if<records::Transfer>(&rec)) {
             if (t->from != owner.bytes) continue;   // spoofed sender
+            // A deal the seller did not address is void (records.md §9.5): it
+            // neither issues, pays nor settles anything.
+            if (t->accept && !deals.moves_hours(bh.bytes)) continue;
             double total = 0;
             for (const auto& o : t->origins) {
                 total += o.units;

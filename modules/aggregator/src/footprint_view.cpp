@@ -27,8 +27,9 @@ FootprintView FootprintView::build(const AggregatorStorage& storage) {
     // Layer-2 tallies keyed by the chain they describe.
     std::map<UserId, std::set<UserId>> redeemer_sets, acceptor_sets;
     std::map<UserId, double>           redeemed_to_others, labor_outward;
-    // One work — one deal (records.md §9.5, ИР-023): one job paid for by two
-    // chains is not «two outsiders took the labour».
+    // One result — one counted deal (records.md §9.5, ИР-023): one job paid for
+    // by two chains is not «two outsiders took the labour»; and a deal the seller
+    // did not address is void — it moves no paper at all.
     const auto deals = read_deals(storage);
 
     for (const Hash& bh : storage.all_block_hashes()) {
@@ -46,6 +47,7 @@ FootprintView FootprintView::build(const AggregatorStorage& storage) {
 
         if (const auto* t = std::get_if<records::Transfer>(&rec)) {
             if (t->from != owner.bytes) continue;      // spoofed sender
+            if (t->accept && !deals.moves_hours(bh.bytes)) continue;   // void deal
             UserId from{}, to{};
             from.bytes = t->from;
             to.bytes   = t->to;

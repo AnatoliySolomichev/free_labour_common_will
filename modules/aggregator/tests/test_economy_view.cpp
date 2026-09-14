@@ -105,8 +105,9 @@ TEST_F(EconomyViewTest, IdeasBoardAndChainDossiers) {
     // Alice's work accepted by Bob at 3 labor-h and paid in the same record
     // (records.md §9.5, ИР-023); `settles` says WHICH promise this closes (v4).
     records::WorkRecord work{};
-    work.action = "сборка";
-    work.hours  = 4;
+    work.action   = "сборка";
+    work.hours    = 4;
+    work.customer = bob.bytes;   // заказ Боба (records.md §9.4)
     const Block work_block = add(alice, work);
     records::Acceptance acc{};
     acc.work        = ref_to(alice, work_block);

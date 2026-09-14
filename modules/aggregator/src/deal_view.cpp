@@ -21,9 +21,10 @@ using RefHash = std::array<uint8_t, 32>;
 using NeedKey = std::pair<UserId, RefHash>;
 
 struct WorkInfo {
-    UserId      owner{};
-    std::string action;
-    double      hours = 0;
+    UserId                owner{};
+    std::string           action;
+    double                hours = 0;
+    std::optional<UserId> customer;   // records.md §9.4 v3
 };
 
 // A deal paying for a work: the Transfer that carries its acceptance
@@ -83,12 +84,16 @@ DealView DealView::build(const AggregatorStorage& storage) {
     // Pass 1: profiles give the needs and their closed flags (records.md §8.6 rules,
     // including the acceptance-based close — its to.chain == owner holds).
     const auto profiles = ProfileView::build(storage);
+    // Which deals happened (records.md §9.5, ИР-023): a deal the seller did not
+    // address is void — it neither accepts, pays nor settles a pledge.
+    const auto deals = read_deals(storage);
 
     // Pass 2: everything that points at a need, plus lookup tables.
     std::map<NeedKey, std::vector<DealTaker>> takers;
     std::map<NeedKey, std::vector<RefHash>>   performs;      // need → work hashes
     std::map<RefHash, WorkInfo>               work_infos;    // work hash → info
     std::map<RefHash, AcceptInfo>             accept_infos;  // deal hash → info
+    std::map<RefHash, std::size_t>            unaddressed_of_work;   // work hash → void deals
     std::map<RefHash, double>                 settlements;   // pledge hash → settled
     struct RawPledge {
         UserId pledger{}; RefHash hash{}; NeedKey target;
@@ -125,7 +130,13 @@ DealView DealView::build(const AggregatorStorage& storage) {
             }
             // CLOSE_KIND is already folded into ProfileView's closed flag.
         } else if (const auto* w = std::get_if<records::WorkRecord>(&rec)) {
-            work_infos[bh.bytes] = WorkInfo{owner, w->action, w->hours};
+            WorkInfo wi{owner, w->action, w->hours, std::nullopt};
+            if (w->customer) {
+                UserId c{};
+                c.bytes = *w->customer;
+                wi.customer = c;
+            }
+            work_infos[bh.bytes] = std::move(wi);
         } else if (const auto* p = std::get_if<records::Pledge>(&rec)) {
             UserId target_chain{};
             target_chain.bytes = p->target.chain;
@@ -145,6 +156,10 @@ DealView DealView::build(const AggregatorStorage& storage) {
                 revokes.emplace_back(owner, pr->pledge.hash);
         } else if (const auto* t = std::get_if<records::Transfer>(&rec)) {
             if (t->from != owner.bytes) continue;       // spoofed sender
+            if (t->accept && !deals.moves_hours(bh.bytes)) {
+                ++unaddressed_of_work[t->accept->work.hash];   // void: counted, never shown
+                continue;
+            }
             double total = 0;
             for (const auto& o : t->origins) total += o.units;
             if (t->accept)
@@ -160,10 +175,10 @@ DealView DealView::build(const AggregatorStorage& storage) {
         for (auto& rp : raw_pledges)
             if (rp.hash == pledge_hash && rp.pledger == owner) rp.revoked = true;
 
-    // Deals indexed by the work they pay for. One work — one deal (records.md §9.5,
-    // ИР-023): the recognized deal is shown when there is one, else the first by
-    // hash — and the others are counted, not silently overwritten away.
-    const auto deals = read_deals(storage);
+    // Deals indexed by the work they pay for. One result — one counted deal
+    // (records.md §9.5, ИР-023): the recognized deal is shown; a result the
+    // seller gave to two buyers shows the first by hash. The others are counted,
+    // not silently overwritten away.
     std::map<RefHash, RefHash>     acceptance_of_work;    // work hash → deal hash
     std::map<RefHash, std::size_t> acceptances_of_work;
     for (const auto& [ah, info] : accept_infos) {
@@ -176,9 +191,10 @@ DealView DealView::build(const AggregatorStorage& storage) {
         DealWork dw;
         dw.work_hash = Hash{wh};
         if (const auto wi = work_infos.find(wh); wi != work_infos.end()) {
-            dw.worker = wi->second.owner;
-            dw.action = wi->second.action;
-            dw.hours  = wi->second.hours;
+            dw.worker   = wi->second.owner;
+            dw.action   = wi->second.action;
+            dw.hours    = wi->second.hours;
+            dw.customer = wi->second.customer;
         }
         if (const auto aw = acceptance_of_work.find(wh);
             aw != acceptance_of_work.end()) {
@@ -192,6 +208,8 @@ DealView DealView::build(const AggregatorStorage& storage) {
         }
         if (const auto n = acceptances_of_work.find(wh); n != acceptances_of_work.end())
             dw.acceptances = n->second;
+        if (const auto u = unaddressed_of_work.find(wh); u != unaddressed_of_work.end())
+            dw.unaddressed = u->second;
         dw.oversold = deals.recognition.oversold.count(wh) > 0;
         deal.works.push_back(std::move(dw));
     };
@@ -237,7 +255,7 @@ DealView DealView::build(const AggregatorStorage& storage) {
 
     // Direct deals (case 2): accepted work linked to no need — somebody did a
     // job that was never posted. Anchored by the deal shown for the work; a work
-    // paid for twice is still one job, one deal.
+    // paid for twice is still one job, one deal. A void deal anchors nothing.
     std::set<RefHash> direct_works;
     for (const auto& [ah, info] : accept_infos) {
         if (claimed_works.count(info.work)) continue;

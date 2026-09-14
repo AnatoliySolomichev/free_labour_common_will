@@ -160,9 +160,10 @@ void w_carry_entry(Buf& out, const CarryEntry& ce) {
 
 void enc_work_record(Buf& out, const WorkRecord& wr) {
     // Key 1 (agent → Grade) is retired with the grade (ИР-022 шаг 11). The
-    // optional tail — carry (7), title (8) — is written only when present and in
-    // ascending key order, so the encoding stays deterministic.
-    w_map(out, 6 + (wr.carry.empty() ? 0 : 1) + (wr.title.empty() ? 0 : 1));
+    // optional tail — carry (7), title (8), customer (9) — is written only when
+    // present and in ascending key order, so the encoding stays deterministic.
+    w_map(out, 6 + (wr.carry.empty() ? 0 : 1) + (wr.title.empty() ? 0 : 1)
+                 + (wr.customer ? 1 : 0));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::WorkRecord));
     w_uint(out, 2); w_text(out, wr.action);
     w_uint(out, 3); w_int64(out, wr.start_ts);
@@ -176,16 +177,18 @@ void enc_work_record(Buf& out, const WorkRecord& wr) {
         for (const auto& ce : wr.carry) w_carry_entry(out, ce);
     }
     if (!wr.title.empty()) { w_uint(out, 8); w_text(out, wr.title); }
+    if (wr.customer)       { w_uint(out, 9); w_fixed(out, *wr.customer); }
 }
 
 // The acceptance (records.md §9.5): since ИР-023 not a record of its own but the
 // `accept` field of the buyer's Transfer — a nested map. Required: 0 work,
 // 1 quality, 2 hours_raw, 3 labor_units, 4 the breakdown; optional, each only
-// when set and in ascending order: 5 carried_units, 6 norm, 7 like.
+// when set and in ascending order: 5 carried_units, 6 norm, 7 like, 8 release.
 void w_acceptance(Buf& out, const Acceptance& a) {
     if (a.axes.empty())
         throw CodecError("Acceptance: цена обязана быть расписана по осям (ИР-022)");
-    w_map(out, 5 + (a.carried_units ? 1 : 0) + (a.norm ? 1 : 0) + (a.like ? 1 : 0));
+    w_map(out, 5 + (a.carried_units ? 1 : 0) + (a.norm ? 1 : 0) + (a.like ? 1 : 0)
+                 + (a.release ? 1 : 0));
     w_uint(out, 0); w_ref(out, a.work);
     w_uint(out, 1); w_text(out, a.quality);
     w_uint(out, 2); w_float64(out, a.hours_raw);
@@ -207,7 +210,8 @@ void w_acceptance(Buf& out, const Acceptance& a) {
         w_uint(out, 1); w_int64(out, a.norm->date);
         w_uint(out, 2); w_float64(out, a.norm->W);
     }
-    if (a.like) { w_uint(out, 7); w_ref(out, *a.like); }   // ИР-022 шаг 11
+    if (a.like)    { w_uint(out, 7); w_ref(out, *a.like); }      // ИР-022 шаг 11
+    if (a.release) { w_uint(out, 8); w_ref(out, *a.release); }   // ИР-023
 }
 
 // What a Transfer must be to exist at all (records.md §11.1 v5, ИР-023) —
@@ -231,12 +235,36 @@ void check_transfer(const Transfer& t) {
         throw CodecError("Transfer: самоприёмка ничего не заверяет (records.md §14.4)");
     if (a.work.chain != t.to)
         throw CodecError("Transfer: платят тому, чья работа принята — to ≠ цепь работы");
+    if (a.release && a.release->chain != t.to)
+        throw CodecError("Transfer: отпуск лежит в цепи продавца — to ≠ цепь отпуска "
+                         "(records.md §9.8)");
     double paid = 0.0;
     for (const auto& o : t.origins) paid += o.units;
     const double payable = a.labor_units + (a.carried_units ? *a.carried_units : 0.0);
     if (!settled_exactly(paid, payable))
         throw CodecError("Transfer: оплата обязана ровно равняться приёмке — труд плюс "
                          "перенос (records.md §12.8)");
+}
+
+// What a Release must be to exist (records.md §9.8) — checked on write and on
+// read, like the transfer.
+void check_release(const Release& rl) {
+    if (rl.expires <= rl.timestamp)
+        throw CodecError("Release: срок истекает не позже самого отпуска (records.md §9.8)");
+    if (rl.to == rl.work.chain)
+        throw CodecError("Release: отпуск себе ничего не отпускает");
+}
+
+// The release (records.md §9.8): the seller names who gets the result. Keys:
+// 0 type, 1 work, 2 to, 3 expires, 4 timestamp.
+void enc_release(Buf& out, const Release& rl) {
+    check_release(rl);
+    w_map(out, 5);
+    w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Release));
+    w_uint(out, 1); w_ref(out, rl.work);
+    w_uint(out, 2); w_fixed(out, rl.to);
+    w_uint(out, 3); w_int64(out, rl.expires);
+    w_uint(out, 4); w_int64(out, rl.timestamp);
 }
 
 void enc_material(Buf& out, const Material& m) {
@@ -672,8 +700,8 @@ CarryEntry dec_carry_entry(CborReader& r) {
 }
 
 WorkRecord dec_work_record_fields(CborReader& r, uint64_t field_count) {
-    if (field_count < 6 || field_count > 8)
-        throw CodecError("WorkRecord: expected 6..8 fields");
+    if (field_count < 6 || field_count > 9)
+        throw CodecError("WorkRecord: expected 6..9 fields");
     WorkRecord wr{};
     expect_key(r, 2); wr.action   = r.r_text();
     expect_key(r, 3); wr.start_ts = r.r_int();
@@ -690,9 +718,9 @@ WorkRecord dec_work_record_fields(CborReader& r, uint64_t field_count) {
         wr.outputs.reserve(static_cast<size_t>(n));
         for (uint64_t i = 0; i < n; ++i) wr.outputs.push_back(dec_resource_qty(r));
     }
-    // The optional tail, by key and ascending: carry (7), title (8). Present
-    // means non-empty — an empty one is never written, so reading one would mean
-    // two encodings of the same record.
+    // The optional tail, by key and ascending: carry (7), title (8), customer
+    // (9). Present means non-empty — an empty one is never written, so reading
+    // one would mean two encodings of the same record.
     uint64_t last = 6;
     for (uint64_t i = 6; i < field_count; ++i) {
         const uint64_t key = r.r_uint();
@@ -706,6 +734,10 @@ WorkRecord dec_work_record_fields(CborReader& r, uint64_t field_count) {
         } else if (key == 8) {
             wr.title = r.r_text();
             if (wr.title.empty()) throw CodecError("WorkRecord: title present but empty");
+        } else if (key == 9) {
+            std::array<uint8_t, 32> c{};
+            r.r_fixed(c);
+            wr.customer = c;
         } else {
             throw CodecError("WorkRecord: unknown field key");
         }
@@ -715,7 +747,7 @@ WorkRecord dec_work_record_fields(CborReader& r, uint64_t field_count) {
 
 Acceptance dec_acceptance(CborReader& r) {
     const uint64_t n = r.r_map();
-    if (n < 5 || n > 8) throw CodecError("Acceptance: expected 5..8 fields");
+    if (n < 5 || n > 9) throw CodecError("Acceptance: expected 5..9 fields");
     Acceptance a{};
     expect_key(r, 0); a.work        = dec_ref(r);
     expect_key(r, 1); a.quality     = r.r_text();
@@ -735,7 +767,8 @@ Acceptance dec_acceptance(CborReader& r) {
             a.axes.push_back(std::move(x));
         }
     }
-    // The tail, by key and ascending: carried_units (5), norm (6), like (7).
+    // The tail, by key and ascending: carried_units (5), norm (6), like (7),
+    // release (8).
     uint64_t last = 4;
     for (uint64_t i = 5; i < n; ++i) {
         const uint64_t key = r.r_uint();
@@ -752,6 +785,8 @@ Acceptance dec_acceptance(CborReader& r) {
             a.norm = nm;
         } else if (key == 7) {
             a.like = dec_ref(r);
+        } else if (key == 8) {
+            a.release = dec_ref(r);
         } else {
             throw CodecError("Acceptance: unknown field key");
         }
@@ -844,6 +879,17 @@ Transfer dec_transfer_fields(CborReader& r, uint64_t field_count) {
     }
     check_transfer(t);
     return t;
+}
+
+Release dec_release_fields(CborReader& r, uint64_t field_count) {
+    if (field_count != 5) throw CodecError("Release: expected 5 fields");
+    Release rl{};
+    expect_key(r, 1); rl.work      = dec_ref(r);
+    expect_key(r, 2); r.r_fixed(rl.to);
+    expect_key(r, 3); rl.expires   = r.r_int();
+    expect_key(r, 4); rl.timestamp = r.r_int();
+    check_release(rl);
+    return rl;
 }
 
 Redemption dec_redemption_fields(CborReader& r) {
@@ -975,6 +1021,7 @@ std::vector<uint8_t> Codec::encode(const Record& rec) {
         else if constexpr (std::is_same_v<T, Copy>)        enc_copy(out, r);
         else if constexpr (std::is_same_v<T, Reaction>)    enc_reaction(out, r);
         else if constexpr (std::is_same_v<T, WorkRecord>)  enc_work_record(out, r);
+        else if constexpr (std::is_same_v<T, Release>)     enc_release(out, r);
         else if constexpr (std::is_same_v<T, Material>)    enc_material(out, r);
         else if constexpr (std::is_same_v<T, Tool>)        enc_tool(out, r);
         else if constexpr (std::is_same_v<T, Transfer>)    enc_transfer(out, r);
@@ -1007,6 +1054,7 @@ Record Codec::decode(const uint8_t* data, size_t len) {
         case RecordType::Copy:        return dec_copy_fields(r);
         case RecordType::Reaction:    return dec_reaction_fields(r);
         case RecordType::WorkRecord:  return dec_work_record_fields(r, field_count);
+        case RecordType::Release:     return dec_release_fields(r, field_count);
         case RecordType::Material:    return dec_material_fields(r);
         case RecordType::Tool:        return dec_tool_fields(r);
         case RecordType::Transfer:    return dec_transfer_fields(r, field_count);

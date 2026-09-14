@@ -4,6 +4,7 @@
 #include "aggregator/discovery_view.h"
 #include "aggregator/economy_view.h"
 #include "aggregator/footprint_view.h"
+#include "aggregator/recognition.h"
 #include "aggregator/match_view.h"
 #include "aggregator/profile_view.h"
 #include "aggregator/rates_view.h"
@@ -1410,7 +1411,10 @@ void AggregatorServer::setup_routes() {
                           + "\",\"hours\":"  + std::to_string(w.hours)
                           + ",\"accepted\":" + (w.accepted ? "true" : "false")
                           + ",\"acceptances\":" + std::to_string(w.acceptances)
+                          + ",\"unaddressed\":" + std::to_string(w.unaddressed)
                           + ",\"oversold\":" + (w.oversold ? "true" : "false");
+                    if (w.customer)
+                        body += ",\"customer\":\"" + to_hex(w.customer->bytes) + "\"";
                     if (w.accepted)
                         body += ",\"acceptance_ref\":\"" + to_hex(w.acceptor.bytes)
                               + "/" + to_hex(w.acceptance_hash.bytes)
@@ -1422,6 +1426,70 @@ void AggregatorServer::setup_routes() {
                 body += "]}";
             }
             body += "]}";
+            res.set_content(body, "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
+                            "application/json");
+        }
+    });
+
+    // ── GET /work/<chain>/<hash> ─────────────────────────────────────────────
+    // One result and who it went to (records.md §9.5, records.md §9.8): the
+    // work's customer, the releases of it and every deal naming it, each with
+    // its standing. `bc accept` and `bc release` read it before signing.
+    svr.Get("/work/:chain/:hash", [&](const httplib::Request& req,
+                                      httplib::Response& res) {
+        const auto chain = hex_to_hash(req.path_params.at("chain"));
+        const auto hash  = hex_to_hash(req.path_params.at("hash"));
+        if (!chain || !hash) {
+            res.status = 400;
+            res.set_content("{\"error\":\"invalid ref\"}", "application/json");
+            return;
+        }
+        try {
+            const auto  deals = read_deals(storage_);
+            const auto& ch    = chain->bytes;
+            const auto& wh    = hash->bytes;
+            const auto  w     = deals.works.find(wh);
+            const bool  known = w != deals.works.end() && w->second.worker.bytes == ch;
+            std::string body = "{\"ref\":\"" + to_hex(ch) + "/" + to_hex(wh) + "\""
+                             + ",\"known\":" + (known ? "true" : "false");
+            if (known && w->second.customer)
+                body += ",\"customer\":\"" + to_hex(*w->second.customer) + "\"";
+            body += ",\"releases\":[";
+            bool first = true;
+            for (const auto& r : deals.releases) {
+                if (r.release.work.hash != wh || r.seller.bytes != ch) continue;
+                if (!first) body += ',';
+                first = false;
+                body += "{\"ref\":\"" + to_hex(r.seller.bytes) + "/" + to_hex(r.hash)
+                      + "\",\"to\":\"" + to_hex(r.release.to)
+                      + "\",\"expires\":" + std::to_string(r.release.expires)
+                      + ",\"timestamp\":" + std::to_string(r.release.timestamp) + "}";
+            }
+            body += "],\"deals\":[";
+            first = true;
+            const auto& rc = deals.recognition;
+            for (const auto& d : deals.all) {
+                if (d.accept().work.hash != wh || d.accept().work.chain != ch) continue;
+                const char* state = rc.recognized.count(d.hash) ? "recognized"
+                                  : rc.repeated.count(d.hash)   ? "repeated"
+                                  : rc.contested.count(d.hash)  ? "contested"
+                                  :                               "unaddressed";
+                double paid = 0;
+                for (const auto& o : d.transfer.origins) paid += o.units;
+                if (!first) body += ',';
+                first = false;
+                body += "{\"ref\":\"" + to_hex(d.payer.bytes) + "/" + to_hex(d.hash)
+                      + "\",\"payer\":\"" + to_hex(d.payer.bytes)
+                      + "\",\"timestamp\":" + std::to_string(d.transfer.timestamp)
+                      + ",\"state\":\"" + state + "\""
+                      + ",\"paid\":" + std::to_string(paid) + "}";
+            }
+            body += "],\"oversold\":";
+            body += rc.oversold.count(wh) ? "true" : "false";
+            body += "}";
             res.set_content(body, "application/json");
         } catch (const std::exception& e) {
             res.status = 500;

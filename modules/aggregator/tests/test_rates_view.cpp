@@ -102,6 +102,7 @@ protected:
         if (lines.empty()) lines = {{0x01, units}};
         records::WorkRecord wr{};
         wr.hours = hours;
+        wr.customer = payer.bytes;   // на заказ плательщика (records.md §9.4)
         const Block work = add(alice_, wr);
 
         records::Acceptance a{};
@@ -179,6 +180,7 @@ TEST_F(RatesViewTest, CarriedCostSettlesAtFullPayableButAveragesLaborOnly) {
     ce.seq     = 0;
     ce.after   = 0.23625;
     wr.carry.push_back(ce);
+    wr.customer = bob_.bytes;   // заказ Боба (records.md §9.4)
     const Block work = add(alice_, wr);
 
     records::Acceptance a{};
@@ -258,6 +260,7 @@ TEST_F(RatesViewTest, RatesEndpointPublishesSignedAggregateOnce) {
 TEST_F(RatesViewTest, BreakdownThatDoesNotAddUpIsNotAPrice) {
     records::WorkRecord wr{};
     wr.hours = 2.0;
+    wr.customer = bob_.bytes;   // заказ Боба (records.md §9.4)
     const Block work = add(alice_, wr);
     records::Acceptance a{};
     a.work        = ref_to(alice_, work);
@@ -314,6 +317,7 @@ protected:
                  const std::vector<std::pair<uint8_t, double>>& per_hour, int64_t ts) {
         records::WorkRecord wr{};
         wr.hours = hours;
+        wr.customer = payer.bytes;   // на заказ плательщика (records.md §9.4)
         const Block work = add(worker, wr);
 
         double units = 0.0;
@@ -623,23 +627,22 @@ TEST_F(IndependenceTest, PrivateAxisDoesNotPriceItsOwnInflation) {
     EXPECT_LT(a->weighted_hours / a->hours, 0.5);
 }
 
-// Одна работа — одна признанная приёмка (records.md §9.5, ИР-023): работа,
-// оплаченная двумя покупателями, продана дважды. Её часы не должны войти в цену
-// дважды — и не входят вовсе, как бы дорого за неё ни заплатили.
-TEST_F(RatesViewTest, WorkPaidByTwoBuyersMovesNoPrice) {
+// Засчитывается сделка того, кому продавец отдал результат (records.md §9.5):
+// посторонний, заплативший за чужую работу, цены не двигает — его сделка
+// ничтожна; работа, которую продавец сам отдал двоим, — двойная продажа, и в
+// цены осей не входит ни одна из её сделок, как бы дорого за неё ни заплатили.
+TEST_F(RatesViewTest, OnlyTheAddressedDealMovesThePrice) {
     const UserId carol = make_chain(0xC7);
     settled_deal(bob_, 1.0, 1.0);                 // честная сделка дня
 
-    records::WorkRecord wr{};
-    wr.hours = 1.0;
-    const Block work = add(alice_, wr);
-    for (const UserId& buyer : {bob_, carol}) {
+    const auto pay = [&](const Block& work, const UserId& buyer,
+                         std::optional<records::Ref> release) {
         records::Acceptance a{};
         a.work        = ref_to(alice_, work);
         a.hours_raw   = 1.0;
         a.labor_units = 9.0;
         a.axes        = {{test_axis(), 9.0}};
-
+        a.release     = release;
         records::Transfer t{};
         t.from      = buyer.bytes;
         t.to        = alice_.bytes;
@@ -647,7 +650,24 @@ TEST_F(RatesViewTest, WorkPaidByTwoBuyersMovesNoPrice) {
         t.accept    = a;
         t.timestamp = kDay + 100;
         add(buyer, t);
-    }
+    };
+
+    records::WorkRecord wr{};
+    wr.hours    = 1.0;
+    wr.customer = bob_.bytes;                     // заказ Боба
+    const Block ordered = add(alice_, wr);
+    pay(ordered, carol, std::nullopt);            // Кэрол платит без адреса — ничтожна
+
+    wr.action = "вторая работа";
+    const Block sold_twice = add(alice_, wr);
+    records::Release rl{};                        // Алиса сама отдаёт её и Кэрол
+    rl.work      = ref_to(alice_, sold_twice);
+    rl.to        = carol.bytes;
+    rl.timestamp = kDay;
+    rl.expires   = kDay + 1000;
+    const Block released = add(alice_, rl);
+    pay(sold_twice, bob_, std::nullopt);          // заказчик
+    pay(sold_twice, carol, ref_to(alice_, released));   // и по отпуску — двойная продажа
 
     const auto day = build_daily_prices(*storage_, kDay, {});
     ASSERT_EQ(day.axes.size(), 1u);

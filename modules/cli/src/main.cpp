@@ -11,6 +11,7 @@
 #include <records/credit.h>
 #include <records/json.h>
 #include <records/codec.h>
+#include <records/acceptance.h>
 #include <records/draft.h>
 #include <records/types.h>
 #include <sync/dialogue_channel.h>
@@ -278,6 +279,10 @@ static std::string record_summary(const Record& rec) {
                 for (const auto& ce : r.carry) carried += ce.carried;
                 ss << "  carry:" << r.carry.size() << " (" << carried << "h)";
             }
+            if (r.customer) ss << "  for:" << short_hex(*r.customer);
+        } else if constexpr (std::is_same_v<T, records::Release>) {
+            ss << "[Release]     work:" << short_hex(r.work.hash)
+               << "  to:" << short_hex(r.to) << "  expires:" << r.expires;
         } else if constexpr (std::is_same_v<T, records::Tool>) {
             ss << "[Tool]        \"" << r.name << "\"  " << r.cost
                << "h  life:" << r.life << "h  [" << r.basis << "]";
@@ -1054,6 +1059,8 @@ static int cmd_react(const fs::path& data_dir, int argc, char** argv) {
 // The worker is whoever signs the block. There is no specialty or grade to
 // point at (ИР-022 шаг 11): «кем работал» is free text for people, and what the
 // work was is said by the breakdown of its price at acceptance.
+static std::array<uint8_t, 32> uid_from_hex(const std::string& s);
+
 static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
     const auto action_s = flag_val(argc, argv, "--action");
     const auto hours_s  = flag_val(argc, argv, "--hours");
@@ -1062,6 +1069,9 @@ static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
                      "    --action \"description\"\n"
                      "    --hours  FLOAT\n"
                      "   [--title  TEXT]            кем работал — вольный текст для людей\n"
+                     "   [--for    CHAIN]           заказчик: работа на заказ — результат\n"
+                     "                              отпущен ему этой же записью (records.md §9.4);\n"
+                     "                              без него — bc release после работы\n"
                      "   [--start  UNIX_TS]         (default: now)\n"
                      "   [--input  NAME:QTY:UNIT]   (repeatable)\n"
                      "   [--output NAME:QTY:UNIT]   (repeatable)\n"
@@ -1072,6 +1082,10 @@ static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
     wr.action = action_s;
     wr.hours  = std::stod(hours_s);
     wr.title  = flag_val(argc, argv, "--title");
+    // Работа на заказ (records.md §9.4 v3): результат отпущен заказчику этой же
+    // записью; без --for — отпуск потом (bc release, records.md §9.8).
+    if (const auto for_s = flag_val(argc, argv, "--for"); !for_s.empty())
+        wr.customer = uid_from_hex(for_s);
     const auto start_s = flag_val(argc, argv, "--start");
     wr.start_ts = start_s.empty()
                   ? static_cast<int64_t>(std::time(nullptr))
@@ -1088,6 +1102,9 @@ static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
     const Block block = append_record(ctx, Record{wr});
     std::cout << "block #" << block.address.block_index
               << "  hash: " << to_hex(Crypto::hash_block(block).bytes) << "\n";
+    if (wr.customer)
+        std::cerr << "на заказ: результат отпущен " << short_hex(*wr.customer)
+                  << " этой же записью (records.md §9.4)\n";
     const auto via = flag_val(argc, argv, "--via");
     if (!via.empty()) upload_block(via, block);
     return 0;
@@ -1108,29 +1125,10 @@ static double jnum(const records::json::Object& o, const char* k);
 static const records::json::Value* jarr(const records::json::Object& o,
                                         const char* k);
 
-// The aggregator's view of one work (GET /deals): the `works[]` entry whose ref
-// is `work_ref`. nullopt when the aggregator is unreachable or does not know it.
-static std::optional<records::json::Value> find_deal_work(const std::string& via,
-                                                          const std::string& work_ref) {
-    const auto root = fetch_json(via, "/deals");
-    if (!root || !root->is_object()) return std::nullopt;
-    const auto* deals = jarr(root->object, "deals");
-    if (!deals) return std::nullopt;
-    for (const auto& d : deals->array) {
-        if (!d.is_object()) continue;
-        if (const auto* ws = jarr(d.object, "works"))
-            for (const auto& w : ws->array)
-                if (w.is_object() && jstr(w.object, "ref") == work_ref) return w;
-    }
-    return std::nullopt;
-}
-
-// An acceptance of `work` already on record — in the own branches or, with
-// --via, anyone's at the aggregator. One work — one recognized acceptance
-// (records.md §9.5, ИР-023): a second one would make the work «продана дважды».
-// Empty when none is known.
-static std::string known_acceptance_of(Context& ctx, const std::string& via,
-                                       const Ref& work) {
+// The own deal on `work` already on record in the own branches: its ref, or
+// empty. One result — one deal (records.md §9.5, ИР-023): a second deal of the
+// same buyer buys nothing, it only overpays.
+static std::string own_deal_on(Context& ctx, const Ref& work) {
     for (const NodeIndex node : ctx.local_branches()) {
         std::vector<Block> blocks;
         try { blocks = ctx.bc.get_branch(ctx.user_id, node); }
@@ -1141,15 +1139,21 @@ static std::string known_acceptance_of(Context& ctx, const std::string& via,
             try { rec = Codec::decode(b.payload.data(), b.payload.size()); }
             catch (const CodecError&) { continue; }
             const auto* t = std::get_if<records::Transfer>(&rec);
-            if (t && t->accept && t->accept->work.hash == work.hash)
+            if (t && t->accept && t->accept->work == work)
                 return to_hex(ctx.user_id.bytes) + "/" + to_hex(Crypto::hash_block(b).bytes);
         }
     }
-    if (via.empty()) return {};
-    const auto w = find_deal_work(via, to_hex(work.chain.data(), 32) + "/" +
-                                       to_hex(work.hash.data(), 32));
-    if (!w || jnum(w->object, "acceptances") < 0.5) return {};
-    return jstr(w->object, "acceptance_ref");
+    return {};
+}
+
+// The aggregator's view of one result (GET /work/<chain>/<hash>, records.md §9.5):
+// the work's customer, its releases and every deal naming it with its standing.
+// nullopt without --via or when the aggregator is unreachable.
+static std::optional<records::json::Value> fetch_work_status(const std::string& via,
+                                                             const Ref& work) {
+    if (via.empty()) return std::nullopt;
+    return fetch_json(via, "/work/" + to_hex(work.chain.data(), 32) + "/" +
+                           to_hex(work.hash.data(), 32));
 }
 
 static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
@@ -1185,7 +1189,9 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
                      "    [--coef        FLOAT]   manual rate, стч/ч, instead of axis prices\n"
                      "    [--labor-units FLOAT]   the price outright\n"
                      "    [--pledge      REF]     the own pledge this deal closes (v4)\n"
-                     "    [--again]               accept a work that already has a deal\n";
+                     "    [--release     REF]     the seller's release to you (records.md §9.8);\n"
+                     "                            default: found at the aggregator. Not needed\n"
+                     "                            when the work names you as its customer\n";
         return 1;
     }
 
@@ -1201,14 +1207,78 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     if (a.work.chain == ctx.user_id.bytes)
         throw std::runtime_error("свою работу не принимают — принимает и платит заказчик "
                                  "(records.md §9.5)");
-    // One work — one deal (records.md §9.5, ИР-023): a second deal on the same
-    // work would make it «продана дважды».
-    if (!flag_present(argc, argv, "--again"))
-        if (const auto seen = known_acceptance_of(ctx, via, a.work); !seen.empty())
+    // Один результат — одна сделка (records.md §9.5, ИР-023). Своя повторная
+    // ничего не купит, только переплатит; сделка рядом с чужой либо ничтожна (не
+    // по адресу), либо делает результат «проданным дважды». Обхода нет.
+    if (const auto mine = own_deal_on(ctx, a.work); !mine.empty())
+        throw std::runtime_error("вы уже приняли и оплатили эту работу: " + mine +
+                                 " (records.md §9.5)");
+    const auto status = fetch_work_status(via, a.work);
+    if (status && status->is_object())
+        if (const auto* ds = jarr(status->object, "deals"))
+            for (const auto& d : ds->array)
+                if (d.is_object() && jstr(d.object, "state") != "unaddressed")
+                    throw std::runtime_error(
+                        "работа уже продана: сделка " + jstr(d.object, "ref") +
+                        ". Один результат — одна сделка (records.md §9.5): вторая по "
+                        "адресу сделала бы его «проданным дважды»");
+
+    // Кому достаётся результат, решает продавец (records.md §9.5): заказчик в
+    // записи труда (records.md §9.4) или отпуск на имя покупателя
+    // (records.md §9.8). Сделку не по адресу не пишем — она ничтожна, часы по
+    // ней никуда не перейдут.
+    const auto        now      = static_cast<int64_t>(std::time(nullptr));
+    const auto        work_rec = load_record(ctx, via, a.work);
+    const WorkRecord* work     = work_rec ? std::get_if<WorkRecord>(&*work_rec) : nullptr;
+    const std::optional<std::array<uint8_t, 32>> customer =
+        work ? work->customer : std::optional<std::array<uint8_t, 32>>{};
+    std::optional<records::Release> release;
+    if (const auto rs = flag_val(argc, argv, "--release"); !rs.empty()) {
+        const Ref  rref = parse_ref(rs);
+        const auto rrec = load_record(ctx, via, rref);
+        const auto* rl  = rrec ? std::get_if<records::Release>(&*rrec) : nullptr;
+        if (!rl)
+            throw std::runtime_error("--release: отпуск не найден (bc fetch <ref> --via URL)");
+        release   = *rl;
+        a.release = rref;
+    } else if (!(customer && *customer == ctx.user_id.bytes) && status &&
+               status->is_object()) {
+        // Не заказчик — ищем живой отпуск на своё имя; из нескольких — самый долгий.
+        if (const auto* rels = jarr(status->object, "releases"))
+            for (const auto& r : rels->array) {
+                if (!r.is_object() || jstr(r.object, "to") != to_hex(ctx.user_id.bytes))
+                    continue;
+                if (jnum(r.object, "expires") <= static_cast<double>(now)) continue;
+                const Ref  rref = parse_ref(jstr(r.object, "ref"));
+                const auto rrec = load_record(ctx, via, rref);
+                const auto* rl  = rrec ? std::get_if<records::Release>(&*rrec) : nullptr;
+                if (rl && (!release || rl->expires > release->expires)) {
+                    release   = *rl;
+                    a.release = rref;
+                }
+            }
+    }
+    {
+        records::Transfer probe{};
+        probe.from      = ctx.user_id.bytes;
+        probe.timestamp = now;
+        probe.accept    = a;
+        if (!records::addressed_to(probe, customer, release ? &*release : nullptr)) {
+            if (release)
+                throw std::runtime_error(
+                    "отпуск не на вас, не на эту работу или истёк (срок " +
+                    std::to_string(release->expires) + ") — попросите продавца "
+                    "отпустить заново (bc release, records.md §9.8)");
             throw std::runtime_error(
-                "работа уже принята и оплачена: " + seen + ". Признаётся одна сделка "
-                "на работу (records.md §9.5): вторая сделала бы её «проданной дважды». "
-                "Принять ещё раз сознательно — --again");
+                "работа не отпущена вам: результат достаётся тому, кого назвал продавец — "
+                "заказчиком в записи труда (bc work log --for) или отпуском на ваше имя "
+                "(bc release). Сделка не по адресу ничтожна (records.md §9.5)");
+        }
+        std::cerr << (release ? "по отпуску продавца: " + short_hex(a.release->hash) +
+                                    ", до " + std::to_string(release->expires)
+                              : std::string("работа на ваш заказ"))
+                  << "\n";
+    }
     for (const auto& p : axis_args) {
         const auto eq = p.rfind('=');
         if (eq == std::string::npos || eq == 0)
@@ -1248,15 +1318,11 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
 
     if (raw_s.empty()) {
         // Hours from the worker's record (records.md §9.5).
-        const auto block = find_external_by_hash(ctx, a.work.hash);
-        if (!block || block->type != BlockType::DATA)
+        if (!work)
             throw std::runtime_error(
-                "work record not fetched — run 'bc fetch <ref> --via URL' first, "
-                "or pass --hours-raw");
-        const auto rec = Codec::decode(block->payload.data(), block->payload.size());
-        const auto* wr = std::get_if<WorkRecord>(&rec);
-        if (!wr) throw std::runtime_error("--work does not reference a WorkRecord");
-        a.hours_raw = wr->hours;
+                "запись работы не найдена — 'bc fetch <ref> --via URL' или --via, "
+                "или задайте --hours-raw");
+        a.hours_raw = work->hours;
     } else {
         a.hours_raw = std::stod(raw_s);
     }
@@ -1398,7 +1464,7 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     t.to_node   = DEFAULT_LEAF;
     t.origins   = pick_portions(ctx, to_s, payable);
     t.accept    = a;
-    t.timestamp = static_cast<int64_t>(std::time(nullptr));
+    t.timestamp = now;   // the same moment the addressing was checked against
     // Transfer v4 (records.md §11.1): which own promise this deal closes.
     const auto pledge_s = flag_val(argc, argv, "--pledge");
     if (!pledge_s.empty()) t.settles = parse_ref(pledge_s);
@@ -1415,6 +1481,100 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
               << " labor-h (raw " << a.hours_raw << "h)";
     if (a.carried_units) std::cerr << " + перенос " << *a.carried_units << "ч";
     std::cerr << " = paid " << payable << "h\n";
+    if (!via.empty()) upload_block(via, block);
+    return 0;
+}
+
+// bc release WORK --to CHAIN [--days N | --until TS] [--via URL] [--leaf L]
+// Отпуск (records.md §9.8, ИР-023): the seller gives the result of an own work to
+// a named buyer. Only that buyer's deal completes it, and only before the term;
+// without it (or a customer on the work itself) a deal on the work is void.
+static int cmd_release(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos  = get_positionals(argc, argv);
+    const auto to_s = flag_val(argc, argv, "--to");
+    if (pos.size() < 2 || to_s.empty()) {
+        std::cerr << "Usage: bc release РАБОТА --to ЦЕПЬ [--days N | --until UNIX_TS]\n"
+                     "                  [--via URL] [--leaf L]\n"
+                     "  отдать результат своей работы покупателю (records.md §9.8):\n"
+                     "  засчитана будет только его сделка и только до срока\n"
+                     "  (по умолчанию 7 дней). РАБОТА — хеш своей записи труда или ЦЕПЬ/ХЕШ\n";
+        return 1;
+    }
+    const auto      via  = flag_val(argc, argv, "--via");
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+
+    Ref work{};
+    if (pos[1].find('/') == std::string::npos) {
+        work.chain = ctx.user_id.bytes;
+        if (!from_hex(pos[1], work.hash.data(), 32))
+            throw std::runtime_error("РАБОТА: ожидался хеш записи труда (64 hex) или ЦЕПЬ/ХЕШ");
+    } else {
+        work = parse_ref(pos[1]);
+    }
+    if (work.chain != ctx.user_id.bytes)
+        throw std::runtime_error("отпускают только свою работу — результат отдаёт тот, "
+                                 "кто его сделал (records.md §9.8)");
+    const auto        wrec = load_record(ctx, "", work);
+    const WorkRecord* wr   = wrec ? std::get_if<WorkRecord>(&*wrec) : nullptr;
+    if (!wr) throw std::runtime_error("своей записи труда с таким хешем нет");
+
+    records::Release rl{};
+    rl.work      = work;
+    rl.to        = uid_from_hex(to_s);
+    rl.timestamp = static_cast<int64_t>(std::time(nullptr));
+    if (rl.to == ctx.user_id.bytes)
+        throw std::runtime_error("отпуск себе ничего не отпускает");
+    if (wr->customer && *wr->customer == rl.to) {
+        std::cerr << "работа и так на заказ этой цепи — результат отпущен ей самой "
+                     "записью труда (records.md §9.4), отпуск не нужен\n";
+        return 0;
+    }
+    const auto until_s = flag_val(argc, argv, "--until");
+    rl.expires = !until_s.empty()
+        ? static_cast<int64_t>(std::stoll(until_s))
+        : rl.timestamp + static_cast<int64_t>(
+              std::stod(flag_val(argc, argv, "--days", "7")) * 86400.0);
+
+    // Один результат — одна сделка (records.md §9.5): не отпускаем проданное и не
+    // отпускаем второму, пока жив отпуск первому — это была бы двойная продажа, и
+    // подписана она была бы нами.
+    for (const NodeIndex node : ctx.local_branches()) {
+        std::vector<Block> blocks;
+        try { blocks = ctx.bc.get_branch(ctx.user_id, node); }
+        catch (const BlockchainError&) { continue; }
+        for (const auto& b : blocks) {
+            if (b.type != BlockType::DATA) continue;
+            Record rec;
+            try { rec = Codec::decode(b.payload.data(), b.payload.size()); }
+            catch (const CodecError&) { continue; }
+            const auto* prev = std::get_if<records::Release>(&rec);
+            if (prev && prev->work == work && prev->to != rl.to &&
+                prev->expires > rl.timestamp)
+                throw std::runtime_error(
+                    "работа уже отпущена " + short_hex(prev->to) + " до " +
+                    std::to_string(prev->expires) + " — второй отпуск до срока "
+                    "первого был бы двойной продажей (records.md §9.8)");
+        }
+    }
+    if (const auto st = fetch_work_status(via, work); st && st->is_object()) {
+        if (const auto* ds = jarr(st->object, "deals"))
+            for (const auto& d : ds->array)
+                if (d.is_object() && jstr(d.object, "state") != "unaddressed")
+                    throw std::runtime_error("работа уже продана: сделка " +
+                                             jstr(d.object, "ref") + " (records.md §9.5)");
+    }
+    if (wr->customer)
+        std::cerr << "⚠ работа была на заказ " << short_hex(*wr->customer)
+                  << " — отпуская её другому, вы отдаёте результат второй раз; если "
+                     "заказчик тоже заплатит, это двойная продажа (records.md §9.5)\n";
+
+    const Block block = append_record(ctx, Record{rl});
+    std::cout << "release ref: " << to_hex(ctx.user_id.bytes) << "/"
+              << to_hex(Crypto::hash_block(block).bytes) << "\n";
+    std::cerr << "отпуск: результат работы " << short_hex(work.hash) << " → "
+              << short_hex(rl.to) << ", срок " << rl.expires << " (через "
+              << (rl.expires - rl.timestamp) / 86400.0 << " дн.)\n";
     if (!via.empty()) upload_block(via, block);
     return 0;
 }
@@ -2629,6 +2789,23 @@ static int cmd_transfer_recv(const fs::path& data_dir, int argc, char** argv) {
     if (!t->accept)
         throw std::runtime_error(
             "перевод без приёмки — не оплата труда, такой не принимается (records.md §12.9)");
+    // Кому достаётся результат, решает продавец — то есть мы (records.md §9.5):
+    // сделку за работу, которую мы этому плательщику не отпускали, не принимаем —
+    // она ничтожна, и её часы в кошелёк не идут.
+    {
+        std::optional<std::array<uint8_t, 32>> customer;
+        if (const auto w = load_record(ctx, "", t->accept->work))
+            if (const auto* wr = std::get_if<WorkRecord>(&*w)) customer = wr->customer;
+        std::optional<records::Release> release;
+        if (t->accept->release)
+            if (const auto r = load_record(ctx, "", *t->accept->release))
+                if (const auto* rl = std::get_if<records::Release>(&*r)) release = *rl;
+        if (!records::addressed_to(*t, customer, release ? &*release : nullptr))
+            throw std::runtime_error(
+                "сделка не по адресу: вы не отпускали эту работу плательщику — ни "
+                "заказчиком в записи труда, ни отпуском (или отпуск истёк). Такая "
+                "сделка ничтожна, часы не принимаются (records.md §9.5)");
+    }
     // Transfer v3: a self-issuing transfer must be threaded (economy.md §4.3).
     {
         double self_issued = 0;
@@ -3301,8 +3478,10 @@ static int cmd_deal_work(const fs::path& data_dir, int argc, char** argv) {
     const auto action_s = flag_val(argc, argv, "--action");
     if (pos.size() < 3 || hours_s.empty() || action_s.empty()) {
         std::cerr << "Usage: bc deal work NEED_REF --hours H --action TEXT "
-                     "[--title TEXT] [--tool HASH_PREFIX:USED]... "
-                     "[--start TS] [--leaf L] [--via URL]\n";
+                     "[--title TEXT] [--for CHAIN] [--tool HASH_PREFIX:USED]... "
+                     "[--start TS] [--leaf L] [--via URL]\n"
+                     "  работа — на заказ хозяина потребности (records.md §9.4);\n"
+                     "  --for — если принимает и платит другой (economy.md §7)\n";
         return 1;
     }
     const NodeIndex leaf = parse_leaf_index(argc, argv);
@@ -3310,6 +3489,11 @@ static int cmd_deal_work(const fs::path& data_dir, int argc, char** argv) {
 
     WorkRecord wr{};
     wr.title    = flag_val(argc, argv, "--title");
+    // Работа по потребности — на заказ её хозяина (records.md §9.4 v3): результат
+    // отпущен ему этой же записью. Финансирует другой — --for: каждый
+    // финансирующий принимает свою работу (economy.md §7).
+    const auto for_s = flag_val(argc, argv, "--for");
+    wr.customer = for_s.empty() ? parse_ref(pos[2]).chain : uid_from_hex(for_s);
     wr.action   = action_s;
     wr.hours    = std::stod(hours_s);
     const auto start_s = flag_val(argc, argv, "--start");
@@ -4348,6 +4532,9 @@ Deals — from found match to settled labour (records.md §8.6; ИР-006):
   deal work NEED_REF               Log work AND attach it to the need in one
     --hours H --action TEXT            go («исполняет» link)
     [--title TEXT]                     «кем работал» — free text for people
+    [--for CHAIN]                      the customer (default: the need's owner)
+                                       — the result goes to them by this very
+                                       record (records.md §9.4)
   deal settle NEED_REF --via URL   Pay accepted work (settling your pledge,
     [--yes]                            Transfer v4), then ASK to close — the
                                        owner decides, the tool never does
@@ -4395,6 +4582,10 @@ Labor:
     [--title TEXT]                     «кем работал» — free text for people
                                        («электрик, 5-й разряд»); nothing is
                                        computed on it (ИР-022 шаг 11)
+    [--for CHAIN]                      the customer of an order agreed in
+                                       advance: the result goes to them by
+                                       this very record (records.md §9.4);
+                                       otherwise — bc release afterwards
     [--start UNIX_TS]
     [--input  NAME:QTY:UNIT ...]   (repeatable)
     [--output NAME:QTY:UNIT ...]   (repeatable)
@@ -4405,7 +4596,7 @@ Labor:
   accept                           Accept received work AND pay for it: one
                                        record, the payment equals the appraisal
                                        (records.md §9.5)
-    --work        WORK_REF             (fetch it first: bc fetch <ref> --via URL)
+    --work        WORK_REF             (fetched from --via when missing)
     --quality     TEXT
     --axis PATH=HOURS ...              the breakdown is REQUIRED (ИР-022): hours
     | --axis-share PATH=SHARE ...       per axis (their sum is the price), shares
@@ -4419,9 +4610,14 @@ Labor:
                                        carried_units is derived automatically
                                        from the work's carry — never by hand
     [--pledge REF]                     the own pledge this deal closes
-    [--again]                          accept a work that already has a deal:
-                                       only one deal per work counts
-                                       (records.md §9.5)
+    [--release REF]                    the seller's release to you — see
+                                       records.md §9.8; found at the aggregator
+                                       by default. A deal the seller did not
+                                       address (no customer, no live release)
+                                       is void, and is refused (records.md §9.5)
+  release WORK --to CHAIN          Give the result of an own work to a buyer
+    [--days N | --until UNIX_TS]       (records.md §9.8): only their deal counts,
+    [--via URL]                        and only before the term (default 7 days)
 
 Means of production (ИР-011, records.md §10.2, records.md §9.4):
   tool add ИМЯ --cost H --life HRS Register a tool: cost in labor-hours,
@@ -4511,7 +4707,8 @@ Economy (records.md §11 — именные трудочасы, records.md §12.
   wallet [--leaf N]                Branch purse (economy.md §5а: the --leaf
                                        branch's holdings) + chain-wide debt
   transfer recv <chain>/<hash>     Fetch an incoming deal (bc accept of your work),
-    --via URL                          store it and acknowledge on-chain (Copy)
+    --via URL                          store it and acknowledge on-chain (Copy);
+                                       a deal you did not address is refused
   pledge add --target REF          Promise labor-hours for a work/idea
     --units N [--executor UID_HEX] [--expires UNIX_TS]
   pledge revoke --pledge REF       Revoke the unsettled remainder of an own pledge
@@ -4577,6 +4774,7 @@ int main(int argc, char** argv) {
         else if (cmd == "react")                            return cmd_react(data_dir, argc, argv);
         else if (cmd == "work"      && subcmd == "log")     return cmd_work_log(data_dir, argc, argv);
         else if (cmd == "accept")                           return cmd_accept(data_dir, argc, argv);
+        else if (cmd == "release")                          return cmd_release(data_dir, argc, argv);
         else if (cmd == "tool"      && subcmd == "add")     return cmd_tool_add(data_dir, argc, argv);
         else if (cmd == "tool"      && subcmd == "list")    return cmd_tool_list(data_dir, argc, argv);
         else if (cmd == "tool"      && subcmd == "show")    return cmd_tool_show(data_dir, argc, argv);

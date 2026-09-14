@@ -80,8 +80,9 @@ protected:
                        std::initializer_list<uint8_t> tags,
                        const UserId* work_chain = nullptr, double named = -1.0) {
         records::WorkRecord w;
-        w.action = "работа";
-        w.hours  = hours;
+        w.action   = "работа";
+        w.hours    = hours;
+        w.customer = acceptor.bytes;   // заказ принимающего (records.md §9.4)
         const Hash wh = add(worker, w);
         records::Acceptance a{};
         a.work        = ref_of(work_chain ? *work_chain : worker, wh);
@@ -173,24 +174,27 @@ TEST_F(AttestationViewTest, BreakdownThatDoesNotAddUpAttestsNothing) {
     EXPECT_EQ(view.total(anna).chains, 0u);
 }
 
-// Одна работа — одна сделка (records.md §9.5, ИР-023): две цепи, оплатившие одну
-// и ту же работу, — это одна работа, проданная дважды, а не два свидетеля. Пока
-// сделка одна — она считается; появилась вторая — не считается ни одна.
-TEST_F(AttestationViewTest, OneWorkPaidByTwoCountsForNobody) {
+// Засчитывается сделка того, кому продавец отдал результат (records.md §9.5,
+// ИР-023). Посторонний, заплативший за ту же работу, её не губит — его сделка
+// ничтожна; а если продавец сам отдал работу второму покупателю, это двойная
+// продажа, и не засчитывается ни одна. Погубить сделку может только продавец.
+TEST_F(AttestationViewTest, OnlyTheSellerCanSpoilTheDeal) {
     const UserId anna  = make_owner(0xA1);
     const UserId vera  = make_owner(0xB2);
     const UserId boris = make_owner(0xC3);
 
     records::WorkRecord w;
-    w.action = "работа";
-    w.hours  = 5;
+    w.action   = "работа";
+    w.hours    = 5;
+    w.customer = vera.bytes;                         // заказ Веры
     const Hash wh = add(anna, w);
-    const auto deal = [&](const UserId& by) {
+    const auto deal = [&](const UserId& by, std::optional<records::Ref> release) {
         records::Acceptance a{};
         a.work        = ref_of(anna, wh);
         a.hours_raw   = 5;
         a.labor_units = 5;
         a.axes        = {{axis(kLiveLine), 5.0}};
+        a.release     = release;
         records::Transfer t{};
         t.from      = by.bytes;
         t.to        = anna.bytes;
@@ -199,17 +203,23 @@ TEST_F(AttestationViewTest, OneWorkPaidByTwoCountsForNobody) {
         t.timestamp = 1000;
         add(by, t);
     };
-    deal(vera);
-    {
-        const auto view = AttestationView::build(*storage_);
-        const auto att  = view.at(anna, axis(kLiveLine).hash);
-        ASSERT_TRUE(att.has_value());
-        EXPECT_EQ(att->chains, 1u);                  // Вера — приняла и заплатила
-        EXPECT_DOUBLE_EQ(att->hours, 5.0);
-    }
+    const auto attested = [&]() -> std::size_t {
+        const auto att = AttestationView::build(*storage_).at(anna, axis(kLiveLine).hash);
+        return att ? att->chains : 0;
+    };
 
-    deal(boris);                                     // та же работа — второй раз
-    const auto view = AttestationView::build(*storage_);
-    EXPECT_TRUE(view.of(anna).empty());              // продана дважды — не в счёт
-    EXPECT_EQ(view.total(anna).chains, 0u);
+    deal(vera, std::nullopt);
+    EXPECT_EQ(attested(), 1u);                       // Вера — приняла и заплатила
+
+    deal(boris, std::nullopt);                       // Борис платит без адреса
+    EXPECT_EQ(attested(), 1u);                       // ничтожна — сделка Веры стоит
+
+    records::Release rl{};                           // Анна сама отдаёт работу Борису
+    rl.work      = ref_of(anna, wh);
+    rl.to        = boris.bytes;
+    rl.timestamp = 900;
+    rl.expires   = 2000;
+    const Hash rh = add(anna, rl);
+    deal(boris, ref_of(anna, rh));
+    EXPECT_EQ(attested(), 0u);                       // двойная продажа — её, не Бориса
 }

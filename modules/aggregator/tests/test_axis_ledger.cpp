@@ -95,6 +95,7 @@ protected:
         records::WorkRecord wr{};
         wr.title = "сварщик";
         wr.hours = hours;
+        wr.customer = payer.bytes;   // на заказ плательщика (records.md §9.4)
         const Block work = add(worker_, wr);
 
         records::Acceptance a{};

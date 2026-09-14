@@ -206,7 +206,7 @@ say "мука:  4ч / партия 50 кг     ($(short "$MAT_H"))"
 act "6. Анна печёт для Дмитрия (need.food) — труд + перенос стоимости"
 say "6ч работы; печь 6 моточасов и мука 12 кг переносят свою стоимость в хлеб"
 WORK_anna=$(bcp anna work log --title "повар, 5-й разряд" \
-            --action "выпечка обедов для бригады" --hours 6 --output "хлеб:24:шт" \
+            --action "выпечка обедов для бригады" --hours 6 --output "хлеб:24:шт" --for "${CID[dmitry]}" \
             --tool "${TOOL_H:0:12}:6" --material "${MAT_H:0:12}:12" --via "$VIA" | after 'hash: ')
 say "печь → 6/8000 × 315 = 0.23625ч ;  мука → 12/50 × 4 = 0.96ч"
 
@@ -272,7 +272,7 @@ MAT2=$(bcp dmitry material add "Доска мебельная" --unit шт --cos
        --note "оценка партии" --via "$VIA" | after 'material ref: ')
 MAT2_H="${MAT2#*/}"
 WORK_dmitry=$(bcp dmitry work log --title "столяр, 6-й разряд" \
-              --action "Ремонт дверцы шкафа" --hours 5 --output "шкаф:1:шт" \
+              --action "Ремонт дверцы шкафа" --hours 5 --output "шкаф:1:шт" --for "${CID[vera]}" \
               --tool "${TOOL2_H:0:12}:5" --material "${MAT2_H:0:12}:10" --via "$VIA" | after 'hash: ')
 # привязать работу к потребности Веры
 bcp dmitry concept link "${CID[dmitry]}/$WORK_dmitry" "$ND_vera" --kind исполняет --via "$VIA" >/dev/null 2>&1 || true
@@ -317,9 +317,22 @@ bcp irina deal settle "$ND_irina" --yes --via "$VIA" | sed 's/^/   /'
 act "10. Сделка одной записью и кошельки (bc accept / wallet)"
 say "Пелагея-медсестра принимает работу Галины — и этой же записью платит"
 WORK_galina=$(bcp galina work log --title "парикмахер" \
-              --action "Стрижка перед сменой" --hours 1 --via "$VIA" | after 'hash: ')
+              --action "Стрижка перед сменой" --hours 1 --for "${CID[pelageya]}" --via "$VIA" | after 'hash: ')
 bcp pelageya fetch "${CID[galina]}/$WORK_galina" --via "$VIA" >/dev/null
 ACC_galina=$(bcp pelageya accept --work "${CID[galina]}/$WORK_galina" --quality "аккуратно" --coef 1.0 --axis-share "$(axis precision)=0.5" --axis-share "$(axis physical)=0.3" --axis-share "$(axis pace)=0.2" --via "$VIA" | after 'acceptance ref: ')
+hr "без заказа результат отдаёт тот, кто работал: отпуск (bc release, records.md §9.8)"
+W_gal0=$(bcp galina work log --title "парикмахер" --action "Укладка — клиент без записи" \
+         --hours 1 --via "$VIA" | after 'hash: ')
+say "Дмитрий хочет оплатить укладку, но Галина ещё не назвала покупателя:"
+bcp dmitry accept --work "${CID[galina]}/$W_gal0" --quality "аккуратно" \
+    --axis "$(axis precision)=1.0" --via "$VIA" 2>&1 | tail -1 | sed 's/^/   /' || true
+say "Галина отпускает укладку Дмитрию на 3 дня — теперь сделка его:"
+bcp galina release "$W_gal0" --to "${CID[dmitry]}" --days 3 --via "$VIA" 2>&1 | sed 's/^/   /'
+OUT_gal0="$(bcp dmitry accept --work "${CID[galina]}/$W_gal0" --quality "аккуратно" \
+            --axis "$(axis precision)=1.0" --via "$VIA" 2>&1)"
+echo "$OUT_gal0" | sed 's/^/   /'
+bcp galina transfer recv "$(printf '%s\n' "$OUT_gal0" | after 'acceptance ref: ')" \
+    --via "$VIA" >/dev/null
 hr "перевода без приёмки нет: bc transfer send снят (records.md §11.1)"
 bcp pelageya transfer send --to "${CID[galina]}" --units 1 --via "$VIA" 2>&1 | sed 's/^/   /' || true
 hr "кошелёк Анны (держит чужую бумагу) и Дмитрия (свой долг в обороте)"
@@ -342,13 +355,13 @@ PY
 hr "«такая же работа, как та» — образцы работ (bc accept --like, ИР-022)"
 say "вторая стрижка, вторая проводка и второй обед принимаются по образцу первых:"
 say "разбивка копируется у образца, а ссылка на него остаётся в приёмке"
-W_gal2=$(bcp galina work log --title "парикмахер" --action "Стрижка" --hours 1 --via "$VIA" | after 'hash: ')
+W_gal2=$(bcp galina work log --title "парикмахер" --action "Стрижка" --hours 1 --for "${CID[irina]}" --via "$VIA" | after 'hash: ')
 bcp irina fetch "${CID[galina]}/$W_gal2" --via "$VIA" >/dev/null
 A_gal2=$(bcp irina accept --work "${CID[galina]}/$W_gal2" --quality "аккуратно" --like "$ACC_galina" --via "$VIA" | after 'acceptance ref: ')
-W_bor2=$(bcp boris work log --title "электрик, 4-й разряд" --action "Розетка в мастерской" --hours 1 --via "$VIA" | after 'hash: ')
+W_bor2=$(bcp boris work log --title "электрик, 4-й разряд" --action "Розетка в мастерской" --hours 1 --for "${CID[dmitry]}" --via "$VIA" | after 'hash: ')
 bcp dmitry fetch "${CID[boris]}/$W_bor2" --via "$VIA" >/dev/null
 A_bor2=$(bcp dmitry accept --work "${CID[boris]}/$W_bor2" --quality "работает" --like "$ACC_boris" --via "$VIA" | after 'acceptance ref: ')
-W_ann2=$(bcp anna work log --title "повар, 5-й разряд" --action "Обед для мастерской" --hours 2 --via "$VIA" | after 'hash: ')
+W_ann2=$(bcp anna work log --title "повар, 5-й разряд" --action "Обед для мастерской" --hours 2 --for "${CID[boris]}" --via "$VIA" | after 'hash: ')
 bcp boris fetch "${CID[anna]}/$W_ann2" --via "$VIA" >/dev/null
 A_ann2=$(bcp boris accept --work "${CID[anna]}/$W_ann2" --quality "вкусно" --like "$ACC_anna" --via "$VIA" | after 'acceptance ref: ')
 say "у каждой приёмки теперь like: ссылка на образец (bc list покажет её)"
@@ -509,14 +522,18 @@ checkn "бумага Дмитрия частично вернулась к не�
 # отзыв ключа сработал
 if bcp oleg revoke status --node 2147483647 | grep -q "REPLACED"; then
     echo "   ✓ ветка Олега помечена REPLACED после отзыва"; else echo "   ✗ отзыв не отражён"; fail=1; fi
-# повторная приёмка той же работы обязана отклониться (одна работа — одна сделка)
+# повторная сделка по той же работе обязана отклониться (один результат — одна сделка)
 if bcp dmitry accept --work "${CID[anna]}/$WORK_anna" --quality "ещё раз" --coef 1.0 --axis-share "$(axis physical)=1.0" --via "$VIA" >/dev/null 2>&1; then
-    echo "   ✗ повторная приёмка прошла, а должна была отклониться"; fail=1
-else echo "   ✓ повторная приёмка отклонена (одна работа — одна сделка, records.md §9.5)"; fi
+    echo "   ✗ повторная сделка прошла, а должна была отклониться"; fail=1
+else echo "   ✓ повторная сделка отклонена (один результат — одна сделка, records.md §9.5)"; fi
+# чужой заказ не купить: результат достаётся тому, кого назвал продавец
+if bcp boris accept --work "${CID[anna]}/$WORK_anna" --quality "перекуплю" --coef 1.0 --axis-share "$(axis physical)=1.0" --via "$VIA" >/dev/null 2>&1; then
+    echo "   ✗ посторонний купил чужой заказ"; fail=1
+else echo "   ✓ посторонний чужой заказ не купит (records.md §9.5)"; fi
 # переоценка печи ВВЕРХ обязана отклониться (перевыпуск только вниз)
 if bcp anna tool add "Печь подовая" --cost 400 --life 8000 --origin "$TOOL" --note "хочу дороже" >/dev/null 2>&1; then
     echo "   ✗ переоценка вверх прошла, а должна была отклониться"; fail=1
-else echo "   ✓ переоценка вверх отклонена (перевыпуск только вниз, §10.2)"; fi
+else echo "   ✓ переоценка вверх отклонена (перевыпуск только вниз, records.md §10.2)"; fi
 
 act "ИТОГ"
 if [[ "$fail" == 0 ]]; then echo "   всё сошлось — весь круг возможностей отработал."

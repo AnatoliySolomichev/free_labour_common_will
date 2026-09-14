@@ -77,12 +77,19 @@ protected:
 
     // `payer` accepts `payee`'s work and pays for it with paper issued by
     // `issuer` — one record, the acceptance inside its payment (records.md §9.5,
-    // ИР-023). Every payment is a deal now: hours move only against accepted work.
+    // ИР-023). Every payment is a deal now: hours move only against accepted work,
+    // and only work the seller addressed to the payer — here, ordered by them
+    // (records.md §9.4); an unaddressed deal would move nothing.
     void transfer(const UserId& payer, const UserId& payee,
                   const UserId& issuer, double units) {
+        records::WorkRecord w{};
+        w.action   = "работа";
+        w.hours    = units;
+        w.customer = payer.bytes;
+        const Block work = add(payee, w);
         records::Acceptance a{};
         a.work.chain  = payee.bytes;
-        a.work.hash.fill(static_cast<uint8_t>(next_index_));
+        a.work.hash   = Crypto::hash_block(work).bytes;
         a.hours_raw   = units;
         a.labor_units = units;
         a.axes        = {{test_axis(), units}};
@@ -177,6 +184,37 @@ TEST_F(FootprintViewTest, SpoofedRecordsIgnored) {
     EXPECT_FALSE(FootprintView::build(*storage_).chain(vera).has_value());
     const auto fp = FootprintView::build(*storage_).chain(anna);
     if (fp) { EXPECT_DOUBLE_EQ(fp->labor_outward, 0.0); }
+}
+
+// Сделка не по адресу ничтожна (records.md §9.5): посторонний, «оплативший»
+// чужую работу, не кладёт свою бумагу работнику в руки и не становится тем, кто
+// её труд принял, — ни подарка под видом оплаты, ни следа.
+TEST_F(FootprintViewTest, UnaddressedDealMovesNoPaper) {
+    const auto anna = make_chain(0xA1), vera = make_chain(0xB2),
+               mallory = make_chain(0xEE);
+    accept_work(vera, anna, 6.0);                  // честная сделка по заказу Веры
+
+    records::WorkRecord w{};
+    w.action = "работа на склад";                  // никому не отпущена
+    w.hours  = 5;
+    const Block work = add(anna, w);
+    records::Acceptance a{};
+    a.work.chain  = anna.bytes;
+    a.work.hash   = Crypto::hash_block(work).bytes;
+    a.hours_raw   = 5;
+    a.labor_units = 5;
+    a.axes        = {{test_axis(), 5.0}};
+    records::Transfer t{};
+    t.from    = mallory.bytes;
+    t.to      = anna.bytes;
+    t.origins = {{mallory.bytes, 5.0}};
+    t.accept  = a;
+    add(mallory, t);
+
+    const auto fp = of(anna);
+    EXPECT_EQ(fp.acceptors, 1u);                   // только Вера
+    EXPECT_DOUBLE_EQ(fp.labor_outward, 6.0);
+    EXPECT_FALSE(FootprintView::build(*storage_).chain(mallory).has_value());
 }
 
 // ── Layer 3: closedness — the screening signal ───────────────────────────────

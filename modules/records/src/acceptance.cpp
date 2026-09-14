@@ -1,19 +1,55 @@
 #include "records/acceptance.h"
 
+#include <algorithm>
 #include <cmath>
 #include <map>
 
 namespace records {
 
+bool addressed_to(const Transfer& deal,
+                  const std::optional<std::array<uint8_t, 32>>& customer,
+                  const Release* release) noexcept {
+    if (!deal.accept) return false;
+    const Acceptance& a = *deal.accept;
+    if (a.release)
+        return release != nullptr
+            && release->work == a.work
+            && release->to == deal.from
+            && deal.timestamp < release->expires;
+    return customer && *customer == deal.from;
+}
+
 DealRecognition recognize_deals(const std::vector<DealClaim>& claims) {
     using Hash32 = std::array<uint8_t, 32>;
-    std::map<Hash32, std::set<Hash32>> by_work;   // the same block seen twice is one deal
-    for (const auto& c : claims) by_work[c.work].insert(c.deal);
+    // Per result; the same block seen twice is one deal.
+    std::map<Hash32, std::map<Hash32, const DealClaim*>> by_work;
+    for (const auto& c : claims) by_work[c.work].emplace(c.deal, &c);
 
     DealRecognition out;
     for (const auto& [work, deals] : by_work) {
-        if (deals.size() == 1) out.recognized.insert(*deals.begin());
-        else                   out.oversold.insert(work);
+        std::vector<const DealClaim*> addressed;
+        std::set<Hash32>              payers;
+        for (const auto& [hash, c] : deals) {
+            if (!c->addressed) { out.unaddressed.insert(hash); continue; }
+            addressed.push_back(c);
+            payers.insert(c->payer);
+        }
+        if (addressed.empty()) continue;
+        if (payers.size() > 1) {        // the seller gave one result to two buyers
+            out.oversold.insert(work);
+            for (const auto* c : addressed) out.contested.insert(c->deal);
+            continue;
+        }
+        // One buyer: the first of their deals counts, by their own timestamp and
+        // then by hash, so every reader picks the same one.
+        const auto* first = *std::min_element(
+            addressed.begin(), addressed.end(),
+            [](const DealClaim* x, const DealClaim* y) {
+                return x->timestamp != y->timestamp ? x->timestamp < y->timestamp
+                                                    : x->deal < y->deal;
+            });
+        for (const auto* c : addressed)
+            (c == first ? out.recognized : out.repeated).insert(c->deal);
     }
     return out;
 }

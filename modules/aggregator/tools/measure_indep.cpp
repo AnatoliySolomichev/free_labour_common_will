@@ -156,6 +156,7 @@ public:
         records::WorkRecord wr{};
         wr.hours = hours;
         wr.title = spec + ", " + std::to_string(level) + "-й разряд";   // для людей
+        wr.customer = p.bytes;   // на заказ плательщика (records.md §9.4)
         const Block work = add(w, wr);
 
         records::Acceptance a{};

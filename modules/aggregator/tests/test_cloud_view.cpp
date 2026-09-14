@@ -130,6 +130,7 @@ protected:
         records::WorkRecord wr{};
         wr.hours = hours;
         wr.title = o.title;
+        wr.customer = payer.bytes;   // на заказ плательщика (records.md §9.4)
         const Block work = add(worker_, wr);
 
         records::Acceptance a{};

@@ -139,6 +139,7 @@ TEST_F(DealViewTest, StagesDeriveFromWhicheverLinksExist) {
     work.action   = "Замена проводки";
     work.start_ts = 1000;
     work.hours    = 6;
+    work.customer = vera.bytes;   // по потребности Веры — её заказ (records.md §9.4)
     const Hash work_hash = add(anna, work);
     add(anna, link(ref_of(anna, work_hash), ref_of(vera, need), "исполняет"));
     {
@@ -196,8 +197,9 @@ TEST_F(DealViewTest, DealWithoutPledgeReachesPaid) {
 
     const Hash need = add(vera, need_fact("Починить розетку"));
     records::WorkRecord work;
-    work.action = "починил";
-    work.hours  = 1;
+    work.action   = "починил";
+    work.hours    = 1;
+    work.customer = vera.bytes;   // заказ Веры (records.md §9.4)
     const Hash wh = add(anna, work);
     add(anna, link(ref_of(anna, wh), ref_of(vera, need), "исполняет"));
 
@@ -244,8 +246,9 @@ TEST_F(DealViewTest, DirectDealAnchoredByAcceptance) {
     const UserId anna    = make_owner(0xA1);
 
     records::WorkRecord work;
-    work.action = "проводка по дружбе, в мессенджере договорились";
-    work.hours  = 3;
+    work.action   = "проводка по дружбе, в мессенджере договорились";
+    work.hours    = 3;
+    work.customer = friend_.bytes;   // договорились — заказ (records.md §9.4)
     const Hash wh = add(anna, work);
 
     records::Acceptance acc{};
@@ -314,24 +317,28 @@ TEST_F(DealViewTest, ForChainSeesSeekerAndWorkerSides) {
     EXPECT_EQ(view.for_chain(other).size(), 1u);   // only their own
 }
 
-// Одна работа — одна сделка (records.md §9.5, ИР-023): вторая сделка на ту же
-// работу не затирает первую молча — сделка одна, число сделок видно, работа
-// «продана дважды».
-TEST_F(DealViewTest, WorkPaidTwiceIsOneDealAndShowsTheCount) {
+// Засчитывается сделка того, кому продавец отдал результат (records.md §9.5,
+// ИР-023): чужая оплата той же работы ничтожна — она не затирает сделку и не
+// делает работу «проданной дважды», только видна в счётчике. Двойную продажу
+// может устроить лишь сам продавец — отпустив результат второму.
+TEST_F(DealViewTest, AStrangersPaymentIsVoidAndOnlyTheSellerSellsTwice) {
     const UserId anna  = make_owner(0xA1);
     const UserId vera  = make_owner(0xB2);
     const UserId boris = make_owner(0xC3);
 
     records::WorkRecord w;
-    w.action = "Проводка";
-    w.hours  = 3;
+    w.action   = "Проводка";
+    w.hours    = 3;
+    w.customer = vera.bytes;                                  // заказ Веры
     const Hash wh = add(anna, w);
-    const auto deal = [&](const UserId& by) {
+    const auto deal = [&](const UserId& by,
+                          std::optional<records::Ref> release = std::nullopt) {
         records::Acceptance a{};
         a.work        = ref_of(anna, wh);
         a.hours_raw   = 3;
         a.labor_units = 3;
         a.axes        = {{test_axis(), 3.0}};
+        a.release     = release;
         records::Transfer t{};
         t.from      = by.bytes;
         t.to        = anna.bytes;
@@ -348,13 +355,31 @@ TEST_F(DealViewTest, WorkPaidTwiceIsOneDealAndShowsTheCount) {
         EXPECT_EQ(dw.acceptance_hash.bytes, by_vera.bytes);
         EXPECT_EQ(dw.acceptances, 1u);
         EXPECT_FALSE(dw.oversold);
+        ASSERT_TRUE(dw.customer.has_value());
+        EXPECT_EQ(*dw.customer, vera);
         EXPECT_DOUBLE_EQ(dw.paid, 3.0);                        // оплачено той же записью
     }
 
-    deal(boris);                                              // та же работа — второй раз
+    deal(boris);                                              // Борис платит без адреса
+    {
+        const auto view = DealView::build(*storage_);
+        ASSERT_EQ(view.deals().size(), 1u);
+        const auto& dw = view.deals()[0].works.at(0);
+        EXPECT_EQ(dw.acceptance_hash.bytes, by_vera.bytes);   // сделка Веры стоит
+        EXPECT_EQ(dw.acceptances, 1u);
+        EXPECT_EQ(dw.unaddressed, 1u);                        // ничтожная — только в счётчике
+        EXPECT_FALSE(dw.oversold);
+    }
+
+    records::Release rl{};                                    // Анна сама отдаёт работу Борису
+    rl.work      = ref_of(anna, wh);
+    rl.to        = boris.bytes;
+    rl.timestamp = 900;
+    rl.expires   = 2000;
+    deal(boris, ref_of(anna, add(anna, rl)));
     const auto view = DealView::build(*storage_);
-    ASSERT_EQ(view.deals().size(), 1u);                       // одна работа — одна сделка
+    ASSERT_EQ(view.deals().size(), 1u);
     const auto& dw = view.deals()[0].works.at(0);
-    EXPECT_EQ(dw.acceptances, 2u);                            // вторая не затёрла первую
-    EXPECT_TRUE(dw.oversold);                                 // продана дважды
+    EXPECT_EQ(dw.acceptances, 2u);                            // обе — по адресу продавца
+    EXPECT_TRUE(dw.oversold);                                 // продана дважды — ею самой
 }

@@ -91,6 +91,7 @@ protected:
         records::WorkRecord wr{};
         wr.hours = hours;
         wr.title = !title.empty() ? title : worker == tailor_ ? "портной" : "швея";
+        wr.customer = payer.bytes;   // на заказ плательщика (records.md §9.4)
         const Block work = add(worker, wr);
 
         records::Acceptance a{};

@@ -906,3 +906,58 @@ TEST(RecordsCodec, AcceptanceAxisPathKeepsBranchAndIndex) {
     EXPECT_EQ(d.axes[0].axis.block, 41u);
     EXPECT_EQ(d.axes[0].axis, a.axes[0].axis);
 }
+
+// ── Кому достаётся результат (records.md §9.4 v3, records.md §9.8, ИР-023) ───
+
+// Работа на заказ: заказчик — необязательный хвост; без него поля нет вовсе.
+TEST(RecordsCodec, WorkRecordCustomerIsOptionalTail) {
+    WorkRecord wr{};
+    wr.action   = "торт на заказ";
+    wr.start_ts = 1;
+    wr.hours    = 4.0;
+    EXPECT_EQ(Codec::encode(Record{wr})[0], 0xA6);           // map(6)
+    wr.customer = make_uid(0xB2);
+    const auto bytes = Codec::encode(Record{wr});
+    EXPECT_EQ(bytes[0], 0xA7);                                // + заказчик
+    const auto d = std::get<WorkRecord>(Codec::decode(bytes));
+    ASSERT_TRUE(d.customer.has_value());
+    EXPECT_EQ(*d.customer, make_uid(0xB2));
+}
+
+static Release release_of(uint8_t buyer) {
+    Release rl{};
+    rl.work      = make_ref(0x53, 0x54);                      // работа в цепи 0x53
+    rl.to        = make_uid(buyer);
+    rl.timestamp = 1'700'000'000LL;
+    rl.expires   = 1'700'604'800LL;                           // неделя
+    return rl;
+}
+
+TEST(RecordsCodec, ReleaseRoundtrip) {
+    const Release rl = release_of(0xB2);
+    const auto d = std::get<Release>(roundtrip(Record{rl}));
+    EXPECT_EQ(d.work, rl.work);
+    EXPECT_EQ(d.to, rl.to);
+    EXPECT_EQ(d.expires, rl.expires);
+    EXPECT_EQ(d.timestamp, rl.timestamp);
+}
+
+// Отпуск, истекающий не позже самого себя, ничего не отпускает; отпуск себе —
+// тоже. Кодек таких не пишет.
+TEST(RecordsCodec, ReleaseThatExpiresAtOnceOrGoesToItselfIsRefused) {
+    Release rl = release_of(0xB2);
+    rl.expires = rl.timestamp;
+    EXPECT_THROW(Codec::encode(Record{rl}), CodecError);
+    EXPECT_THROW(Codec::encode(Record{release_of(0x53)}), CodecError);   // себе
+}
+
+// Сделка по отпуску: приёмка называет отпуск продавца — он лежит в цепи того,
+// кому платят; отпуск чужой цепи ничего не отпускает, и такую сделку не записать.
+TEST(RecordsCodec, DealNamesTheSellersRelease) {
+    Acceptance a = plain_acceptance(2.0);
+    a.release    = make_ref(0x53, 0x57);
+    EXPECT_EQ(roundtrip_accept(a).release, a.release);
+
+    a.release = make_ref(0xEE, 0x57);
+    EXPECT_THROW(Codec::encode(Record{deal_of(a)}), CodecError);
+}

@@ -65,12 +65,15 @@ struct DealWork {
     double      carried = 0;         // carried cost of tools/materials (records.md §9.5 v2)
     double      paid = 0;            // = labor_units + carried, paid in the same record
 
-    // One work — one deal (records.md §9.5, ИР-023). The deal shown above is the
-    // recognized one when there is one; `acceptances` says how many deals name
-    // the work, `oversold` — that there are two or more: the work was sold twice
-    // and none of them counts.
+    // One result — one counted deal (records.md §9.5, ИР-023). The deal shown
+    // above is the recognized one; `acceptances` says how many addressed deals
+    // name the work (a repeat by the same buyer included), `oversold` — that the
+    // seller gave it to two buyers or more and none counts, `unaddressed` — how
+    // many deals named it without the seller's address: void, never shown.
     std::size_t acceptances = 0;
+    std::size_t unaddressed = 0;
     bool        oversold    = false;
+    std::optional<UserId> customer;   // the pre-agreed customer (records.md §9.4 v3)
 };
 
 struct Deal {
