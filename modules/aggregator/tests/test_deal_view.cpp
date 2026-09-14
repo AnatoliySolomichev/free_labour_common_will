@@ -1,4 +1,5 @@
 #include "aggregator/deal_view.h"
+#include "labor_thread_support.h"
 
 #include <blockchain/crypto.h>
 #include <blockchain/serializer.h>
@@ -65,6 +66,7 @@ protected:
     std::filesystem::path              db_path_;
     std::unique_ptr<AggregatorStorage> storage_;
     BlockIndex                         next_index_ = 0;
+    LaborThreads threads_;   // records.md §9.4 v4: works go into the thread
 
     void SetUp() override {
         static int cnt = 0;
@@ -80,7 +82,8 @@ protected:
     }
 
     // Returns the block hash — deal links need it.
-    Hash add(const UserId& owner, const records::Record& rec) {
+    Hash add(const UserId& owner, const records::Record& written) {
+        const records::Record rec = threads_.stamp(owner.bytes, written);
         Block b{};
         b.address           = {owner, 0x7FFF'FFFFu, next_index_++};
         b.prev_hash         = Hash::zero();
@@ -92,7 +95,9 @@ protected:
         const KeyPair kp    = Crypto::generate_keypair();
         b.signature         = Crypto::sign(bytes.data(), bytes.size(), kp.sec);
         EXPECT_TRUE(storage_->add_block(b));
-        return Crypto::hash_block(b);
+        const Hash h = Crypto::hash_block(b);
+        threads_.placed(owner.bytes, rec, h.bytes);
+        return h;
     }
 };
 

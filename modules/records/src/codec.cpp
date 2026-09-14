@@ -1,6 +1,8 @@
 #include "records/codec.h"
 #include "records/acceptance.h"
 #include <cstring>
+#include <tuple>
+#include <cmath>
 #include <limits>
 
 // CBOR encoding follows RFC 8949 §4.2.1 (deterministic, shortest form).
@@ -158,12 +160,45 @@ void w_carry_entry(Buf& out, const CarryEntry& ce) {
     w_uint(out, 5); w_float64(out, ce.after);
 }
 
+// What a WorkRecord must be to exist (records.md §9.4 v4) — checked on write and
+// on read: a thread link that could not have been written by the rule, and a
+// proposed breakdown that is not a breakdown, are not records.
+void check_work_record(const WorkRecord& wr) {
+    if (wr.thread) {
+        const auto& prev = wr.thread->prev;
+        if ((wr.thread->seq == 0) != prev.empty())
+            throw CodecError("WorkRecord: у первого звена нити нет предыдущих, у остальных "
+                             "они есть (records.md §9.4)");
+        for (size_t i = 1; i < prev.size(); ++i)
+            if (!(std::tie(prev[i - 1].chain, prev[i - 1].hash) <
+                  std::tie(prev[i].chain, prev[i].hash)))
+                throw CodecError("WorkRecord: предыдущие звенья нити — по возрастанию, без "
+                                 "повторов");
+    }
+    if (!wr.axes.empty()) {
+        double sum = 0.0;
+        for (size_t i = 0; i < wr.axes.size(); ++i) {
+            const double share = wr.axes[i].share;
+            if (!(share > 0.0) || !std::isfinite(share))
+                throw CodecError("WorkRecord: доля оси обязана быть положительной");
+            for (size_t j = 0; j < i; ++j)
+                if (wr.axes[j].axis == wr.axes[i].axis)
+                    throw CodecError("WorkRecord: ось названа дважды");
+            sum += share;
+        }
+        if (std::abs(sum - 1.0) > 1e-9)
+            throw CodecError("WorkRecord: доли осей в сумме обязаны давать 1 (records.md §9.4)");
+    }
+}
+
 void enc_work_record(Buf& out, const WorkRecord& wr) {
     // Key 1 (agent → Grade) is retired with the grade (ИР-022 шаг 11). The
-    // optional tail — carry (7), title (8), customer (9) — is written only when
-    // present and in ascending key order, so the encoding stays deterministic.
+    // optional tail — carry (7), title (8), customer (9), thread (10), axes (11)
+    // — is written only when present and in ascending key order, so the
+    // encoding stays deterministic.
+    check_work_record(wr);
     w_map(out, 6 + (wr.carry.empty() ? 0 : 1) + (wr.title.empty() ? 0 : 1)
-                 + (wr.customer ? 1 : 0));
+                 + (wr.customer ? 1 : 0) + (wr.thread ? 1 : 0) + (wr.axes.empty() ? 0 : 1));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::WorkRecord));
     w_uint(out, 2); w_text(out, wr.action);
     w_uint(out, 3); w_int64(out, wr.start_ts);
@@ -178,6 +213,21 @@ void enc_work_record(Buf& out, const WorkRecord& wr) {
     }
     if (!wr.title.empty()) { w_uint(out, 8); w_text(out, wr.title); }
     if (wr.customer)       { w_uint(out, 9); w_fixed(out, *wr.customer); }
+    if (wr.thread) {
+        w_uint(out, 10);
+        w_map(out, 2);
+        w_uint(out, 0); w_uint(out, wr.thread->seq);
+        w_uint(out, 1); w_arr(out, wr.thread->prev.size());
+        for (const auto& p : wr.thread->prev) w_ref(out, p);
+    }
+    if (!wr.axes.empty()) {
+        w_uint(out, 11); w_arr(out, wr.axes.size());
+        for (const auto& x : wr.axes) {
+            w_map(out, 2);
+            w_uint(out, 0); w_block_path(out, x.axis);
+            w_uint(out, 1); w_float64(out, x.share);
+        }
+    }
 }
 
 // The acceptance (records.md §9.5): since ИР-023 not a record of its own but the
@@ -700,8 +750,8 @@ CarryEntry dec_carry_entry(CborReader& r) {
 }
 
 WorkRecord dec_work_record_fields(CborReader& r, uint64_t field_count) {
-    if (field_count < 6 || field_count > 9)
-        throw CodecError("WorkRecord: expected 6..9 fields");
+    if (field_count < 6 || field_count > 11)
+        throw CodecError("WorkRecord: expected 6..11 fields");
     WorkRecord wr{};
     expect_key(r, 2); wr.action   = r.r_text();
     expect_key(r, 3); wr.start_ts = r.r_int();
@@ -719,8 +769,8 @@ WorkRecord dec_work_record_fields(CborReader& r, uint64_t field_count) {
         for (uint64_t i = 0; i < n; ++i) wr.outputs.push_back(dec_resource_qty(r));
     }
     // The optional tail, by key and ascending: carry (7), title (8), customer
-    // (9). Present means non-empty — an empty one is never written, so reading
-    // one would mean two encodings of the same record.
+    // (9), thread (10), axes (11). Present means non-empty — an empty one is
+    // never written, so reading one would mean two encodings of the same record.
     uint64_t last = 6;
     for (uint64_t i = 6; i < field_count; ++i) {
         const uint64_t key = r.r_uint();
@@ -738,10 +788,31 @@ WorkRecord dec_work_record_fields(CborReader& r, uint64_t field_count) {
             std::array<uint8_t, 32> c{};
             r.r_fixed(c);
             wr.customer = c;
+        } else if (key == 10) {
+            if (r.r_map() != 2) throw CodecError("ThreadLink: expected 2 fields");
+            ThreadLink link{};
+            expect_key(r, 0); link.seq = r.r_uint();
+            expect_key(r, 1);
+            const uint64_t n = r.r_arr();
+            link.prev.reserve(static_cast<size_t>(n));
+            for (uint64_t k = 0; k < n; ++k) link.prev.push_back(dec_ref(r));
+            wr.thread = std::move(link);
+        } else if (key == 11) {
+            const uint64_t n = r.r_arr();
+            if (n == 0) throw CodecError("WorkRecord: axes present but empty");
+            wr.axes.reserve(static_cast<size_t>(n));
+            for (uint64_t k = 0; k < n; ++k) {
+                if (r.r_map() != 2) throw CodecError("AxisShare: expected 2 fields");
+                AxisShare x{};
+                expect_key(r, 0); x.axis  = dec_block_path(r);
+                expect_key(r, 1); x.share = r.r_float64();
+                wr.axes.push_back(std::move(x));
+            }
         } else {
             throw CodecError("WorkRecord: unknown field key");
         }
     }
+    check_work_record(wr);
     return wr;
 }
 

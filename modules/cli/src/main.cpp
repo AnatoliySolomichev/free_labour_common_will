@@ -12,6 +12,7 @@
 #include <records/json.h>
 #include <records/codec.h>
 #include <records/acceptance.h>
+#include <records/goods_thread.h>
 #include <records/draft.h>
 #include <records/types.h>
 #include <sync/dialogue_channel.h>
@@ -21,6 +22,7 @@
 #include <httplib.h>
 
 #include <algorithm>
+#include <tuple>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -280,6 +282,9 @@ static std::string record_summary(const Record& rec) {
                 ss << "  carry:" << r.carry.size() << " (" << carried << "h)";
             }
             if (r.customer) ss << "  for:" << short_hex(*r.customer);
+            if (r.thread) ss << "  thread#" << r.thread->seq
+                             << (r.thread->prev.size() > 1 ? " merge" : "");
+            if (!r.axes.empty()) ss << "  axes:" << r.axes.size();
         } else if constexpr (std::is_same_v<T, records::Release>) {
             ss << "[Release]     work:" << short_hex(r.work.hash)
                << "  to:" << short_hex(r.to) << "  expires:" << r.expires;
@@ -714,6 +719,97 @@ static void attach_carry(Context& ctx, WorkRecord& wr,
     }
 }
 
+// The goods thread (records.md §9.4 v4, ИР-023): a work goes into the chain's
+// one thread — after every link this device can see — and claims hours of its
+// own. Without --start the work is taken to have just ended; if those hours are
+// already claimed by another work of the chain, it goes into the latest free
+// window before them — never into the future, whose hours belong to work not
+// yet done. The same hours are never sold twice: an explicit --start that
+// crosses another work is refused.
+static void place_in_thread(Context& ctx, WorkRecord& wr, bool explicit_start) {
+    std::vector<records::ObservedWork>          seen;   // own works, every local branch
+    std::map<std::array<uint8_t, 32>, uint64_t> seq_of;
+    for (const NodeIndex branch : ctx.local_branches()) {
+        std::vector<Block> blocks;
+        try { blocks = ctx.bc.get_branch(ctx.user_id, branch); }
+        catch (const BlockchainError&) { continue; }
+        for (const auto& b : blocks) {
+            if (b.type != BlockType::DATA) continue;
+            Record rec;
+            try { rec = Codec::decode(b.payload.data(), b.payload.size()); }
+            catch (const CodecError&) { continue; }
+            const auto* w = std::get_if<WorkRecord>(&rec);
+            if (!w) continue;
+            const auto h = Crypto::hash_block(b).bytes;
+            seen.push_back({h, records::labor_interval(*w), w->thread});
+            if (w->thread) seq_of[h] = w->thread->seq;
+        }
+    }
+
+    const auto crossing = [&]() -> const records::ObservedWork* {
+        const auto iv = records::labor_interval(wr);
+        for (const auto& o : seen)
+            if (records::intervals_cross(iv, o.interval)) return &o;
+        return nullptr;
+    };
+    if (const auto* o = crossing()) {
+        if (explicit_start)
+            throw std::runtime_error(
+                "часы работы пересекаются с работой " + short_hex(o->hash) +
+                " — одни и те же часы не продаются дважды (records.md §9.4)");
+        // Без --start: самое позднее свободное окно, кончающееся не позже, чем
+        // работа «только что кончилась». Будущих часов клиент не заявляет — иначе
+        // они заняли бы место настоящей работы, которая ещё впереди.
+        const int64_t length = records::labor_interval(wr).second - wr.start_ts;
+        while (const auto* c = crossing()) wr.start_ts = c->interval.first - length;
+        std::cerr << "нить труда: эти часы уже заняты другой работой — работа поставлена "
+                     "раньше, в свободное окно (начало " << wr.start_ts << ")\n";
+    }
+
+    const auto th = records::check_labor_thread(ctx.user_id.bytes, seen);
+    records::ThreadLink link{};
+    for (const auto& tip : th.tips) {
+        link.prev.push_back(Ref{ctx.user_id.bytes, tip});
+        link.seq = std::max(link.seq, seq_of[tip] + 1);
+    }
+    std::sort(link.prev.begin(), link.prev.end(), [](const Ref& x, const Ref& y) {
+        return std::tie(x.chain, x.hash) < std::tie(y.chain, y.hash);
+    });
+    wr.thread = link;
+    std::cerr << "нить труда: звено #" << link.seq;
+    if (link.prev.size() > 1) std::cerr << " — сводит " << link.prev.size() << " ветки";
+    std::cerr << "\n";
+}
+
+// --axis-share ПУТЬ_ОСИ=ДОЛЯ, repeatable: the worker's proposed breakdown of the
+// hours by axis (records.md §9.4 v4). The last axis takes the remainder, so the
+// shares add up to 1 exactly, not up to rounding.
+static std::vector<records::AxisShare> parse_axis_shares(const std::vector<std::string>& specs) {
+    std::vector<records::AxisShare> out;
+    double sum = 0.0;
+    for (const auto& p : specs) {
+        const auto eq = p.rfind('=');
+        if (eq == std::string::npos || eq == 0)
+            throw std::runtime_error("--axis-share ждёт ПУТЬ_ОСИ=ДОЛЯ (путь: цепь/узел/блок/хеш): " + p);
+        records::AxisShare x{};
+        x.axis  = parse_block_path(p.substr(0, eq));
+        x.share = std::stod(p.substr(eq + 1));
+        sum += x.share;
+        out.push_back(x);
+    }
+    if (out.empty()) return out;
+    if (std::abs(sum - 1.0) > 1e-6)
+        throw std::runtime_error("--axis-share в сумме даёт " + std::to_string(sum) +
+                                 ", а должно 1.0");
+    double left = 1.0;
+    for (std::size_t i = 0; i + 1 < out.size(); ++i) left -= out[i].share;
+    out.back().share = left;
+    std::sort(out.begin(), out.end(), [](const records::AxisShare& a, const records::AxisShare& b) {
+        return a.axis.hash < b.axis.hash;
+    });
+    return out;
+}
+
 // bc block stub [--leaf L]
 // Appends an empty stub DATA block: bootstrap for merge (blockchain.md §6.4) or time anchor (blockchain.md §5.4).
 static int cmd_block_stub(const fs::path& data_dir, int argc, char** argv) {
@@ -1072,7 +1168,10 @@ static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
                      "   [--for    CHAIN]           заказчик: работа на заказ — результат\n"
                      "                              отпущен ему этой же записью (records.md §9.4);\n"
                      "                              без него — bc release после работы\n"
-                     "   [--start  UNIX_TS]         (default: now)\n"
+                     "   [--start  UNIX_TS]         начало; по умолчанию работа только что\n"
+                     "                              кончилась (нить труда, records.md §9.4)\n"
+                     "   [--axis-share ОСЬ=ДОЛЯ]    предложенная разбивка часов по осям,\n"
+                     "                              сумма 1 — покупатель её подтверждает\n"
                      "   [--input  NAME:QTY:UNIT]   (repeatable)\n"
                      "   [--output NAME:QTY:UNIT]   (repeatable)\n"
                      "   [--tool   HASH_PREFIX:USED] (repeatable — перенос стоимости, ИР-011)\n";
@@ -1086,10 +1185,12 @@ static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
     // записью; без --for — отпуск потом (bc release, records.md §9.8).
     if (const auto for_s = flag_val(argc, argv, "--for"); !for_s.empty())
         wr.customer = uid_from_hex(for_s);
+    // Без --start работа считается только что законченной (records.md §9.4 v4).
     const auto start_s = flag_val(argc, argv, "--start");
     wr.start_ts = start_s.empty()
-                  ? static_cast<int64_t>(std::time(nullptr))
+                  ? static_cast<int64_t>(std::time(nullptr)) - std::llround(wr.hours * 3600.0)
                   : static_cast<int64_t>(std::stoll(start_s));
+    wr.axes = parse_axis_shares(flag_all(argc, argv, "--axis-share"));
     for (const auto& s : flag_all(argc, argv, "--input"))  wr.inputs.push_back(parse_rq(s));
     for (const auto& s : flag_all(argc, argv, "--output")) wr.outputs.push_back(parse_rq(s));
 
@@ -1098,6 +1199,7 @@ static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
     auto carry_specs = flag_all(argc, argv, "--tool");
     for (const auto& s : flag_all(argc, argv, "--material")) carry_specs.push_back(s);
     if (!carry_specs.empty()) attach_carry(ctx, wr, carry_specs);
+    place_in_thread(ctx, wr, !start_s.empty());
 
     const Block block = append_record(ctx, Record{wr});
     std::cout << "block #" << block.address.block_index
@@ -1168,8 +1270,7 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
         if (std::string(argv[i]) == "--axis")       axis_args.emplace_back(argv[i + 1]);
         if (std::string(argv[i]) == "--axis-share") share_args.emplace_back(argv[i + 1]);
     }
-    if (work_s.empty() || quality_s.empty() ||
-        (axis_args.empty() && share_args.empty() && like_s.empty())) {
+    if (work_s.empty() || quality_s.empty()) {
         std::cerr << "Usage: bc accept — принять работу и оплатить её одной записью\n"
                      "    --work         WORK_CHAIN/HASH\n"
                      "    --quality      TEXT\n"
@@ -1183,6 +1284,8 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
                      "    --like ПРИЁМКА               «такая же работа, как та»: доли\n"
                      "                                 берутся у образца, ссылка на него\n"
                      "                                 остаётся в приёмке\n"
+                     "    (ничего не задано)           разбивка, предложенная работником в\n"
+                     "                                 записи труда (records.md §9.4)\n"
                      "    [--hours-raw   FLOAT]   default: hours of the fetched WorkRecord\n"
                      "    [--k           FLOAT]   price = hours × Σ network prices of the\n"
                      "                            axes named × k (default k 1.0)\n"
@@ -1279,6 +1382,27 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
                               : std::string("работа на ваш заказ"))
                   << "\n";
     }
+    // Нить труда продавца (records.md §9.4 v4): платим только за работу в нити и на
+    // своих часах — иначе эти часы могли продать дважды, и сделка в счёт не пойдёт.
+    if (status && status->is_object()) {
+        const auto state = jstr(status->object, "thread_state");
+        if (state == "unthreaded")
+            throw std::runtime_error(
+                "работа записана вне нити труда — её часов не сверить с другими работами "
+                "продавца, в счёт такая сделка не пойдёт (records.md §9.4)");
+        if (state == "broken")
+            throw std::runtime_error("звено нити труда битое — работа вне нити (records.md §9.4)");
+        if (state == "crossing") {
+            std::string with;
+            if (const auto* cs = jarr(status->object, "crosses"))
+                for (const auto& c : cs->array)
+                    if (c.is_string()) with += " " + c.string.substr(c.string.find('/') + 1, 16);
+            throw std::runtime_error(
+                "часы этой работы заняты и другой работой продавца:" + with +
+                " — одни и те же часы проданы дважды, в счёт не пойдёт ни одна "
+                "(records.md §9.4)");
+        }
+    }
     for (const auto& p : axis_args) {
         const auto eq = p.rfind('=');
         if (eq == std::string::npos || eq == 0)
@@ -1315,6 +1439,16 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
             std::cerr << "разбивка как у образца: " << shares.size() << " ос.\n";
         }
     }
+
+    // Ничего не названо — разбивка, которую предложил работник (records.md §9.4
+    // v4): покупатель подтверждает её своей подписью.
+    if (a.axes.empty() && shares.empty() && work && !work->axes.empty()) {
+        for (const auto& x : work->axes) shares.emplace_back(x.axis, x.share);
+        std::cerr << "разбивка, предложенная работником: " << shares.size() << " ос.\n";
+    }
+    if (a.axes.empty() && shares.empty())
+        throw std::runtime_error("разбивка цены обязательна (ИР-022): --axis, --axis-share или "
+                                 "--like — у работы нет предложенной (records.md §9.4)");
 
     if (raw_s.empty()) {
         // Hours from the worker's record (records.md §9.5).
@@ -1576,6 +1710,77 @@ static int cmd_release(const fs::path& data_dir, int argc, char** argv) {
               << short_hex(rl.to) << ", срок " << rl.expires << " (через "
               << (rl.expires - rl.timestamp) / 86400.0 << " дн.)\n";
     if (!via.empty()) upload_block(via, block);
+    return 0;
+}
+
+// bc thread [ЦЕПЬ] --via URL
+// The goods thread of a chain (records.md §9.4 v4, ИР-023): its works in time,
+// the faults — outside the thread, broken links, hours sold twice — and the
+// labor no deal has confirmed yet, by the axes the worker proposed.
+static int cmd_thread(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);
+    const auto via = flag_val(argc, argv, "--via");
+    if (via.empty()) {
+        std::cerr << "Usage: bc thread [ЦЕПЬ] --via URL   (по умолчанию — своя цепь)\n";
+        return 1;
+    }
+    const std::string chain = pos.size() >= 2 ? pos[1] : to_hex(load_user_id(data_dir).bytes);
+    const auto root = fetch_json(via, "/thread/" + chain);
+    if (!root || !root->is_object()) {
+        std::cerr << "агрегатор не знает работ этой цепи (блоки выгружены — --via?)\n";
+        return 1;
+    }
+    const auto& o = root->object;
+    const auto when = [](double ts) {
+        const std::time_t t = static_cast<std::time_t>(ts);
+        char buf[32];
+        std::strftime(buf, sizeof buf, "%Y-%m-%d %H:%M", std::gmtime(&t));
+        return std::string(buf);
+    };
+    const auto* works = jarr(o, "works");
+    const auto* gaps  = records::json::find(o, "gaps");
+    std::cout << "нить труда " << chain.substr(0, 16) << "…  (records.md §9.4; время UTC)\n"
+              << "  работ: " << (works ? works->array.size() : 0)
+              << ", форков: " << static_cast<int>(jnum(o, "forks"))
+              << (gaps && gaps->boolean ? ", есть пробелы — не все звенья у агрегатора" : "")
+              << "\n";
+    if (works)
+        for (const auto& w : works->array) {
+            if (!w.is_object()) continue;
+            const auto& x     = w.object;
+            const auto* sold  = records::json::find(x, "sold");
+            const auto  fault = jstr(x, "fault");
+            std::cout << "  " << when(jnum(x, "start")) << "  " << jnum(x, "hours") << "ч  "
+                      << jstr(x, "action")
+                      << (sold && sold->boolean ? "  [продана]" : "")
+                      << (fault == "unthreaded" ? "  ⚠ вне нити"
+                        : fault == "broken"     ? "  ⚠ битое звено"
+                        : fault == "crossing"   ? "  ✗ часы заняты другой работой" : "")
+                      << "\n";
+        }
+    if (const auto* ov = jarr(o, "overlaps"); ov && !ov->array.empty()) {
+        std::cout << "  одни и те же часы в двух работах — подписано самой цепью:\n";
+        for (const auto& p : ov->array)
+            if (p.is_array() && p.array.size() == 2)
+                std::cout << "    " << p.array[0].string.substr(p.array[0].string.find('/') + 1, 12)
+                          << " ⟷ "   << p.array[1].string.substr(p.array[1].string.find('/') + 1, 12)
+                          << "\n";
+    }
+    if (const auto* un = records::json::find(o, "unconfirmed"); un && un->is_object()) {
+        std::cout << "  ещё не подтверждено сделкой: " << jnum(un->object, "hours") << "ч";
+        if (const auto* ax = jarr(un->object, "axes"); ax && !ax->array.empty()) {
+            std::cout << " — по осям:";
+            for (const auto& a : ax->array) {
+                if (!a.is_object()) continue;
+                const auto label = jstr(a.object, "label");
+                std::cout << "  " << (label.empty() ? jstr(a.object, "axis").substr(0, 12) : label)
+                          << " " << jnum(a.object, "hours") << "ч";
+            }
+        }
+        if (jnum(un->object, "without_axes") > 0)
+            std::cout << "  (без разбивки: " << jnum(un->object, "without_axes") << "ч)";
+        std::cout << "\n";
+    }
     return 0;
 }
 
@@ -3478,7 +3683,8 @@ static int cmd_deal_work(const fs::path& data_dir, int argc, char** argv) {
     const auto action_s = flag_val(argc, argv, "--action");
     if (pos.size() < 3 || hours_s.empty() || action_s.empty()) {
         std::cerr << "Usage: bc deal work NEED_REF --hours H --action TEXT "
-                     "[--title TEXT] [--for CHAIN] [--tool HASH_PREFIX:USED]... "
+                     "[--title TEXT] [--for CHAIN] [--axis-share AXIS=SHARE]... "
+                     "[--tool HASH_PREFIX:USED]... "
                      "[--start TS] [--leaf L] [--via URL]\n"
                      "  работа — на заказ хозяина потребности (records.md §9.4);\n"
                      "  --for — если принимает и платит другой (economy.md §7)\n";
@@ -3496,12 +3702,16 @@ static int cmd_deal_work(const fs::path& data_dir, int argc, char** argv) {
     wr.customer = for_s.empty() ? parse_ref(pos[2]).chain : uid_from_hex(for_s);
     wr.action   = action_s;
     wr.hours    = std::stod(hours_s);
+    // Без --start работа считается только что законченной (records.md §9.4 v4).
     const auto start_s = flag_val(argc, argv, "--start");
-    wr.start_ts = start_s.empty() ? static_cast<int64_t>(std::time(nullptr))
-                                  : static_cast<int64_t>(std::stoll(start_s));
+    wr.start_ts = start_s.empty()
+        ? static_cast<int64_t>(std::time(nullptr)) - std::llround(wr.hours * 3600.0)
+        : static_cast<int64_t>(std::stoll(start_s));
+    wr.axes = parse_axis_shares(flag_all(argc, argv, "--axis-share"));
     auto carry_specs = flag_all(argc, argv, "--tool");
     for (const auto& s : flag_all(argc, argv, "--material")) carry_specs.push_back(s);
     if (!carry_specs.empty()) attach_carry(ctx, wr, carry_specs);
+    place_in_thread(ctx, wr, !start_s.empty());
 
     const Block work_block = append_record(ctx, Record{wr});
     const auto  work_hash  = Crypto::hash_block(work_block);
@@ -4586,7 +4796,12 @@ Labor:
                                        advance: the result goes to them by
                                        this very record (records.md §9.4);
                                        otherwise — bc release afterwards
-    [--start UNIX_TS]
+    [--start UNIX_TS]                  default: the work just ended; if those
+                                       hours are claimed, the latest free
+                                       window before — never the future
+                                       (the goods thread, records.md §9.4)
+    [--axis-share PATH=SHARE ...]      proposed breakdown of the hours by
+                                       axis (Σ 1); the buyer confirms it
     [--input  NAME:QTY:UNIT ...]   (repeatable)
     [--output NAME:QTY:UNIT ...]   (repeatable)
     [--tool  HASH_PREFIX:USED ...] (repeatable) carry the cost of an own
@@ -4602,7 +4817,8 @@ Labor:
     | --axis-share PATH=SHARE ...       per axis (their sum is the price), shares
     | --like ACCEPT_REF                of the price, or «такая же работа, как
                                        та» — the sample's shares, kept as
-                                       provenance
+                                       provenance; none given — the worker's
+                                       proposal from the work record
     [--hours-raw FLOAT]                default: hours of the fetched WorkRecord
     [--via URL] [--k FLOAT]            price = hours × Σ network prices of the
                                        axes named × k (economy.md §2а)
@@ -4618,6 +4834,10 @@ Labor:
   release WORK --to CHAIN          Give the result of an own work to a buyer
     [--days N | --until UNIX_TS]       (records.md §9.8): only their deal counts,
     [--via URL]                        and only before the term (default 7 days)
+  thread [CHAIN] --via URL         The goods thread (records.md §9.4): works in
+                                       time, faults (outside the thread, broken
+                                       links, hours sold twice), labor not yet
+                                       confirmed — by the proposed axes
 
 Means of production (ИР-011, records.md §10.2, records.md §9.4):
   tool add ИМЯ --cost H --life HRS Register a tool: cost in labor-hours,
@@ -4775,6 +4995,7 @@ int main(int argc, char** argv) {
         else if (cmd == "work"      && subcmd == "log")     return cmd_work_log(data_dir, argc, argv);
         else if (cmd == "accept")                           return cmd_accept(data_dir, argc, argv);
         else if (cmd == "release")                          return cmd_release(data_dir, argc, argv);
+        else if (cmd == "thread")                           return cmd_thread(data_dir, argc, argv);
         else if (cmd == "tool"      && subcmd == "add")     return cmd_tool_add(data_dir, argc, argv);
         else if (cmd == "tool"      && subcmd == "list")    return cmd_tool_list(data_dir, argc, argv);
         else if (cmd == "tool"      && subcmd == "show")    return cmd_tool_show(data_dir, argc, argv);

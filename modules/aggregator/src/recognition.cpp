@@ -6,7 +6,8 @@ namespace aggregator {
 
 DealsOnTable read_deals(const AggregatorStorage& storage) {
     DealsOnTable out;
-    std::map<std::array<uint8_t, 32>, std::size_t> release_at;   // release hash → index
+    std::map<std::array<uint8_t, 32>, std::size_t>       release_at;   // release hash → index
+    std::map<UserId, std::vector<records::ObservedWork>> observed;     // chain → its works
     for (const Hash& bh : storage.all_block_hashes()) {
         const auto block = storage.get_block_by_hash(bh);
         if (!block || block->type != BlockType::DATA) continue;
@@ -16,7 +17,8 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
         catch (const records::CodecError&) { continue; }
 
         if (const auto* w = std::get_if<records::WorkRecord>(&rec)) {
-            out.works[bh.bytes] = WorkOnTable{owner, w->customer};
+            out.works[bh.bytes] = WorkOnTable{owner, *w};
+            observed[owner].push_back({bh.bytes, records::labor_interval(*w), w->thread});
         } else if (const auto* rl = std::get_if<records::Release>(&rec)) {
             if (rl->work.chain != owner.bytes) continue;   // only one's own work is released
             release_at[bh.bytes] = out.releases.size();
@@ -28,6 +30,10 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
         }
     }
 
+    // Each chain's goods thread (records.md §9.4 v4): its links and its hours.
+    for (const auto& [chain, works] : observed)
+        out.threads[chain] = records::check_labor_thread(chain.bytes, works);
+
     // Blocks come in hash order, so the seller's records are matched to the
     // deals only after the whole scan.
     std::vector<records::DealClaim> claims;
@@ -37,14 +43,15 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
         std::optional<std::array<uint8_t, 32>> customer;
         if (const auto w = out.works.find(a.work.hash);
             w != out.works.end() && w->second.worker.bytes == a.work.chain)
-            customer = w->second.customer;
+            customer = w->second.record.customer;
         const records::Release* release = nullptr;
         if (a.release)
             if (const auto r = release_at.find(a.release->hash);
                 r != release_at.end() && out.releases[r->second].seller.bytes == a.release->chain)
                 release = &out.releases[r->second].release;
         claims.push_back({d.hash, a.work.hash, d.payer.bytes, d.transfer.timestamp,
-                          records::addressed_to(d.transfer, customer, release)});
+                          records::addressed_to(d.transfer, customer, release),
+                          out.sound(a.work)});
     }
     out.recognition = records::recognize_deals(claims);
     return out;

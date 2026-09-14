@@ -1,0 +1,136 @@
+#include "records/goods_thread.h"
+
+#include <gtest/gtest.h>
+
+using namespace records;
+
+namespace {
+
+using Hash32 = std::array<uint8_t, 32>;
+using Hashes = std::set<Hash32>;
+
+Hash32 h(uint8_t fill) {
+    Hash32 x{};
+    x.fill(fill);
+    return x;
+}
+
+const Hash32 kChain = h(0xA1);
+constexpr int64_t kHour = 3600;
+
+// A link of kChain's thread, from hour `from` to hour `to`.
+ObservedWork link(uint8_t hash, int64_t from, int64_t to, uint64_t seq,
+                  std::vector<uint8_t> prev) {
+    ObservedWork w{};
+    w.hash     = h(hash);
+    w.interval = {from * kHour, to * kHour};
+    ThreadLink l{};
+    l.seq = seq;
+    for (const auto p : prev) l.prev.push_back(Ref{kChain, h(p)});
+    w.link = l;
+    return w;
+}
+
+// A work written outside the thread.
+ObservedWork loose(uint8_t hash, int64_t from, int64_t to) {
+    ObservedWork w{};
+    w.hash     = h(hash);
+    w.interval = {from * kHour, to * kHour};
+    return w;
+}
+
+} // namespace
+
+TEST(LaborThread, TheIntervalOfAWork) {
+    WorkRecord wr{};
+    wr.start_ts = 1000;
+    wr.hours    = 1.5;
+    EXPECT_EQ(labor_interval(wr), (std::pair<int64_t, int64_t>{1000, 1000 + 5400}));
+    EXPECT_TRUE(intervals_cross({0, 10}, {9, 20}));
+    EXPECT_FALSE(intervals_cross({0, 10}, {10, 20}));   // конец одной — начало другой
+}
+
+// Нить по порядку: всё в нити, пересечений нет, вершина одна.
+TEST(LaborThread, AStraightThreadIsSound) {
+    const auto t = check_labor_thread(kChain, {link(1, 0, 8, 0, {}),
+                                               link(2, 8, 16, 1, {1}),
+                                               link(3, 24, 30, 2, {2})});
+    for (uint8_t i = 1; i <= 3; ++i) EXPECT_TRUE(t.sound(h(i)));
+    EXPECT_EQ(t.tips, std::vector<Hash32>{h(3)});
+    EXPECT_EQ(t.forks, 0u);
+    EXPECT_FALSE(t.gaps);
+}
+
+// Форк без пересечения — не обман (правило форка, ИР-023): понедельник записан на
+// телефоне, вторник на компьютере; звено с двумя предыдущими сводит ветки.
+TEST(LaborThread, AForkWithoutCrossingIsNoFraud) {
+    const auto t = check_labor_thread(kChain, {link(1, 0, 8, 0, {}),
+                                               link(2, 24, 32, 1, {1}),
+                                               link(3, 48, 56, 1, {1}),
+                                               link(4, 72, 80, 2, {2, 3})});
+    for (uint8_t i = 1; i <= 4; ++i) EXPECT_TRUE(t.sound(h(i)));
+    EXPECT_EQ(t.forks, 1u);
+    EXPECT_EQ(t.tips, std::vector<Hash32>{h(4)});
+}
+
+// Одни и те же часы в двух работах — подписанное доказательство. Какая из двух
+// фиктивна, не узнать, поэтому не в счёт обе; стык в 10:00 пересечением не считается.
+TEST(LaborThread, CrossingHoursSpoilBothWorks) {
+    const auto t = check_labor_thread(kChain, {link(1, 0, 8, 0, {}),
+                                               link(2, 6, 10, 1, {1}),
+                                               link(3, 10, 12, 2, {2})});
+    EXPECT_FALSE(t.sound(h(1)));
+    EXPECT_FALSE(t.sound(h(2)));
+    EXPECT_TRUE(t.sound(h(3)));
+    ASSERT_EQ(t.overlaps.size(), 1u);
+    EXPECT_EQ(t.overlaps[0], (std::pair<Hash32, Hash32>{h(1), h(2)}));
+}
+
+// Форк с пересечением — обман, и доказательство подписано самой цепью.
+TEST(LaborThread, AForkThatCrossesIsCaught) {
+    const auto t = check_labor_thread(kChain, {link(1, 0, 8, 0, {}),
+                                               link(2, 9, 17, 1, {1}),
+                                               link(3, 12, 20, 1, {1})});
+    EXPECT_TRUE(t.sound(h(1)));
+    EXPECT_FALSE(t.sound(h(2)));
+    EXPECT_FALSE(t.sound(h(3)));
+    EXPECT_EQ(t.forks, 1u);
+}
+
+// Работа вне нити к сделке не признаётся — но её часы всё равно заявлены:
+// пересечение с ней портит и звено нити.
+TEST(LaborThread, AWorkOutsideTheThreadStillClaimsItsHours) {
+    const auto t = check_labor_thread(kChain, {link(1, 0, 8, 0, {}),
+                                               loose(2, 20, 24),
+                                               loose(3, 4, 6)});
+    EXPECT_EQ(t.unthreaded, (Hashes{h(2), h(3)}));
+    EXPECT_FALSE(t.sound(h(2)));
+    EXPECT_FALSE(t.sound(h(1)));                      // 4–6 внутри 0–8
+    EXPECT_EQ(t.overlapping, (Hashes{h(1), h(3)}));
+}
+
+// Битое звено — вне нити: номер не на единицу больше предыдущего; предыдущее из
+// чужой цепи; предыдущее — не звено. Предыдущего нет на столе — это пробел, а не
+// вина: звено остаётся в нити.
+TEST(LaborThread, BrokenLinksAreOutOfTheThreadAndGapsAreNotFaults) {
+    ObservedWork foreign = link(4, 40, 41, 1, {});
+    foreign.link->prev = {Ref{h(0xEE), h(1)}};
+    const auto t = check_labor_thread(kChain, {link(1, 0, 8, 0, {}),
+                                               link(2, 10, 11, 5, {1}),   // seq не тот
+                                               foreign,
+                                               loose(9, 30, 31),
+                                               link(5, 50, 51, 1, {9}),   // prev — не звено
+                                               link(6, 60, 61, 3, {7})}); // prev не получен
+    EXPECT_EQ(t.broken, (Hashes{h(2), h(4), h(5)}));
+    EXPECT_TRUE(t.sound(h(1)));
+    EXPECT_TRUE(t.sound(h(6)));
+    EXPECT_TRUE(t.gaps);
+    EXPECT_EQ(t.tips, (std::vector<Hash32>{h(1), h(6)}));   // битое 2 продолжением не считается
+}
+
+// Работа без часов ничего не заявляет и ни с чем не пересекается.
+TEST(LaborThread, AWorkOfNoHoursCrossesNothing) {
+    const auto t = check_labor_thread(kChain, {link(1, 0, 8, 0, {}), link(2, 4, 4, 1, {1})});
+    EXPECT_TRUE(t.sound(h(1)));
+    EXPECT_TRUE(t.sound(h(2)));
+}

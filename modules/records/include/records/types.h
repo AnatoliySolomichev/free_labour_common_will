@@ -173,6 +173,33 @@ struct CarryEntry {
     }
 };
 
+// The labor link of the chain's goods thread (records.md §9.4 v4, ИР-023): one
+// thread per chain, written from any branch. `seq` is one past the highest of
+// `prev` — 0 for the first link, the only one without prev; several `prev`
+// merge branches that continued the thread without seeing each other. The
+// thread is what lets a buyer see every interval the worker ever claimed before
+// paying for one of them.
+struct ThreadLink {
+    uint64_t         seq = 0;
+    std::vector<Ref> prev;   // strictly ascending by (chain, hash); empty ⇔ seq == 0
+
+    bool operator==(const ThreadLink& o) const noexcept {
+        return seq == o.seq && prev == o.prev;
+    }
+};
+
+// The share of a work's hours the worker proposes for one axis (records.md §9.4
+// v4): «труд по осям», not yet confirmed by anyone. The buyer confirms it or
+// writes their own breakdown in the acceptance (records.md §9.5).
+struct AxisShare {
+    BlockPath axis;
+    double    share = 0;   // > 0; Σ over the work = 1
+
+    bool operator==(const AxisShare& o) const noexcept {
+        return axis == o.axis && share == o.share;
+    }
+};
+
 // One act of work (records.md §9.4). The worker is the chain that signed the
 // block. There is no reference to a specialty or a grade (ИР-022 шаг 11): what
 // the work was is said by the breakdown of its price in the Acceptance
@@ -180,9 +207,9 @@ struct CarryEntry {
 struct WorkRecord {
     static constexpr RecordType TYPE = RecordType::WorkRecord;
 
-    std::string action;    // description of the work performed
-    int64_t     start_ts;  // Unix timestamp UTC
-    double      hours;     // duration in hours
+    std::string action;         // description of the work performed
+    int64_t     start_ts = 0;   // Unix timestamp UTC
+    double      hours    = 0;   // duration in hours
 
     std::vector<ResourceQty> inputs;   // may be empty
     std::vector<ResourceQty> outputs;  // may be empty
@@ -196,6 +223,12 @@ struct WorkRecord {
     // separate Release needed. Absent by default: work for stock, or without an
     // agreement, is released afterwards (records.md §9.8).
     std::optional<std::array<uint8_t, 32>> customer;
+    // v4 (ИР-023): the labor link of the chain's goods thread. A work outside
+    // the thread is not recognized for a deal (records.md §9.5): its buyer could
+    // not have seen whether its hours were already sold.
+    std::optional<ThreadLink> thread;
+    // v4 (ИР-023): the worker's proposed breakdown of these hours by axis.
+    std::vector<AxisShare>    axes;
 };
 
 // A release (records.md §9.8, ИР-023): the seller gives the result of an own work

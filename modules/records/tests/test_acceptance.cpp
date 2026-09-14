@@ -141,6 +141,20 @@ TEST(DealRecognition, WorksAreIndependentAndDuplicatesAreOneDeal) {
     EXPECT_EQ(r.oversold, Hashes{h(kOther)});
 }
 
+// Работа вне нити труда или на часах, которые заявила и другая работа цепи
+// (records.md §9.4 v4): продавец сделку адресовал, часы ушли — но в счёт она не
+// идёт, ведь эти часы могли продать дважды.
+TEST(DealRecognition, ADealOnAnUnsoundWorkMovesHoursButDoesNotCount) {
+    DealClaim c = claim(0xA1, kWork, kVera);
+    c.sound = false;
+    const auto r = recognize_deals({c, claim(0xE1, kWork, kMallory, 900, /*addressed=*/false)});
+    EXPECT_TRUE(r.recognized.empty());
+    EXPECT_EQ(r.unsound, Hashes{h(0xA1)});
+    EXPECT_EQ(r.unsound_works, Hashes{h(kWork)});
+    EXPECT_TRUE(r.moves_hours(h(0xA1)));
+    EXPECT_EQ(r.unaddressed, Hashes{h(0xE1)});                 // ничтожная остаётся ничтожной
+}
+
 TEST(DealRecognition, SettledExactly) {
     EXPECT_TRUE(settled_exactly(6.23625, 6.23625));
     EXPECT_TRUE(settled_exactly(6.0 + 5e-7, 6.0));    // округление, не другая сделка

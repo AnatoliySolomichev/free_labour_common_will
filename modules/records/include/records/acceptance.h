@@ -57,20 +57,25 @@ struct DealClaim {
     std::array<uint8_t, 32> payer{};          // who accepted and paid
     int64_t                 timestamp = 0;    // the deal's own
     bool                    addressed = false;  // addressed_to(...)
+    // The work sits in its worker's goods thread, on hours no other work of the
+    // chain claims (records.md §9.4 v4, records/goods_thread.h).
+    bool                    sound = true;
 };
 
 struct DealRecognition {
     std::set<std::array<uint8_t, 32>> recognized;   // deals that count
     std::set<std::array<uint8_t, 32>> repeated;     // the same buyer paid again
     std::set<std::array<uint8_t, 32>> contested;    // deals on a result given to two buyers
+    std::set<std::array<uint8_t, 32>> unsound;      // deals on a work outside the thread or on crossing hours
     std::set<std::array<uint8_t, 32>> unaddressed;  // void: the seller named no such buyer
     std::set<std::array<uint8_t, 32>> oversold;     // WORKS given to two buyers or more
+    std::set<std::array<uint8_t, 32>> unsound_works;  // WORKS outside the thread or on crossing hours
 
     // Hours really moved: every addressed deal — the one that counts, a repeat,
-    // or one of a double sale. A void deal moves nothing.
+    // one of a double sale, or one on an unsound work. A void deal moves nothing.
     bool moves_hours(const std::array<uint8_t, 32>& deal) const {
         return recognized.count(deal) > 0 || repeated.count(deal) > 0
-            || contested.count(deal) > 0;
+            || contested.count(deal) > 0 || unsound.count(deal) > 0;
     }
 };
 

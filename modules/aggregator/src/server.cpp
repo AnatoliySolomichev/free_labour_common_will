@@ -13,6 +13,8 @@
 #include "aggregator/cloud_view.h"
 #include "blockchain/serializer.h"
 #include "blockchain/errors.h"
+#include <map>
+#include <set>
 #include <records/catalog.h>
 #include <records/codec.h>
 #include <httplib.h>
@@ -1455,8 +1457,8 @@ void AggregatorServer::setup_routes() {
             const bool  known = w != deals.works.end() && w->second.worker.bytes == ch;
             std::string body = "{\"ref\":\"" + to_hex(ch) + "/" + to_hex(wh) + "\""
                              + ",\"known\":" + (known ? "true" : "false");
-            if (known && w->second.customer)
-                body += ",\"customer\":\"" + to_hex(*w->second.customer) + "\"";
+            if (known && w->second.record.customer)
+                body += ",\"customer\":\"" + to_hex(*w->second.record.customer) + "\"";
             body += ",\"releases\":[";
             bool first = true;
             for (const auto& r : deals.releases) {
@@ -1489,7 +1491,150 @@ void AggregatorServer::setup_routes() {
             }
             body += "],\"oversold\":";
             body += rc.oversold.count(wh) ? "true" : "false";
+            // The labor thread of the work (records.md §9.4 v4): a deal counts
+            // only on a work in its worker's thread, on hours of its own.
+            if (known) {
+                const auto t = deals.threads.find(w->second.worker);
+                const char* state = "sound";
+                std::vector<std::array<uint8_t, 32>> crosses;
+                if (t == deals.threads.end() || t->second.unthreaded.count(wh)) {
+                    state = "unthreaded";
+                } else if (t->second.broken.count(wh)) {
+                    state = "broken";
+                } else if (t->second.overlapping.count(wh)) {
+                    state = "crossing";
+                    for (const auto& [a, b] : t->second.overlaps) {
+                        if (a == wh) crosses.push_back(b);
+                        if (b == wh) crosses.push_back(a);
+                    }
+                }
+                body += ",\"thread_state\":\"" + std::string(state) + "\",\"crosses\":[";
+                for (std::size_t i = 0; i < crosses.size(); ++i)
+                    body += std::string(i ? "," : "") + "\"" + to_hex(ch) + "/"
+                          + to_hex(crosses[i]) + "\"";
+                body += "]";
+            }
             body += "}";
+            res.set_content(body, "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
+                            "application/json");
+        }
+    });
+
+    // ── GET /thread/<chain> ──────────────────────────────────────────────────
+    // A chain's goods thread, labor links (records.md §9.4 v4, ИР-023): its
+    // works in time with their links, the faults — works outside the thread,
+    // broken links, hours sold twice — and the labor no deal has confirmed yet,
+    // by the axes the worker proposed. What a buyer reads before paying.
+    svr.Get("/thread/:chain", [&](const httplib::Request& req,
+                                  httplib::Response& res) {
+        const auto chain = hex_to_hash(req.path_params.at("chain"));
+        if (!chain) {
+            res.status = 400;
+            res.set_content("{\"error\":\"invalid chain\"}", "application/json");
+            return;
+        }
+        try {
+            const auto deals = read_deals(storage_);
+            UserId uid{};
+            uid.bytes = chain->bytes;
+            const auto t = deals.threads.find(uid);
+            if (t == deals.threads.end()) {
+                res.status = 404;
+                res.set_content("{\"error\":\"chain wrote no work\"}", "application/json");
+                return;
+            }
+            const records::LaborThread& th = t->second;
+            const auto ref = [&](const std::array<uint8_t, 32>& h) {
+                return to_hex(uid.bytes) + "/" + to_hex(h);
+            };
+            const auto label_of = [&](const records::BlockPath& p) -> std::string {
+                const auto b = storage_.get_block_by_hash(Hash{p.hash});
+                if (!b || b->type != BlockType::DATA) return {};
+                try {
+                    const auto rec = records::Codec::decode(b->payload.data(), b->payload.size());
+                    if (const auto* d = std::get_if<records::AxisDef>(&rec))
+                        return d->ru.empty() ? d->slug : d->ru;
+                } catch (const records::CodecError&) {}
+                return {};
+            };
+
+            // Confirmed labor: some deal on it moved hours.
+            std::set<std::array<uint8_t, 32>> sold;
+            for (const auto& d : deals.all)
+                if (d.accept().work.chain == uid.bytes && deals.moves_hours(d.hash))
+                    sold.insert(d.accept().work.hash);
+
+            std::vector<std::pair<std::array<uint8_t, 32>, const WorkOnTable*>> works;
+            for (const auto& [h, w] : deals.works)
+                if (w.worker == uid) works.emplace_back(h, &w);
+            std::sort(works.begin(), works.end(), [](const auto& a, const auto& b) {
+                return a.second->record.start_ts != b.second->record.start_ts
+                     ? a.second->record.start_ts < b.second->record.start_ts
+                     : a.first < b.first;
+            });
+
+            double unconfirmed = 0, without_axes = 0;
+            std::map<std::string, std::pair<std::string, double>> by_axis;   // path → label, hours
+            std::string body = "{\"chain\":\"" + to_hex(uid.bytes) + "\",\"works\":[";
+            bool first = true;
+            for (const auto& [h, w] : works) {
+                const auto& r  = w->record;
+                const auto  iv = records::labor_interval(r);
+                const char* fault = th.broken.count(h)      ? "broken"
+                                  : th.unthreaded.count(h)  ? "unthreaded"
+                                  : th.overlapping.count(h) ? "crossing" : "";
+                if (!first) body += ',';
+                first = false;
+                body += "{\"ref\":\"" + ref(h) + "\",\"action\":\"" + json_escape(r.action)
+                      + "\",\"start\":" + std::to_string(iv.first)
+                      + ",\"end\":" + std::to_string(iv.second)
+                      + ",\"hours\":" + std::to_string(r.hours)
+                      + ",\"sold\":" + (sold.count(h) ? "true" : "false");
+                if (r.thread)
+                    body += ",\"seq\":" + std::to_string(r.thread->seq)
+                          + ",\"prev\":" + std::to_string(r.thread->prev.size());
+                if (r.customer) body += ",\"customer\":\"" + to_hex(*r.customer) + "\"";
+                if (*fault) body += ",\"fault\":\"" + std::string(fault) + "\"";
+                body += ",\"axes\":[";
+                for (std::size_t i = 0; i < r.axes.size(); ++i)
+                    body += std::string(i ? "," : "") + "{\"axis\":\""
+                          + block_path_str(r.axes[i].axis) + "\",\"share\":"
+                          + std::to_string(r.axes[i].share) + "}";
+                body += "]}";
+                // Labor not yet confirmed: sound, and no deal has moved hours for it.
+                if (!sold.count(h) && th.sound(h)) {
+                    unconfirmed += r.hours;
+                    if (r.axes.empty()) without_axes += r.hours;
+                    for (const auto& x : r.axes) {
+                        auto& slot = by_axis[block_path_str(x.axis)];
+                        if (slot.first.empty()) slot.first = label_of(x.axis);
+                        slot.second += x.share * r.hours;
+                    }
+                }
+            }
+            body += "],\"tips\":[";
+            for (std::size_t i = 0; i < th.tips.size(); ++i)
+                body += std::string(i ? "," : "") + "\"" + ref(th.tips[i]) + "\"";
+            body += "],\"forks\":" + std::to_string(th.forks)
+                  + ",\"gaps\":" + (th.gaps ? "true" : "false") + ",\"overlaps\":[";
+            for (std::size_t i = 0; i < th.overlaps.size(); ++i)
+                body += std::string(i ? "," : "") + "[\"" + ref(th.overlaps[i].first)
+                      + "\",\"" + ref(th.overlaps[i].second) + "\"]";
+            std::vector<std::pair<std::string, std::pair<std::string, double>>> axes(
+                by_axis.begin(), by_axis.end());
+            std::sort(axes.begin(), axes.end(), [](const auto& a, const auto& b) {
+                return a.second.second > b.second.second;
+            });
+            body += "],\"unconfirmed\":{\"hours\":" + std::to_string(unconfirmed)
+                  + ",\"without_axes\":" + std::to_string(without_axes) + ",\"axes\":[";
+            for (std::size_t i = 0; i < axes.size(); ++i)
+                body += std::string(i ? "," : "") + "{\"axis\":\"" + axes[i].first
+                      + "\",\"label\":\"" + json_escape(axes[i].second.first)
+                      + "\",\"hours\":" + std::to_string(axes[i].second.second) + "}";
+            body += "]}}";
             res.set_content(body, "application/json");
         } catch (const std::exception& e) {
             res.status = 500;

@@ -961,3 +961,53 @@ TEST(RecordsCodec, DealNamesTheSellersRelease) {
     a.release = make_ref(0xEE, 0x57);
     EXPECT_THROW(Codec::encode(Record{deal_of(a)}), CodecError);
 }
+
+// ── Товарная нить: звено труда (records.md §9.4 v4, ИР-023) ──────────────────
+
+TEST(RecordsCodec, WorkRecordThreadLinkRoundtrip) {
+    WorkRecord wr{};
+    wr.action   = "выпечка";
+    wr.start_ts = 1;
+    wr.hours    = 2.0;
+    wr.thread   = ThreadLink{0, {}};                                  // первое звено
+    EXPECT_EQ(std::get<WorkRecord>(roundtrip(wr)).thread, wr.thread);
+
+    wr.thread = ThreadLink{4, {make_ref(0x53, 0x01), make_ref(0x53, 0x02)}};   // слияние
+    wr.axes   = {{make_path(0x79, 0x01), 0.25}, {make_path(0x79, 0x02), 0.75}};
+    const auto bytes = Codec::encode(Record{wr});
+    EXPECT_EQ(bytes[0], 0xA8);                                        // 6 + нить + оси
+    const auto d = std::get<WorkRecord>(Codec::decode(bytes));
+    EXPECT_EQ(d.thread, wr.thread);
+    EXPECT_EQ(d.axes, wr.axes);
+}
+
+// Первое звено — без предыдущих, остальные — с ними; предыдущие — по порядку и
+// без повторов, иначе одну и ту же запись можно было бы закодировать по-разному.
+TEST(RecordsCodec, ThreadLinkThatCouldNotBeWrittenIsRefused) {
+    WorkRecord wr{};
+    wr.action = "работа";
+    wr.hours  = 1.0;
+    wr.thread = ThreadLink{3, {}};                                    // не первое, а предыдущих нет
+    EXPECT_THROW(Codec::encode(Record{wr}), CodecError);
+    wr.thread = ThreadLink{0, {make_ref(0x53, 0x01)}};                // первое, а предыдущее есть
+    EXPECT_THROW(Codec::encode(Record{wr}), CodecError);
+    wr.thread = ThreadLink{2, {make_ref(0x53, 0x02), make_ref(0x53, 0x01)}};   // не по порядку
+    EXPECT_THROW(Codec::encode(Record{wr}), CodecError);
+    wr.thread = ThreadLink{2, {make_ref(0x53, 0x01), make_ref(0x53, 0x01)}};   // повтор
+    EXPECT_THROW(Codec::encode(Record{wr}), CodecError);
+}
+
+// Предложенная разбивка — это разбивка: доли положительны, в сумме 1, ось не дважды.
+TEST(RecordsCodec, ProposedAxesMustBeABreakdown) {
+    WorkRecord wr{};
+    wr.action = "работа";
+    wr.hours  = 1.0;
+    wr.axes   = {{make_path(0x79, 0x01), 0.5}, {make_path(0x79, 0x02), 0.4}};
+    EXPECT_THROW(Codec::encode(Record{wr}), CodecError);              // 0.9
+    wr.axes   = {{make_path(0x79, 0x01), 1.2}, {make_path(0x79, 0x02), -0.2}};
+    EXPECT_THROW(Codec::encode(Record{wr}), CodecError);              // доля < 0
+    wr.axes   = {{make_path(0x79, 0x01), 0.5}, {make_path(0x79, 0x01), 0.5}};
+    EXPECT_THROW(Codec::encode(Record{wr}), CodecError);              // ось дважды
+    wr.axes   = {{make_path(0x79, 0x01), 1.0}};
+    EXPECT_EQ(std::get<WorkRecord>(roundtrip(wr)).axes, wr.axes);
+}

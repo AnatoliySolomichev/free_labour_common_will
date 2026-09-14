@@ -1,4 +1,5 @@
 #include "aggregator/rates_view.h"
+#include "labor_thread_support.h"
 #include "aggregator/server.h"
 
 #include <blockchain/crypto.h>
@@ -72,6 +73,7 @@ protected:
     std::filesystem::path              db_path_;
     std::unique_ptr<AggregatorStorage> storage_;
     BlockIndex                         next_index_ = 0;
+    LaborThreads threads_;   // records.md §9.4 v4: works go into the thread
     UserId alice_ = make_chain(0xA1);   // worker
     UserId bob_   = make_chain(0xB2);   // payer
 
@@ -88,9 +90,11 @@ protected:
         std::filesystem::remove_all(db_path_);
     }
 
-    Block add(const UserId& owner, const records::Record& rec) {
+    Block add(const UserId& owner, const records::Record& written) {
+        const records::Record rec = threads_.stamp(owner.bytes, written);
         const Block b = make_record_block(owner, next_index_++, rec);
         EXPECT_TRUE(storage_->add_block(b));
+        threads_.placed(owner.bytes, rec, Crypto::hash_block(b).bytes);
         return b;
     }
 
@@ -287,6 +291,7 @@ protected:
     std::filesystem::path              db_path_;
     std::unique_ptr<AggregatorStorage> storage_;
     BlockIndex                         next_index_ = 0;
+    LaborThreads threads_;   // records.md §9.4 v4: works go into the thread
 
     UserId alice_ = make_chain(0xA1);
     UserId carol_ = make_chain(0xC3);
@@ -305,9 +310,11 @@ protected:
         std::filesystem::remove_all(db_path_);
     }
 
-    Block add(const UserId& owner, const records::Record& rec) {
+    Block add(const UserId& owner, const records::Record& written) {
+        const records::Record rec = threads_.stamp(owner.bytes, written);
         const Block b = make_record_block(owner, next_index_++, rec);
         EXPECT_TRUE(storage_->add_block(b));
+        threads_.placed(owner.bytes, rec, Crypto::hash_block(b).bytes);
         return b;
     }
 
@@ -668,6 +675,56 @@ TEST_F(RatesViewTest, OnlyTheAddressedDealMovesThePrice) {
     const Block released = add(alice_, rl);
     pay(sold_twice, bob_, std::nullopt);          // заказчик
     pay(sold_twice, carol, ref_to(alice_, released));   // и по отпуску — двойная продажа
+
+    const auto day = build_daily_prices(*storage_, kDay, {});
+    ASSERT_EQ(day.axes.size(), 1u);
+    EXPECT_EQ(day.axes[0].deals, 1u);             // только честная
+    EXPECT_NEAR(day.axes[0].price, 1.0, 1e-9);
+}
+
+// Нить труда (records.md §9.4 v4): одни и те же часы, проданные двоим, цены не
+// двигают — ни та, ни другая сделка; работа вне нити — тоже. Часы при этом ушли:
+// продавец эти сделки адресовал.
+TEST_F(RatesViewTest, HoursSoldTwiceAndWorkOutsideTheThreadMoveNoPrice) {
+    const UserId dave  = make_chain(0xD4);
+    const UserId carol = make_chain(0xC7);
+    settled_deal(bob_, 1.0, 1.0);                 // честная сделка дня — в нити Алисы
+
+    const auto pay = [&](const Block& work, const UserId& buyer) {
+        records::Acceptance a{};
+        a.work        = ref_to(dave, work);
+        a.hours_raw   = 2.0;
+        a.labor_units = 9.0;
+        a.axes        = {{test_axis(), 9.0}};
+        records::Transfer t{};
+        t.from      = buyer.bytes;
+        t.to        = dave.bytes;
+        t.origins   = { {buyer.bytes, 9.0} };
+        t.accept    = a;
+        t.timestamp = kDay + 100;
+        add(buyer, t);
+    };
+
+    // Дэйв продаёт одни и те же часы двоим: обе работы в нити, обе на заказ.
+    records::WorkRecord first{};
+    first.hours    = 2.0;
+    first.start_ts = kDay - 36'000;
+    first.customer = bob_.bytes;
+    first.thread   = records::ThreadLink{0, {}};
+    const Block b1 = add(dave, first);
+    records::WorkRecord second = first;
+    second.start_ts += 3600;                      // 11:00–13:00 внутри 10:00–12:00
+    second.customer  = carol.bytes;
+    second.thread    = records::ThreadLink{1, {ref_to(dave, b1)}};
+    const Block b2 = add(dave, second);
+    pay(b1, bob_);
+    pay(b2, carol);
+
+    records::WorkRecord loose{};                  // и ещё одна — вне нити
+    loose.hours    = 1.0;
+    loose.start_ts = kDay - 3600;
+    loose.customer = carol.bytes;
+    pay(add(dave, loose), carol);
 
     const auto day = build_daily_prices(*storage_, kDay, {});
     ASSERT_EQ(day.axes.size(), 1u);

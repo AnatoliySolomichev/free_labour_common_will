@@ -35,6 +35,14 @@ DealRecognition recognize_deals(const std::vector<DealClaim>& claims) {
             payers.insert(c->payer);
         }
         if (addressed.empty()) continue;
+        // A work outside its worker's thread, or on hours another work of the
+        // chain also claims (records.md §9.4 v4): the payment stands — the seller
+        // addressed it — but the deal does not count; its hours may be sold twice.
+        if (!addressed.front()->sound) {
+            out.unsound_works.insert(work);
+            for (const auto* c : addressed) out.unsound.insert(c->deal);
+            continue;
+        }
         if (payers.size() > 1) {        // the seller gave one result to two buyers
             out.oversold.insert(work);
             for (const auto* c : addressed) out.contested.insert(c->deal);

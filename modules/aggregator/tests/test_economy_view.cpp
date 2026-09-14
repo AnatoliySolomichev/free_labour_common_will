@@ -1,4 +1,5 @@
 #include "aggregator/economy_view.h"
+#include "labor_thread_support.h"
 
 #include <blockchain/crypto.h>
 #include <blockchain/serializer.h>
@@ -55,6 +56,7 @@ protected:
     std::filesystem::path              db_path_;
     std::unique_ptr<AggregatorStorage> storage_;
     BlockIndex                         next_index_ = 0;
+    LaborThreads threads_;   // records.md §9.4 v4: works go into the thread
 
     void SetUp() override {
         static int cnt = 0;
@@ -69,9 +71,11 @@ protected:
         std::filesystem::remove_all(db_path_);
     }
 
-    Block add(const UserId& owner, const records::Record& rec) {
+    Block add(const UserId& owner, const records::Record& written) {
+        const records::Record rec = threads_.stamp(owner.bytes, written);
         const Block b = make_record_block(owner, next_index_++, rec);
         EXPECT_TRUE(storage_->add_block(b));
+        threads_.placed(owner.bytes, rec, Crypto::hash_block(b).bytes);
         return b;
     }
 };

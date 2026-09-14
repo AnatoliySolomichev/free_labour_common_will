@@ -36,6 +36,7 @@
 // в расчёт подписи не входят, результат воспроизводим с точностью до округления.
 
 #include "aggregator/rates_view.h"
+#include "../tests/labor_thread_support.h"
 
 #include <blockchain/crypto.h>
 #include <blockchain/serializer.h>
@@ -183,7 +184,9 @@ private:
     std::filesystem::path              dir_;
     std::unique_ptr<AggregatorStorage> storage_;
     BlockIndex                         next_ = 0;
-    Block add(const UserId& owner, const records::Record& rec) {
+    LaborThreads threads_;   // records.md §9.4 v4: works go into the thread
+    Block add(const UserId& owner, const records::Record& written) {
+        const records::Record rec = threads_.stamp(owner.bytes, written);
         Block b{};
         b.address           = {owner, 0x7FFF'FFFFu, next_++};
         b.prev_hash         = Hash::zero();
@@ -195,6 +198,7 @@ private:
         const KeyPair kp    = Crypto::generate_keypair();
         b.signature         = Crypto::sign(bytes.data(), bytes.size(), kp.sec);
         if (!storage_->add_block(b)) throw std::runtime_error("add_block refused");
+        threads_.placed(owner.bytes, rec, Crypto::hash_block(b).bytes);
         return b;
     }
 

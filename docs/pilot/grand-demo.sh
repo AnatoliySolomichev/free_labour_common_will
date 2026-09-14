@@ -366,6 +366,9 @@ bcp boris fetch "${CID[anna]}/$W_ann2" --via "$VIA" >/dev/null
 A_ann2=$(bcp boris accept --work "${CID[anna]}/$W_ann2" --quality "вкусно" --like "$ACC_anna" --via "$VIA" | after 'acceptance ref: ')
 say "у каждой приёмки теперь like: ссылка на образец (bc list покажет её)"
 
+hr "нить труда Галины — все её работы подряд, без пересечений (bc thread, records.md §9.4)"
+bcp galina thread --via "$VIA" | sed 's/^/   /'
+
 hr "облако образцов работ — из сделок, а не из каталога (bc cloud, ИР-022)"
 say "точка — образец, который повторили; место — из чего сложилась цена его семьи."
 say "соседи — те, кому платят за похожее; ставка — высота над картой, не координата"
@@ -530,6 +533,11 @@ else echo "   ✓ повторная сделка отклонена (один �
 if bcp boris accept --work "${CID[anna]}/$WORK_anna" --quality "перекуплю" --coef 1.0 --axis-share "$(axis physical)=1.0" --via "$VIA" >/dev/null 2>&1; then
     echo "   ✗ посторонний купил чужой заказ"; fail=1
 else echo "   ✓ посторонний чужой заказ не купит (records.md §9.5)"; fi
+# одни и те же часы дважды не записать: нить труда (records.md §9.4)
+if bcp galina work log --action "та же укладка ещё раз" --hours 1 \
+        --start "$(( $(date +%s) - 1800 ))" --via "$VIA" >/dev/null 2>&1; then
+    echo "   ✗ работа на уже заявленных часах записалась"; fail=1
+else echo "   ✓ одни и те же часы дважды не записать (нить труда, records.md §9.4)"; fi
 # переоценка печи ВВЕРХ обязана отклониться (перевыпуск только вниз)
 if bcp anna tool add "Печь подовая" --cost 400 --life 8000 --origin "$TOOL" --note "хочу дороже" >/dev/null 2>&1; then
     echo "   ✗ переоценка вверх прошла, а должна была отклониться"; fail=1
