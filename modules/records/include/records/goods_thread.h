@@ -144,15 +144,27 @@ double resale_price(const HoldingLot& lot, double qty) noexcept;
 // Whether an acceptance pays a resale exactly: carried cost only.
 bool meets_resale(const Acceptance& a, double price) noexcept;
 
-// ── Addressed buyout (records.md §9.8 v5, ИР-023, пункт 8) ───────────────────
+// ── Addressed buyout, rent without rent (records.md §9.8 v5, v6; ИР-023, п. 8) ──
 
 // Whether a purchase honours the seller's addressed buyout: it pre-signs the
-// return to the addressee, for the same term, at no more than it paid.
-bool honours_buyout(const Acceptance& a, double paid, const Addressed& buyout) noexcept;
+// return to the addressee, for the same term, on the same terms of wear.
+bool honours_buyout(const Acceptance& a, const Addressed& buyout) noexcept;
+
+// What part of an output's value is left at `t2` of what it had at `t1`:
+// straight-line wear over the service life its maker declared (records.md §9.4
+// v7), from the thing's birth — the end of the work. 1 without a life; and once
+// the life is spent there is nothing left to wear either.
+double residual_share(const WorkRecord& work, uint32_t out, int64_t t1, int64_t t2) noexcept;
+
+// The price of a return: what the holder paid for each lot, bought at `bought`
+// — less, for a rent (`wear`), the wear by the norm until `back`. Nobody names
+// it, so nobody earns on it: a rent pays exactly the wear (ИР-011).
+double buyback_price(const std::vector<HoldingLot>& lots, const WorkRecord& work,
+                     int64_t bought, int64_t back, bool wear) noexcept;
 
 // Whether `deal` buys back what `purchase` bought, on its pre-signed return: by
-// the addressee, from the holder, before the term, the same product, at the
-// signed price — carried cost only, like any resale. No holder takes part.
-bool completes_buyback(const Transfer& deal, const Transfer& purchase) noexcept;
+// the addressee, from the holder, before the term, the same product, at `price`
+// (buyback_price) — carried cost only, like any resale. No holder takes part.
+bool completes_buyback(const Transfer& deal, const Transfer& purchase, double price) noexcept;
 
 } // namespace records

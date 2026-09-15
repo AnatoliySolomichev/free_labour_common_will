@@ -245,16 +245,37 @@ bool meets_resale(const Acceptance& a, double price) noexcept {
            std::abs(carried - price) <= 1e-6;
 }
 
-bool honours_buyout(const Acceptance& a, double paid, const Addressed& buyout) noexcept {
+bool honours_buyout(const Acceptance& a, const Addressed& buyout) noexcept {
     return a.buyback && a.buyback->to == buyout.to && a.buyback->until == buyout.until &&
-           a.buyback->units <= paid + 1e-6;
+           a.buyback->wear == buyout.wear;
 }
 
-bool completes_buyback(const Transfer& deal, const Transfer& purchase) noexcept {
+double residual_share(const WorkRecord& work, uint32_t out, int64_t t1, int64_t t2) noexcept {
+    if (out >= work.outputs.size() || !work.outputs[out].life || t2 <= t1) return 1.0;
+    const double life = *work.outputs[out].life * 86400.0;
+    const double then = static_cast<double>(t1);
+    const double born = work.start_ts > 0
+        ? std::min(static_cast<double>(work.start_ts) + work.hours * 3600.0, then)
+        : then;                                   // birth unknown: the holding starts it
+    const double left_then = life - (then - born);
+    if (!(left_then > 0.0)) return 1.0;           // spent already: nothing left to wear
+    const double left_now = std::max(0.0, life - (static_cast<double>(t2) - born));
+    return left_now / left_then;
+}
+
+double buyback_price(const std::vector<HoldingLot>& lots, const WorkRecord& work,
+                     int64_t bought, int64_t back, bool wear) noexcept {
+    double price = 0.0;
+    for (const auto& l : lots)
+        price += l.cost * (wear ? residual_share(work, l.out, bought, back) : 1.0);
+    return price;
+}
+
+bool completes_buyback(const Transfer& deal, const Transfer& purchase, double price) noexcept {
     if (!deal.accept || !purchase.accept || !purchase.accept->buyback) return false;
     const Buyback& b = *purchase.accept->buyback;
     return deal.from == b.to && deal.to == purchase.from && deal.timestamp < b.until &&
-           deal.accept->work == purchase.accept->work && meets_resale(*deal.accept, b.units);
+           deal.accept->work == purchase.accept->work && meets_resale(*deal.accept, price);
 }
 
 } // namespace records

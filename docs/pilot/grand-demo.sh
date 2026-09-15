@@ -414,6 +414,30 @@ say "Вера выкупает табурет сама — по подписан
 bcp vera accept --work "${CID[dmitry]}/$W_stools" --quality "отремонтирован" --via "$VIA" 2>&1 | sed 's/^/   /'
 bcp dmitry stock --via "$VIA" | sed 's/^/   /'
 
+hr "аренда без ренты: Ирина сдаёт Борису палатку — платится только износ (records.md §9.8)"
+say "Ирина шьёт палатку со сроком службы 600 дней и сдаёт её Борису на месяц — выкупом с адресом на себя"
+say "Борис платит полную цену и подписывает возврат по остатку после износа; цену возврата не называет никто"
+W_tent=$(bcp irina work log --title "швея, 5-й разряд" --action "Палатка для похода" --hours 4 \
+         --output "палатка:1:шт::k=1::600" --axis-share "$(axis precision)=1" --via "$VIA" | after 'hash: ')
+bcp irina release "$W_tent" --to "${CID[boris]}" --rent --buyback-days 60 --days 1 \
+    --via "$VIA" 2>&1 | sed 's/^/   /'
+OUT_tent="$(bcp boris accept --work "${CID[irina]}/$W_tent" --quality "целая" --via "$VIA" 2>&1)"
+echo "$OUT_tent" | sed 's/^/   /'
+TENT_boris="$(printf '%s\n' "$OUT_tent" | after 'acceptance ref: ')"
+# Ирина больше ничего не пишет: её выкуп «через месяц» — последний блок её цепи.
+if command -v faketime >/dev/null; then
+    say "прошло 30 дней: Ирина выкупает палатку без участия Бориса — 95 % цены; 5 % — износ, и только он"
+    FAKETIME_DONT_FAKE_MONOTONIC=1 faketime "$(date -u -d '+30 days' '+%Y-%m-%d %H:%M:%S')" \
+        "$BC" --data-dir "$work/irina" accept --work "${CID[irina]}/$W_tent" \
+        --quality "вернулась целой" --via "$VIA" 2>&1 | sed 's/^/   /'
+else
+    say "faketime не установлен — Ирина выкупает сразу, износ почти нулевой"
+    bcp irina accept --work "${CID[irina]}/$W_tent" --quality "вернулась целой" \
+        --via "$VIA" 2>&1 | sed 's/^/   /'
+fi
+say "у Ирины снова палатка — уже по остатку — и бумага Бориса на износ: ровно то, что было"
+bcp irina stock --via "$VIA" | sed 's/^/   /'
+
 hr "облако образцов работ — из сделок, а не из каталога (bc cloud, ИР-022)"
 say "точка — образец, который повторили; место — из чего сложилась цена его семьи."
 say "соседи — те, кому платят за похожее; ставка — высота над картой, не координата"
@@ -599,6 +623,10 @@ else echo "   ✓ больше купленного не перепродать 
 if bcp dmitry release "$REPAIR_dmitry" --to "${CID[boris]}" --units Т-2 --via "$VIA" >/dev/null 2>&1; then
     echo "   ✗ держатель продал вещь не адресату"; fail=1
 else echo "   ✓ купленное с адресом продаёт только адресат (records.md §9.8)"; fi
+# арендованное не продать никому, кроме сдающего, — и после выкупа тоже (records.md §9.8)
+if bcp boris release "$TENT_boris" --to "${CID[galina]}" --qty 1 --via "$VIA" >/dev/null 2>&1; then
+    echo "   ✗ арендатор продал арендованное"; fail=1
+else echo "   ✓ арендованное не продать (records.md §9.8)"; fi
 # переоценка печи ВВЕРХ обязана отклониться (перевыпуск только вниз)
 if bcp anna tool add "Печь подовая" --cost 400 --life 8000 --origin "$TOOL" --note "хочу дороже" >/dev/null 2>&1; then
     echo "   ✗ переоценка вверх прошла, а должна была отклониться"; fail=1

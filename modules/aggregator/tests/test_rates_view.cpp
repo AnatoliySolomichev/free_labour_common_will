@@ -909,7 +909,7 @@ TEST_F(RatesViewTest, AddressedBuyoutAndPreSignedReturn) {
         a.hours_raw   = 4.0;
         a.labor_units = 4.0;
         a.axes        = {{test_axis(), 4.0}};
-        if (sign) a.buyback = records::Buyback{alice_.bytes, 4.0, kDay + 5000};
+        if (sign) a.buyback = records::Buyback{alice_.bytes, kDay + 5000};
         records::Transfer t{};
         t.from      = bob_.bytes;
         t.to        = alice_.bytes;
@@ -1024,4 +1024,73 @@ TEST_F(RatesViewTest, AMakerSaleWithoutAxesIsVoid) {
     t.timestamp = kDay + 100;
     const auto deal = Crypto::hash_block(add(bob_, t)).bytes;
     EXPECT_FALSE(read_deals(*storage_).moves_hours(deal));
+}
+
+// Аренда без ренты (records.md §9.8 v6): Алиса сдаёт Бобу палатку со сроком
+// службы 600 дней за 100. Через 30 дней она выкупает её по остатку после износа —
+// за 95: у неё палатка на 95 и бумага Боба на 5, ровно то, что было. Выкуп по
+// цене покупки (износ не уплачен) и выкуп дешевле (рента) ничего не завершают.
+TEST_F(RatesViewTest, ARentPaysExactlyTheWear) {
+    records::WorkRecord make{};
+    make.hours   = 10.0;
+    make.outputs = {{"палатка", 1.0, "шт"}};
+    make.outputs[0].life = 600.0;
+    make.axes    = {{test_axis(), 1.0}};
+    const Block work = add(alice_, make);
+    const auto made = std::get<records::WorkRecord>(
+        records::Codec::decode(work.payload.data(), work.payload.size()));
+    const int64_t born = made.start_ts + static_cast<int64_t>(made.hours * 3600.0);
+    constexpr int64_t kDaySec = 86'400;
+
+    records::Release rl{};
+    rl.work      = ref_to(alice_, work);
+    rl.to        = bob_.bytes;
+    rl.timestamp = born;
+    rl.expires   = born + kDaySec;
+    rl.addressed = records::Addressed{alice_.bytes, born + 60 * kDaySec, true};
+    const Block rb = add(alice_, rl);
+    records::Acceptance a{};
+    a.work        = ref_to(alice_, work);
+    a.release     = ref_to(alice_, rb);
+    a.hours_raw   = 10.0;
+    a.labor_units = 100.0;
+    a.axes        = {{test_axis(), 100.0}};
+    a.buyback     = records::Buyback{alice_.bytes, born + 60 * kDaySec, true};
+    records::Transfer t{};
+    t.from      = bob_.bytes;
+    t.to        = alice_.bytes;
+    t.origins   = { {bob_.bytes, 100.0} };                          // вексель Боба на 100
+    t.accept    = a;
+    t.timestamp = born;
+    const Block rent = add(bob_, t);
+
+    const auto buy_back = [&](double price) {
+        records::Acceptance ba{};
+        ba.work          = ref_to(alice_, work);
+        ba.release       = ref_to(bob_, rent);
+        ba.carried_units = price;
+        records::Transfer bt{};
+        bt.from      = alice_.bytes;
+        bt.to        = bob_.bytes;
+        bt.origins   = { {bob_.bytes, price} };                     // векселем Боба — гасит его
+        bt.accept    = ba;
+        bt.timestamp = born + 30 * kDaySec;
+        return Crypto::hash_block(add(alice_, bt)).bytes;
+    };
+    const auto free_use = buy_back(100.0);                         // износ не уплачен
+    const auto rent_fee = buy_back(90.0);                          // сверх износа — рента
+    const auto fair     = buy_back(95.0);                          // ровно износ
+
+    const auto deals     = read_deals(*storage_);
+    const auto rent_hash = Crypto::hash_block(rent).bytes;
+    EXPECT_TRUE(deals.counts(rent_hash));                          // сдача — первая продажа
+    EXPECT_FALSE(deals.moves_hours(free_use));
+    EXPECT_FALSE(deals.moves_hours(rent_fee));
+    EXPECT_TRUE(deals.recognition.resold.count(fair));
+    EXPECT_TRUE(deals.bought_back.count(rent_hash));
+    // У Алисы палатка на 95: дальше она продаётся от этой цены.
+    const auto h = deals.holdings.find(fair);
+    ASSERT_NE(h, deals.holdings.end());
+    ASSERT_EQ(h->second.size(), 1u);
+    EXPECT_NEAR(h->second[0].cost, 95.0, 1e-9);
 }

@@ -366,28 +366,28 @@ TEST(Holding, AResaleIsCarriedCostOnly) {
     EXPECT_FALSE(meets_resale(a, 0.6));
 }
 
-// ── Выкуп с адресом (records.md §9.8 v5, ИР-023, пункт 8) ────────────────────
+// ── Выкуп с адресом и аренда без ренты (records.md §9.8 v5, v6) ──────────────
 
 TEST(Buyout, APurchaseOnAnAddressedBuyoutPreSignsTheReturn) {
     const Addressed buyout{h(0xA1), 5000};
     Acceptance a{};
-    EXPECT_FALSE(honours_buyout(a, 3.0, buyout));                   // без возврата — нет
-    a.buyback = Buyback{h(0xA1), 3.0, 5000};
-    EXPECT_TRUE(honours_buyout(a, 3.0, buyout));
-    a.buyback->units = 3.5;                                          // дороже уплаченного
-    EXPECT_FALSE(honours_buyout(a, 3.0, buyout));
-    a.buyback = Buyback{h(0xB2), 3.0, 5000};                         // не тому
-    EXPECT_FALSE(honours_buyout(a, 3.0, buyout));
+    EXPECT_FALSE(honours_buyout(a, buyout));                        // без возврата — нет
+    a.buyback = Buyback{h(0xA1), 5000};
+    EXPECT_TRUE(honours_buyout(a, buyout));
+    a.buyback->wear = true;                                          // не те условия износа
+    EXPECT_FALSE(honours_buyout(a, buyout));
+    a.buyback = Buyback{h(0xB2), 5000};                              // не тому
+    EXPECT_FALSE(honours_buyout(a, buyout));
 }
 
 // Адресат выкупает сам — держатель в сделке не участвует; но только он, до срока
-// и по подписанной цене.
+// и по цене возврата.
 TEST(Buyout, TheAddresseeBuysBackOnItsOwn) {
     Transfer purchase{};
     purchase.from = h(0xC3);                                         // держатель
     Acceptance pa{};
     pa.work.hash.fill(0x54);
-    pa.buyback = Buyback{h(0xA1), 3.0, 5000};
+    pa.buyback = Buyback{h(0xA1), 5000};
     purchase.accept = pa;
 
     Transfer back{};
@@ -398,13 +398,42 @@ TEST(Buyout, TheAddresseeBuysBackOnItsOwn) {
     ba.work          = pa.work;
     ba.carried_units = 3.0;
     back.accept = ba;
-    EXPECT_TRUE(completes_buyback(back, purchase));
+    EXPECT_TRUE(completes_buyback(back, purchase, 3.0));
+    EXPECT_FALSE(completes_buyback(back, purchase, 2.5));            // не по цене возврата
     back.timestamp = 5000;                                           // срок прошёл
-    EXPECT_FALSE(completes_buyback(back, purchase));
+    EXPECT_FALSE(completes_buyback(back, purchase, 3.0));
     back.timestamp = 4000;
     back.from = h(0xB2);                                             // не адресат
-    EXPECT_FALSE(completes_buyback(back, purchase));
-    back.from = h(0xA1);
-    back.accept->carried_units = 2.0;                                // не по подписанной цене
-    EXPECT_FALSE(completes_buyback(back, purchase));
+    EXPECT_FALSE(completes_buyback(back, purchase, 3.0));
+}
+
+// Износ по норме — прямая от рождения вещи через срок службы (records.md §9.8 v6).
+TEST(Buyout, TheWearFollowsTheServiceLife) {
+    constexpr int64_t kDaySec = 86'400;
+    WorkRecord tent{};
+    tent.start_ts = 100 * kDaySec;
+    tent.hours    = 24.0;                                            // родилась в день 101
+    tent.outputs  = {{"палатка", 1.0, "шт"}};
+    tent.outputs[0].life = 600.0;                                    // срок службы — 600 дней
+    EXPECT_NEAR(residual_share(tent, 0, 101 * kDaySec, 131 * kDaySec), 0.95, 1e-12);   // месяц — 5 %
+    // Под конец срока тот же месяц — большая доля того, что осталось.
+    EXPECT_NEAR(residual_share(tent, 0, 401 * kDaySec, 431 * kDaySec), 0.9, 1e-12);
+    EXPECT_EQ(residual_share(tent, 0, 101 * kDaySec, 800 * kDaySec), 0.0);  // срок вышел
+    EXPECT_EQ(residual_share(tent, 0, 800 * kDaySec, 830 * kDaySec), 1.0);  // изношенное не изнашивается
+    tent.outputs[0].life.reset();
+    EXPECT_EQ(residual_share(tent, 0, 101 * kDaySec, 131 * kDaySec), 1.0);  // без срока — без износа
+}
+
+// Пример участника: квартира за 100, износ по норме 5 — выкуп за 95; хранение —
+// по цене покупки. Цену не называет никто, поэтому и ренты нет.
+TEST(Buyout, ARentPaysExactlyTheWear) {
+    constexpr int64_t kDaySec = 86'400;
+    WorkRecord flat{};
+    flat.start_ts = 100 * kDaySec;
+    flat.hours    = 24.0;
+    flat.outputs  = {{"квартира", 1.0, "шт"}};
+    flat.outputs[0].life = 600.0;
+    const std::vector<HoldingLot> lots{{0, 1.0, {}, 100.0}};         // уплачено 100
+    EXPECT_NEAR(buyback_price(lots, flat, 101 * kDaySec, 131 * kDaySec, true), 95.0, 1e-9);
+    EXPECT_EQ(buyback_price(lots, flat, 101 * kDaySec, 131 * kDaySec, false), 100.0);
 }

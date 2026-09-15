@@ -164,10 +164,14 @@ struct ResourceQty {
     // v6: the numbers of the lot's units — a frame number, a stamp — for a lot
     // counted piece by piece (ИР-023, вопрос 10); qty is their count.
     std::vector<std::string> units;
+    // v7: the service life, days, declared by the maker (records.md §9.4) — the
+    // norm a rent's wear is counted by: straight-line from the thing's birth
+    // (records.md §9.8 v6, ИР-023, пункт 8).
+    std::optional<double>    life;
 
     bool operator==(const ResourceQty& o) const noexcept {
         return resource == o.resource && qty == o.qty && unit == o.unit
-            && share == o.share && price == o.price && units == o.units;
+            && share == o.share && price == o.price && units == o.units && life == o.life;
     }
 };
 
@@ -278,9 +282,13 @@ struct LotLink {
 struct Addressed {
     std::array<uint8_t, 32> to{};
     int64_t                 until = 0;
+    // v6: a rent — the thing is used, so it comes back at what is left of it
+    // after the wear by the norm, and nothing above the wear is paid
+    // (records.md §9.8 v6). Only back to the seller itself.
+    bool                    wear = false;
 
     bool operator==(const Addressed& o) const noexcept {
-        return to == o.to && until == o.until;
+        return to == o.to && until == o.until && wear == o.wear;
     }
 };
 
@@ -356,17 +364,18 @@ struct AcceptanceAxis {
     }
 };
 
-// The pre-signed return (records.md §9.8 v5, ИР-023, пункт 8): buying on an
+// The pre-signed return (records.md §9.8 v5, v6; ИР-023, пункт 8): buying on an
 // addressed buyout, the buyer signs in that very deal that it releases what it
-// bought to `to` for `units` until `until`. The addressee then buys back on its
-// own, and no holder can stall it; the price is no more than was paid.
+// bought to `to` until `until`. The addressee then buys back on its own, and no
+// holder can stall it. Its price is nobody's to name (v6): what the holder paid
+// — less, for a rent (`wear`), the wear by the norm over the holding.
 struct Buyback {
     std::array<uint8_t, 32> to{};
-    double                  units = 0;
     int64_t                 until = 0;
+    bool                    wear  = false;
 
     bool operator==(const Buyback& o) const noexcept {
-        return to == o.to && units == o.units && until == o.until;
+        return to == o.to && until == o.until && wear == o.wear;
     }
 };
 

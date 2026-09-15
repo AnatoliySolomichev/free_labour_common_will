@@ -94,11 +94,12 @@ void w_block_path(Buf& out, const BlockPath& p) {
     w_uint(out, 3); w_fixed(out, p.hash);
 }
 
-// Keys 0–2 always; an output may carry share (3), price (5) and units (6) —
-// each only when set, in ascending order (records.md §9.4 v6). Key 4 — the
+// Keys 0–2 always; an output may carry share (3), price (5), units (6) and life
+// (7) — each only when set, in ascending order (records.md §9.4 v7). Key 4 — the
 // price multiplier k of v5 — is retired: the tag is a number of labor-hours.
 void w_resource_qty(Buf& out, const ResourceQty& rq) {
-    w_map(out, 3 + (rq.share ? 1 : 0) + (rq.price ? 1 : 0) + (rq.units.empty() ? 0 : 1));
+    w_map(out, 3 + (rq.share ? 1 : 0) + (rq.price ? 1 : 0) + (rq.units.empty() ? 0 : 1)
+                 + (rq.life ? 1 : 0));
     w_uint(out, 0); w_text(out, rq.resource);
     w_uint(out, 1); w_float64(out, rq.qty);
     w_uint(out, 2); w_text(out, rq.unit);
@@ -108,6 +109,7 @@ void w_resource_qty(Buf& out, const ResourceQty& rq) {
         w_uint(out, 6); w_arr(out, rq.units.size());
         for (const auto& u : rq.units) w_text(out, u);
     }
+    if (rq.life) { w_uint(out, 7); w_float64(out, *rq.life); }
 }
 
 // ── Per-type encoders ─────────────────────────────────────────────────────────
@@ -199,11 +201,12 @@ void check_work_record(const WorkRecord& wr) {
         if (std::abs(sum - 1.0) > 1e-9)
             throw CodecError("WorkRecord: доли осей в сумме обязаны давать 1 (records.md §9.4)");
     }
-    // Share, price tag and unit numbers belong to outputs — to lots
-    // (records.md §9.4 v6).
+    // Share, price tag, unit numbers and service life belong to outputs — to
+    // lots (records.md §9.4 v6, v7).
     for (const auto& in : wr.inputs)
-        if (in.share || in.price || !in.units.empty())
-            throw CodecError("WorkRecord: доля, ценник и номера бывают только у выхода работы");
+        if (in.share || in.price || !in.units.empty() || in.life)
+            throw CodecError("WorkRecord: доля, ценник, номера и срок службы бывают только у "
+                             "выхода работы");
     std::size_t with_share = 0;
     double      shares     = 0.0;
     for (const auto& o : wr.outputs) {
@@ -215,6 +218,8 @@ void check_work_record(const WorkRecord& wr) {
         }
         if (o.price && (!(*o.price > 0.0) || !std::isfinite(*o.price)))
             throw CodecError("WorkRecord: ценник обязан быть положительным");
+        if (o.life && (!(*o.life > 0.0) || !std::isfinite(*o.life)))
+            throw CodecError("WorkRecord: срок службы обязан быть положительным (records.md §9.4)");
         if (!o.units.empty()) {
             if (o.qty != static_cast<double>(o.units.size()))
                 throw CodecError("WorkRecord: у партии с номерами количество — число номеров");
@@ -296,12 +301,12 @@ void w_acceptance(Buf& out, const Acceptance& a) {
     }
     if (a.like)    { w_uint(out, 7); w_ref(out, *a.like); }      // ИР-022 шаг 11
     if (a.release) { w_uint(out, 8); w_ref(out, *a.release); }   // ИР-023
-    if (a.buyback) {                                              // ИР-023, пункт 8
+    if (a.buyback) {          // ИР-023, пункт 8: 0 to, 2 until, 3 wear; key 1 (a price) retired
         w_uint(out, 9);
-        w_map(out, 3);
+        w_map(out, 2 + (a.buyback->wear ? 1 : 0));
         w_uint(out, 0); w_fixed(out, a.buyback->to);
-        w_uint(out, 1); w_float64(out, a.buyback->units);
         w_uint(out, 2); w_int64(out, a.buyback->until);
+        if (a.buyback->wear) { w_uint(out, 3); w_uint(out, 1); }
     }
 }
 
@@ -352,12 +357,8 @@ void check_transfer(const Transfer& t) {
         throw CodecError("Transfer: оплата обязана ровно равняться приёмке — труд плюс "
                          "перенос (records.md §12.8)");
     if (a.buyback) {
-        // The pre-signed return (records.md §9.8 v5): to somebody else, for a term
-        // still ahead, at no more than was paid — a return is no sale at a markup.
-        if (!(a.buyback->units > 0.0) || !std::isfinite(a.buyback->units))
-            throw CodecError("Transfer: цена возврата обязана быть положительной");
-        if (a.buyback->units > paid + 1e-6)
-            throw CodecError("Transfer: возврат дороже покупки — наценки нет (records.md §9.8)");
+        // The pre-signed return (records.md §9.8 v5, v6): to somebody else, for a
+        // term still ahead. It names no price — the norm sets it.
         if (a.buyback->until <= t.timestamp)
             throw CodecError("Transfer: срок возврата уже прошёл");
         if (a.buyback->to == t.from)
@@ -423,6 +424,9 @@ void check_release(const Release& rl) {
                          "покупки (records.md §9.8)");
     if (rl.addressed && rl.addressed->until <= rl.timestamp)
         throw CodecError("Release: срок выкупа с адресом уже прошёл (records.md §9.8)");
+    if (rl.addressed && rl.addressed->wear &&
+        rl.addressed->to != (rl.holding ? rl.holding->chain : rl.work.chain))
+        throw CodecError("Release: аренда возвращается тому, кто сдаёт (records.md §9.8)");
 }
 
 // The release (records.md §9.8): the seller names who gets the result. Keys:
@@ -438,11 +442,12 @@ void enc_release(Buf& out, const Release& rl) {
     w_uint(out, 4); w_int64(out, rl.timestamp);
     if (rl.lot)     { w_uint(out, 5); w_lot_link(out, *rl.lot); }
     if (rl.holding) { w_uint(out, 6); w_ref(out, *rl.holding); }
-    if (rl.addressed) {
+    if (rl.addressed) {           // 0 to, 1 until, 2 wear (v6, written as 1 when set)
         w_uint(out, 7);
-        w_map(out, 2);
+        w_map(out, 2 + (rl.addressed->wear ? 1 : 0));
         w_uint(out, 0); w_fixed(out, rl.addressed->to);
         w_uint(out, 1); w_int64(out, rl.addressed->until);
+        if (rl.addressed->wear) { w_uint(out, 2); w_uint(out, 1); }
     }
 }
 
@@ -820,7 +825,7 @@ std::optional<int64_t> dec_opt_int(CborReader& r) {
 
 ResourceQty dec_resource_qty(CborReader& r) {
     const uint64_t n = r.r_map();
-    if (n < 3 || n > 6) throw CodecError("ResourceQty: expected 3..6 fields");
+    if (n < 3 || n > 7) throw CodecError("ResourceQty: expected 3..7 fields");
     ResourceQty rq{};
     expect_key(r, 0); rq.resource = r.r_text();
     expect_key(r, 1); rq.qty      = r.r_float64();
@@ -842,6 +847,8 @@ ResourceQty dec_resource_qty(CborReader& r) {
             if (m == 0) throw CodecError("ResourceQty: units present but empty");
             rq.units.reserve(static_cast<size_t>(m));
             for (uint64_t k = 0; k < m; ++k) rq.units.push_back(r.r_text());
+        } else if (key == 7) {
+            rq.life = r.r_float64();
         } else {
             throw CodecError("ResourceQty: unknown field key");
         }
@@ -1022,11 +1029,21 @@ Acceptance dec_acceptance(CborReader& r) {
         } else if (key == 8) {
             a.release = dec_ref(r);
         } else if (key == 9) {
-            if (r.r_map() != 3) throw CodecError("Buyback: expected 3 fields");
+            const uint64_t m = r.r_map();
+            if (m < 2 || m > 3) throw CodecError("Buyback: expected 2..3 fields");
             Buyback b{};
             expect_key(r, 0); r.r_fixed(b.to);
-            expect_key(r, 1); b.units = r.r_float64();
-            expect_key(r, 2); b.until = r.r_int();
+            const uint64_t k = r.r_uint();
+            if (k == 1)
+                throw CodecError("Buyback: цена возврата снята — её задаёт норма износа "
+                                 "(records.md §9.8)");
+            if (k != 2) throw CodecError("Buyback: unknown field key");
+            b.until = r.r_int();
+            if (m == 3) {
+                expect_key(r, 3);
+                if (r.r_uint() != 1) throw CodecError("Buyback: wear is written as 1");
+                b.wear = true;
+            }
             a.buyback = b;
         } else {
             throw CodecError("Acceptance: unknown field key");
@@ -1171,10 +1188,16 @@ Release dec_release_fields(CborReader& r, uint64_t field_count) {
         if      (key == 5) rl.lot     = dec_lot_link(r);
         else if (key == 6) rl.holding = dec_ref(r);
         else if (key == 7) {
-            if (r.r_map() != 2) throw CodecError("Addressed: expected 2 fields");
+            const uint64_t m = r.r_map();
+            if (m < 2 || m > 3) throw CodecError("Addressed: expected 2..3 fields");
             Addressed ad{};
             expect_key(r, 0); r.r_fixed(ad.to);
             expect_key(r, 1); ad.until = r.r_int();
+            if (m == 3) {
+                expect_key(r, 2);
+                if (r.r_uint() != 1) throw CodecError("Addressed: wear is written as 1");
+                ad.wear = true;
+            }
             rl.addressed = ad;
         }
         else throw CodecError("Release: unknown field key");

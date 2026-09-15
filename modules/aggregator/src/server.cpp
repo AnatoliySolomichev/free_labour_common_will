@@ -1528,7 +1528,8 @@ void AggregatorServer::setup_routes() {
                           + to_hex(r.release.holding->hash) + "\"";
                 if (r.release.addressed)   // an addressed buyout (records.md §9.8 v5)
                     body += ",\"addressed\":{\"to\":\"" + to_hex(r.release.addressed->to)
-                          + "\",\"until\":" + std::to_string(r.release.addressed->until) + "}";
+                          + "\",\"until\":" + std::to_string(r.release.addressed->until)
+                          + ",\"wear\":" + (r.release.addressed->wear ? "true" : "false") + "}";
                 if (r.release.lot) {       // a portion (records.md §9.8 v2)
                     const auto lot   = deals.lots.find(
                         {r.release.holding ? r.release.holding->hash : wh, r.release.lot->out});
@@ -1598,8 +1599,8 @@ void AggregatorServer::setup_routes() {
                 body += "{\"ref\":\"" + to_hex(p.payer.bytes) + "/" + to_hex(p.hash)
                       + "\",\"holder\":\"" + to_hex(p.payer.bytes)
                       + "\",\"to\":\"" + to_hex(pa.buyback->to)
-                      + "\",\"units\":" + std::to_string(pa.buyback->units)
-                      + ",\"until\":" + std::to_string(pa.buyback->until)
+                      + "\",\"until\":" + std::to_string(pa.buyback->until)
+                      + ",\"wear\":" + (pa.buyback->wear ? "true" : "false")
                       + ",\"taken\":" + (deals.bought_back.count(p.hash) ? "true" : "false") + "}";
             }
             body += "],\"oversold\":";
@@ -1796,8 +1797,8 @@ void AggregatorServer::setup_routes() {
                       + "\",\"work\":\"" + to_hex(work.chain) + "/" + to_hex(work.hash)
                       + "\",\"action\":\"" + json_escape(w->second.record.action) + "\"";
                 if (const auto& b = d.accept().buyback)   // выкуп с адресом (records.md §9.8 v5)
-                    body += ",\"buyback\":{\"to\":\"" + to_hex(b->to) + "\",\"units\":"
-                          + std::to_string(b->units) + ",\"until\":" + std::to_string(b->until)
+                    body += ",\"buyback\":{\"to\":\"" + to_hex(b->to) + "\",\"until\":"
+                          + std::to_string(b->until) + ",\"wear\":" + (b->wear ? "true" : "false")
                           + ",\"taken\":" + (deals.bought_back.count(d.hash) ? "true" : "false")
                           + "}";
                 body += ",\"lots\":[";

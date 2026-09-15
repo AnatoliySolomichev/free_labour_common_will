@@ -1186,20 +1186,24 @@ TEST(RecordsCodec, AddressedBuyoutRoundtrip) {
     Release rl = release_of(0xB2);
     rl.addressed = Addressed{make_uid(0x53), rl.timestamp + 86400};   // вернуть мастеру за сутки
     EXPECT_EQ(std::get<Release>(roundtrip(Record{rl})).addressed, rl.addressed);
-    rl.addressed->until = rl.timestamp;                                // срок прошёл
+    rl.addressed->wear = true;                                         // аренда — мастеру
+    EXPECT_EQ(std::get<Release>(roundtrip(Record{rl})).addressed, rl.addressed);
+    rl.addressed->to = make_uid(0xC3);                                 // аренда — не тому, кто сдаёт
+    EXPECT_THROW(Codec::encode(Record{rl}), CodecError);
+    rl.addressed = Addressed{make_uid(0x53), rl.timestamp};            // срок прошёл
     EXPECT_THROW(Codec::encode(Record{rl}), CodecError);
 }
 
-// Возврат едет в самой покупке: не себе, на срок впереди и не дороже уплаченного.
+// Возврат едет в самой покупке: не себе и на срок впереди. Цены в нём нет
+// (records.md §9.8 v6) — её задаёт норма.
 TEST(RecordsCodec, PreSignedReturnRidesInThePurchase) {
     Acceptance a = plain_acceptance(2.0);
     Transfer   t = deal_of(a);
-    t.accept->buyback = Buyback{make_uid(0x53), 2.0, t.timestamp + 86400};
+    t.accept->buyback = Buyback{make_uid(0x53), t.timestamp + 86400};
+    EXPECT_EQ(std::get<Transfer>(roundtrip(Record{t})).accept->buyback, t.accept->buyback);
+    t.accept->buyback->wear = true;                                    // аренда
     EXPECT_EQ(std::get<Transfer>(roundtrip(Record{t})).accept->buyback, t.accept->buyback);
 
-    t.accept->buyback->units = 2.5;                                    // дороже покупки
-    EXPECT_THROW(Codec::encode(Record{t}), CodecError);
-    t.accept->buyback->units = 2.0;
     t.accept->buyback->until = t.timestamp;                            // срок прошёл
     EXPECT_THROW(Codec::encode(Record{t}), CodecError);
     t.accept->buyback->until = t.timestamp + 1;
@@ -1220,4 +1224,21 @@ TEST(RecordsCodec, AMakerHoldingItsOwnSellsOnByCarryOnly) {
     EXPECT_NO_THROW(Codec::encode(Record{t}));
     t.accept->hours_raw = 1.0;                               // с трудом — нужна разбивка
     EXPECT_THROW(Codec::encode(Record{t}), CodecError);
+}
+
+// Срок службы — у выхода (records.md §9.4 v7): по нему считают износ при аренде.
+TEST(RecordsCodec, OutputServiceLifeRoundtrip) {
+    WorkRecord wr{};
+    wr.action   = "палатка";
+    wr.start_ts = 1'700'000'000LL;
+    wr.hours    = 4.0;
+    wr.outputs  = {{"палатка", 1.0, "шт"}};
+    wr.outputs[0].life = 600.0;                                        // дней
+    EXPECT_EQ(std::get<WorkRecord>(roundtrip(Record{wr})).outputs[0].life, wr.outputs[0].life);
+    wr.outputs[0].life = 0.0;
+    EXPECT_THROW(Codec::encode(Record{wr}), CodecError);
+    wr.outputs[0].life.reset();
+    wr.inputs = {{"ткань", 3.0, "м"}};
+    wr.inputs[0].life = 600.0;                                         // у входа — нет
+    EXPECT_THROW(Codec::encode(Record{wr}), CodecError);
 }

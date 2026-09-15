@@ -146,9 +146,18 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
         bool ok = false;
         if (buyback_of[i]) {
             // Выкуп по заранее подписанному возврату (records.md §9.8 v5): the deal
-            // names the holder's purchase itself, which pre-signed it.
+            // names the holder's purchase itself, which pre-signed it. Its price is
+            // nobody's to name: what the holder paid — less, for a rent, the wear
+            // by the norm until now (v6).
             const std::size_t h = *buyback_of[i];
-            ok = addressed(h) && records::completes_buyback(d.transfer, out.all[h].transfer);
+            const auto&       p = out.all[h];
+            const auto        w = out.works.find(p.accept().work.hash);
+            if (addressed(h) && w != out.works.end() &&
+                w->second.worker.bytes == p.accept().work.chain)
+                ok = records::completes_buyback(
+                    d.transfer, p.transfer,
+                    records::buyback_price(lots_of(h), w->second.record, p.transfer.timestamp,
+                                           d.transfer.timestamp, p.accept().buyback->wear));
         } else if (release && release->holding) {
             // Перепродажа: the holder's purchase happened, of this very product,
             // and the price is its share of what the holder paid.
@@ -177,11 +186,8 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
         }
         // Выкуп с адресом (records.md §9.8 v5): a purchase on an addressed buyout
         // pre-signs the return — or it completes nothing.
-        if (ok && release && release->addressed) {
-            double paid = 0.0;
-            for (const auto& o : d.transfer.origins) paid += o.units;
-            ok = records::honours_buyout(a, paid, *release->addressed);
-        }
+        if (ok && release && release->addressed)
+            ok = records::honours_buyout(a, *release->addressed);
         state[i] = ok ? 1 : 0;
         return ok;
     };
