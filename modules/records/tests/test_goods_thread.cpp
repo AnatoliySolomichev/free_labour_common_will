@@ -237,3 +237,90 @@ TEST(Lot, ThePartOfTheWorkAPortionCarries) {
     l.out = 7;
     EXPECT_FALSE(portion_fraction(bread, l).has_value());         // нет такого выхода
 }
+
+// ── Партия со штучным учётом (records.md §9.8 v3, ИР-023, вопрос 10) ─────────
+
+namespace {
+
+ObservedLotLink numbered(uint8_t hash, uint64_t seq, std::vector<std::string> units,
+                         double after, std::optional<uint8_t> prev,
+                         std::optional<int64_t> expires = std::nullopt,
+                         std::vector<uint8_t> returns = {}, int64_t ts = 1000) {
+    auto l = lot(hash, seq, static_cast<double>(units.size()), after, prev, expires,
+                 std::move(returns), ts);
+    l.link.units = std::move(units);
+    return l;
+}
+
+const std::vector<std::string> kFrames = {"R-1", "R-2", "R-3"};
+
+} // namespace
+
+// Велосипеды с номерами рам: номер продаётся один раз.
+TEST(NumberedLot, AUnitIsSoldOnce) {
+    const auto st = check_lot(kChain, 3, {numbered(1, 0, {"R-2"}, 1, {}),
+                                          numbered(2, 1, {"R-2"}, 2, 1)}, kFrames);
+    EXPECT_EQ(st.valid, Hashes{h(1)});
+    EXPECT_EQ(st.invalid, Hashes{h(2)});
+    EXPECT_EQ(st.held, (std::set<std::string>{"R-2"}));
+}
+
+// Истёкший невзятый отпуск вернулся в запас — его номер снова свободен.
+TEST(NumberedLot, AReturnFreesTheUnit) {
+    const auto st = check_lot(kChain, 3, {numbered(1, 0, {"R-2"}, 1, {}, 500),
+                                          numbered(2, 1, {"R-2"}, 1, 1, std::nullopt, {1}, 1000)},
+                              kFrames);
+    EXPECT_EQ(st.valid, (Hashes{h(1), h(2)}));
+    EXPECT_EQ(st.held, (std::set<std::string>{"R-2"}));
+}
+
+// Номер, которого в партии нет, порция без номеров из партии с номерами и номера
+// у партии без номеров — не звенья.
+TEST(NumberedLot, UnitsMustBeTheLotsOwn) {
+    auto st = check_lot(kChain, 3, {numbered(1, 0, {"X-9"}, 1, {})}, kFrames);
+    EXPECT_EQ(st.invalid, Hashes{h(1)});
+    st = check_lot(kChain, 3, {lot(1, 0, 1, 1, {})}, kFrames);
+    EXPECT_EQ(st.invalid, Hashes{h(1)});
+    st = check_lot(kChain, 3, {numbered(1, 0, {"R-1"}, 1, {})});
+    EXPECT_EQ(st.invalid, Hashes{h(1)});
+}
+
+// ── Порция по ценнику, «бери или нет» (records.md §9.8 v3, ИР-023, вопрос 11) ─
+
+TEST(PortionTerms, APortionIsSoldOnTheLotsTerms) {
+    BlockPath skill{};
+    skill.hash.fill(0x01);
+    BlockPath speed{};
+    speed.hash.fill(0x02);
+    WorkRecord bread{};
+    bread.hours   = 10;
+    bread.outputs = {{"хлеб", 100, "шт", std::nullopt, 12.0}};   // ценник: 12 стч за сто
+    bread.axes    = {{speed, 0.25}, {skill, 0.75}};
+    CarryEntry ce{};
+    ce.carried  = 2.0;                                             // печь: 2 ч на всю партию
+    bread.carry = {ce};
+    LotLink l{};
+    l.qty = 25;
+
+    const auto t = portion_terms(bread, l);
+    ASSERT_TRUE(t.has_value());
+    EXPECT_DOUBLE_EQ(t->hours_raw, 2.5);
+    EXPECT_DOUBLE_EQ(t->labor_units, 3.0);
+    EXPECT_DOUBLE_EQ(t->carried_units, 0.5);
+    ASSERT_EQ(t->axes.size(), 2u);
+    EXPECT_EQ(t->axes[0].axis, skill);                             // по хешу оси
+    EXPECT_DOUBLE_EQ(t->axes[0].units, 2.25);
+    EXPECT_DOUBLE_EQ(t->axes[0].units + t->axes[1].units, 3.0);
+
+    Acceptance a{};
+    a.hours_raw     = t->hours_raw;
+    a.labor_units   = t->labor_units;
+    a.carried_units = t->carried_units;
+    a.axes          = t->axes;
+    EXPECT_TRUE(meets_terms(a, *t));
+    a.labor_units = 2.0;                                           // поторговался — не по ценнику
+    EXPECT_FALSE(meets_terms(a, *t));
+
+    bread.outputs[0].price.reset();                                // без ценника порциями не продают
+    EXPECT_FALSE(portion_terms(bread, l).has_value());
+}

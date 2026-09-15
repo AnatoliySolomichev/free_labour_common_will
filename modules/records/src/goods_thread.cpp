@@ -85,7 +85,8 @@ std::optional<double> portion_fraction(const WorkRecord& wr, const LotLink& lot)
 }
 
 LotState check_lot(const std::array<uint8_t, 32>& chain, double qty,
-                   const std::vector<ObservedLotLink>& links) {
+                   const std::vector<ObservedLotLink>& links,
+                   const std::vector<std::string>& units) {
     using Hash32 = std::array<uint8_t, 32>;
     constexpr double EPS = 1e-6;   // the carry thread's tolerance (records.md §9.4)
 
@@ -103,37 +104,65 @@ LotState check_lot(const std::array<uint8_t, 32>& chain, double qty,
     for (const auto& [seq, n] : per_seq)
         if (n > 1) st.equivocated_seqs.push_back(seq);
 
+    std::map<Hash32, bool> ok;
     for (const auto& [hash, l] : by_hash) {
         const LotLink& k = l->link;
-        bool ok = per_seq[k.seq] == 1;                    // one sale per remainder
-        if (k.after > qty + EPS) ok = false;               // more than the lot holds
+        bool good = per_seq[k.seq] == 1;                  // one sale per remainder
+        if (k.after > qty + EPS) good = false;             // more than the lot holds
 
         double back = 0;
         bool   returns_known = true;
         for (const auto& r : k.returns) {
-            if (r.chain != chain) { ok = false; continue; }
+            if (r.chain != chain) { good = false; continue; }
             const auto it = by_hash.find(r.hash);
             if (it == by_hash.end()) { returns_known = false; st.gaps = true; continue; }
             const ObservedLotLink& b = *it->second;
             if (!b.expires || *b.expires > l->timestamp || b.taken ||
                 returned[r.hash] > 1 || b.link.seq >= k.seq)
-                ok = false;
+                good = false;
             back += b.link.qty;
         }
 
         if (!k.prev) {
-            if (std::abs(k.after - k.qty) > EPS) ok = false;   // the first link: after = qty
+            if (std::abs(k.after - k.qty) > EPS) good = false;   // the first link: after = qty
         } else if (k.prev->chain != chain) {
-            ok = false;                                          // a sub-thread is one chain's
+            good = false;                                          // a sub-thread is one chain's
         } else if (const auto it = by_hash.find(k.prev->hash); it == by_hash.end()) {
-            st.gaps = true;                                      // not received: a gap, not a fault
+            st.gaps = true;                                        // not received: a gap, not a fault
         } else {
             const LotLink& p = it->second->link;
-            if (p.seq + 1 != k.seq) ok = false;
-            else if (returns_known && std::abs(p.after + k.qty - back - k.after) > EPS) ok = false;
+            if (p.seq + 1 != k.seq) good = false;
+            else if (returns_known && std::abs(p.after + k.qty - back - k.after) > EPS) good = false;
         }
-        (ok ? st.valid : st.invalid).insert(hash);
+        ok[hash] = good;
     }
+
+    // Numbered units (ИР-023, вопрос 10): walking the sub-thread in order, a unit
+    // is held by the link that took it until a later link returns that link. A
+    // link taking a unit the lot has not, or one somebody holds, sells it twice;
+    // a link of a numbered lot names its units, one of a lot by quantity names none.
+    const std::set<std::string> lot_units(units.begin(), units.end());
+    std::vector<const ObservedLotLink*> in_order;
+    for (const auto& [hash, l] : by_hash) in_order.push_back(l);
+    std::sort(in_order.begin(), in_order.end(),
+              [](const ObservedLotLink* a, const ObservedLotLink* b) {
+                  return a->link.seq != b->link.seq ? a->link.seq < b->link.seq
+                                                    : a->hash < b->hash;
+              });
+    std::map<std::string, Hash32> holder;
+    for (const auto* l : in_order) {
+        if (!ok[l->hash]) continue;
+        for (const auto& r : l->link.returns)
+            for (auto it = holder.begin(); it != holder.end();)
+                it = it->second == r.hash ? holder.erase(it) : std::next(it);
+        bool good = lot_units.empty() == l->link.units.empty();
+        for (const auto& u : l->link.units)
+            if (!lot_units.count(u) || holder.count(u)) good = false;
+        if (!good) { ok[l->hash] = false; continue; }
+        for (const auto& u : l->link.units) holder[u] = l->hash;
+    }
+    for (const auto& [u, h] : holder) st.held.insert(u);
+    for (const auto& [hash, good] : ok) (good ? st.valid : st.invalid).insert(hash);
 
     uint64_t top = 0;
     bool     any = false;
@@ -145,6 +174,45 @@ LotState check_lot(const std::array<uint8_t, 32>& chain, double qty,
         for (uint64_t s = 0; s <= top; ++s)
             if (!per_seq.count(s)) { st.gaps = true; break; }
     return st;
+}
+
+std::optional<PortionTerms> portion_terms(const WorkRecord& wr, const LotLink& lot) {
+    const auto f = portion_fraction(wr, lot);
+    if (!f || wr.axes.empty()) return std::nullopt;
+    const ResourceQty& o = wr.outputs[lot.out];
+    if (!o.price) return std::nullopt;
+
+    PortionTerms t;
+    t.hours_raw   = wr.hours * *f;
+    t.labor_units = *o.price * lot.qty / o.qty;
+    double carried = 0.0;
+    for (const auto& ce : wr.carry) carried += ce.carried;
+    t.carried_units = carried * *f;
+    std::vector<AxisShare> axes = wr.axes;
+    std::sort(axes.begin(), axes.end(), [](const AxisShare& a, const AxisShare& b) {
+        return a.axis.hash < b.axis.hash;
+    });
+    double left = t.labor_units;   // the last axis takes the remainder: Σ = price exactly
+    for (std::size_t i = 0; i < axes.size(); ++i) {
+        const double u = i + 1 == axes.size() ? left : t.labor_units * axes[i].share;
+        left -= u;
+        t.axes.push_back({axes[i].axis, u});
+    }
+    return t;
+}
+
+bool meets_terms(const Acceptance& a, const PortionTerms& t) noexcept {
+    constexpr double EPS = 1e-6;
+    const double carried = a.carried_units ? *a.carried_units : 0.0;
+    if (std::abs(a.hours_raw - t.hours_raw) > EPS || std::abs(a.labor_units - t.labor_units) > EPS ||
+        std::abs(carried - t.carried_units) > EPS || a.axes.size() != t.axes.size())
+        return false;
+    for (const auto& x : t.axes) {
+        const auto it = std::find_if(a.axes.begin(), a.axes.end(),
+                                     [&](const AcceptanceAxis& y) { return y.axis == x.axis; });
+        if (it == a.axes.end() || std::abs(it->units - x.units) > EPS) return false;
+    }
+    return true;
 }
 
 } // namespace records

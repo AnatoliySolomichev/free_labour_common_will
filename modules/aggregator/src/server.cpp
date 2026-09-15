@@ -150,6 +150,14 @@ std::string json_escape(const std::string& s) {
     return out;
 }
 
+// A list of strings as a JSON array.
+std::string json_strings(const std::vector<std::string>& v) {
+    std::string out = "[";
+    for (std::size_t i = 0; i < v.size(); ++i)
+        out += std::string(i ? "," : "") + "\"" + json_escape(v[i]) + "\"";
+    return out + "]";
+}
+
 // One lot as JSON (records.md §9.8 v2): how much of an output went where.
 std::string lot_json(const aggregator::LotSummary& l, const records::ResourceQty& o) {
     return "{\"out\":" + std::to_string(l.out) + ",\"resource\":\"" + json_escape(o.resource)
@@ -159,7 +167,8 @@ std::string lot_json(const aggregator::LotSummary& l, const records::ResourceQty
          + ",\"reserved\":" + std::to_string(l.reserved)
          + ",\"remaining\":" + std::to_string(l.remaining)
          + ",\"faults\":" + std::to_string(l.faults)
-         + ",\"gaps\":" + (l.gaps ? "true" : "false") + "}";
+         + ",\"gaps\":" + (l.gaps ? "true" : "false")
+         + ",\"free_units\":" + json_strings(l.free_units) + "}";
 }
 
 // Tags are emitted verbatim: an attribute the view does not model (geo, radius,
@@ -1518,6 +1527,8 @@ void AggregatorServer::setup_routes() {
                           + ",\"qty\":" + std::to_string(r.release.lot->qty)
                           + ",\"after\":" + std::to_string(r.release.lot->after)
                           + ",\"valid\":" + (valid ? "true" : "false");
+                    if (!r.release.lot->units.empty())
+                        body += ",\"units\":" + json_strings(r.release.lot->units);
                 }
                 body += "}";
             }

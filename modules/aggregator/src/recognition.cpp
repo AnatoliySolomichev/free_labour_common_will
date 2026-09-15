@@ -56,8 +56,18 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
             if (const auto r = release_at.find(a.release->hash);
                 r != release_at.end() && out.releases[r->second].seller.bytes == a.release->chain)
                 release = &out.releases[r->second].release;
-        released[i]  = release;
-        addressed[i] = records::addressed_to(d.transfer, customer, release) ? 1 : 0;
+        released[i] = release;
+        bool ok = records::addressed_to(d.transfer, customer, release);
+        // A portion from stock is sold on the lot's terms — take it or leave it
+        // (records.md §9.8 v3): a deal that pays otherwise completes nothing.
+        if (ok && release && release->lot) {
+            std::optional<records::PortionTerms> terms;
+            if (const auto w = out.works.find(a.work.hash);
+                w != out.works.end() && w->second.worker.bytes == a.work.chain)
+                terms = records::portion_terms(w->second.record, *release->lot);
+            ok = terms && records::meets_terms(a, *terms);
+        }
+        addressed[i] = ok ? 1 : 0;
         if (addressed[i] && release) out.taken.insert(a.release->hash);
     }
 
@@ -86,8 +96,9 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
             out.lots[key] = std::move(none);
             continue;
         }
-        out.lots[key] = records::check_lot(w->second.worker.bytes,
-                                           w->second.record.outputs[key.second].qty, links);
+        const auto& output = w->second.record.outputs[key.second];
+        out.lots[key] = records::check_lot(w->second.worker.bytes, output.qty, links,
+                                           output.units);
     }
 
     // The claims — and what each deal bought: the whole result, or a portion.
@@ -147,6 +158,10 @@ std::vector<LotSummary> lot_summaries(const DealsOnTable& deals,
                     st.valid.count(wo.hash))
                     s.written_off += wo.writeoff.lot.qty;
             s.reserved = std::max(0.0, st.used - s.sold - s.written_off);
+            for (const auto& u : outputs[i].units)
+                if (!st.held.count(u)) s.free_units.push_back(u);
+        } else {
+            s.free_units = outputs[i].units;
         }
         out.push_back(s);
     }

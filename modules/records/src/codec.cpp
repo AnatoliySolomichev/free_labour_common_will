@@ -1,6 +1,7 @@
 #include "records/codec.h"
 #include "records/acceptance.h"
 #include <cstring>
+#include <set>
 #include <tuple>
 #include <cmath>
 #include <limits>
@@ -93,15 +94,20 @@ void w_block_path(Buf& out, const BlockPath& p) {
     w_uint(out, 3); w_fixed(out, p.hash);
 }
 
-// Keys 0–2 always; an output may carry share (3) and k (4) — each only when
-// set, in ascending order (records.md §9.4 v5).
+// Keys 0–2 always; an output may carry share (3), price (5) and units (6) —
+// each only when set, in ascending order (records.md §9.4 v6). Key 4 — the
+// price multiplier k of v5 — is retired: the tag is a number of labor-hours.
 void w_resource_qty(Buf& out, const ResourceQty& rq) {
-    w_map(out, 3 + (rq.share ? 1 : 0) + (rq.k ? 1 : 0));
+    w_map(out, 3 + (rq.share ? 1 : 0) + (rq.price ? 1 : 0) + (rq.units.empty() ? 0 : 1));
     w_uint(out, 0); w_text(out, rq.resource);
     w_uint(out, 1); w_float64(out, rq.qty);
     w_uint(out, 2); w_text(out, rq.unit);
     if (rq.share) { w_uint(out, 3); w_float64(out, *rq.share); }
-    if (rq.k)     { w_uint(out, 4); w_float64(out, *rq.k); }
+    if (rq.price) { w_uint(out, 5); w_float64(out, *rq.price); }
+    if (!rq.units.empty()) {
+        w_uint(out, 6); w_arr(out, rq.units.size());
+        for (const auto& u : rq.units) w_text(out, u);
+    }
 }
 
 // ── Per-type encoders ─────────────────────────────────────────────────────────
@@ -193,10 +199,11 @@ void check_work_record(const WorkRecord& wr) {
         if (std::abs(sum - 1.0) > 1e-9)
             throw CodecError("WorkRecord: доли осей в сумме обязаны давать 1 (records.md §9.4)");
     }
-    // Share and price tag belong to outputs — to lots (records.md §9.4 v5).
+    // Share, price tag and unit numbers belong to outputs — to lots
+    // (records.md §9.4 v6).
     for (const auto& in : wr.inputs)
-        if (in.share || in.k)
-            throw CodecError("WorkRecord: доля и ценник бывают только у выхода работы");
+        if (in.share || in.price || !in.units.empty())
+            throw CodecError("WorkRecord: доля, ценник и номера бывают только у выхода работы");
     std::size_t with_share = 0;
     double      shares     = 0.0;
     for (const auto& o : wr.outputs) {
@@ -206,8 +213,14 @@ void check_work_record(const WorkRecord& wr) {
             ++with_share;
             shares += *o.share;
         }
-        if (o.k && (!(*o.k > 0.0) || !std::isfinite(*o.k)))
-            throw CodecError("WorkRecord: ценник k обязан быть положительным");
+        if (o.price && (!(*o.price > 0.0) || !std::isfinite(*o.price)))
+            throw CodecError("WorkRecord: ценник обязан быть положительным");
+        if (!o.units.empty()) {
+            if (o.qty != static_cast<double>(o.units.size()))
+                throw CodecError("WorkRecord: у партии с номерами количество — число номеров");
+            if (std::set<std::string>(o.units.begin(), o.units.end()).size() != o.units.size())
+                throw CodecError("WorkRecord: номер единицы в партии повторяется");
+        }
     }
     if (with_share != 0 && (with_share != wr.outputs.size() || std::abs(shares - 1.0) > 1e-9))
         throw CodecError("WorkRecord: доли — у всех выходов и в сумме 1 (records.md §9.4)");
@@ -332,13 +345,20 @@ void check_lot_link(const LotLink& l) {
         if (!(std::tie(l.returns[i - 1].chain, l.returns[i - 1].hash) <
               std::tie(l.returns[i].chain, l.returns[i].hash)))
             throw CodecError("LotLink: возвраты — по возрастанию, без повторов");
+    if (!l.units.empty()) {
+        if (l.qty != static_cast<double>(l.units.size()))
+            throw CodecError("LotLink: у порции с номерами количество — число номеров");
+        for (size_t i = 1; i < l.units.size(); ++i)
+            if (!(l.units[i - 1] < l.units[i]))
+                throw CodecError("LotLink: номера — по возрастанию, без повторов");
+    }
 }
 
-// Keys: 0 out, 1 qty, 2 seq, 3 prev (null for the first), 4 after, 5 returns —
-// the last only when non-empty.
+// Keys: 0 out, 1 qty, 2 seq, 3 prev (null for the first), 4 after, 5 returns,
+// 6 units — the last two only when non-empty.
 void w_lot_link(Buf& out, const LotLink& l) {
     check_lot_link(l);
-    w_map(out, 5 + (l.returns.empty() ? 0 : 1));
+    w_map(out, 5 + (l.returns.empty() ? 0 : 1) + (l.units.empty() ? 0 : 1));
     w_uint(out, 0); w_uint(out, l.out);
     w_uint(out, 1); w_float64(out, l.qty);
     w_uint(out, 2); w_uint(out, l.seq);
@@ -348,6 +368,10 @@ void w_lot_link(Buf& out, const LotLink& l) {
     if (!l.returns.empty()) {
         w_uint(out, 5); w_arr(out, l.returns.size());
         for (const auto& r : l.returns) w_ref(out, r);
+    }
+    if (!l.units.empty()) {
+        w_uint(out, 6); w_arr(out, l.units.size());
+        for (const auto& u : l.units) w_text(out, u);
     }
 }
 
@@ -745,7 +769,7 @@ std::optional<int64_t> dec_opt_int(CborReader& r) {
 
 ResourceQty dec_resource_qty(CborReader& r) {
     const uint64_t n = r.r_map();
-    if (n < 3 || n > 5) throw CodecError("ResourceQty: expected 3..5 fields");
+    if (n < 3 || n > 6) throw CodecError("ResourceQty: expected 3..6 fields");
     ResourceQty rq{};
     expect_key(r, 0); rq.resource = r.r_text();
     expect_key(r, 1); rq.qty      = r.r_float64();
@@ -755,9 +779,21 @@ ResourceQty dec_resource_qty(CborReader& r) {
         const uint64_t key = r.r_uint();
         if (key <= last) throw CodecError("ResourceQty: keys out of order");
         last = key;
-        if      (key == 3) rq.share = r.r_float64();
-        else if (key == 4) rq.k     = r.r_float64();
-        else throw CodecError("ResourceQty: unknown field key");
+        if (key == 3) {
+            rq.share = r.r_float64();
+        } else if (key == 4) {
+            throw CodecError("ResourceQty: ценник k снят — ценник теперь число трудочасов "
+                             "(ключ 5, records.md §9.4)");
+        } else if (key == 5) {
+            rq.price = r.r_float64();
+        } else if (key == 6) {
+            const uint64_t m = r.r_arr();
+            if (m == 0) throw CodecError("ResourceQty: units present but empty");
+            rq.units.reserve(static_cast<size_t>(m));
+            for (uint64_t k = 0; k < m; ++k) rq.units.push_back(r.r_text());
+        } else {
+            throw CodecError("ResourceQty: unknown field key");
+        }
     }
     return rq;
 }
@@ -1030,7 +1066,7 @@ Transfer dec_transfer_fields(CborReader& r, uint64_t field_count) {
 
 LotLink dec_lot_link(CborReader& r) {
     const uint64_t n = r.r_map();
-    if (n < 5 || n > 6) throw CodecError("LotLink: expected 5..6 fields");
+    if (n < 5 || n > 7) throw CodecError("LotLink: expected 5..7 fields");
     LotLink l{};
     expect_key(r, 0);
     {
@@ -1042,12 +1078,23 @@ LotLink dec_lot_link(CborReader& r) {
     expect_key(r, 2); l.seq   = r.r_uint();
     expect_key(r, 3); l.prev  = dec_opt_ref(r);
     expect_key(r, 4); l.after = r.r_float64();
-    if (n == 6) {
-        expect_key(r, 5);
+    // The tail, by key and ascending: returns (5), units (6).
+    uint64_t last = 4;
+    for (uint64_t i = 5; i < n; ++i) {
+        const uint64_t key = r.r_uint();
+        if (key <= last) throw CodecError("LotLink: keys out of order");
+        last = key;
         const uint64_t m = r.r_arr();
-        if (m == 0) throw CodecError("LotLink: returns present but empty");
-        l.returns.reserve(static_cast<size_t>(m));
-        for (uint64_t i = 0; i < m; ++i) l.returns.push_back(dec_ref(r));
+        if (m == 0) throw CodecError("LotLink: list present but empty");
+        if (key == 5) {
+            l.returns.reserve(static_cast<size_t>(m));
+            for (uint64_t k = 0; k < m; ++k) l.returns.push_back(dec_ref(r));
+        } else if (key == 6) {
+            l.units.reserve(static_cast<size_t>(m));
+            for (uint64_t k = 0; k < m; ++k) l.units.push_back(r.r_text());
+        } else {
+            throw CodecError("LotLink: unknown field key");
+        }
     }
     check_lot_link(l);
     return l;

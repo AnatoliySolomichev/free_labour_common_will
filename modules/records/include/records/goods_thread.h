@@ -84,6 +84,7 @@ struct LotState {
     std::vector<uint64_t> equivocated_seqs;         // one seq in two blocks: two sales from one remainder
     bool   gaps = false;                            // links or returns not on the table
     double used = 0;                                // taken from the lot at the newest valid link
+    std::set<std::string> held;                     // numbered units taken and not returned
 
     double remaining() const noexcept { return qty - used; }
 };
@@ -92,8 +93,28 @@ struct LotState {
 // twice is one. Strict like the carry thread: a link checks out only against
 // its own previous link, and two links with one seq are both refused. A return
 // is honest only for an earlier release of this lot that expired before the
-// returning link, was taken by nobody and is returned once.
+// returning link, was taken by nobody and is returned once. For a lot counted
+// piece by piece (`units`, ИР-023, вопрос 10) every link names the units it
+// takes; a unit the lot has not, or one somebody holds, is sold twice.
 LotState check_lot(const std::array<uint8_t, 32>& chain, double qty,
-                   const std::vector<ObservedLotLink>& links);
+                   const std::vector<ObservedLotLink>& links,
+                   const std::vector<std::string>& units = {});
+
+// What a portion of a lot costs — take it or leave it (records.md §9.8 v3,
+// ИР-023, вопрос 11): its share of the lot's price tag, broken down by the
+// worker's proposed axes, with its share of the work's hours and of the carried
+// cost. nullopt when the lot has no tag, the work no proposed breakdown, or the
+// portion cannot be valued — such a lot is not sold in portions.
+struct PortionTerms {
+    double hours_raw     = 0;
+    double labor_units   = 0;
+    double carried_units = 0;
+    std::vector<AcceptanceAxis> axes;   // by axis hash; Σ units = labor_units exactly
+};
+std::optional<PortionTerms> portion_terms(const WorkRecord& wr, const LotLink& lot);
+
+// Whether an acceptance pays exactly on those terms. Bargaining happens over an
+// order or a lot bought whole; a portion from stock is bought or not.
+bool meets_terms(const Acceptance& a, const PortionTerms& t) noexcept;
 
 } // namespace records

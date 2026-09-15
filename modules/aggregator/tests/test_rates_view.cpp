@@ -1,4 +1,5 @@
 #include "aggregator/rates_view.h"
+#include "aggregator/recognition.h"
 #include "labor_thread_support.h"
 #include "aggregator/server.h"
 
@@ -732,21 +733,23 @@ TEST_F(RatesViewTest, HoursSoldTwiceAndWorkOutsideTheThreadMoveNoPrice) {
     EXPECT_NEAR(day.axes[0].price, 1.0, 1e-9);
 }
 
-// Партия (records.md §9.8 v2): хлеб на склад, отпущенный порциями трём
-// покупателям, — три сделки, у каждой своя доля часов; порция сверх партии цены
-// не двигает — продавец отпустил больше, чем испёк.
+// Партия (records.md §9.8 v3): хлеб на склад с ценником, отпущенный порциями, —
+// каждая порция своя сделка по своей доле ценника. Порция сверх партии цены не
+// двигает — продавец отпустил больше, чем испёк; порция не по ценнику ничего не
+// завершает — её часы не уходят вовсе.
 TEST_F(RatesViewTest, PortionsOfALotAreDealsOfTheirOwn) {
     const UserId carol = make_chain(0xC7);
     const UserId dave  = make_chain(0xD4);
     records::WorkRecord bake{};
-    bake.hours   = 10.0;                          // 10 ч на сто буханок
-    bake.outputs = {{"хлеб", 100.0, "шт"}};
+    bake.hours   = 10.0;                                         // 10 ч на сто буханок
+    bake.outputs = {{"хлеб", 100.0, "шт", std::nullopt, 10.0}};  // ценник: 10 стч за партию
+    bake.axes    = {{test_axis(), 1.0}};                          // предложенная разбивка
     const Block work = add(alice_, bake);
 
     std::optional<records::Ref> prev;
     uint64_t seq   = 0;
     double   taken = 0;
-    const auto sell = [&](const UserId& buyer, double qty) {
+    const auto sell = [&](const UserId& buyer, double qty, double pay_share) {
         records::Release rl{};
         rl.work      = ref_to(alice_, work);
         rl.to        = buyer.bytes;
@@ -761,29 +764,31 @@ TEST_F(RatesViewTest, PortionsOfALotAreDealsOfTheirOwn) {
         const Block rb = add(alice_, rl);
         prev = ref_to(alice_, rb);
 
-        const double hours = 10.0 * qty / 100.0;  // часы порции
+        const double hours = 10.0 * qty / 100.0;                 // часы порции
+        const double labor = hours * pay_share;                  // 1.0 — ровно по ценнику
         records::Acceptance a{};
         a.work        = ref_to(alice_, work);
         a.release     = ref_to(alice_, rb);
         a.hours_raw   = hours;
-        a.labor_units = hours;
-        a.axes        = {{test_axis(), hours}};
+        a.labor_units = labor;
+        a.axes        = {{test_axis(), labor}};
         records::Transfer t{};
         t.from      = buyer.bytes;
         t.to        = alice_.bytes;
-        t.origins   = { {buyer.bytes, hours} };
+        t.origins   = { {buyer.bytes, labor} };
         t.accept    = a;
         t.timestamp = kDay + 100;
-        add(buyer, t);
+        return Crypto::hash_block(add(buyer, t)).bytes;
     };
-    sell(bob_, 30);
-    sell(carol, 50);
-    sell(dave, 20);                               // вся партия
-    sell(bob_, 10);                               // сверх партии: after = 110 > 100
+    sell(bob_, 30, 1.0);
+    sell(carol, 50, 1.0);
+    const auto lowball = sell(dave, 20, 0.5);                    // полцены — не по ценнику
+    sell(bob_, 10, 1.0);                                          // сверх партии: after = 110
 
     const auto day = build_daily_prices(*storage_, kDay, {});
     ASSERT_EQ(day.axes.size(), 1u);
-    EXPECT_EQ(day.axes[0].deals, 3u);
-    EXPECT_NEAR(day.axes[0].hours, 10.0, 1e-9);   // часы трёх порций — вся работа
+    EXPECT_EQ(day.axes[0].deals, 2u);                             // две порции по ценнику
+    EXPECT_NEAR(day.axes[0].hours, 8.0, 1e-9);
     EXPECT_NEAR(day.axes[0].price, 1.0, 1e-9);
+    EXPECT_FALSE(read_deals(*storage_).moves_hours(lowball));     // ничтожна: часы не ушли
 }

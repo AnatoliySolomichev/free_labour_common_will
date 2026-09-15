@@ -1088,3 +1088,30 @@ TEST(RecordsCodec, LotLinkThatCouldNotBeWrittenIsRefused) {
     wo.lot.returns = {make_ref(0x53, 0x62), make_ref(0x53, 0x61)};            // не по порядку
     EXPECT_THROW(Codec::encode(Record{wo}), CodecError);
 }
+
+// ── Ценник числом и партия со штучным учётом (records.md §9.4 v6,
+//    records.md §9.8 v3) ──────────────────────────────────────────────────────
+
+TEST(RecordsCodec, NumberedLotAndPriceTagRoundtrip) {
+    WorkRecord wr{};
+    wr.action  = "табуреты";
+    wr.hours   = 3.0;
+    wr.outputs = {{"табурет", 3.0, "шт", std::nullopt, 3.3, {"Т-1", "Т-2", "Т-3"}}};
+    EXPECT_EQ(std::get<WorkRecord>(roundtrip(wr)).outputs, wr.outputs);
+
+    wr.outputs[0].units = {"Т-1", "Т-2"};                     // три штуки, два номера
+    EXPECT_THROW(Codec::encode(Record{wr}), CodecError);
+    wr.outputs[0].units = {"Т-1", "Т-1", "Т-2"};              // номер дважды
+    EXPECT_THROW(Codec::encode(Record{wr}), CodecError);
+}
+
+TEST(RecordsCodec, PortionOfNumberedUnitsRoundtrip) {
+    Release rl = release_of(0xB2);
+    rl.lot = lot_link(0, 2.0, 2.0);
+    rl.lot->units = {"R-1", "R-2"};
+    EXPECT_EQ(*std::get<Release>(roundtrip(Record{rl})).lot, *rl.lot);
+    rl.lot->units = {"R-2", "R-1"};                            // не по порядку
+    EXPECT_THROW(Codec::encode(Record{rl}), CodecError);
+    rl.lot->units = {"R-1"};                                   // две штуки, один номер
+    EXPECT_THROW(Codec::encode(Record{rl}), CodecError);
+}

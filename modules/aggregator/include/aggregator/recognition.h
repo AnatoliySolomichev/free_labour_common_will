@@ -106,6 +106,7 @@ struct LotSummary {
     double      remaining = 0;    // still in stock
     std::size_t faults = 0;       // links of the lot that do not check out
     bool        gaps   = false;
+    std::vector<std::string> free_units;   // a numbered lot: the units still in stock
 };
 std::vector<LotSummary> lot_summaries(const DealsOnTable& deals,
                                       const std::array<uint8_t, 32>& work);

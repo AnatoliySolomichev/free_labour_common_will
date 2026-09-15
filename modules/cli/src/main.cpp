@@ -245,10 +245,32 @@ static ResourceQty parse_rq(const std::string& s) {
     return { s.substr(0, p1), std::stod(s.substr(p1 + 1, p2 - p1 - 1)), s.substr(p2 + 1) };
 }
 
-// --output ИМЯ:КОЛИЧЕСТВО:ЕДИНИЦА[:ДОЛЯ[:K]] — a lot (records.md §9.4 v5): the
-// share of the work's hours when one work yields several outputs, and the price
-// tag k. An empty field is absent: «хлеб:100:шт::1.2» — a tag and no share.
-static ResourceQty parse_output(const std::string& s) {
+// A comma-separated list: «R1,R2,R3»; empty items are dropped.
+static std::vector<std::string> split_list(const std::string& s) {
+    std::vector<std::string> out;
+    for (std::size_t from = 0;;) {
+        const auto comma = s.find(',', from);
+        std::string item = s.substr(from, comma == std::string::npos ? std::string::npos
+                                                                     : comma - from);
+        if (!item.empty()) out.push_back(std::move(item));
+        if (comma == std::string::npos) break;
+        from = comma + 1;
+    }
+    return out;
+}
+
+// --output ИМЯ:КОЛИЧЕСТВО:ЕДИНИЦА[:ДОЛЯ[:ЦЕНА[:НОМЕРА]]] — a lot (records.md §9.4
+// v6): the share of the work's hours when one work yields several outputs; the
+// price tag — labor-hours for the whole lot, or k=K to have it computed from
+// the axis prices of the production day; the unit numbers, comma separated,
+// for a lot counted piece by piece. An empty field is absent:
+// «хлеб:100:шт::k=1.2» — a tag and no share; «табурет:3:шт::k=1:Т-1,Т-2,Т-3».
+struct OutputSpec {
+    ResourceQty           rq;
+    std::optional<double> k;   // the tag still to be computed from k
+};
+
+static OutputSpec parse_output(const std::string& s) {
     std::vector<std::string> parts;
     for (std::size_t from = 0;;) {
         const auto colon = s.find(':', from);
@@ -257,12 +279,19 @@ static ResourceQty parse_output(const std::string& s) {
         if (colon == std::string::npos) break;
         from = colon + 1;
     }
-    if (parts.size() < 3 || parts.size() > 5)
-        throw std::runtime_error("--output ждёт ИМЯ:КОЛИЧЕСТВО:ЕДИНИЦА[:ДОЛЯ[:K]], получено: " + s);
-    ResourceQty rq{parts[0], std::stod(parts[1]), parts[2]};
-    if (parts.size() > 3 && !parts[3].empty()) rq.share = std::stod(parts[3]);
-    if (parts.size() > 4 && !parts[4].empty()) rq.k     = std::stod(parts[4]);
-    return rq;
+    if (parts.size() < 3 || parts.size() > 6)
+        throw std::runtime_error("--output ждёт ИМЯ:КОЛИЧЕСТВО:ЕДИНИЦА[:ДОЛЯ[:ЦЕНА[:НОМЕРА]]], "
+                                 "получено: " + s);
+    OutputSpec spec{ResourceQty{parts[0], std::stod(parts[1]), parts[2]}, std::nullopt};
+    if (parts.size() > 3 && !parts[3].empty()) spec.rq.share = std::stod(parts[3]);
+    if (parts.size() > 4 && !parts[4].empty()) {
+        if (parts[4].rfind("k=", 0) == 0) spec.k = std::stod(parts[4].substr(2));
+        else                              spec.rq.price = std::stod(parts[4]);
+    }
+    if (parts.size() > 5) spec.rq.units = split_list(parts[5]);
+    if (!spec.rq.units.empty() && spec.rq.qty != static_cast<double>(spec.rq.units.size()))
+        throw std::runtime_error("у партии с номерами количество — число номеров: " + s);
+    return spec;
 }
 
 // A quantity as people write it: 3, 2.5 — not 3.000000.
@@ -1221,8 +1250,10 @@ static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
                      "   [--axis-share ОСЬ=ДОЛЯ]    предложенная разбивка часов по осям,\n"
                      "                              сумма 1 — покупатель её подтверждает\n"
                      "   [--input  NAME:QTY:UNIT]   (repeatable)\n"
-                     "   [--output ИМЯ:КОЛ:ЕД[:ДОЛЯ[:K]]] партия (repeatable, records.md §9.4):\n"
-                     "                              ДОЛЯ часов при нескольких выходах, K — ценник\n"
+                     "   [--output ИМЯ:КОЛ:ЕД[:ДОЛЯ[:ЦЕНА[:НОМЕРА]]]] партия (repeatable,\n"
+                     "                              records.md §9.4): ДОЛЯ часов при нескольких\n"
+                     "                              выходах; ЦЕНА — ценник, трудочасы за партию\n"
+                     "                              или k=K; НОМЕРА — через запятую\n"
                      "   [--tool   HASH_PREFIX:USED] (repeatable — перенос стоимости, ИР-011)\n";
         return 1;
     }
@@ -1241,7 +1272,12 @@ static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
                   : static_cast<int64_t>(std::stoll(start_s));
     wr.axes = parse_axis_shares(flag_all(argc, argv, "--axis-share"));
     for (const auto& s : flag_all(argc, argv, "--input"))  wr.inputs.push_back(parse_rq(s));
-    for (const auto& s : flag_all(argc, argv, "--output")) wr.outputs.push_back(parse_output(s));
+    std::vector<std::optional<double>> tag_k;   // tags still to compute from k (records.md §9.4 v6)
+    for (const auto& s : flag_all(argc, argv, "--output")) {
+        auto spec = parse_output(s);
+        wr.outputs.push_back(std::move(spec.rq));
+        tag_k.push_back(spec.k);
+    }
 
     const NodeIndex leaf = parse_leaf_index(argc, argv);
     Context ctx(data_dir, leaf);
@@ -1249,6 +1285,39 @@ static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
     for (const auto& s : flag_all(argc, argv, "--material")) carry_specs.push_back(s);
     if (!carry_specs.empty()) attach_carry(ctx, wr, carry_specs);
     place_in_thread(ctx, wr, !start_s.empty());
+
+    // Ценник из k (records.md §9.4 v6, ИР-023, вопрос 2): часы × Σ цен
+    // предложенных осей дня производства × k — закрепляется числом трудочасов
+    // за всю партию; порции потом продаются по нему, «бери или нет».
+    if (std::any_of(tag_k.begin(), tag_k.end(), [](const auto& k) { return k.has_value(); })) {
+        if (wr.axes.empty())
+            throw std::runtime_error("ценник из k считается по предложенным осям — задайте "
+                                     "--axis-share (records.md §9.4)");
+        const auto via_s  = flag_val(argc, argv, "--via");
+        auto       prices = lookup_axis_prices_on(via_s, wr.start_ts);
+        if (prices.empty()) prices = lookup_axis_prices(via_s);
+        double      rate   = 0.0;
+        std::size_t priced = 0;
+        for (const auto& x : wr.axes)
+            if (const auto it = prices.find(x.axis.hash); it != prices.end()) {
+                rate += it->second;
+                ++priced;
+            }
+        if (priced == 0) {
+            rate = 1.0;
+            std::cerr << "у предложенных осей ещё нет сетевой цены — 1.0 стч/ч\n";
+        }
+        for (std::size_t i = 0; i < wr.outputs.size(); ++i) {
+            if (!tag_k[i]) continue;
+            auto& o = wr.outputs[i];
+            if (wr.outputs.size() > 1 && !o.share)
+                throw std::runtime_error("у нескольких выходов ценник из k делится по долям — "
+                                         "объявите их: --output ИМЯ:КОЛ:ЕД:ДОЛЯ:k=K");
+            o.price = wr.hours * (o.share ? *o.share : 1.0) * rate * *tag_k[i];
+            std::cerr << "ценник «" << o.resource << "»: " << qty_str(*o.price) << " стч за "
+                      << qty_str(o.qty) << " " << o.unit << " (k = " << *tag_k[i] << ")\n";
+        }
+    }
 
     const Block block = append_record(ctx, Record{wr});
     std::cout << "block #" << block.address.block_index
@@ -1310,6 +1379,196 @@ static std::optional<records::json::Value> fetch_work_status(const std::string& 
                            to_hex(work.hash.data(), 32));
 }
 
+// How a whole result is appraised (records.md §9.5): the buyer's breakdown by
+// axis — named, as shares, like a sample's, or the worker's proposal — and the
+// price: named hours, a manual rate, or hours × Σ network prices of the axes ×
+// k. This is where the parties bargain: over an order or a lot bought whole
+// (ИР-023, вопрос 11); a portion from stock is not appraised, it has its terms.
+// The breakdown is written out in full and checked against the price: the price
+// and its explanation must agree exactly (ИР-022).
+static void appraise_whole(Context& ctx, const std::string& via, int argc, char** argv,
+                           const WorkRecord* work, Acceptance& a,
+                           const std::vector<std::string>& axis_args,
+                           const std::vector<std::string>& share_args,
+                           const std::string& like_s, const std::string& raw_s,
+                           const std::string& lu_s) {
+    for (const auto& p : axis_args) {
+        const auto eq = p.rfind('=');
+        if (eq == std::string::npos || eq == 0)
+            throw std::runtime_error("--axis ждёт ПУТЬ_ОСИ=ЧАСЫ (путь: цепь/узел/блок/хеш): " + p);
+        AcceptanceAxis x{};
+        x.axis  = parse_block_path(p.substr(0, eq));
+        x.units = std::stod(p.substr(eq + 1));
+        a.axes.push_back(std::move(x));
+    }
+    std::vector<std::pair<BlockPath, double>> shares;
+    for (const auto& p : share_args) {
+        const auto eq = p.rfind('=');
+        if (eq == std::string::npos || eq == 0)
+            throw std::runtime_error("--axis-share ждёт ПУТЬ_ОСИ=ДОЛЯ (путь: цепь/узел/блок/хеш): " + p);
+        shares.emplace_back(parse_block_path(p.substr(0, eq)), std::stod(p.substr(eq + 1)));
+    }
+
+    // «Такая же работа, как та» (ИР-022 шаг 11): unless this deal names its own
+    // breakdown, the sample's is taken as shares. The reference stays in the
+    // record as provenance — the work cloud is made of it.
+    if (!like_s.empty()) {
+        a.like = parse_ref(like_s);
+        if (a.axes.empty() && shares.empty()) {
+            const auto  rec    = load_record(ctx, via, *a.like);
+            const auto* deal   = rec ? std::get_if<records::Transfer>(&*rec) : nullptr;
+            const Acceptance* sample = deal && deal->accept ? &*deal->accept : nullptr;
+            if (!sample)
+                throw std::runtime_error("--like: образец не найден или это не сделка с "
+                                         "приёмкой (bc fetch <ref> --via URL)");
+            if (sample->labor_units <= 0.0)
+                throw std::runtime_error("--like: у образца нулевая цена — долей из неё не вывести");
+            for (const auto& x : sample->axes)
+                shares.emplace_back(x.axis, x.units / sample->labor_units);
+            std::cerr << "разбивка как у образца: " << shares.size() << " ос.\n";
+        }
+    }
+
+    // Ничего не названо — разбивка, которую предложил работник (records.md §9.4
+    // v4): покупатель подтверждает её своей подписью.
+    if (a.axes.empty() && shares.empty() && work && !work->axes.empty()) {
+        for (const auto& x : work->axes) shares.emplace_back(x.axis, x.share);
+        std::cerr << "разбивка, предложенная работником: " << shares.size() << " ос.\n";
+    }
+    if (a.axes.empty() && shares.empty())
+        throw std::runtime_error("разбивка цены обязательна (ИР-022): --axis, --axis-share или "
+                                 "--like — у работы нет предложенной (records.md §9.4)");
+
+    if (raw_s.empty()) {
+        // Hours from the worker's record (records.md §9.5).
+        if (!work)
+            throw std::runtime_error(
+                "запись работы не найдена — 'bc fetch <ref> --via URL' или --via, "
+                "или задайте --hours-raw");
+        a.hours_raw = work->hours;
+    } else {
+        a.hours_raw = std::stod(raw_s);
+    }
+
+    // The price of live labour (economy.md §2а).
+    if (!lu_s.empty()) {
+        a.labor_units = std::stod(lu_s);
+    } else if (!a.axes.empty()) {
+        for (const auto& x : a.axes) a.labor_units += x.units;   // hours named ARE the price
+    } else {
+        // hours × Σ network price of the axes named × k — or a manual rate.
+        const auto coef_s = flag_val(argc, argv, "--coef");
+        double rate = 0.0;
+        if (!coef_s.empty()) {
+            rate = std::stod(coef_s);
+        } else {
+            const auto prices = lookup_axis_prices(via);
+            std::size_t priced = 0;
+            for (const auto& [path, share] : shares) {
+                (void)share;
+                if (const auto it = prices.find(path.hash); it != prices.end()) {
+                    rate += it->second;
+                    ++priced;
+                }
+            }
+            if (priced > 0) {
+                std::cerr << "сетевая цена названных осей: " << rate << " стч/ч ("
+                          << priced << " из " << shares.size() << " оценены сетью)\n";
+            } else {
+                rate = 1.0;
+                std::cerr << "у названных осей ещё нет сетевой цены — 1.0 стч/ч "
+                             "(задайте --coef или --labor-units)\n";
+            }
+        }
+        const double k = std::stod(flag_val(argc, argv, "--k", "1.0"));
+        a.labor_units = a.hours_raw * rate * k;
+    }
+
+    // v2 (ИР-011): carried cost of the accepted work. carried_units must equal
+    // Σ carried of the WorkRecord's carry, or the acceptance is unrecognisable
+    // (records.md §9.5) — so it is always derived, never passed by hand.
+    if (const auto wblock = find_external_by_hash(ctx, a.work.hash)) {
+        if (wblock->type == BlockType::DATA) {
+            try {
+                const auto wrec = Codec::decode(wblock->payload.data(),
+                                                wblock->payload.size());
+                const auto* wr = std::get_if<WorkRecord>(&wrec);
+                if (wr && !wr->carry.empty()) {
+                    double carried = 0;
+                    for (const auto& ce : wr->carry) carried += ce.carried;
+                    a.carried_units = carried;
+                    std::cerr << "перенос средств производства: " << carried
+                              << "ч, позиции:\n";
+                    for (const auto& ce : wr->carry) {
+                        const auto ablock = find_external_by_hash(ctx, ce.src.hash);
+                        std::optional<AssetInfo> info;
+                        if (ablock && ablock->type == BlockType::DATA) {
+                            try {
+                                info = asset_info(Codec::decode(
+                                    ablock->payload.data(), ablock->payload.size()));
+                            } catch (const CodecError&) {}
+                        }
+                        if (!info) {
+                            std::cerr << "  " << short_hex(ce.src.hash) << ": "
+                                      << ce.carried << "ч — запись средства не "
+                                      "загружена, формула не проверена (bc fetch "
+                                      << to_hex(ce.src.chain) << "/"
+                                      << to_hex(ce.src.hash) << ")\n";
+                            continue;
+                        }
+                        const double expected = records::carry_step(
+                            info->cost, info->capacity, ce.used,
+                            ce.after - ce.carried);
+                        if (std::abs(expected - ce.carried) > 1e-6)
+                            std::cerr << "  ⚠ " << info->name << ": " << ce.carried
+                                      << "ч НЕ по формуле переноса (ожидалось "
+                                      << expected << "ч, records.md §9.4) — вправе отклонить\n";
+                        else
+                            std::cerr << "  " << info->name << ": " << ce.carried
+                                      << "ч за " << ce.used
+                                      << (info->is_material ? " " + info->unit
+                                                            : "ч работы")
+                                      << (info->basis == "est"
+                                          ? "  [оценка владельца]" : "") << "\n";
+                    }
+                }
+            } catch (const CodecError&) {}
+        }
+    }
+
+    if (!shares.empty()) {
+        double sum = 0.0;
+        for (const auto& [ref, f] : shares) { (void)ref; sum += f; }
+        if (std::abs(sum - 1.0) > 1e-9)
+            throw std::runtime_error("--axis-share в сумме даёт " + std::to_string(sum)
+                                     + ", а должно 1.0");
+        double left = a.labor_units;
+        for (std::size_t i = 0; i < shares.size(); ++i) {
+            AcceptanceAxis x{};
+            x.axis  = shares[i].first;
+            // Последней достаётся остаток: сумма обязана совпасть с ценой ТОЧНО,
+            // а не с точностью до округления долей.
+            x.units = i + 1 == shares.size() ? left : a.labor_units * shares[i].second;
+            left   -= x.units;
+            a.axes.push_back(std::move(x));
+        }
+    }
+    std::sort(a.axes.begin(), a.axes.end(),
+              [](const AcceptanceAxis& x, const AcceptanceAxis& y) {
+                  return x.axis.hash < y.axis.hash;
+              });
+    {   // Разбивка ЕСТЬ цена: расхождение здесь — не округление, а другая сделка.
+        double named = 0.0;
+        for (const auto& x : a.axes) named += x.units;
+        if (std::abs(named - a.labor_units) > 1e-6)
+            throw std::runtime_error(
+                "разбивка по осям даёт " + std::to_string(named) + " стч, а оценка — "
+                + std::to_string(a.labor_units) + " стч. Цена и её объяснение обязаны "
+                  "совпадать в точности (ИР-022)");
+    }
+
+}
+
 static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     const auto work_s    = flag_val(argc, argv, "--work");
     const auto quality_s = flag_val(argc, argv, "--quality");
@@ -1338,6 +1597,8 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
                      "                                 остаётся в приёмке\n"
                      "    (ничего не задано)           разбивка, предложенная работником в\n"
                      "                                 записи труда (records.md §9.4)\n"
+                     "  порция партии — по ценнику, «бери или нет» (records.md §9.8): её\n"
+                     "  разбивка, часы и цена берутся из партии, свои не задаются\n"
                      "    [--hours-raw   FLOAT]   default: hours of the fetched WorkRecord\n"
                      "    [--k           FLOAT]   price = hours × Σ network prices of the\n"
                      "                            axes named × k (default k 1.0)\n"
@@ -1443,24 +1704,26 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
                 "(records.md §9.4)");
         }
     }
-    // Порция партии (records.md §9.8 v2): её часы и перенос — доля работы в этой
-    // порции; ценник — k, поставленный производителем при изготовлении, по ценам
-    // осей дня производства (ИР-023, вопрос 2).
-    const bool                  portion  = release && release->lot;
-    double                      fraction = 1.0;
-    const records::ResourceQty* lot_of   = nullptr;
+    // Порция партии (records.md §9.8 v3) — «бери или нет»: её цена — доля ценника
+    // партии по разбивке, предложенной работником, её часы и перенос — доля
+    // работы. Торгуются при заказе и при покупке партии целиком (ИР-023, вопрос 11).
+    const bool                           portion = release && release->lot;
+    std::optional<records::PortionTerms> terms;
     if (portion) {
         if (!work)
             throw std::runtime_error("порция партии: запись работы не найдена — нужен --via");
-        const auto f = records::portion_fraction(*work, *release->lot);
-        if (!f)
-            throw std::runtime_error("порцию не оценить: у работы нет такого выхода или у "
-                                     "нескольких выходов не объявлены доли (records.md §9.4)");
-        fraction = *f;
-        lot_of   = &work->outputs[release->lot->out];
-        std::cerr << "порция партии «" << lot_of->resource << "»: " << qty_str(release->lot->qty)
-                  << " " << lot_of->unit << " из " << qty_str(lot_of->qty)
-                  << " — доля работы " << fraction << "\n";
+        terms = records::portion_terms(*work, *release->lot);
+        if (!terms)
+            throw std::runtime_error("порцию не оценить: у партии нет ценника или у работы — "
+                                     "предложенной разбивки, или у нескольких выходов не "
+                                     "объявлены доли (records.md §9.8)");
+        const auto& o = work->outputs[release->lot->out];
+        std::cerr << "порция партии «" << o.resource << "»: " << qty_str(release->lot->qty)
+                  << " " << o.unit << " из " << qty_str(o.qty);
+        for (std::size_t i = 0; i < release->lot->units.size(); ++i)
+            std::cerr << (i ? ", " : " (номера ") << release->lot->units[i]
+                      << (i + 1 == release->lot->units.size() ? ")" : "");
+        std::cerr << " — по ценнику: " << terms->labor_units << " стч\n";
     }
 
     // Один результат — одна сделка (records.md §9.5, ИР-023); порция — свой
@@ -1499,160 +1762,20 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
                                 "одного остатка дважды; в счёт не пойдёт (records.md §9.8)");
     }
 
-    for (const auto& p : axis_args) {
-        const auto eq = p.rfind('=');
-        if (eq == std::string::npos || eq == 0)
-            throw std::runtime_error("--axis ждёт ПУТЬ_ОСИ=ЧАСЫ (путь: цепь/узел/блок/хеш): " + p);
-        AcceptanceAxis x{};
-        x.axis  = parse_block_path(p.substr(0, eq));
-        x.units = std::stod(p.substr(eq + 1));
-        a.axes.push_back(std::move(x));
-    }
-    std::vector<std::pair<BlockPath, double>> shares;
-    for (const auto& p : share_args) {
-        const auto eq = p.rfind('=');
-        if (eq == std::string::npos || eq == 0)
-            throw std::runtime_error("--axis-share ждёт ПУТЬ_ОСИ=ДОЛЯ (путь: цепь/узел/блок/хеш): " + p);
-        shares.emplace_back(parse_block_path(p.substr(0, eq)), std::stod(p.substr(eq + 1)));
-    }
-
-    // «Такая же работа, как та» (ИР-022 шаг 11): unless this deal names its own
-    // breakdown, the sample's is taken as shares. The reference stays in the
-    // record as provenance — the work cloud is made of it.
-    if (!like_s.empty()) {
-        a.like = parse_ref(like_s);
-        if (a.axes.empty() && shares.empty()) {
-            const auto  rec    = load_record(ctx, via, *a.like);
-            const auto* deal   = rec ? std::get_if<records::Transfer>(&*rec) : nullptr;
-            const Acceptance* sample = deal && deal->accept ? &*deal->accept : nullptr;
-            if (!sample)
-                throw std::runtime_error("--like: образец не найден или это не сделка с "
-                                         "приёмкой (bc fetch <ref> --via URL)");
-            if (sample->labor_units <= 0.0)
-                throw std::runtime_error("--like: у образца нулевая цена — долей из неё не вывести");
-            for (const auto& x : sample->axes)
-                shares.emplace_back(x.axis, x.units / sample->labor_units);
-            std::cerr << "разбивка как у образца: " << shares.size() << " ос.\n";
-        }
-    }
-
-    // Ничего не названо — разбивка, которую предложил работник (records.md §9.4
-    // v4): покупатель подтверждает её своей подписью.
-    if (a.axes.empty() && shares.empty() && work && !work->axes.empty()) {
-        for (const auto& x : work->axes) shares.emplace_back(x.axis, x.share);
-        std::cerr << "разбивка, предложенная работником: " << shares.size() << " ос.\n";
-    }
-    if (a.axes.empty() && shares.empty())
-        throw std::runtime_error("разбивка цены обязательна (ИР-022): --axis, --axis-share или "
-                                 "--like — у работы нет предложенной (records.md §9.4)");
-
-    if (raw_s.empty()) {
-        // Hours from the worker's record (records.md §9.5).
-        if (!work)
-            throw std::runtime_error(
-                "запись работы не найдена — 'bc fetch <ref> --via URL' или --via, "
-                "или задайте --hours-raw");
-        a.hours_raw = work->hours * fraction;   // порция несёт свою долю работы
+    if (portion) {
+        a.hours_raw   = terms->hours_raw;
+        a.labor_units = terms->labor_units;
+        if (terms->carried_units > 0.0) a.carried_units = terms->carried_units;
+        a.axes = terms->axes;
+        if (!axis_args.empty() || !share_args.empty() || !like_s.empty() || !raw_s.empty() ||
+            !lu_s.empty() || !flag_val(argc, argv, "--coef").empty() ||
+            !flag_val(argc, argv, "--k").empty())
+            std::cerr << "порция — по ценнику: свои разбивка, часы и цена не принимаются\n";
+        if (a.carried_units)
+            std::cerr << "перенос средств производства: " << *a.carried_units
+                      << "ч (доля порции)\n";
     } else {
-        a.hours_raw = std::stod(raw_s);
-    }
-
-    // The price of live labour (economy.md §2а).
-    if (!lu_s.empty()) {
-        a.labor_units = std::stod(lu_s);
-    } else if (!a.axes.empty()) {
-        for (const auto& x : a.axes) a.labor_units += x.units;   // hours named ARE the price
-    } else {
-        // hours × Σ network price of the axes named × k — or a manual rate.
-        const auto coef_s = flag_val(argc, argv, "--coef");
-        double rate = 0.0;
-        if (!coef_s.empty()) {
-            rate = std::stod(coef_s);
-        } else {
-            auto prices = lot_of ? lookup_axis_prices_on(via, work->start_ts)
-                                 : std::map<std::array<uint8_t, 32>, double>{};
-            if (lot_of)
-                std::cerr << (prices.empty() ? "цен осей дня производства агрегатор не "
-                                               "публиковал — по сегодняшним\n"
-                                             : "цены осей дня производства\n");
-            if (prices.empty()) prices = lookup_axis_prices(via);
-            std::size_t priced = 0;
-            for (const auto& [path, share] : shares) {
-                (void)share;
-                if (const auto it = prices.find(path.hash); it != prices.end()) {
-                    rate += it->second;
-                    ++priced;
-                }
-            }
-            if (priced > 0) {
-                std::cerr << "сетевая цена названных осей: " << rate << " стч/ч ("
-                          << priced << " из " << shares.size() << " оценены сетью)\n";
-            } else {
-                rate = 1.0;
-                std::cerr << "у названных осей ещё нет сетевой цены — 1.0 стч/ч "
-                             "(задайте --coef или --labor-units)\n";
-            }
-        }
-        double k = std::stod(flag_val(argc, argv, "--k", "1.0"));
-        if (flag_val(argc, argv, "--k").empty() && lot_of && lot_of->k) {
-            k = *lot_of->k;
-            std::cerr << "ценник производителя: k = " << k << "\n";
-        }
-        a.labor_units = a.hours_raw * rate * k;
-    }
-
-    // v2 (ИР-011): carried cost of the accepted work. carried_units must equal
-    // Σ carried of the WorkRecord's carry, or the acceptance is unrecognisable
-    // (records.md §9.5) — so it is always derived, never passed by hand.
-    if (const auto wblock = find_external_by_hash(ctx, a.work.hash)) {
-        if (wblock->type == BlockType::DATA) {
-            try {
-                const auto wrec = Codec::decode(wblock->payload.data(),
-                                                wblock->payload.size());
-                const auto* wr = std::get_if<WorkRecord>(&wrec);
-                if (wr && !wr->carry.empty()) {
-                    double carried = 0;
-                    for (const auto& ce : wr->carry) carried += ce.carried;
-                    // Порция несёт свою долю переноса (records.md §9.8 v2).
-                    a.carried_units = carried * fraction;
-                    std::cerr << "перенос средств производства: " << *a.carried_units << "ч";
-                    if (fraction < 1.0) std::cerr << " (доля порции из " << carried << "ч)";
-                    std::cerr << ", позиции:\n";
-                    for (const auto& ce : wr->carry) {
-                        const auto ablock = find_external_by_hash(ctx, ce.src.hash);
-                        std::optional<AssetInfo> info;
-                        if (ablock && ablock->type == BlockType::DATA) {
-                            try {
-                                info = asset_info(Codec::decode(
-                                    ablock->payload.data(), ablock->payload.size()));
-                            } catch (const CodecError&) {}
-                        }
-                        if (!info) {
-                            std::cerr << "  " << short_hex(ce.src.hash) << ": "
-                                      << ce.carried << "ч — запись средства не "
-                                      "загружена, формула не проверена (bc fetch "
-                                      << to_hex(ce.src.chain) << "/"
-                                      << to_hex(ce.src.hash) << ")\n";
-                            continue;
-                        }
-                        const double expected = records::carry_step(
-                            info->cost, info->capacity, ce.used,
-                            ce.after - ce.carried);
-                        if (std::abs(expected - ce.carried) > 1e-6)
-                            std::cerr << "  ⚠ " << info->name << ": " << ce.carried
-                                      << "ч НЕ по формуле переноса (ожидалось "
-                                      << expected << "ч, records.md §9.4) — вправе отклонить\n";
-                        else
-                            std::cerr << "  " << info->name << ": " << ce.carried
-                                      << "ч за " << ce.used
-                                      << (info->is_material ? " " + info->unit
-                                                            : "ч работы")
-                                      << (info->basis == "est"
-                                          ? "  [оценка владельца]" : "") << "\n";
-                    }
-                }
-            } catch (const CodecError&) {}
-        }
+        appraise_whole(ctx, via, argc, argv, work, a, axis_args, share_args, like_s, raw_s, lu_s);
     }
 
     // v3 (economy.md §2б): record the normalizer this appraisal was made against,
@@ -1662,41 +1785,9 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
         std::cerr << "нормировщик W=" << nm->W << " (из агрегатора, для истории)\n";
     }
 
-    if (!shares.empty()) {
-        double sum = 0.0;
-        for (const auto& [ref, f] : shares) { (void)ref; sum += f; }
-        if (std::abs(sum - 1.0) > 1e-9)
-            throw std::runtime_error("--axis-share в сумме даёт " + std::to_string(sum)
-                                     + ", а должно 1.0");
-        double left = a.labor_units;
-        for (std::size_t i = 0; i < shares.size(); ++i) {
-            AcceptanceAxis x{};
-            x.axis  = shares[i].first;
-            // Последней достаётся остаток: сумма обязана совпасть с ценой ТОЧНО,
-            // а не с точностью до округления долей.
-            x.units = i + 1 == shares.size() ? left : a.labor_units * shares[i].second;
-            left   -= x.units;
-            a.axes.push_back(std::move(x));
-        }
-    }
-    std::sort(a.axes.begin(), a.axes.end(),
-              [](const AcceptanceAxis& x, const AcceptanceAxis& y) {
-                  return x.axis.hash < y.axis.hash;
-              });
-    {   // Разбивка ЕСТЬ цена: расхождение здесь — не округление, а другая сделка.
-        double named = 0.0;
-        for (const auto& x : a.axes) named += x.units;
-        if (std::abs(named - a.labor_units) > 1e-6)
-            throw std::runtime_error(
-                "разбивка по осям даёт " + std::to_string(named) + " стч, а оценка — "
-                + std::to_string(a.labor_units) + " стч. Цена и её объяснение обязаны "
-                  "совпадать в точности (ИР-022)");
-    }
-
     // Приёмка — внутри своей оплаты (records.md §9.5, ИР-023): оценка и перевод
     // подписываются одной записью, поэтому оплата равна оценке по построению, а
-    // платит тот, кто принимает. Блок пишется ПОСЛЕ разворота долей и проверки:
-    // иначе в цепь ушла бы приёмка без разбивки, которой не должно существовать.
+    // платит тот, кто принимает.
     const double payable = a.labor_units + (a.carried_units ? *a.carried_units : 0.0);
     const std::string me_hex = to_hex(ctx.user_id.bytes);
     const std::string to_s   = to_hex(a.work.chain.data(), 32);
@@ -1781,13 +1872,18 @@ static OwnLot own_lot(Context& ctx, const Ref& work, uint32_t out) {
     return lot;
 }
 
-// The next link of a lot's sub-thread (records.md §9.8 v2): after the newest own
-// link of the lot, taking `qty`. With --via the releases of the lot that expired
-// with nobody taking them go back into stock by this very link (`returns`) —
-// whether a release was taken only the aggregator knows, so without it nothing
-// is returned. A portion the lot no longer holds is refused.
+// The next link of a lot's sub-thread (records.md §9.8 v3): after the newest own
+// link of the lot, taking `qty` — or, for a lot counted piece by piece, the
+// numbered units asked for (the first free ones when none are named). With
+// --via the releases of the lot that expired with nobody taking them go back
+// into stock by this very link (`returns`); whether a release was taken only the
+// aggregator knows, so without it nothing is returned. A portion the lot no
+// longer holds, or a unit already out, is refused. A portion for sale needs the
+// lot's price tag and the work's proposed breakdown: it is sold on them.
 static records::LotLink next_lot_link(Context& ctx, const std::string& via, const Ref& work,
-                                      const WorkRecord& wr, uint32_t out, double qty,
+                                      const WorkRecord& wr, uint32_t out,
+                                      std::optional<double> qty,
+                                      std::vector<std::string> want, bool for_sale,
                                       int64_t now) {
     if (out >= wr.outputs.size())
         throw std::runtime_error("у работы нет выхода №" + std::to_string(out) +
@@ -1797,7 +1893,15 @@ static records::LotLink next_lot_link(Context& ctx, const std::string& via, cons
         throw std::runtime_error("у работы несколько выходов, а долей часов нет — порцию не "
                                  "оценить; объявите их при записи работы: --output "
                                  "ИМЯ:КОЛ:ЕД:ДОЛЯ (records.md §9.4)");
-    if (!(qty > 0.0)) throw std::runtime_error("--qty: порция должна быть больше нуля");
+    if (for_sale && (!o.price || wr.axes.empty()))
+        throw std::runtime_error("порции продаются по ценнику, «бери или нет» "
+                                 "(records.md §9.8): у партии нет ценника или у работы — "
+                                 "предложенной разбивки; назначьте их при записи работы: "
+                                 "--output ИМЯ:КОЛ:ЕД::k=K и --axis-share");
+    const bool numbered = !o.units.empty();
+    if (!numbered && !want.empty())
+        throw std::runtime_error("у партии «" + o.resource + "» нет номеров единиц — её "
+                                 "отпускают количеством (--qty)");
     const OwnLot lot = own_lot(ctx, work, out);
     if (lot.whole)
         throw std::runtime_error("работа уже отпущена целиком — продать её ещё и порциями "
@@ -1805,14 +1909,14 @@ static records::LotLink next_lot_link(Context& ctx, const std::string& via, cons
 
     records::LotLink link{};
     link.out = out;
-    link.qty = qty;
     const records::ObservedLotLink*   newest = nullptr;
-    std::set<std::array<uint8_t, 32>> returned;
+    std::set<std::array<uint8_t, 32>> returned;   // by earlier own links
     for (const auto& l : lot.links) {
         if (!newest || l.link.seq > newest->link.seq) newest = &l;
         for (const auto& r : l.link.returns) returned.insert(r.hash);
     }
-    double before = 0.0;
+    double                            before = 0.0;
+    std::set<std::array<uint8_t, 32>> back_now;   // returned by this very link
     if (newest) {
         link.seq  = newest->link.seq + 1;
         link.prev = Ref{ctx.user_id.bytes, newest->hash};
@@ -1835,6 +1939,7 @@ static records::LotLink next_lot_link(Context& ctx, const std::string& via, cons
                 if (l.expires && *l.expires <= now && !taken.count(l.hash) &&
                     !returned.count(l.hash)) {
                     link.returns.push_back(Ref{ctx.user_id.bytes, l.hash});
+                    back_now.insert(l.hash);
                     back += l.link.qty;
                 }
         std::sort(link.returns.begin(), link.returns.end(), [](const Ref& x, const Ref& y) {
@@ -1845,7 +1950,46 @@ static records::LotLink next_lot_link(Context& ctx, const std::string& via, cons
                       << " — отпуски истекли, их никто не взял\n";
         before -= back;
     }
-    link.after = before + qty;
+
+    if (numbered) {
+        // Номер продаётся один раз (records.md §9.8 v3): он занят звеном, которое
+        // его взяло, пока то не вернули.
+        std::set<std::string> held;
+        for (const auto& l : lot.links)
+            if (!returned.count(l.hash) && !back_now.count(l.hash))
+                for (const auto& u : l.link.units) held.insert(u);
+        if (want.empty()) {
+            if (!qty || !(*qty > 0.0) || *qty != std::floor(*qty))
+                throw std::runtime_error("партия с номерами: назовите номера (--units) или "
+                                         "целое количество (--qty)");
+            for (const auto& u : o.units)
+                if (want.size() < static_cast<std::size_t>(*qty) && !held.count(u))
+                    want.push_back(u);
+            if (want.size() < static_cast<std::size_t>(*qty))
+                throw std::runtime_error("в партии «" + o.resource + "» свободно номеров: " +
+                                         std::to_string(want.size()) +
+                                         " — больше не отпустить (records.md §9.8)");
+        } else {
+            for (const auto& u : want) {
+                if (std::find(o.units.begin(), o.units.end(), u) == o.units.end())
+                    throw std::runtime_error("в партии «" + o.resource + "» нет номера " + u);
+                if (held.count(u))
+                    throw std::runtime_error("номер " + u + " уже отпущен или продан — второй "
+                                             "раз его не продать (records.md §9.8)");
+            }
+        }
+        std::sort(want.begin(), want.end());
+        want.erase(std::unique(want.begin(), want.end()), want.end());
+        if (qty && *qty != static_cast<double>(want.size()))
+            throw std::runtime_error("--qty не совпадает с числом номеров --units");
+        link.units = want;
+        link.qty   = static_cast<double>(want.size());
+    } else {
+        if (!qty || !(*qty > 0.0))
+            throw std::runtime_error("--qty: порция должна быть больше нуля");
+        link.qty = *qty;
+    }
+    link.after = before + link.qty;
     if (link.after > o.qty + 1e-9)
         throw std::runtime_error("в партии «" + o.resource + "» осталось " +
                                  qty_str(o.qty - before) + " " + o.unit +
@@ -1862,12 +2006,13 @@ static int cmd_release(const fs::path& data_dir, int argc, char** argv) {
     const auto pos  = get_positionals(argc, argv);
     const auto to_s = flag_val(argc, argv, "--to");
     if (pos.size() < 2 || to_s.empty()) {
-        std::cerr << "Usage: bc release РАБОТА --to ЦЕПЬ [--qty КОЛИЧЕСТВО [--out N]]\n"
-                     "                  [--days N | --until UNIX_TS] [--via URL] [--leaf L]\n"
+        std::cerr << "Usage: bc release РАБОТА --to ЦЕПЬ [--qty КОЛИЧЕСТВО | --units НОМЕР,...]\n"
+                     "                  [--out N] [--days N | --until UNIX_TS] [--via URL]\n"
                      "  отдать результат своей работы покупателю (records.md §9.8): засчитана\n"
                      "  будет только его сделка и только до срока (по умолчанию 7 дней).\n"
-                     "  --qty — порция партии: выхода N (по умолчанию 0), звено её подниточки;\n"
-                     "  больше, чем в партии осталось, не отпустить. РАБОТА — хеш своей\n"
+                     "  --qty / --units — порция партии выхода N (по умолчанию 0), звено её\n"
+                     "  подниточки; продаётся по ценнику, «бери или нет»; больше, чем в партии\n"
+                     "  осталось, не отпустить, номер — не продать дважды. РАБОТА — хеш своей\n"
                      "  записи труда или ЦЕПЬ/ХЕШ\n";
         return 1;
     }
@@ -1892,14 +2037,17 @@ static int cmd_release(const fs::path& data_dir, int argc, char** argv) {
         : rl.timestamp + static_cast<int64_t>(
               std::stod(flag_val(argc, argv, "--days", "7")) * 86400.0);
 
-    const auto qty_s = flag_val(argc, argv, "--qty");
-    if (!qty_s.empty()) {
-        // Порция партии (records.md §9.8 v2): звено подниточки — после последнего.
+    const auto qty_s   = flag_val(argc, argv, "--qty");
+    const auto units_s = flag_val(argc, argv, "--units");
+    if (!qty_s.empty() || !units_s.empty()) {
+        // Порция партии (records.md §9.8 v3): звено подниточки — после последнего.
         if (wr->customer)
             throw std::runtime_error("работа на заказ — результат целиком отпущен заказчику "
                                      "(records.md §9.4); порциями продают работу на склад");
         const auto out = static_cast<uint32_t>(std::stoul(flag_val(argc, argv, "--out", "0")));
-        rl.lot = next_lot_link(ctx, via, work, *wr, out, std::stod(qty_s), rl.timestamp);
+        rl.lot = next_lot_link(ctx, via, work, *wr, out,
+                               qty_s.empty() ? std::optional<double>{} : std::stod(qty_s),
+                               split_list(units_s), /*for_sale=*/true, rl.timestamp);
     } else {
         if (wr->customer && *wr->customer == rl.to) {
             std::cerr << "работа и так на заказ этой цепи — результат отпущен ей самой "
@@ -1955,7 +2103,11 @@ static int cmd_release(const fs::path& data_dir, int argc, char** argv) {
     if (rl.lot) {
         const auto& o = wr->outputs[rl.lot->out];
         std::cerr << "отпуск порции: " << qty_str(rl.lot->qty) << " " << o.unit << " «"
-                  << o.resource << "» → " << short_hex(rl.to) << ", в партии осталось "
+                  << o.resource << "»";
+        for (std::size_t i = 0; i < rl.lot->units.size(); ++i)
+            std::cerr << (i ? ", " : " (") << rl.lot->units[i]
+                      << (i + 1 == rl.lot->units.size() ? ")" : "");
+        std::cerr << " → " << short_hex(rl.to) << ", в партии осталось "
                   << qty_str(o.qty - rl.lot->after) << " " << o.unit;
     } else {
         std::cerr << "отпуск: результат работы " << short_hex(work.hash) << " → "
@@ -1973,10 +2125,12 @@ static int cmd_release(const fs::path& data_dir, int argc, char** argv) {
 // checkable and the loss stays visible in the own chain.
 static int cmd_writeoff(const fs::path& data_dir, int argc, char** argv) {
     const auto pos    = get_positionals(argc, argv);
-    const auto qty_s  = flag_val(argc, argv, "--qty");
-    const auto reason = flag_val(argc, argv, "--reason");
-    if (pos.size() < 2 || qty_s.empty() || reason.empty()) {
-        std::cerr << "Usage: bc writeoff РАБОТА --qty КОЛИЧЕСТВО --reason ТЕКСТ [--out N]\n"
+    const auto qty_s   = flag_val(argc, argv, "--qty");
+    const auto units_s = flag_val(argc, argv, "--units");
+    const auto reason  = flag_val(argc, argv, "--reason");
+    if (pos.size() < 2 || (qty_s.empty() && units_s.empty()) || reason.empty()) {
+        std::cerr << "Usage: bc writeoff РАБОТА (--qty КОЛИЧЕСТВО | --units НОМЕР,...)\n"
+                     "                   --reason ТЕКСТ [--out N]\n"
                      "                   [--via URL] [--leaf L]\n"
                      "  списать часть партии без продажи — испорчено, потеряно,\n"
                      "  израсходовано (records.md §9.9): звено подниточки партии\n";
@@ -1999,7 +2153,9 @@ static int cmd_writeoff(const fs::path& data_dir, int argc, char** argv) {
     wo.reason    = reason;
     wo.timestamp = static_cast<int64_t>(std::time(nullptr));
     const auto out = static_cast<uint32_t>(std::stoul(flag_val(argc, argv, "--out", "0")));
-    wo.lot = next_lot_link(ctx, via, work, *wr, out, std::stod(qty_s), wo.timestamp);
+    wo.lot = next_lot_link(ctx, via, work, *wr, out,
+                           qty_s.empty() ? std::optional<double>{} : std::stod(qty_s),
+                           split_list(units_s), /*for_sale=*/false, wo.timestamp);
 
     const Block block = append_record(ctx, Record{wo});
     const auto& o = wr->outputs[out];
@@ -2067,6 +2223,12 @@ static int cmd_thread(const fs::path& data_dir, int argc, char** argv) {
                               << ", в запасе " << jnum(y, "remaining");
                     if (jnum(y, "faults") > 0)
                         std::cout << "  ✗ звеньев не сходится: " << jnum(y, "faults");
+                    if (const auto* fu = jarr(y, "free_units"); fu && !fu->array.empty()) {
+                        std::cout << "; свободны номера:";
+                        for (std::size_t i = 0; i < fu->array.size() && i < 8; ++i)
+                            std::cout << " " << fu->array[i].string;
+                        if (fu->array.size() > 8) std::cout << " …";
+                    }
                     std::cout << "\n";
                 }
         }
@@ -3322,6 +3484,17 @@ static int cmd_transfer_recv(const fs::path& data_dir, int argc, char** argv) {
                 "сделка не по адресу: вы не отпускали эту работу плательщику — ни "
                 "заказчиком в записи труда, ни отпуском (или отпуск истёк). Такая "
                 "сделка ничтожна, часы не принимаются (records.md §9.5)");
+        // Порция со склада — по ценнику (records.md §9.8 v3): иначе сделка ничего не
+        // завершает, и её часы не наши.
+        if (release && release->lot) {
+            std::optional<records::PortionTerms> terms;
+            if (const auto w = load_record(ctx, "", t->accept->work))
+                if (const auto* wr = std::get_if<WorkRecord>(&*w))
+                    terms = records::portion_terms(*wr, *release->lot);
+            if (!terms || !records::meets_terms(*t->accept, *terms))
+                throw std::runtime_error("сделка по порции не по ценнику партии — она ничего не "
+                                         "завершает, часы не принимаются (records.md §9.8)");
+        }
     }
     // Transfer v3: a self-issuing transfer must be threaded (economy.md §4.3).
     {
@@ -5115,9 +5288,11 @@ Labor:
     [--axis-share PATH=SHARE ...]      proposed breakdown of the hours by
                                        axis (Σ 1); the buyer confirms it
     [--input  NAME:QTY:UNIT ...]   (repeatable)
-    [--output NAME:QTY:UNIT[:SHARE[:K]] ...]  a lot (repeatable, records.md §9.4):
-                                       SHARE of the hours when several outputs,
-                                       K — the price tag
+    [--output NAME:QTY:UNIT[:SHARE[:PRICE[:UNITS]]] ...]  a lot (repeatable,
+                                       records.md §9.4): SHARE of the hours when
+                                       several outputs; PRICE — the tag, labor-
+                                       hours for the lot, or k=K; UNITS — the
+                                       unit numbers, comma separated
     [--tool  HASH_PREFIX:USED ...] (repeatable) carry the cost of an own
     [--material HASH_PREFIX:QTY ...]   tool (tool-hours) or material batch
                                        (units) into this work (ИР-011): the
@@ -5148,8 +5323,9 @@ Labor:
   release WORK --to CHAIN          Give the result of an own work to a buyer
     [--days N | --until UNIX_TS]       (records.md §9.8): only their deal counts,
     [--via URL]                        and only before the term (default 7 days)
-    [--qty Q [--out N]]                a portion of lot N — a link of the lot's
-                                       sub-thread; never more than it holds
+    [--qty Q | --units N1,N2 [--out N]] a portion of lot N at its price tag —
+                                       a link of the lot's sub-thread; never
+                                       more than it holds, a unit sold once
   writeoff WORK --qty Q --reason T  Write off part of a lot — spoiled, lost,
     [--out N] [--via URL]              used up (records.md §9.9)
   thread [CHAIN] --via URL         The goods thread (records.md §9.4): works in

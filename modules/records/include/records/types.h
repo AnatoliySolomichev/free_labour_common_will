@@ -155,14 +155,19 @@ struct ResourceQty {
     // Outputs only (v5). `share` — the part of the work's hours this output
     // carries when one work yields several (the sawmill's boards and sawdust):
     // declared by the producer, confirmed by the buyer; Σ over the outputs = 1.
-    // `k` — the price tag: the producer's k over the axis prices of the
-    // production day (economy.md §2а, ИР-023); the buyer agrees or not.
-    std::optional<double> share;
-    std::optional<double> k;
+    std::optional<double>    share;
+    // v6: the price tag — labor-hours for the whole output, fixed at production
+    // (the client computes it from k over the axis prices of the production day,
+    // economy.md §2а, ИР-023). A portion from stock is sold at its share of the
+    // tag, take it or leave it (records.md §9.8 v3).
+    std::optional<double>    price;
+    // v6: the numbers of the lot's units — a frame number, a stamp — for a lot
+    // counted piece by piece (ИР-023, вопрос 10); qty is their count.
+    std::vector<std::string> units;
 
     bool operator==(const ResourceQty& o) const noexcept {
         return resource == o.resource && qty == o.qty && unit == o.unit
-            && share == o.share && k == o.k;
+            && share == o.share && price == o.price && units == o.units;
     }
 };
 
@@ -256,10 +261,13 @@ struct LotLink {
     std::optional<Ref> prev;        // the previous link; absent for the first
     double             after = 0;   // taken from the lot after this link; ≤ the output's qty
     std::vector<Ref>   returns;     // expired releases of this lot nobody took — back in stock
+    // v3: the numbered units taken, for a lot counted piece by piece; qty is
+    // their count. A unit is sold once (records.md §9.8).
+    std::vector<std::string> units;
 
     bool operator==(const LotLink& o) const noexcept {
         return out == o.out && qty == o.qty && seq == o.seq && prev == o.prev
-            && after == o.after && returns == o.returns;
+            && after == o.after && returns == o.returns && units == o.units;
     }
 };
 
