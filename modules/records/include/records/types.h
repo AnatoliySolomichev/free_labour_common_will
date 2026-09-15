@@ -286,6 +286,10 @@ struct Release {
     // v2 (ИР-023): a portion of one output instead of the whole result — a link
     // of that lot's sub-thread (records.md §9.8).
     std::optional<LotLink>  lot;
+    // v4 (ИР-023): the own purchase the portion comes from — a resale. `work`
+    // still names the product's birth record: the serial does not change hands;
+    // the lot link is one of the purchase's sub-thread.
+    std::optional<Ref>      holding;
 };
 
 // A write-off (records.md §9.9, ИР-023): part of a lot leaves it without a sale —
@@ -295,10 +299,11 @@ struct Release {
 struct WriteOff {
     static constexpr RecordType TYPE = RecordType::WriteOff;
 
-    Ref         work;              // own WorkRecord whose output the lot is
-    LotLink     lot;
-    std::string reason;            // «подгорели», «бой при перевозке»
-    int64_t     timestamp = 0;
+    Ref                work;       // the WorkRecord whose output the lot is
+    LotLink            lot;
+    std::string        reason;     // «подгорели», «бой при перевозке»
+    int64_t            timestamp = 0;
+    std::optional<Ref> holding;    // v2: a bought lot written off — the own purchase
 };
 
 // v3 (economy.md §2б): the normalizer this appraisal was made against, so a

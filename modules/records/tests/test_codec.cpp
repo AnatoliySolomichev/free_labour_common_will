@@ -1115,3 +1115,67 @@ TEST(RecordsCodec, PortionOfNumberedUnitsRoundtrip) {
     rl.lot->units = {"R-1"};                                   // две штуки, один номер
     EXPECT_THROW(Codec::encode(Record{rl}), CodecError);
 }
+
+// ── Перепродажа (records.md §9.8 v4, records.md §9.5) ────────────────────────
+
+// Держателю платят за чужую вещь по его отпуску: только перенос, без труда и без
+// разбивки — вторая продажа «бери или нет».
+TEST(RecordsCodec, ResaleIsCarriedCostOnly) {
+    Acceptance a{};
+    a.work          = make_ref(0x53, 0x54);                   // вещь сделала цепь 0x53
+    a.release       = make_ref(0xC3, 0x57);                   // отпуск держателя 0xC3
+    a.quality       = "свежие";
+    a.carried_units = 0.55;
+    Transfer t{};
+    t.from      = make_uid(0xA1);
+    t.to        = make_uid(0xC3);                              // платят держателю
+    t.origins   = {{t.from, 0.55}};
+    t.accept    = a;
+    t.timestamp = 1;
+    EXPECT_EQ(std::get<Transfer>(roundtrip(Record{t})).accept->carried_units, 0.55);
+
+    t.accept->labor_units = 0.5;                               // с трудом — не перепродажа
+    t.origins = {{t.from, 1.05}};
+    EXPECT_THROW(Codec::encode(Record{t}), CodecError);
+    t.accept->labor_units = 0.0;
+    t.origins = {{t.from, 0.55}};
+    t.accept->axes = {{make_path(0x79, 0x01), 0.0}};           // с разбивкой — тоже
+    EXPECT_THROW(Codec::encode(Record{t}), CodecError);
+    t.accept->axes.clear();
+    t.accept->release.reset();                                 // без отпуска держателя
+    EXPECT_THROW(Codec::encode(Record{t}), CodecError);
+}
+
+// Отпуск перепродажи называет покупку держателя и вещь — по её записи рождения;
+// купленное перепродают только порцией и не себе — а мастеру обратно можно.
+TEST(RecordsCodec, ReleaseOfAPurchaseRoundtrip) {
+    Release rl = release_of(0xB2);                             // вещь цепи 0x53
+    rl.holding = make_ref(0xC3, 0x70);                         // покупка держателя 0xC3
+    rl.lot     = lot_link(0, 2.0, 2.0);
+    const auto d = std::get<Release>(roundtrip(Record{rl}));
+    ASSERT_TRUE(d.holding.has_value());
+    EXPECT_EQ(*d.holding, *rl.holding);
+    EXPECT_EQ(d.work, rl.work);
+
+    Release whole = rl;
+    whole.lot.reset();
+    EXPECT_THROW(Codec::encode(Record{whole}), CodecError);
+    Release self = rl;
+    self.to = make_uid(0xC3);
+    EXPECT_THROW(Codec::encode(Record{self}), CodecError);
+    Release back_to_maker = rl;
+    back_to_maker.to = make_uid(0x53);
+    EXPECT_NO_THROW(Codec::encode(Record{back_to_maker}));
+}
+
+TEST(RecordsCodec, WriteOffOfAPurchaseRoundtrip) {
+    WriteOff wo{};
+    wo.work      = make_ref(0x53, 0x54);
+    wo.holding   = make_ref(0xC3, 0x70);
+    wo.lot       = lot_link(0, 1.0, 1.0);
+    wo.reason    = "раздавлены при перевозке";
+    wo.timestamp = 1;
+    const auto d = std::get<WriteOff>(roundtrip(Record{wo}));
+    ASSERT_TRUE(d.holding.has_value());
+    EXPECT_EQ(*d.holding, *wo.holding);
+}

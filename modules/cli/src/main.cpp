@@ -347,10 +347,12 @@ static std::string record_summary(const Record& rec) {
             if (r.lot)
                 ss << "  lot:" << r.lot->out << " qty:" << r.lot->qty
                    << " #" << r.lot->seq << " after:" << r.lot->after;
+            if (r.holding) ss << "  resale of:" << short_hex(r.holding->hash);
         } else if constexpr (std::is_same_v<T, records::WriteOff>) {
             ss << "[WriteOff]    work:" << short_hex(r.work.hash) << "  lot:" << r.lot.out
                << " qty:" << r.lot.qty << " #" << r.lot.seq << " after:" << r.lot.after
                << "  \"" << r.reason << "\"";
+            if (r.holding) ss << "  bought:" << short_hex(r.holding->hash);
         } else if constexpr (std::is_same_v<T, records::Tool>) {
             ss << "[Tool]        \"" << r.name << "\"  " << r.cost
                << "h  life:" << r.life << "h  [" << r.basis << "]";
@@ -1379,6 +1381,36 @@ static std::optional<records::json::Value> fetch_work_status(const std::string& 
                            to_hex(work.hash.data(), 32));
 }
 
+// A purchase as a lot to sell on (records.md §9.8 v4): the buyer's deal, the
+// product's birth record and the release the deal completed give its lots. Any
+// chain's purchase — the records come from the own chain, the local store or the
+// aggregator. nullopt when one of them cannot be had.
+struct Holding {
+    records::Transfer                deal;
+    WorkRecord                       work;
+    std::optional<records::Release>  bought;
+    std::vector<records::HoldingLot> lots;
+};
+
+static std::optional<Holding> load_holding(Context& ctx, const std::string& via,
+                                           const Ref& purchase) {
+    const auto  drec = load_record(ctx, via, purchase);
+    const auto* deal = drec ? std::get_if<records::Transfer>(&*drec) : nullptr;
+    if (!deal || !deal->accept || deal->from != purchase.chain) return std::nullopt;
+    const auto  wrec = load_record(ctx, via, deal->accept->work);
+    const auto* work = wrec ? std::get_if<WorkRecord>(&*wrec) : nullptr;
+    if (!work) return std::nullopt;
+    Holding h{*deal, *work, std::nullopt, {}};
+    if (deal->accept->release) {
+        const auto  rrec = load_record(ctx, via, *deal->accept->release);
+        const auto* rl   = rrec ? std::get_if<records::Release>(&*rrec) : nullptr;
+        if (!rl) return std::nullopt;
+        h.bought = *rl;
+    }
+    h.lots = records::holding_lots(h.deal, h.work, h.bought ? &*h.bought : nullptr);
+    return h;
+}
+
 // How a whole result is appraised (records.md §9.5): the buyer's breakdown by
 // axis — named, as shares, like a sample's, or the worker's proposal — and the
 // price: named hours, a manual rate, or hours × Σ network prices of the axes ×
@@ -1619,10 +1651,6 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     a.quality     = quality_s;
     a.labor_units = 0.0;
 
-    // Самоприёмка ничего не заверяет (records.md §14.4) — кодек её и не запишет.
-    if (a.work.chain == ctx.user_id.bytes)
-        throw std::runtime_error("свою работу не принимают — принимает и платит заказчик "
-                                 "(records.md §9.5)");
     const auto status = fetch_work_status(via, a.work);
 
     // Кому достаётся результат, решает продавец (records.md §9.5): заказчик в
@@ -1662,6 +1690,15 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
                 }
             }
     }
+    // Кому платим: работнику — или держателю, если это перепродажа его покупки
+    // (records.md §9.8 v4). Самоприёмка ничего не заверяет (records.md §14.4) —
+    // кодек её и не запишет.
+    const bool resale = release && release->holding;
+    const std::array<uint8_t, 32> seller = resale ? release->holding->chain : a.work.chain;
+    if (seller == ctx.user_id.bytes)
+        throw std::runtime_error(resale ? "это ваша же перепродажа — у себя не покупают"
+                                        : "свою работу не принимают — принимает и платит "
+                                          "заказчик (records.md §9.5)");
     {
         records::Transfer probe{};
         probe.from      = ctx.user_id.bytes;
@@ -1685,7 +1722,7 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     }
     // Нить труда продавца (records.md §9.4 v4): платим только за работу в нити и на
     // своих часах — иначе эти часы могли продать дважды, и сделка в счёт не пойдёт.
-    if (status && status->is_object()) {
+    if (!resale && status && status->is_object()) {
         const auto state = jstr(status->object, "thread_state");
         if (state == "unthreaded")
             throw std::runtime_error(
@@ -1707,7 +1744,7 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     // Порция партии (records.md §9.8 v3) — «бери или нет»: её цена — доля ценника
     // партии по разбивке, предложенной работником, её часы и перенос — доля
     // работы. Торгуются при заказе и при покупке партии целиком (ИР-023, вопрос 11).
-    const bool                           portion = release && release->lot;
+    const bool                           portion = release && release->lot && !resale;
     std::optional<records::PortionTerms> terms;
     if (portion) {
         if (!work)
@@ -1725,26 +1762,48 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
                       << (i + 1 == release->lot->units.size() ? ")" : "");
         std::cerr << " — по ценнику: " << terms->labor_units << " стч\n";
     }
+    // Перепродажа (records.md §9.8 v4): цена — доля того, что держатель заплатил за
+    // купленное, без наценки и без труда; оси определены при первой продаже.
+    double resale_units = 0.0;
+    if (resale) {
+        const auto h = load_holding(ctx, via, *release->holding);
+        const records::HoldingLot* hl = nullptr;
+        if (h)
+            for (const auto& l : h->lots)
+                if (l.out == release->lot->out) hl = &l;
+        if (!hl)
+            throw std::runtime_error("перепродажа: покупки держателя не найти или в ней нет "
+                                     "такой партии — нужен --via");
+        resale_units = records::resale_price(*hl, release->lot->qty);
+        std::cerr << "перепродажа: " << qty_str(release->lot->qty) << " из купленных "
+                  << "держателем " << qty_str(hl->qty) << " — по цене покупки: " << resale_units
+                  << " стч, без наценки (records.md §9.8)\n";
+    }
 
     // Один результат — одна сделка (records.md §9.5, ИР-023); порция — свой
     // результат. Своя повторная ничего не купит, только переплатит; сделка рядом с
     // чужой по адресу сделала бы результат «проданным дважды». Обхода нет.
     const std::string release_ref =
         a.release ? to_hex(a.release->chain) + "/" + to_hex(a.release->hash) : std::string{};
-    if (const auto mine = own_deal_on(ctx, a.work, portion ? a.release : std::optional<Ref>{});
+    const bool        piece     = portion || resale;   // a result of its own: its release
+    const std::string my_source = resale
+        ? to_hex(release->holding->chain) + "/" + to_hex(release->holding->hash)
+        : to_hex(a.work.chain) + "/" + to_hex(a.work.hash);
+    if (const auto mine = own_deal_on(ctx, a.work, piece ? a.release : std::optional<Ref>{});
         !mine.empty())
         throw std::runtime_error(std::string("вы уже приняли и оплатили ") +
-                                 (portion ? "эту порцию: " : "эту работу: ") + mine +
+                                 (piece ? "эту порцию: " : "эту работу: ") + mine +
                                  " (records.md §9.5)");
     if (status && status->is_object()) {
         if (const auto* ds = jarr(status->object, "deals"))
             for (const auto& d : ds->array) {
                 if (!d.is_object() || jstr(d.object, "state") == "unaddressed") continue;
+                if (jstr(d.object, "source") != my_source) continue;   // другой источник
                 const auto* p = records::json::find(d.object, "portion");
                 const bool theirs_portion = p && p->boolean;
                 // Целиком — ни рядом с какой; порция — не рядом с продажей целиком и
                 // не та же порция второй раз.
-                if (!portion || !theirs_portion || jstr(d.object, "release") == release_ref)
+                if (!piece || !theirs_portion || jstr(d.object, "release") == release_ref)
                     throw std::runtime_error(
                         "работа уже продана: сделка " + jstr(d.object, "ref") +
                         ". Один результат — одна сделка (records.md §9.5): вторая по "
@@ -1752,7 +1811,7 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
             }
         // Звено партии, которое не сходится, — порция сверх партии или продажа из
         // одного остатка дважды: платить за неё — отдать часы за чужой обман.
-        if (portion)
+        if (piece)
             if (const auto* rs = jarr(status->object, "releases"))
                 for (const auto& r : rs->array)
                     if (r.is_object() && jstr(r.object, "ref") == release_ref)
@@ -1762,7 +1821,16 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
                                 "одного остатка дважды; в счёт не пойдёт (records.md §9.8)");
     }
 
-    if (portion) {
+    if (resale) {
+        a.hours_raw     = 0.0;
+        a.labor_units   = 0.0;
+        a.carried_units = resale_units;
+        a.axes.clear();
+        if (!axis_args.empty() || !share_args.empty() || !like_s.empty() || !raw_s.empty() ||
+            !lu_s.empty() || !flag_val(argc, argv, "--coef").empty() ||
+            !flag_val(argc, argv, "--k").empty())
+            std::cerr << "перепродажа — по цене покупки: свои разбивка и цена не принимаются\n";
+    } else if (portion) {
         a.hours_raw   = terms->hours_raw;
         a.labor_units = terms->labor_units;
         if (terms->carried_units > 0.0) a.carried_units = terms->carried_units;
@@ -1790,10 +1858,10 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     // платит тот, кто принимает.
     const double payable = a.labor_units + (a.carried_units ? *a.carried_units : 0.0);
     const std::string me_hex = to_hex(ctx.user_id.bytes);
-    const std::string to_s   = to_hex(a.work.chain.data(), 32);
+    const std::string to_s   = to_hex(seller.data(), 32);
     records::Transfer t{};
     t.from      = ctx.user_id.bytes;
-    t.to        = a.work.chain;
+    t.to        = seller;
     t.to_node   = DEFAULT_LEAF;
     t.origins   = pick_portions(ctx, to_s, payable);
     t.accept    = a;
@@ -1801,19 +1869,26 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     // Transfer v4 (records.md §11.1): which own promise this deal closes.
     const auto pledge_s = flag_val(argc, argv, "--pledge");
     if (!pledge_s.empty()) t.settles = parse_ref(pledge_s);
-    // Pay into the purse of the branch that did the work (economy.md §5а).
-    if (const auto work_block = find_external_by_hash(ctx, a.work.hash))
-        t.to_node = work_block->address.node_index;
+    // Pay into the purse of the branch that did the work (economy.md §5а) — for a
+    // resale, the branch that wrote the release.
+    if (const auto seller_block =
+            find_external_by_hash(ctx, resale ? a.release->hash : a.work.hash))
+        t.to_node = seller_block->address.node_index;
     attach_emission_link(ctx, t);   // self-issues are threaded (economy.md §4.3)
 
     const Block block = append_record(ctx, Record{t});
     print_portions(t, me_hex, to_s);
     std::cout << "acceptance ref: " << me_hex << "/"
               << to_hex(Crypto::hash_block(block).bytes) << "\n";
-    std::cerr << "принято и оплачено одной записью: " << a.labor_units
-              << " labor-h (raw " << a.hours_raw << "h)";
-    if (a.carried_units) std::cerr << " + перенос " << *a.carried_units << "ч";
-    std::cerr << " = paid " << payable << "h\n";
+    if (resale) {
+        std::cerr << "куплено у держателя одной записью: " << payable
+                  << "ч — перепродажа, без труда (records.md §9.8)\n";
+    } else {
+        std::cerr << "принято и оплачено одной записью: " << a.labor_units
+                  << " labor-h (raw " << a.hours_raw << "h)";
+        if (a.carried_units) std::cerr << " + перенос " << *a.carried_units << "ч";
+        std::cerr << " = paid " << payable << "h\n";
+    }
     if (!via.empty()) upload_block(via, block);
     return 0;
 }
@@ -1830,21 +1905,23 @@ static Ref own_work_arg(Context& ctx, const std::string& arg) {
         work = parse_ref(arg);
     }
     if (work.chain != ctx.user_id.bytes)
-        throw std::runtime_error("это чужая работа — отпускает и списывает её результат тот, "
-                                 "кто его сделал (records.md §9.8)");
+        throw std::runtime_error("это чужая запись — отпускает и списывает тот, у кого "
+                                 "результат: кто его сделал или купил (records.md §9.8)");
     return work;
 }
 
 // The own links of one lot (records.md §9.8 v2): releases of portions and
-// write-offs of output `out` of `work`, every local branch. `whole` — the work
-// was released whole; `portions` — some output of it goes by portions.
+// write-offs of output `out` of `work` — of the work's own output, or, with
+// `holding`, of a purchase sold on (v4) — every local branch. `whole` — the
+// work was released whole; `portions` — some output of it goes by portions.
 struct OwnLot {
     std::vector<records::ObservedLotLink> links;
     bool whole    = false;
     bool portions = false;
 };
 
-static OwnLot own_lot(Context& ctx, const Ref& work, uint32_t out) {
+static OwnLot own_lot(Context& ctx, const Ref& work, uint32_t out,
+                     const std::optional<Ref>& holding = std::nullopt) {
     OwnLot lot;
     for (const NodeIndex node : ctx.local_branches()) {
         std::vector<Block> blocks;
@@ -1856,13 +1933,14 @@ static OwnLot own_lot(Context& ctx, const Ref& work, uint32_t out) {
             try { rec = Codec::decode(b.payload.data(), b.payload.size()); }
             catch (const CodecError&) { continue; }
             const auto hash = Crypto::hash_block(b).bytes;
-            if (const auto* rl = std::get_if<records::Release>(&rec); rl && rl->work == work) {
+            if (const auto* rl = std::get_if<records::Release>(&rec);
+                rl && rl->work == work && rl->holding == holding) {
                 if (!rl->lot) { lot.whole = true; continue; }
                 lot.portions = true;
                 if (rl->lot->out == out)
                     lot.links.push_back({hash, *rl->lot, rl->timestamp, rl->expires, false});
             } else if (const auto* wo = std::get_if<records::WriteOff>(&rec);
-                       wo && wo->work == work) {
+                       wo && wo->work == work && wo->holding == holding) {
                 lot.portions = true;
                 if (wo->lot.out == out)
                     lot.links.push_back({hash, wo->lot, wo->timestamp, std::nullopt, false});
@@ -1872,43 +1950,38 @@ static OwnLot own_lot(Context& ctx, const Ref& work, uint32_t out) {
     return lot;
 }
 
+// A lot as its seller sees it: which output of the product, how much of it and
+// which units (records.md §9.8).
+struct LotView {
+    uint32_t                 out = 0;
+    double                   qty = 0;
+    std::vector<std::string> units;
+    std::string              resource, unit;
+};
+
 // The next link of a lot's sub-thread (records.md §9.8 v3): after the newest own
-// link of the lot, taking `qty` — or, for a lot counted piece by piece, the
+// link of the lot — of the work's own output, or of a purchase sold on
+// (`holding`, v4) — taking `qty`, or, for a lot counted piece by piece, the
 // numbered units asked for (the first free ones when none are named). With
 // --via the releases of the lot that expired with nobody taking them go back
 // into stock by this very link (`returns`); whether a release was taken only the
 // aggregator knows, so without it nothing is returned. A portion the lot no
-// longer holds, or a unit already out, is refused. A portion for sale needs the
-// lot's price tag and the work's proposed breakdown: it is sold on them.
-static records::LotLink next_lot_link(Context& ctx, const std::string& via, const Ref& work,
-                                      const WorkRecord& wr, uint32_t out,
-                                      std::optional<double> qty,
-                                      std::vector<std::string> want, bool for_sale,
+// longer holds, or a unit already out, is refused.
+static records::LotLink take_from_lot(Context& ctx, const std::string& via, const Ref& product,
+                                      const std::optional<Ref>& holding, const LotView& o,
+                                      std::optional<double> qty, std::vector<std::string> want,
                                       int64_t now) {
-    if (out >= wr.outputs.size())
-        throw std::runtime_error("у работы нет выхода №" + std::to_string(out) +
-                                 " — нет и партии (records.md §9.4)");
-    const records::ResourceQty& o = wr.outputs[out];
-    if (wr.outputs.size() > 1 && !o.share)
-        throw std::runtime_error("у работы несколько выходов, а долей часов нет — порцию не "
-                                 "оценить; объявите их при записи работы: --output "
-                                 "ИМЯ:КОЛ:ЕД:ДОЛЯ (records.md §9.4)");
-    if (for_sale && (!o.price || wr.axes.empty()))
-        throw std::runtime_error("порции продаются по ценнику, «бери или нет» "
-                                 "(records.md §9.8): у партии нет ценника или у работы — "
-                                 "предложенной разбивки; назначьте их при записи работы: "
-                                 "--output ИМЯ:КОЛ:ЕД::k=K и --axis-share");
     const bool numbered = !o.units.empty();
     if (!numbered && !want.empty())
         throw std::runtime_error("у партии «" + o.resource + "» нет номеров единиц — её "
                                  "отпускают количеством (--qty)");
-    const OwnLot lot = own_lot(ctx, work, out);
+    const OwnLot lot = own_lot(ctx, product, o.out, holding);
     if (lot.whole)
         throw std::runtime_error("работа уже отпущена целиком — продать её ещё и порциями "
                                  "значило бы продать дважды (records.md §9.5)");
 
     records::LotLink link{};
-    link.out = out;
+    link.out = o.out;
     const records::ObservedLotLink*   newest = nullptr;
     std::set<std::array<uint8_t, 32>> returned;   // by earlier own links
     for (const auto& l : lot.links) {
@@ -1923,7 +1996,7 @@ static records::LotLink next_lot_link(Context& ctx, const std::string& via, cons
         before    = newest->link.after;
         std::set<std::array<uint8_t, 32>> taken;
         bool known = false;
-        if (const auto st = fetch_work_status(via, work); st && st->is_object()) {
+        if (const auto st = fetch_work_status(via, product); st && st->is_object()) {
             const auto* k = records::json::find(st->object, "known");
             known = k && k->boolean;
             if (const auto* rs = jarr(st->object, "releases"))
@@ -1997,6 +2070,46 @@ static records::LotLink next_lot_link(Context& ctx, const std::string& via, cons
     return link;
 }
 
+// The next link of a lot of the own work (records.md §9.8 v3). A portion for
+// sale needs the lot's price tag and the work's proposed breakdown: it is sold
+// on them.
+static records::LotLink next_lot_link(Context& ctx, const std::string& via, const Ref& work,
+                                      const WorkRecord& wr, uint32_t out,
+                                      std::optional<double> qty,
+                                      std::vector<std::string> want, bool for_sale,
+                                      int64_t now) {
+    if (out >= wr.outputs.size())
+        throw std::runtime_error("у работы нет выхода №" + std::to_string(out) +
+                                 " — нет и партии (records.md §9.4)");
+    const records::ResourceQty& o = wr.outputs[out];
+    if (wr.outputs.size() > 1 && !o.share)
+        throw std::runtime_error("у работы несколько выходов, а долей часов нет — порцию не "
+                                 "оценить; объявите их при записи работы: --output "
+                                 "ИМЯ:КОЛ:ЕД:ДОЛЯ (records.md §9.4)");
+    if (for_sale && (!o.price || wr.axes.empty()))
+        throw std::runtime_error("порции продаются по ценнику, «бери или нет» "
+                                 "(records.md §9.8): у партии нет ценника или у работы — "
+                                 "предложенной разбивки; назначьте их при записи работы: "
+                                 "--output ИМЯ:КОЛ:ЕД::k=K и --axis-share");
+    return take_from_lot(ctx, via, work, std::nullopt,
+                         LotView{out, o.qty, o.units, o.resource, o.unit}, qty,
+                         std::move(want), now);
+}
+
+// Which lot of a purchase: the one there is, or the output named by --out.
+static const records::HoldingLot& pick_holding_lot(const std::vector<records::HoldingLot>& lots,
+                                                   const std::string& out_s) {
+    if (out_s.empty()) {
+        if (lots.size() != 1)
+            throw std::runtime_error("в покупке несколько партий — выберите выход: --out N");
+        return lots.front();
+    }
+    const auto out = static_cast<uint32_t>(std::stoul(out_s));
+    for (const auto& l : lots)
+        if (l.out == out) return l;
+    throw std::runtime_error("в покупке нет партии выхода №" + out_s);
+}
+
 // bc release WORK --to CHAIN [--qty Q [--out N]] [--days N | --until TS] [--via URL]
 // Отпуск (records.md §9.8, ИР-023): the seller gives the result of an own work —
 // whole, or a portion of one of its lots — to a named buyer. Only that buyer's
@@ -2013,17 +2126,16 @@ static int cmd_release(const fs::path& data_dir, int argc, char** argv) {
                      "  --qty / --units — порция партии выхода N (по умолчанию 0), звено её\n"
                      "  подниточки; продаётся по ценнику, «бери или нет»; больше, чем в партии\n"
                      "  осталось, не отпустить, номер — не продать дважды. РАБОТА — хеш своей\n"
-                     "  записи труда или ЦЕПЬ/ХЕШ\n";
+                     "  записи труда или ЦЕПЬ/ХЕШ; своя покупка вместо работы — перепродажа\n"
+                     "  по цене покупки, без наценки (records.md §9.8)\n";
         return 1;
     }
     const auto      via  = flag_val(argc, argv, "--via");
     const NodeIndex leaf = parse_leaf_index(argc, argv);
     Context ctx(data_dir, leaf);
 
-    const Ref         work = own_work_arg(ctx, pos[1]);
-    const auto        wrec = load_record(ctx, "", work);
-    const WorkRecord* wr   = wrec ? std::get_if<WorkRecord>(&*wrec) : nullptr;
-    if (!wr) throw std::runtime_error("своей записи труда с таким хешем нет");
+    const Ref  work = own_work_arg(ctx, pos[1]);
+    const auto wrec = load_record(ctx, "", work);
 
     records::Release rl{};
     rl.work      = work;
@@ -2039,6 +2151,45 @@ static int cmd_release(const fs::path& data_dir, int argc, char** argv) {
 
     const auto qty_s   = flag_val(argc, argv, "--qty");
     const auto units_s = flag_val(argc, argv, "--units");
+
+    // Перепродажа (records.md §9.8 v4): источник — своя покупка. Серийник остаётся
+    // прежним — отпуск называет запись рождения вещи, а цена — доля уплаченного
+    // за покупку, без наценки.
+    if (const auto* bought = wrec ? std::get_if<records::Transfer>(&*wrec) : nullptr;
+        bought && bought->accept) {
+        const auto h = load_holding(ctx, via, work);
+        if (!h || h->lots.empty())
+            throw std::runtime_error("в этой покупке нечего перепродать: купленное — не партия "
+                                     "(услуга) или записей продавца не найти — нужен --via");
+        if (qty_s.empty() && units_s.empty())
+            throw std::runtime_error("купленное перепродают порцией: --qty или --units "
+                                     "(records.md §9.8)");
+        const auto& hl = pick_holding_lot(h->lots, flag_val(argc, argv, "--out"));
+        const auto& o  = h->work.outputs[hl.out];
+        rl.work    = bought->accept->work;
+        rl.holding = work;
+        rl.lot     = take_from_lot(ctx, via, rl.work, work,
+                                   LotView{hl.out, hl.qty, hl.units, o.resource, o.unit},
+                                   qty_s.empty() ? std::optional<double>{} : std::stod(qty_s),
+                                   split_list(units_s), rl.timestamp);
+        const Block block = append_record(ctx, Record{rl});
+        std::cout << "release ref: " << to_hex(ctx.user_id.bytes) << "/"
+                  << to_hex(Crypto::hash_block(block).bytes) << "\n";
+        std::cerr << "перепродажа: " << qty_str(rl.lot->qty) << " " << o.unit << " «"
+                  << o.resource << "»";
+        for (std::size_t i = 0; i < rl.lot->units.size(); ++i)
+            std::cerr << (i ? ", " : " (") << rl.lot->units[i]
+                      << (i + 1 == rl.lot->units.size() ? ")" : "");
+        std::cerr << " → " << short_hex(rl.to) << " по цене покупки: "
+                  << records::resale_price(hl, rl.lot->qty) << " стч, без наценки; из купленных "
+                  << qty_str(hl.qty) << " осталось " << qty_str(hl.qty - rl.lot->after)
+                  << ", срок " << rl.expires << "\n";
+        if (!via.empty()) upload_block(via, block);
+        return 0;
+    }
+    const WorkRecord* wr = wrec ? std::get_if<WorkRecord>(&*wrec) : nullptr;
+    if (!wr) throw std::runtime_error("своей записи труда или покупки с таким хешем нет");
+
     if (!qty_s.empty() || !units_s.empty()) {
         // Порция партии (records.md §9.8 v3): звено подниточки — после последнего.
         if (wr->customer)
@@ -2122,48 +2273,72 @@ static int cmd_release(const fs::path& data_dir, int argc, char** argv) {
 // bc writeoff WORK --qty Q [--out N] --reason TEXT [--via URL] [--leaf L]
 // Списание (records.md §9.9): part of a lot leaves it without a sale — spoiled,
 // lost, used up — by a link of the lot's sub-thread, so the remainder stays
-// checkable and the loss stays visible in the own chain.
+// checkable and the loss stays visible in the own chain. WORK may be an own
+// purchase: bought goods are written off from its lot (v2).
 static int cmd_writeoff(const fs::path& data_dir, int argc, char** argv) {
-    const auto pos    = get_positionals(argc, argv);
+    const auto pos     = get_positionals(argc, argv);
     const auto qty_s   = flag_val(argc, argv, "--qty");
     const auto units_s = flag_val(argc, argv, "--units");
     const auto reason  = flag_val(argc, argv, "--reason");
     if (pos.size() < 2 || (qty_s.empty() && units_s.empty()) || reason.empty()) {
         std::cerr << "Usage: bc writeoff РАБОТА (--qty КОЛИЧЕСТВО | --units НОМЕР,...)\n"
-                     "                   --reason ТЕКСТ [--out N]\n"
-                     "                   [--via URL] [--leaf L]\n"
+                     "                   --reason ТЕКСТ [--out N] [--via URL] [--leaf L]\n"
                      "  списать часть партии без продажи — испорчено, потеряно,\n"
-                     "  израсходовано (records.md §9.9): звено подниточки партии\n";
+                     "  израсходовано (records.md §9.9): звено подниточки партии;\n"
+                     "  РАБОТА — своя запись труда или своя покупка\n";
         return 1;
     }
     const auto      via  = flag_val(argc, argv, "--via");
     const NodeIndex leaf = parse_leaf_index(argc, argv);
     Context ctx(data_dir, leaf);
 
-    const Ref         work = own_work_arg(ctx, pos[1]);
-    const auto        wrec = load_record(ctx, "", work);
-    const WorkRecord* wr   = wrec ? std::get_if<WorkRecord>(&*wrec) : nullptr;
-    if (!wr) throw std::runtime_error("своей записи труда с таким хешем нет");
-    if (wr->customer)
-        throw std::runtime_error("работа на заказ — её результат у заказчика, из своего запаса "
-                                 "списывать нечего (records.md §9.9)");
+    const Ref  source = own_work_arg(ctx, pos[1]);
+    const auto srec   = load_record(ctx, "", source);
+    const auto qty    = qty_s.empty() ? std::optional<double>{} : std::stod(qty_s);
 
     records::WriteOff wo{};
-    wo.work      = work;
     wo.reason    = reason;
     wo.timestamp = static_cast<int64_t>(std::time(nullptr));
-    const auto out = static_cast<uint32_t>(std::stoul(flag_val(argc, argv, "--out", "0")));
-    wo.lot = next_lot_link(ctx, via, work, *wr, out,
-                           qty_s.empty() ? std::optional<double>{} : std::stod(qty_s),
-                           split_list(units_s), /*for_sale=*/false, wo.timestamp);
+    std::string resource, unit;
+    double      lot_qty = 0.0;
+    if (const auto* bought = srec ? std::get_if<records::Transfer>(&*srec) : nullptr;
+        bought && bought->accept) {
+        // Списание купленного (records.md §9.9 v2): звено подниточки покупки.
+        const auto h = load_holding(ctx, via, source);
+        if (!h || h->lots.empty())
+            throw std::runtime_error("в этой покупке нечего списывать: купленное — не партия "
+                                     "или записей продавца не найти — нужен --via");
+        const auto& hl = pick_holding_lot(h->lots, flag_val(argc, argv, "--out"));
+        const auto& o  = h->work.outputs[hl.out];
+        wo.work    = bought->accept->work;
+        wo.holding = source;
+        wo.lot     = take_from_lot(ctx, via, wo.work, source,
+                                   LotView{hl.out, hl.qty, hl.units, o.resource, o.unit}, qty,
+                                   split_list(units_s), wo.timestamp);
+        resource = o.resource;
+        unit     = o.unit;
+        lot_qty  = hl.qty;
+    } else {
+        const WorkRecord* wr = srec ? std::get_if<WorkRecord>(&*srec) : nullptr;
+        if (!wr) throw std::runtime_error("своей записи труда или покупки с таким хешем нет");
+        if (wr->customer)
+            throw std::runtime_error("работа на заказ — её результат у заказчика, из своего "
+                                     "запаса списывать нечего (records.md §9.9)");
+        const auto out = static_cast<uint32_t>(std::stoul(flag_val(argc, argv, "--out", "0")));
+        wo.work = source;
+        wo.lot  = next_lot_link(ctx, via, source, *wr, out, qty, split_list(units_s),
+                                /*for_sale=*/false, wo.timestamp);
+        resource = wr->outputs[out].resource;
+        unit     = wr->outputs[out].unit;
+        lot_qty  = wr->outputs[out].qty;
+    }
 
     const Block block = append_record(ctx, Record{wo});
-    const auto& o = wr->outputs[out];
     std::cout << "writeoff ref: " << to_hex(ctx.user_id.bytes) << "/"
               << to_hex(Crypto::hash_block(block).bytes) << "\n";
-    std::cerr << "списано: " << qty_str(wo.lot.qty) << " " << o.unit << " «" << o.resource
-              << "» — " << reason << "; в партии осталось " << qty_str(o.qty - wo.lot.after)
-              << " " << o.unit << "\n";
+    std::cerr << "списано: " << qty_str(wo.lot.qty) << " " << unit << " «" << resource
+              << "» — " << reason << "; в партии осталось " << qty_str(lot_qty - wo.lot.after)
+              << " " << unit << "\n";
     if (!via.empty()) upload_block(via, block);
     return 0;
 }
@@ -2254,6 +2429,55 @@ static int cmd_thread(const fs::path& data_dir, int argc, char** argv) {
         if (jnum(un->object, "without_axes") > 0)
             std::cout << "  (без разбивки: " << jnum(un->object, "without_axes") << "ч)";
         std::cout << "\n";
+    }
+    return 0;
+}
+
+// bc stock [ЦЕПЬ] --via URL
+// What a chain bought and may sell on (records.md §9.8 v4): each purchase of
+// goods with its lots — sold on, written off, waiting for payment, in stock —
+// and what it cost, the price it is sold on at.
+static int cmd_stock(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);
+    const auto via = flag_val(argc, argv, "--via");
+    if (via.empty()) {
+        std::cerr << "Usage: bc stock [ЦЕПЬ] --via URL   (по умолчанию — своя цепь)\n";
+        return 1;
+    }
+    const std::string chain = pos.size() >= 2 ? pos[1] : to_hex(load_user_id(data_dir).bytes);
+    const auto root = fetch_json(via, "/stock/" + chain);
+    if (!root || !root->is_object()) {
+        std::cerr << "агрегатор не ответил\n";
+        return 1;
+    }
+    const auto* holdings = jarr(root->object, "holdings");
+    std::cout << "купленное " << chain.substr(0, 16) << "…  (records.md §9.8)\n";
+    if (!holdings || holdings->array.empty()) {
+        std::cout << "  купленных партий нет\n";
+        return 0;
+    }
+    for (const auto& hv : holdings->array) {
+        if (!hv.is_object()) continue;
+        const auto& h   = hv.object;
+        const auto  ref = jstr(h, "ref");
+        std::cout << "  «" << jstr(h, "action") << "» — покупка "
+                  << ref.substr(ref.find('/') + 1, 12) << "\n";
+        if (const auto* lots = jarr(h, "lots"))
+            for (const auto& lv : lots->array) {
+                if (!lv.is_object()) continue;
+                const auto& y = lv.object;
+                std::cout << "      «" << jstr(y, "resource") << "» " << jnum(y, "qty") << " "
+                          << jstr(y, "unit") << " за " << jnum(y, "cost") << " стч: перепродано "
+                          << jnum(y, "sold") << ", ждёт оплаты " << jnum(y, "reserved")
+                          << ", списано " << jnum(y, "written_off") << ", в запасе "
+                          << jnum(y, "remaining");
+                if (const auto* fu = jarr(y, "free_units"); fu && !fu->array.empty()) {
+                    std::cout << "; номера:";
+                    for (std::size_t i = 0; i < fu->array.size() && i < 8; ++i)
+                        std::cout << " " << fu->array[i].string;
+                }
+                std::cout << "\n";
+            }
     }
     return 0;
 }
@@ -3484,9 +3708,20 @@ static int cmd_transfer_recv(const fs::path& data_dir, int argc, char** argv) {
                 "сделка не по адресу: вы не отпускали эту работу плательщику — ни "
                 "заказчиком в записи труда, ни отпуском (или отпуск истёк). Такая "
                 "сделка ничтожна, часы не принимаются (records.md §9.5)");
-        // Порция со склада — по ценнику (records.md §9.8 v3): иначе сделка ничего не
-        // завершает, и её часы не наши.
-        if (release && release->lot) {
+        if (release && release->holding) {
+            // Перепродажа своей покупки (records.md §9.8 v4) — по цене покупки.
+            const auto h = load_holding(ctx, via, *release->holding);
+            const records::HoldingLot* hl = nullptr;
+            if (h)
+                for (const auto& l : h->lots)
+                    if (l.out == release->lot->out) hl = &l;
+            if (!hl || !records::meets_resale(*t->accept,
+                                              records::resale_price(*hl, release->lot->qty)))
+                throw std::runtime_error("перепродажа не по цене покупки — сделка ничего не "
+                                         "завершает, часы не принимаются (records.md §9.8)");
+        } else if (release && release->lot) {
+            // Порция со склада — по ценнику (records.md §9.8 v3): иначе сделка ничего
+            // не завершает, и её часы не наши.
             std::optional<records::PortionTerms> terms;
             if (const auto w = load_record(ctx, "", t->accept->work))
                 if (const auto* wr = std::get_if<WorkRecord>(&*w))
@@ -5327,7 +5562,14 @@ Labor:
                                        a link of the lot's sub-thread; never
                                        more than it holds, a unit sold once
   writeoff WORK --qty Q --reason T  Write off part of a lot — spoiled, lost,
-    [--out N] [--via URL]              used up (records.md §9.9)
+    [--out N] [--via URL]              used up (records.md §9.9); WORK may be
+                                       an own purchase
+  release PURCHASE --to CHAIN --qty Q  Resale (records.md §9.8): a portion of an
+                                       own purchase at its share of the price
+                                       paid — no markup; the serial stays the
+                                       maker's
+  stock [CHAIN] --via URL          What was bought and may be sold on: lots,
+                                       sold, written off, in stock
   thread [CHAIN] --via URL         The goods thread (records.md §9.4): works in
                                        time, faults (outside the thread, broken
                                        links, hours sold twice), labor not yet
@@ -5491,6 +5733,7 @@ int main(int argc, char** argv) {
         else if (cmd == "release")                          return cmd_release(data_dir, argc, argv);
         else if (cmd == "thread")                           return cmd_thread(data_dir, argc, argv);
         else if (cmd == "writeoff")                         return cmd_writeoff(data_dir, argc, argv);
+        else if (cmd == "stock")                            return cmd_stock(data_dir, argc, argv);
         else if (cmd == "tool"      && subcmd == "add")     return cmd_tool_add(data_dir, argc, argv);
         else if (cmd == "tool"      && subcmd == "list")    return cmd_tool_list(data_dir, argc, argv);
         else if (cmd == "tool"      && subcmd == "show")    return cmd_tool_show(data_dir, argc, argv);

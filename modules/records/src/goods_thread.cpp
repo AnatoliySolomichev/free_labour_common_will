@@ -215,4 +215,34 @@ bool meets_terms(const Acceptance& a, const PortionTerms& t) noexcept {
     return true;
 }
 
+std::vector<HoldingLot> holding_lots(const Transfer& purchase, const WorkRecord& work,
+                                     const Release* bought) {
+    std::vector<HoldingLot> out;
+    double paid = 0.0;
+    for (const auto& o : purchase.origins) paid += o.units;
+    if (bought && bought->lot) {
+        const LotLink& l = *bought->lot;
+        out.push_back({l.out, l.qty, l.units, paid});
+        return out;
+    }
+    const std::size_t n = work.outputs.size();
+    for (uint32_t i = 0; i < n; ++i) {
+        const ResourceQty& o = work.outputs[i];
+        const double share = o.share ? *o.share : (n == 1 ? 1.0 : 0.0);
+        if (!(share > 0.0) || !(o.qty > 0.0)) continue;   // several outputs, no shares: not split
+        out.push_back({i, o.qty, o.units, paid * share});
+    }
+    return out;
+}
+
+double resale_price(const HoldingLot& lot, double qty) noexcept {
+    return lot.qty > 0.0 ? lot.cost * qty / lot.qty : 0.0;
+}
+
+bool meets_resale(const Acceptance& a, double price) noexcept {
+    const double carried = a.carried_units ? *a.carried_units : 0.0;
+    return a.labor_units == 0.0 && a.hours_raw == 0.0 && a.axes.empty() &&
+           std::abs(carried - price) <= 1e-6;
+}
+
 } // namespace records

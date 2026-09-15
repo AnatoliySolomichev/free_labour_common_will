@@ -270,8 +270,6 @@ void enc_work_record(Buf& out, const WorkRecord& wr) {
 // 1 quality, 2 hours_raw, 3 labor_units, 4 the breakdown; optional, each only
 // when set and in ascending order: 5 carried_units, 6 norm, 7 like, 8 release.
 void w_acceptance(Buf& out, const Acceptance& a) {
-    if (a.axes.empty())
-        throw CodecError("Acceptance: цена обязана быть расписана по осям (ИР-022)");
     w_map(out, 5 + (a.carried_units ? 1 : 0) + (a.norm ? 1 : 0) + (a.like ? 1 : 0)
                  + (a.release ? 1 : 0));
     w_uint(out, 0); w_ref(out, a.work);
@@ -318,11 +316,23 @@ void check_transfer(const Transfer& t) {
     const Acceptance& a = *t.accept;
     if (t.to == t.from)
         throw CodecError("Transfer: самоприёмка ничего не заверяет (records.md §14.4)");
-    if (a.work.chain != t.to)
-        throw CodecError("Transfer: платят тому, чья работа принята — to ≠ цепь работы");
     if (a.release && a.release->chain != t.to)
         throw CodecError("Transfer: отпуск лежит в цепи продавца — to ≠ цепь отпуска "
                          "(records.md §9.8)");
+    if (a.work.chain != t.to) {
+        // Перепродажа (records.md §9.8 v4): платят держателю за вещь, сделанную
+        // другим, — по отпуску держателя, без живого труда и без разбивки: оси
+        // определены при первой продаже, вторая — «бери или нет».
+        if (!a.release)
+            throw CodecError("Transfer: платят тому, чья работа принята, — или держателю по "
+                             "его отпуску (records.md §9.8)");
+        if (a.labor_units != 0.0 || a.hours_raw != 0.0 || !a.axes.empty())
+            throw CodecError("Transfer: перепродажа — только перенос, без труда и без "
+                             "разбивки по осям (records.md §9.5)");
+    } else if (a.axes.empty()) {
+        // Приёмки без разбивки не существует (ИР-022) — кроме перепродажи.
+        throw CodecError("Acceptance: цена обязана быть расписана по осям (ИР-022)");
+    }
     double paid = 0.0;
     for (const auto& o : t.origins) paid += o.units;
     const double payable = a.labor_units + (a.carried_units ? *a.carried_units : 0.0);
@@ -380,31 +390,40 @@ void w_lot_link(Buf& out, const LotLink& l) {
 void check_release(const Release& rl) {
     if (rl.expires <= rl.timestamp)
         throw CodecError("Release: срок истекает не позже самого отпуска (records.md §9.8)");
-    if (rl.to == rl.work.chain)
+    // The seller: the worker of the work, or the holder of a purchase (v4).
+    const auto& seller = rl.holding ? rl.holding->chain : rl.work.chain;
+    if (rl.to == seller)
         throw CodecError("Release: отпуск себе ничего не отпускает");
+    if (rl.holding && !rl.lot)
+        throw CodecError("Release: купленное перепродают порцией — звеном подниточки "
+                         "покупки (records.md §9.8)");
 }
 
 // The release (records.md §9.8): the seller names who gets the result. Keys:
-// 0 type, 1 work, 2 to, 3 expires, 4 timestamp, 5 lot (v2 — a portion).
+// 0 type, 1 work, 2 to, 3 expires, 4 timestamp, 5 lot (v2 — a portion),
+// 6 holding (v4 — a resale).
 void enc_release(Buf& out, const Release& rl) {
     check_release(rl);
-    w_map(out, 5 + (rl.lot ? 1 : 0));
+    w_map(out, 5 + (rl.lot ? 1 : 0) + (rl.holding ? 1 : 0));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Release));
     w_uint(out, 1); w_ref(out, rl.work);
     w_uint(out, 2); w_fixed(out, rl.to);
     w_uint(out, 3); w_int64(out, rl.expires);
     w_uint(out, 4); w_int64(out, rl.timestamp);
-    if (rl.lot) { w_uint(out, 5); w_lot_link(out, *rl.lot); }
+    if (rl.lot)     { w_uint(out, 5); w_lot_link(out, *rl.lot); }
+    if (rl.holding) { w_uint(out, 6); w_ref(out, *rl.holding); }
 }
 
-// The write-off (records.md §9.9): 0 type, 1 work, 2 lot, 3 reason, 4 timestamp.
+// The write-off (records.md §9.9): 0 type, 1 work, 2 lot, 3 reason, 4 timestamp,
+// 5 holding (v2 — a bought lot).
 void enc_write_off(Buf& out, const WriteOff& w) {
-    w_map(out, 5);
+    w_map(out, 5 + (w.holding ? 1 : 0));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::WriteOff));
     w_uint(out, 1); w_ref(out, w.work);
     w_uint(out, 2); w_lot_link(out, w.lot);
     w_uint(out, 3); w_text(out, w.reason);
     w_uint(out, 4); w_int64(out, w.timestamp);
+    if (w.holding) { w_uint(out, 5); w_ref(out, *w.holding); }
 }
 
 void enc_material(Buf& out, const Material& m) {
@@ -974,8 +993,6 @@ Acceptance dec_acceptance(CborReader& r) {
             throw CodecError("Acceptance: unknown field key");
         }
     }
-    if (a.axes.empty())
-        throw CodecError("Acceptance: цена обязана быть расписана по осям (ИР-022)");
     return a;
 }
 
@@ -1101,24 +1118,33 @@ LotLink dec_lot_link(CborReader& r) {
 }
 
 Release dec_release_fields(CborReader& r, uint64_t field_count) {
-    if (field_count < 5 || field_count > 6) throw CodecError("Release: expected 5..6 fields");
+    if (field_count < 5 || field_count > 7) throw CodecError("Release: expected 5..7 fields");
     Release rl{};
     expect_key(r, 1); rl.work      = dec_ref(r);
     expect_key(r, 2); r.r_fixed(rl.to);
     expect_key(r, 3); rl.expires   = r.r_int();
     expect_key(r, 4); rl.timestamp = r.r_int();
-    if (field_count == 6) { expect_key(r, 5); rl.lot = dec_lot_link(r); }
+    uint64_t last = 4;   // the tail, by key and ascending: lot (5), holding (6)
+    for (uint64_t i = 5; i < field_count; ++i) {
+        const uint64_t key = r.r_uint();
+        if (key <= last) throw CodecError("Release: keys out of order");
+        last = key;
+        if      (key == 5) rl.lot     = dec_lot_link(r);
+        else if (key == 6) rl.holding = dec_ref(r);
+        else throw CodecError("Release: unknown field key");
+    }
     check_release(rl);
     return rl;
 }
 
 WriteOff dec_write_off_fields(CborReader& r, uint64_t field_count) {
-    if (field_count != 5) throw CodecError("WriteOff: expected 5 fields");
+    if (field_count < 5 || field_count > 6) throw CodecError("WriteOff: expected 5..6 fields");
     WriteOff w{};
     expect_key(r, 1); w.work      = dec_ref(r);
     expect_key(r, 2); w.lot       = dec_lot_link(r);
     expect_key(r, 3); w.reason    = r.r_text();
     expect_key(r, 4); w.timestamp = r.r_int();
+    if (field_count == 6) { expect_key(r, 5); w.holding = dec_ref(r); }
     return w;
 }
 

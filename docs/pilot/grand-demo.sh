@@ -376,7 +376,9 @@ W_pies=$(bcp anna work log --title "повар, 5-й разряд" --action "П�
          --axis-share "$(axis knowledge)=0.5" --via "$VIA" | after 'hash: ')
 bcp anna release "$W_pies" --to "${CID[boris]}" --qty 5 --days 2 --via "$VIA" 2>&1 | sed 's/^/   /'
 bcp anna release "$W_pies" --to "${CID[irina]}" --qty 4 --days 2 --via "$VIA" 2>&1 | sed 's/^/   /'
-bcp boris accept --work "${CID[anna]}/$W_pies" --quality "свежие" --via "$VIA" 2>&1 | sed 's/^/   /'
+OUT_pb="$(bcp boris accept --work "${CID[anna]}/$W_pies" --quality "свежие" --via "$VIA" 2>&1)"
+echo "$OUT_pb" | sed 's/^/   /'
+PIES_boris="$(printf '%s\n' "$OUT_pb" | after 'acceptance ref: ')"
 bcp irina accept --work "${CID[anna]}/$W_pies" --quality "свежие" --via "$VIA" 2>&1 | sed 's/^/   /'
 bcp anna writeoff "$W_pies" --qty 2 --reason "подгорели" --via "$VIA" 2>&1 | sed 's/^/   /'
 say "нить Анны: у пирогов видно, сколько продано, списано и осталось"
@@ -390,6 +392,13 @@ W_stools=$(bcp dmitry work log --title "столяр, 6-й разряд" --actio
 bcp dmitry release "$W_stools" --to "${CID[vera]}" --units Т-2 --days 2 --via "$VIA" 2>&1 | sed 's/^/   /'
 bcp vera accept --work "${CID[dmitry]}/$W_stools" --quality "крепкий" --via "$VIA" 2>&1 | sed 's/^/   /'
 bcp dmitry thread --via "$VIA" | sed 's/^/   /'
+
+hr "перепродажа: Борис отдаёт 2 пирога Галине по цене покупки (bc release ПОКУПКА, records.md §9.8)"
+say "серийник прежний — путь к записи, где пироги испекла Анна; цена — доля уплаченного, без наценки"
+bcp boris release "$PIES_boris" --to "${CID[galina]}" --qty 2 --days 1 --via "$VIA" 2>&1 | sed 's/^/   /'
+bcp galina accept --work "${CID[anna]}/$W_pies" --quality "свежие" --via "$VIA" 2>&1 | sed 's/^/   /'
+say "склад Бориса (bc stock): из пяти купленных два перепроданы, три в запасе"
+bcp boris stock --via "$VIA" | sed 's/^/   /'
 
 hr "облако образцов работ — из сделок, а не из каталога (bc cloud, ИР-022)"
 say "точка — образец, который повторили; место — из чего сложилась цена его семьи."
@@ -568,6 +577,10 @@ else echo "   ✓ больше, чем осталось в партии, не о
 if bcp dmitry release "$W_stools" --to "${CID[boris]}" --units Т-2 --via "$VIA" >/dev/null 2>&1; then
     echo "   ✗ номер Т-2 продан дважды"; fail=1
 else echo "   ✓ номер единицы не продать дважды (records.md §9.8)"; fi
+# купленного больше, чем осталось, не перепродать (records.md §9.8)
+if bcp boris release "$PIES_boris" --to "${CID[dmitry]}" --qty 4 --via "$VIA" >/dev/null 2>&1; then
+    echo "   ✗ перепродано больше купленного"; fail=1
+else echo "   ✓ больше купленного не перепродать (records.md §9.8)"; fi
 # переоценка печи ВВЕРХ обязана отклониться (перевыпуск только вниз)
 if bcp anna tool add "Печь подовая" --cost 400 --life 8000 --origin "$TOOL" --note "хочу дороже" >/dev/null 2>&1; then
     echo "   ✗ переоценка вверх прошла, а должна была отклониться"; fail=1

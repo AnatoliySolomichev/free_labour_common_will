@@ -5,8 +5,10 @@
 // is paid exactly by construction and the acceptor is the payer. It happens only
 // when the seller addressed the result to that payer — the work's customer
 // (records.md §9.4) or a live release to them (records.md §9.8); a deal nobody
-// addressed is void. A result is the work as a whole or one portion of one of
-// its lots (records.md §9.8 v2), and a deal counts only on a work in its
+// addressed is void. A result is the work as a whole, one portion of one of its
+// lots (records.md §9.8 v2), or a portion of somebody's purchase sold on — a
+// resale, carried cost only, counted in no labor statistic (v4). A deal counts
+// only on a work in its
 // worker's goods thread, on hours no other work of that chain claims
 // (records.md §9.4 v4) — for a portion, also on a link of its lot that checks
 // out. Every view that reads deals reads them here, so that no two views
@@ -45,18 +47,19 @@ struct WorkOnTable {
 
 struct ReleaseEntry {
     std::array<uint8_t, 32> hash{};    // the Release block
-    UserId                  seller{};  // who wrote it — always the worker of its work
+    UserId                  seller{};  // who wrote it: the worker of its work, or the holder of a purchase
     records::Release        release;
 };
 
 struct WriteOffEntry {
     std::array<uint8_t, 32> hash{};    // the WriteOff block
-    UserId                  seller{};  // who wrote it — always the worker of its work
+    UserId                  seller{};  // who wrote it: the worker of its work, or the holder of a purchase
     records::WriteOff       writeoff;
 };
 
-// A lot: one output of one work (records.md §9.8 v2) — the work's block hash and
-// the output's index.
+// A lot (records.md §9.8): one output of one work — the work's block hash and
+// the output's index — or one lot of a purchase sold on (v4) — the purchase's
+// deal hash and the product's output index.
 using LotKey = std::pair<std::array<uint8_t, 32>, uint32_t>;
 
 struct DealsOnTable {
@@ -70,6 +73,8 @@ struct DealsOnTable {
     std::set<std::array<uint8_t, 32>> taken;          // releases an addressed deal completed
     std::set<std::array<uint8_t, 32>> sold_releases;  // releases of portions a deal paid for
     std::set<std::array<uint8_t, 32>> sold_whole;     // works whose whole result a deal paid for
+    // Purchases of goods that happened — the buyers' stock, to sell on (v4).
+    std::map<std::array<uint8_t, 32>, std::vector<records::HoldingLot>> holdings;
 
     // The deal that counts for its result: statistics read only these.
     bool counts(const std::array<uint8_t, 32>& deal) const {
@@ -110,6 +115,10 @@ struct LotSummary {
 };
 std::vector<LotSummary> lot_summaries(const DealsOnTable& deals,
                                       const std::array<uint8_t, 32>& work);
+
+// The lots of a purchase as sold on (records.md §9.8 v4).
+std::vector<LotSummary> holding_summaries(const DealsOnTable& deals,
+                                          const std::array<uint8_t, 32>& purchase);
 
 // Hours of a work no deal has confirmed yet (records.md §9.4 v4): none once its
 // whole result was paid for; otherwise the part of its lots neither sold nor

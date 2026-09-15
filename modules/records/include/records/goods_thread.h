@@ -117,4 +117,31 @@ std::optional<PortionTerms> portion_terms(const WorkRecord& wr, const LotLink& l
 // order or a lot bought whole; a portion from stock is bought or not.
 bool meets_terms(const Acceptance& a, const PortionTerms& t) noexcept;
 
+// ── Resale: a bought lot sold on (records.md §9.8 v4, ИР-023) ───────────────
+
+// One lot a purchase put in the buyer's hands: an output of the product, how
+// much of it and which units, and what it cost the buyer.
+struct HoldingLot {
+    uint32_t                 out  = 0;
+    double                   qty  = 0;
+    std::vector<std::string> units;
+    double                   cost = 0;   // labor-hours paid for it
+};
+
+// The lots of a purchase. `purchase` — the buyer's deal; `work` — the product's
+// birth record; `bought` — the release the deal completed (nullptr: bought
+// whole, by an order or a whole release). A portion bought is one lot; a whole
+// result — one lot per output, its cost split by the outputs' shares; a service
+// leaves nothing to sell on.
+std::vector<HoldingLot> holding_lots(const Transfer& purchase, const WorkRecord& work,
+                                     const Release* bought);
+
+// What a portion of a bought lot costs sold on: its share of what the holder
+// paid — no markup and no labor. The axes were settled by the first sale; the
+// second is take it or leave it (решение участника 2026-09-15).
+double resale_price(const HoldingLot& lot, double qty) noexcept;
+
+// Whether an acceptance pays a resale exactly: carried cost only.
+bool meets_resale(const Acceptance& a, double price) noexcept;
+
 } // namespace records

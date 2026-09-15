@@ -68,10 +68,15 @@ struct DealClaim {
     // (records.md §9.8 v2) — each portion is a result of its own. Absent: the
     // deal bought the work's whole result.
     std::optional<std::array<uint8_t, 32>> portion;
+    // A resale (records.md §9.8 v4): the goods were bought, not made by the one
+    // paid — the deal moves hours and counts in no labor statistic. `work` is
+    // then the holder's purchase: each holder's stock is a source of its own.
+    bool resale = false;
 };
 
 struct DealRecognition {
     std::set<std::array<uint8_t, 32>> recognized;   // deals that count
+    std::set<std::array<uint8_t, 32>> resold;       // resales: the one deal of their result, no labor in it
     std::set<std::array<uint8_t, 32>> repeated;     // the same buyer paid again
     std::set<std::array<uint8_t, 32>> contested;    // deals on a result given to two buyers
     std::set<std::array<uint8_t, 32>> unsound;      // deals on an unsound result (see unsound_results)
@@ -85,7 +90,7 @@ struct DealRecognition {
     // Hours really moved: every addressed deal — the one that counts, a repeat,
     // one of a double sale, or one on an unsound work. A void deal moves nothing.
     bool moves_hours(const std::array<uint8_t, 32>& deal) const {
-        return recognized.count(deal) > 0 || repeated.count(deal) > 0
+        return recognized.count(deal) > 0 || resold.count(deal) > 0 || repeated.count(deal) > 0
             || contested.count(deal) > 0 || unsound.count(deal) > 0;
     }
 };

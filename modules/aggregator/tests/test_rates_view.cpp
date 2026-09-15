@@ -792,3 +792,84 @@ TEST_F(RatesViewTest, PortionsOfALotAreDealsOfTheirOwn) {
     EXPECT_NEAR(day.axes[0].price, 1.0, 1e-9);
     EXPECT_FALSE(read_deals(*storage_).moves_hours(lowball));     // ничтожна: часы не ушли
 }
+
+// Перепродажа (records.md §9.8 v4): Боб перепродаёт часть купленного хлеба по
+// цене покупки — часы уходят, но цену осей двигает только первая продажа;
+// перепродажа с наценкой ничего не завершает, больше купленного не перепродать.
+TEST_F(RatesViewTest, ResaleMovesHoursButNoPrice) {
+    const UserId carol = make_chain(0xC7);
+    const UserId dave  = make_chain(0xD4);
+    records::WorkRecord bake{};
+    bake.hours   = 10.0;
+    bake.outputs = {{"хлеб", 100.0, "шт", std::nullopt, 10.0}};
+    bake.axes    = {{test_axis(), 1.0}};
+    const Block work = add(alice_, bake);
+
+    // Боб покупает у Алисы 40 буханок — по ценнику: 4 стч.
+    records::Release rl{};
+    rl.work      = ref_to(alice_, work);
+    rl.to        = bob_.bytes;
+    rl.timestamp = kDay;
+    rl.expires   = kDay + 1000;
+    records::LotLink lot{};
+    lot.qty   = 40;
+    lot.after = 40;
+    rl.lot    = lot;
+    const Block rb = add(alice_, rl);
+    records::Acceptance a{};
+    a.work        = ref_to(alice_, work);
+    a.release     = ref_to(alice_, rb);
+    a.hours_raw   = 4.0;
+    a.labor_units = 4.0;
+    a.axes        = {{test_axis(), 4.0}};
+    records::Transfer buy{};
+    buy.from      = bob_.bytes;
+    buy.to        = alice_.bytes;
+    buy.origins   = { {bob_.bytes, 4.0} };
+    buy.accept    = a;
+    buy.timestamp = kDay + 100;
+    const Block bought = add(bob_, buy);
+
+    std::optional<records::Ref> prev;
+    uint64_t seq   = 0;
+    double   taken = 0;
+    const auto resell = [&](const UserId& buyer, double qty, double pay) {
+        records::Release r{};
+        r.work      = ref_to(alice_, work);                   // серийник — Алисин
+        r.holding   = ref_to(bob_, bought);
+        r.to        = buyer.bytes;
+        r.timestamp = kDay + 200;
+        r.expires   = kDay + 2000;
+        records::LotLink l{};
+        l.qty   = qty;
+        l.seq   = seq++;
+        l.prev  = prev;
+        l.after = (taken += qty);
+        r.lot   = l;
+        const Block b = add(bob_, r);
+        prev = ref_to(bob_, b);
+        records::Acceptance x{};
+        x.work          = ref_to(alice_, work);
+        x.release       = ref_to(bob_, b);
+        x.carried_units = pay;
+        records::Transfer t{};
+        t.from      = buyer.bytes;
+        t.to        = bob_.bytes;
+        t.origins   = { {buyer.bytes, pay} };
+        t.accept    = x;
+        t.timestamp = kDay + 300;
+        return Crypto::hash_block(add(buyer, t)).bytes;
+    };
+    const auto fair   = resell(carol, 10, 1.0);                 // по цене покупки
+    const auto markup = resell(dave, 10, 1.5);                  // с наценкой
+    const auto over   = resell(carol, 30, 3.0);                 // 10 + 10 + 30 > 40
+
+    const auto deals = read_deals(*storage_);
+    EXPECT_TRUE(deals.recognition.resold.count(fair));          // купила — часы ушли
+    EXPECT_FALSE(deals.moves_hours(markup));                    // с наценкой — ничтожна
+    EXPECT_FALSE(deals.counts(over));                           // сверх купленного — не в счёт
+    const auto day = build_daily_prices(*storage_, kDay, {});
+    ASSERT_EQ(day.axes.size(), 1u);
+    EXPECT_EQ(day.axes[0].deals, 1u);                           // цену двигает только первая продажа
+    EXPECT_NEAR(day.axes[0].hours, 4.0, 1e-9);
+}

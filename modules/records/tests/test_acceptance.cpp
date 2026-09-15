@@ -181,6 +181,18 @@ TEST(DealRecognition, PortionsAreResultsOfTheirOwn) {
     EXPECT_EQ(r.unsound_results, Hashes{h(0x71)});
 }
 
+// Перепродажа (records.md §9.8 v4): покупка у держателя — свой результат из его
+// запаса; часы уходят, но в статистику труда она не входит.
+TEST(DealRecognition, AResaleMovesHoursAndCountsInNoStatistic) {
+    DealClaim c = claim(0xA1, 0x70, kVera);                    // work — покупка держателя
+    c.portion = h(0x57);
+    c.resale  = true;
+    const auto r = recognize_deals({c});
+    EXPECT_TRUE(r.recognized.empty());
+    EXPECT_EQ(r.resold, Hashes{h(0xA1)});
+    EXPECT_TRUE(r.moves_hours(h(0xA1)));
+}
+
 TEST(DealRecognition, SettledExactly) {
     EXPECT_TRUE(settled_exactly(6.23625, 6.23625));
     EXPECT_TRUE(settled_exactly(6.0 + 5e-7, 6.0));    // округление, не другая сделка

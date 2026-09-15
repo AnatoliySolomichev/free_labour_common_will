@@ -71,7 +71,8 @@ DealRecognition recognize_deals(const std::vector<DealClaim>& claims) {
                                                         : x->deal < y->deal;
                 });
             for (const auto* c : cs)
-                (c == first ? out.recognized : out.repeated).insert(c->deal);
+                (c != first ? out.repeated : c->resale ? out.resold : out.recognized)
+                    .insert(c->deal);
         }
     }
     return out;

@@ -1512,16 +1512,23 @@ void AggregatorServer::setup_routes() {
             body += ",\"releases\":[";
             bool first = true;
             for (const auto& r : deals.releases) {
-                if (r.release.work.hash != wh || r.seller.bytes != ch) continue;
+                // The maker's releases and the holders' — a resale keeps the
+                // product's birth record, so it is listed here too (v4).
+                if (r.release.work.hash != wh || r.release.work.chain != ch) continue;
                 if (!first) body += ',';
                 first = false;
                 body += "{\"ref\":\"" + to_hex(r.seller.bytes) + "/" + to_hex(r.hash)
+                      + "\",\"seller\":\"" + to_hex(r.seller.bytes)
                       + "\",\"to\":\"" + to_hex(r.release.to)
                       + "\",\"expires\":" + std::to_string(r.release.expires)
                       + ",\"timestamp\":" + std::to_string(r.release.timestamp)
                       + ",\"taken\":" + (deals.taken.count(r.hash) ? "true" : "false");
+                if (r.release.holding)     // a resale of this purchase (records.md §9.8 v4)
+                    body += ",\"holding\":\"" + to_hex(r.release.holding->chain) + "/"
+                          + to_hex(r.release.holding->hash) + "\"";
                 if (r.release.lot) {       // a portion (records.md §9.8 v2)
-                    const auto lot   = deals.lots.find({wh, r.release.lot->out});
+                    const auto lot   = deals.lots.find(
+                        {r.release.holding ? r.release.holding->hash : wh, r.release.lot->out});
                     const bool valid = lot != deals.lots.end() && lot->second.valid.count(r.hash);
                     body += ",\"out\":" + std::to_string(r.release.lot->out)
                           + ",\"qty\":" + std::to_string(r.release.lot->qty)
@@ -1538,6 +1545,7 @@ void AggregatorServer::setup_routes() {
             for (const auto& d : deals.all) {
                 if (d.accept().work.hash != wh || d.accept().work.chain != ch) continue;
                 const char* state = rc.recognized.count(d.hash) ? "recognized"
+                                  : rc.resold.count(d.hash)     ? "resold"
                                   : rc.repeated.count(d.hash)   ? "repeated"
                                   : rc.contested.count(d.hash)  ? "contested"
                                   : rc.unsound.count(d.hash)    ? "unsound"
@@ -1551,15 +1559,23 @@ void AggregatorServer::setup_routes() {
                       + "\",\"timestamp\":" + std::to_string(d.transfer.timestamp)
                       + ",\"state\":\"" + state + "\""
                       + ",\"paid\":" + std::to_string(paid);
-                if (d.accept().release) {  // what it completed — a portion is a result of its own
+                // What it bought from whom: the source is the maker's work, or the
+                // holder's purchase for a resale (v4); a portion is a result of its own.
+                std::string source = to_hex(ch) + "/" + to_hex(wh);
+                if (d.accept().release) {
                     bool portion = false;
                     for (const auto& r : deals.releases)
-                        if (r.hash == d.accept().release->hash) portion = r.release.lot.has_value();
+                        if (r.hash == d.accept().release->hash) {
+                            portion = r.release.lot.has_value();
+                            if (r.release.holding)
+                                source = to_hex(r.release.holding->chain) + "/"
+                                       + to_hex(r.release.holding->hash);
+                        }
                     body += ",\"release\":\"" + to_hex(d.accept().release->chain) + "/"
                           + to_hex(d.accept().release->hash) + "\",\"portion\":"
                           + (portion ? "true" : "false");
                 }
-                body += "}";
+                body += ",\"source\":\"" + source + "\"}";
             }
             body += "],\"oversold\":";
             body += rc.oversold.count(wh) ? "true" : "false";
@@ -1718,6 +1734,54 @@ void AggregatorServer::setup_routes() {
                       + "\",\"label\":\"" + json_escape(axes[i].second.first)
                       + "\",\"hours\":" + std::to_string(axes[i].second.second) + "}";
             body += "]}}";
+            res.set_content(body, "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
+                            "application/json");
+        }
+    });
+
+    // ── GET /stock/<chain> ───────────────────────────────────────────────────
+    // What a chain bought and may sell on (records.md §9.8 v4): each purchase of
+    // goods that happened, with its lots — sold on, written off, waiting for
+    // payment, in stock — and what each cost: the price it is sold on at.
+    svr.Get("/stock/:chain", [&](const httplib::Request& req, httplib::Response& res) {
+        const auto chain = hex_to_hash(req.path_params.at("chain"));
+        if (!chain) {
+            res.status = 400;
+            res.set_content("{\"error\":\"invalid chain\"}", "application/json");
+            return;
+        }
+        try {
+            const auto  deals = read_deals(storage_);
+            std::string body  = "{\"chain\":\"" + to_hex(chain->bytes) + "\",\"holdings\":[";
+            bool first = true;
+            for (const auto& d : deals.all) {
+                if (d.payer.bytes != chain->bytes) continue;
+                const auto h = deals.holdings.find(d.hash);
+                if (h == deals.holdings.end()) continue;
+                const auto& work = d.accept().work;
+                const auto  w    = deals.works.find(work.hash);
+                if (w == deals.works.end()) continue;
+                const auto lots = holding_summaries(deals, d.hash);
+                if (!first) body += ',';
+                first = false;
+                body += "{\"ref\":\"" + to_hex(d.payer.bytes) + "/" + to_hex(d.hash)
+                      + "\",\"work\":\"" + to_hex(work.chain) + "/" + to_hex(work.hash)
+                      + "\",\"action\":\"" + json_escape(w->second.record.action)
+                      + "\",\"lots\":[";
+                for (std::size_t i = 0; i < lots.size(); ++i) {
+                    double cost = 0.0;
+                    for (const auto& hl : h->second)
+                        if (hl.out == lots[i].out) cost = hl.cost;
+                    std::string lj = lot_json(lots[i], w->second.record.outputs[lots[i].out]);
+                    lj.insert(lj.size() - 1, ",\"cost\":" + std::to_string(cost));
+                    body += std::string(i ? "," : "") + lj;
+                }
+                body += "]}";
+            }
+            body += "]}";
             res.set_content(body, "application/json");
         } catch (const std::exception& e) {
             res.status = 500;

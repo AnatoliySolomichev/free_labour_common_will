@@ -324,3 +324,44 @@ TEST(PortionTerms, APortionIsSoldOnTheLotsTerms) {
     bread.outputs[0].price.reset();                                // без ценника порциями не продают
     EXPECT_FALSE(portion_terms(bread, l).has_value());
 }
+
+// ── Перепродажа: купленное — партия покупателя (records.md §9.8 v4) ──────────
+
+TEST(Holding, WhatAPurchasePutsInTheBuyersHands) {
+    Transfer deal{};
+    deal.origins = {{h(0xB2), 3.0}};                           // заплачено 3 стч
+
+    WorkRecord bread{};
+    bread.outputs = {{"хлеб", 100, "шт"}};
+    Release portion{};
+    LotLink l{};
+    l.qty = 25;
+    portion.lot = l;
+    auto lots = holding_lots(deal, bread, &portion);           // порция — одна партия
+    ASSERT_EQ(lots.size(), 1u);
+    EXPECT_DOUBLE_EQ(lots[0].qty, 25);
+    EXPECT_DOUBLE_EQ(lots[0].cost, 3.0);
+    EXPECT_DOUBLE_EQ(resale_price(lots[0], 5), 0.6);           // пятая часть — пятая часть цены
+
+    WorkRecord saw{};
+    saw.outputs = {{"доски", 2.0, "м³", 0.9, std::nullopt},
+                   {"опилки", 0.5, "м³", 0.1, std::nullopt}};
+    lots = holding_lots(deal, saw, nullptr);                   // целиком — по партии на выход
+    ASSERT_EQ(lots.size(), 2u);
+    EXPECT_DOUBLE_EQ(lots[0].cost, 2.7);
+    EXPECT_NEAR(lots[1].cost, 0.3, 1e-12);
+
+    WorkRecord haircut{};                                       // услуга — перепродавать нечего
+    EXPECT_TRUE(holding_lots(deal, haircut, nullptr).empty());
+}
+
+TEST(Holding, AResaleIsCarriedCostOnly) {
+    Acceptance a{};
+    a.carried_units = 0.6;
+    EXPECT_TRUE(meets_resale(a, 0.6));
+    a.carried_units = 0.7;                                      // наценка
+    EXPECT_FALSE(meets_resale(a, 0.6));
+    a.carried_units = 0.6;
+    a.labor_units   = 0.1;                                      // труд в перепродаже
+    EXPECT_FALSE(meets_resale(a, 0.6));
+}
