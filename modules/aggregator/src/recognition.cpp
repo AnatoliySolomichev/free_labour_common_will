@@ -91,13 +91,18 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
     // What each deal completed. Blocks come in hash order, so the seller's
     // records are matched to the deals only after the whole scan.
     const std::size_t n = out.all.size();
-    std::vector<const records::Release*> released(n, nullptr);
+    std::vector<const records::Release*>    released(n, nullptr);
+    std::vector<std::optional<std::size_t>> buyback_of(n);   // the holder's purchase bought back
     for (std::size_t i = 0; i < n; ++i) {
         const records::Acceptance& a = out.all[i].accept();
         if (!a.release) continue;
         if (const auto r = release_at.find(a.release->hash);
             r != release_at.end() && out.releases[r->second].seller.bytes == a.release->chain)
             released[i] = &out.releases[r->second].release;
+        else if (const auto h = deal_at.find(a.release->hash);
+                 h != deal_at.end() && out.all[h->second].payer.bytes == a.release->chain &&
+                 out.all[h->second].accept().buyback)
+            buyback_of[i] = h->second;   // records.md §9.8 v5: the return is the purchase itself
     }
     // The purchase a resale stands on: the holder's deal (records.md §9.8 v4).
     const auto holding_deal = [&](const std::optional<records::Ref>& holding)
@@ -108,8 +113,18 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
             return std::nullopt;
         return h->second;
     };
-    // The lots a purchase put in the buyer's hands.
-    const auto lots_of = [&](std::size_t j) -> std::vector<records::HoldingLot> {
+    // The lots a purchase put in the buyer's hands. Bought back on a pre-signed
+    // return (v5), they are the holder's lots, at what the addressee paid.
+    std::function<std::vector<records::HoldingLot>(std::size_t)> lots_of =
+        [&](std::size_t j) -> std::vector<records::HoldingLot> {
+        if (buyback_of[j]) {
+            auto   lots = lots_of(*buyback_of[j]);
+            double cost = 0.0, paid = 0.0;
+            for (const auto& l : lots) cost += l.cost;
+            for (const auto& o : out.all[j].transfer.origins) paid += o.units;
+            for (auto& l : lots) l.cost = cost > 0.0 ? paid * l.cost / cost : 0.0;
+            return lots;
+        }
         const records::Acceptance& a = out.all[j].accept();
         const auto w = out.works.find(a.work.hash);
         if (w == out.works.end() || w->second.worker.bytes != a.work.chain) return {};
@@ -129,7 +144,12 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
         const records::Acceptance& a = d.accept();
         const records::Release* release = released[i];
         bool ok = false;
-        if (release && release->holding) {
+        if (buyback_of[i]) {
+            // Выкуп по заранее подписанному возврату (records.md §9.8 v5): the deal
+            // names the holder's purchase itself, which pre-signed it.
+            const std::size_t h = *buyback_of[i];
+            ok = addressed(h) && records::completes_buyback(d.transfer, out.all[h].transfer);
+        } else if (release && release->holding) {
             // Перепродажа: the holder's purchase happened, of this very product,
             // and the price is its share of what the holder paid.
             const auto h = holding_deal(release->holding);
@@ -144,6 +164,9 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
             std::optional<Hash32> customer;
             if (here) customer = w->second.record.customer;
             ok = records::addressed_to(d.transfer, customer, release);
+            // Приёмки без разбивки не существует (ИР-022): одним переносом у мастера
+            // покупают только то, что он держит, — перепродажей или выкупом.
+            if (a.axes.empty()) ok = false;
             // A portion from stock is sold on the lot's terms — take it or leave
             // it (records.md §9.8 v3): a deal that pays otherwise completes nothing.
             if (ok && release && release->lot) {
@@ -152,11 +175,21 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
                 ok = terms && records::meets_terms(a, *terms);
             }
         }
+        // Выкуп с адресом (records.md §9.8 v5): a purchase on an addressed buyout
+        // pre-signs the return — or it completes nothing.
+        if (ok && release && release->addressed) {
+            double paid = 0.0;
+            for (const auto& o : d.transfer.origins) paid += o.units;
+            ok = records::honours_buyout(a, paid, *release->addressed);
+        }
         state[i] = ok ? 1 : 0;
         return ok;
     };
-    for (std::size_t i = 0; i < n; ++i)
-        if (addressed(i) && released[i]) out.taken.insert(out.all[i].accept().release->hash);
+    for (std::size_t i = 0; i < n; ++i) {
+        if (!addressed(i)) continue;
+        if (released[i]) out.taken.insert(out.all[i].accept().release->hash);
+        if (buyback_of[i]) out.bought_back.insert(out.all[*buyback_of[i]].hash);
+    }
     // Purchases of goods that happened: the buyers' stock.
     for (std::size_t i = 0; i < n; ++i)
         if (state[i] == 1)
@@ -203,8 +236,25 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
             out.lots[key] = std::move(none);
             continue;
         }
-        out.lots[key] = records::check_lot(lot->first.bytes, lot->second.qty, links,
-                                           lot->second.units);
+        // A purchase on an addressed buyout (records.md §9.8 v5): until its term it
+        // is sold on only by the pre-signed return, and once bought back — no more
+        // at all. Write-offs stand: a loss is the holder's, at any time.
+        const records::Buyback* buyback = nullptr;
+        if (const auto h = deal_at.find(key.first);
+            h != deal_at.end() && out.all[h->second].accept().buyback)
+            buyback = &*out.all[h->second].accept().buyback;
+        std::vector<records::ObservedLotLink> kept;
+        std::vector<Hash32>                   refused;
+        for (const auto& l : links) {
+            const bool sale = l.expires.has_value();
+            if (buyback && sale && (out.bought_back.count(key.first) || l.timestamp < buyback->until))
+                refused.push_back(l.hash);
+            else
+                kept.push_back(l);
+        }
+        auto st = records::check_lot(lot->first.bytes, lot->second.qty, kept, lot->second.units);
+        for (const auto& h : refused) st.invalid.insert(h);
+        out.lots[key] = std::move(st);
     }
 
     // Whether a deal may count: its work in the worker's thread on hours of its
@@ -222,7 +272,9 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
             return lot != out.lots.end() && lot->second.valid.count(a.release->hash) > 0;
         };
         bool ok;
-        if (release && release->holding) {
+        if (buyback_of[i]) {
+            ok = sound(*buyback_of[i]);          // what is bought back is what was bought
+        } else if (release && release->holding) {
             const auto h = holding_deal(release->holding);
             ok = h && sound(*h) && link_valid(*release);
         } else {
@@ -245,11 +297,14 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
         const auto& d = out.all[i];
         const records::Acceptance& a = d.accept();
         const records::Release* release = released[i];
-        const bool resale = release && release->holding;
+        const bool buyback = buyback_of[i].has_value();
+        const bool resale  = buyback || (release && release->holding);
         std::optional<Hash32> portion;
-        if (release && release->lot) portion = a.release->hash;
-        records::DealClaim c{d.hash, resale ? release->holding->hash : a.work.hash, d.payer.bytes,
-                             d.transfer.timestamp, state[i] == 1, sound(i), portion};
+        if ((release && release->lot) || buyback) portion = a.release->hash;
+        const Hash32 source = buyback ? a.release->hash                // the holder's purchase
+                            : resale  ? release->holding->hash : a.work.hash;
+        records::DealClaim c{d.hash, source, d.payer.bytes, d.transfer.timestamp,
+                             state[i] == 1, sound(i), portion};
         c.resale = resale;
         claims.push_back(c);
     }
@@ -258,7 +313,7 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
     // What was paid for: whole results, and portions.
     for (std::size_t i = 0; i < n; ++i) {
         const auto& d = out.all[i];
-        if (!out.moves_hours(d.hash)) continue;
+        if (!out.moves_hours(d.hash) || buyback_of[i]) continue;
         if (released[i] && released[i]->lot) out.sold_releases.insert(d.accept().release->hash);
         else                                 out.sold_whole.insert(d.accept().work.hash);
     }
@@ -281,8 +336,17 @@ std::vector<LotSummary> holding_summaries(const DealsOnTable& deals,
     std::vector<LotSummary> out;
     const auto h = deals.holdings.find(purchase);
     if (h == deals.holdings.end()) return out;
-    for (const auto& hl : h->second)
-        out.push_back(summarize(deals, {purchase, hl.out}, hl.qty, hl.units));
+    const bool back = deals.bought_back.count(purchase) > 0;
+    for (const auto& hl : h->second) {
+        auto s = summarize(deals, {purchase, hl.out}, hl.qty, hl.units);
+        if (back) {   // bought back whole on the pre-signed return (records.md §9.8 v5)
+            s.sold      = std::max(0.0, hl.qty - s.written_off);
+            s.reserved  = 0.0;
+            s.remaining = 0.0;
+            s.free_units.clear();
+        }
+        out.push_back(std::move(s));
+    }
     return out;
 }
 

@@ -268,10 +268,11 @@ void enc_work_record(Buf& out, const WorkRecord& wr) {
 // The acceptance (records.md §9.5): since ИР-023 not a record of its own but the
 // `accept` field of the buyer's Transfer — a nested map. Required: 0 work,
 // 1 quality, 2 hours_raw, 3 labor_units, 4 the breakdown; optional, each only
-// when set and in ascending order: 5 carried_units, 6 norm, 7 like, 8 release.
+// when set and in ascending order: 5 carried_units, 6 norm, 7 like, 8 release,
+// 9 buyback.
 void w_acceptance(Buf& out, const Acceptance& a) {
     w_map(out, 5 + (a.carried_units ? 1 : 0) + (a.norm ? 1 : 0) + (a.like ? 1 : 0)
-                 + (a.release ? 1 : 0));
+                 + (a.release ? 1 : 0) + (a.buyback ? 1 : 0));
     w_uint(out, 0); w_ref(out, a.work);
     w_uint(out, 1); w_text(out, a.quality);
     w_uint(out, 2); w_float64(out, a.hours_raw);
@@ -295,6 +296,13 @@ void w_acceptance(Buf& out, const Acceptance& a) {
     }
     if (a.like)    { w_uint(out, 7); w_ref(out, *a.like); }      // ИР-022 шаг 11
     if (a.release) { w_uint(out, 8); w_ref(out, *a.release); }   // ИР-023
+    if (a.buyback) {                                              // ИР-023, пункт 8
+        w_uint(out, 9);
+        w_map(out, 3);
+        w_uint(out, 0); w_fixed(out, a.buyback->to);
+        w_uint(out, 1); w_float64(out, a.buyback->units);
+        w_uint(out, 2); w_int64(out, a.buyback->until);
+    }
 }
 
 // What a Transfer must be to exist at all (records.md §11.1 v5, ИР-023) —
@@ -319,6 +327,7 @@ void check_transfer(const Transfer& t) {
     if (a.release && a.release->chain != t.to)
         throw CodecError("Transfer: отпуск лежит в цепи продавца — to ≠ цепь отпуска "
                          "(records.md §9.8)");
+    const bool carried_only = a.labor_units == 0.0 && a.hours_raw == 0.0 && a.axes.empty();
     if (a.work.chain != t.to) {
         // Перепродажа (records.md §9.8 v4): платят держателю за вещь, сделанную
         // другим, — по отпуску держателя, без живого труда и без разбивки: оси
@@ -326,11 +335,14 @@ void check_transfer(const Transfer& t) {
         if (!a.release)
             throw CodecError("Transfer: платят тому, чья работа принята, — или держателю по "
                              "его отпуску (records.md §9.8)");
-        if (a.labor_units != 0.0 || a.hours_raw != 0.0 || !a.axes.empty())
+        if (!carried_only)
             throw CodecError("Transfer: перепродажа — только перенос, без труда и без "
                              "разбивки по осям (records.md §9.5)");
-    } else if (a.axes.empty()) {
-        // Приёмки без разбивки не существует (ИР-022) — кроме перепродажи.
+    } else if (a.axes.empty() && !(a.release && carried_only)) {
+        // Приёмки без разбивки не существует (ИР-022) — кроме перепродажи. Её
+        // ведёт и сам мастер, выкупив своё (records.md §9.8 v5): одним переносом,
+        // по отпуску или возврату. Перепродажа ли это, решает агрегатор — оплата
+        // работы мастера без разбивки ничтожна.
         throw CodecError("Acceptance: цена обязана быть расписана по осям (ИР-022)");
     }
     double paid = 0.0;
@@ -339,6 +351,18 @@ void check_transfer(const Transfer& t) {
     if (!settled_exactly(paid, payable))
         throw CodecError("Transfer: оплата обязана ровно равняться приёмке — труд плюс "
                          "перенос (records.md §12.8)");
+    if (a.buyback) {
+        // The pre-signed return (records.md §9.8 v5): to somebody else, for a term
+        // still ahead, at no more than was paid — a return is no sale at a markup.
+        if (!(a.buyback->units > 0.0) || !std::isfinite(a.buyback->units))
+            throw CodecError("Transfer: цена возврата обязана быть положительной");
+        if (a.buyback->units > paid + 1e-6)
+            throw CodecError("Transfer: возврат дороже покупки — наценки нет (records.md §9.8)");
+        if (a.buyback->until <= t.timestamp)
+            throw CodecError("Transfer: срок возврата уже прошёл");
+        if (a.buyback->to == t.from)
+            throw CodecError("Transfer: возврат себе ничего не возвращает");
+    }
 }
 
 // What a lot link must be to exist (records.md §9.8 v2) — on write and on read.
@@ -397,14 +421,16 @@ void check_release(const Release& rl) {
     if (rl.holding && !rl.lot)
         throw CodecError("Release: купленное перепродают порцией — звеном подниточки "
                          "покупки (records.md §9.8)");
+    if (rl.addressed && rl.addressed->until <= rl.timestamp)
+        throw CodecError("Release: срок выкупа с адресом уже прошёл (records.md §9.8)");
 }
 
 // The release (records.md §9.8): the seller names who gets the result. Keys:
 // 0 type, 1 work, 2 to, 3 expires, 4 timestamp, 5 lot (v2 — a portion),
-// 6 holding (v4 — a resale).
+// 6 holding (v4 — a resale), 7 addressed (v5 — an addressed buyout).
 void enc_release(Buf& out, const Release& rl) {
     check_release(rl);
-    w_map(out, 5 + (rl.lot ? 1 : 0) + (rl.holding ? 1 : 0));
+    w_map(out, 5 + (rl.lot ? 1 : 0) + (rl.holding ? 1 : 0) + (rl.addressed ? 1 : 0));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Release));
     w_uint(out, 1); w_ref(out, rl.work);
     w_uint(out, 2); w_fixed(out, rl.to);
@@ -412,6 +438,12 @@ void enc_release(Buf& out, const Release& rl) {
     w_uint(out, 4); w_int64(out, rl.timestamp);
     if (rl.lot)     { w_uint(out, 5); w_lot_link(out, *rl.lot); }
     if (rl.holding) { w_uint(out, 6); w_ref(out, *rl.holding); }
+    if (rl.addressed) {
+        w_uint(out, 7);
+        w_map(out, 2);
+        w_uint(out, 0); w_fixed(out, rl.addressed->to);
+        w_uint(out, 1); w_int64(out, rl.addressed->until);
+    }
 }
 
 // The write-off (records.md §9.9): 0 type, 1 work, 2 lot, 3 reason, 4 timestamp,
@@ -949,7 +981,7 @@ WorkRecord dec_work_record_fields(CborReader& r, uint64_t field_count) {
 
 Acceptance dec_acceptance(CborReader& r) {
     const uint64_t n = r.r_map();
-    if (n < 5 || n > 9) throw CodecError("Acceptance: expected 5..9 fields");
+    if (n < 5 || n > 10) throw CodecError("Acceptance: expected 5..10 fields");
     Acceptance a{};
     expect_key(r, 0); a.work        = dec_ref(r);
     expect_key(r, 1); a.quality     = r.r_text();
@@ -970,7 +1002,7 @@ Acceptance dec_acceptance(CborReader& r) {
         }
     }
     // The tail, by key and ascending: carried_units (5), norm (6), like (7),
-    // release (8).
+    // release (8), buyback (9).
     uint64_t last = 4;
     for (uint64_t i = 5; i < n; ++i) {
         const uint64_t key = r.r_uint();
@@ -989,6 +1021,13 @@ Acceptance dec_acceptance(CborReader& r) {
             a.like = dec_ref(r);
         } else if (key == 8) {
             a.release = dec_ref(r);
+        } else if (key == 9) {
+            if (r.r_map() != 3) throw CodecError("Buyback: expected 3 fields");
+            Buyback b{};
+            expect_key(r, 0); r.r_fixed(b.to);
+            expect_key(r, 1); b.units = r.r_float64();
+            expect_key(r, 2); b.until = r.r_int();
+            a.buyback = b;
         } else {
             throw CodecError("Acceptance: unknown field key");
         }
@@ -1118,19 +1157,26 @@ LotLink dec_lot_link(CborReader& r) {
 }
 
 Release dec_release_fields(CborReader& r, uint64_t field_count) {
-    if (field_count < 5 || field_count > 7) throw CodecError("Release: expected 5..7 fields");
+    if (field_count < 5 || field_count > 8) throw CodecError("Release: expected 5..8 fields");
     Release rl{};
     expect_key(r, 1); rl.work      = dec_ref(r);
     expect_key(r, 2); r.r_fixed(rl.to);
     expect_key(r, 3); rl.expires   = r.r_int();
     expect_key(r, 4); rl.timestamp = r.r_int();
-    uint64_t last = 4;   // the tail, by key and ascending: lot (5), holding (6)
+    uint64_t last = 4;   // the tail, by key and ascending: lot (5), holding (6), addressed (7)
     for (uint64_t i = 5; i < field_count; ++i) {
         const uint64_t key = r.r_uint();
         if (key <= last) throw CodecError("Release: keys out of order");
         last = key;
         if      (key == 5) rl.lot     = dec_lot_link(r);
         else if (key == 6) rl.holding = dec_ref(r);
+        else if (key == 7) {
+            if (r.r_map() != 2) throw CodecError("Addressed: expected 2 fields");
+            Addressed ad{};
+            expect_key(r, 0); r.r_fixed(ad.to);
+            expect_key(r, 1); ad.until = r.r_int();
+            rl.addressed = ad;
+        }
         else throw CodecError("Release: unknown field key");
     }
     check_release(rl);

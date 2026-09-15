@@ -390,7 +390,9 @@ W_stools=$(bcp dmitry work log --title "столяр, 6-й разряд" --actio
            --hours 3 --output "табурет:3:шт::k=1:Т-1,Т-2,Т-3" \
            --axis-share "$(axis precision)=1" --via "$VIA" | after 'hash: ')
 bcp dmitry release "$W_stools" --to "${CID[vera]}" --units Т-2 --days 2 --via "$VIA" 2>&1 | sed 's/^/   /'
-bcp vera accept --work "${CID[dmitry]}/$W_stools" --quality "крепкий" --via "$VIA" 2>&1 | sed 's/^/   /'
+OUT_st="$(bcp vera accept --work "${CID[dmitry]}/$W_stools" --quality "крепкий" --via "$VIA" 2>&1)"
+echo "$OUT_st" | sed 's/^/   /'
+STOOL_vera="$(printf '%s\n' "$OUT_st" | after 'acceptance ref: ')"
 bcp dmitry thread --via "$VIA" | sed 's/^/   /'
 
 hr "перепродажа: Борис отдаёт 2 пирога Галине по цене покупки (bc release ПОКУПКА, records.md §9.8)"
@@ -399,6 +401,18 @@ bcp boris release "$PIES_boris" --to "${CID[galina]}" --qty 2 --days 1 --via "$V
 bcp galina accept --work "${CID[anna]}/$W_pies" --quality "свежие" --via "$VIA" 2>&1 | sed 's/^/   /'
 say "склад Бориса (bc stock): из пяти купленных два перепроданы, три в запасе"
 bcp boris stock --via "$VIA" | sed 's/^/   /'
+
+hr "выкуп с адресом: Вера отдаёт табурет Т-2 в ремонт Дмитрию (records.md §9.8)"
+say "на время ремонта табурет — Дмитрия, и риск его; до срока продать его он может только Вере"
+say "и подписывает возврат в той же записи, которой покупает"
+bcp vera release "$STOOL_vera" --to "${CID[dmitry]}" --units Т-2 --buyback --buyback-days 3 \
+    --days 1 --via "$VIA" 2>&1 | sed 's/^/   /'
+OUT_rep="$(bcp dmitry accept --work "${CID[dmitry]}/$W_stools" --quality "принят в ремонт" --via "$VIA" 2>&1)"
+echo "$OUT_rep" | sed 's/^/   /'
+REPAIR_dmitry="$(printf '%s\n' "$OUT_rep" | after 'acceptance ref: ')"
+say "Вера выкупает табурет сама — по подписанному возврату, без участия Дмитрия"
+bcp vera accept --work "${CID[dmitry]}/$W_stools" --quality "отремонтирован" --via "$VIA" 2>&1 | sed 's/^/   /'
+bcp dmitry stock --via "$VIA" | sed 's/^/   /'
 
 hr "облако образцов работ — из сделок, а не из каталога (bc cloud, ИР-022)"
 say "точка — образец, который повторили; место — из чего сложилась цена его семьи."
@@ -581,6 +595,10 @@ else echo "   ✓ номер единицы не продать дважды (re
 if bcp boris release "$PIES_boris" --to "${CID[dmitry]}" --qty 4 --via "$VIA" >/dev/null 2>&1; then
     echo "   ✗ перепродано больше купленного"; fail=1
 else echo "   ✓ больше купленного не перепродать (records.md §9.8)"; fi
+# купленное с адресом — только адресату; выкупленное — никому (records.md §9.8)
+if bcp dmitry release "$REPAIR_dmitry" --to "${CID[boris]}" --units Т-2 --via "$VIA" >/dev/null 2>&1; then
+    echo "   ✗ держатель продал вещь не адресату"; fail=1
+else echo "   ✓ купленное с адресом продаёт только адресат (records.md §9.8)"; fi
 # переоценка печи ВВЕРХ обязана отклониться (перевыпуск только вниз)
 if bcp anna tool add "Печь подовая" --cost 400 --life 8000 --origin "$TOOL" --note "хочу дороже" >/dev/null 2>&1; then
     echo "   ✗ переоценка вверх прошла, а должна была отклониться"; fail=1

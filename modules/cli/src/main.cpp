@@ -139,6 +139,7 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--skill", "--need", "--search",
     "--tool", "--cost", "--life", "--serial", "--desc", "--note", "--paid",
     "--material", "--unit", "--qty",
+    "--buyback-to", "--buyback-days", "--buyback-until", "--buyback-price", "--buyback-of",
 };
 
 // True when a standalone flag (no value) is present.
@@ -348,6 +349,9 @@ static std::string record_summary(const Record& rec) {
                 ss << "  lot:" << r.lot->out << " qty:" << r.lot->qty
                    << " #" << r.lot->seq << " after:" << r.lot->after;
             if (r.holding) ss << "  resale of:" << short_hex(r.holding->hash);
+            if (r.addressed)
+                ss << "  addressed:" << short_hex(r.addressed->to) << " until:"
+                   << r.addressed->until;
         } else if constexpr (std::is_same_v<T, records::WriteOff>) {
             ss << "[WriteOff]    work:" << short_hex(r.work.hash) << "  lot:" << r.lot.out
                << " qty:" << r.lot.qty << " #" << r.lot.seq << " after:" << r.lot.after
@@ -373,6 +377,9 @@ static std::string record_summary(const Record& rec) {
                     ss << " +carry:" << *r.accept->carried_units << "h";
                 ss << " axes:" << r.accept->axes.size();
                 if (r.accept->like) ss << " like:" << short_hex(r.accept->like->hash);
+                if (r.accept->buyback)
+                    ss << " return→" << short_hex(r.accept->buyback->to) << ":"
+                       << r.accept->buyback->units;
                 ss << " quality:" << r.accept->quality;
             }
             if (r.emission)
@@ -1639,7 +1646,11 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
                      "    [--pledge      REF]     the own pledge this deal closes (v4)\n"
                      "    [--release     REF]     the seller's release to you (records.md §9.8);\n"
                      "                            default: found at the aggregator. Not needed\n"
-                     "                            when the work names you as its customer\n";
+                     "                            when the work names you as its customer\n"
+                     "    [--buyback-of  REF]     buy back a purchase on its pre-signed return\n"
+                     "                            (default: found at the aggregator)\n"
+                     "    [--buyback-price P]     the return you sign on an addressed buyout,\n"
+                     "                            no more than you pay (default: as much)\n";
         return 1;
     }
 
@@ -1690,16 +1701,54 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
                 }
             }
     }
+    // Выкуп по заранее подписанному возврату (records.md §9.8 v5): отпуском служит
+    // сама покупка держателя — адресат выкупает сам, без него.
+    std::optional<records::Transfer> held;   // the holder's purchase bought back
+    if (!release) {
+        std::optional<Ref> bref;
+        if (const auto bs = flag_val(argc, argv, "--buyback-of"); !bs.empty()) {
+            bref = parse_ref(bs);
+        } else if (status && status->is_object()) {
+            if (const auto* bbs = jarr(status->object, "buybacks"))
+                for (const auto& x : bbs->array) {
+                    if (!x.is_object() || jstr(x.object, "to") != to_hex(ctx.user_id.bytes))
+                        continue;
+                    if (jnum(x.object, "until") <= static_cast<double>(now)) continue;
+                    if (const auto* tk = records::json::find(x.object, "taken"); tk && tk->boolean)
+                        continue;
+                    bref = parse_ref(jstr(x.object, "ref"));
+                }
+        }
+        if (bref) {
+            const auto  prec = load_record(ctx, via, *bref);
+            const auto* p    = prec ? std::get_if<records::Transfer>(&*prec) : nullptr;
+            if (!p || !p->accept || !p->accept->buyback)
+                throw std::runtime_error("--buyback-of: покупки с подписанным возвратом не найти — "
+                                         "нужен --via");
+            held      = *p;
+            a.release = *bref;
+        }
+    }
     // Кому платим: работнику — или держателю, если это перепродажа его покупки
-    // (records.md §9.8 v4). Самоприёмка ничего не заверяет (records.md §14.4) —
-    // кодек её и не запишет.
-    const bool resale = release && release->holding;
-    const std::array<uint8_t, 32> seller = resale ? release->holding->chain : a.work.chain;
+    // (records.md §9.8 v4) или выкуп по её возврату (v5). Самоприёмка ничего не
+    // заверяет (records.md §14.4) — кодек её и не запишет.
+    const bool resale = held || (release && release->holding);
+    const std::array<uint8_t, 32> seller = held ? held->from
+                                         : resale ? release->holding->chain : a.work.chain;
     if (seller == ctx.user_id.bytes)
         throw std::runtime_error(resale ? "это ваша же перепродажа — у себя не покупают"
                                         : "свою работу не принимают — принимает и платит "
                                           "заказчик (records.md §9.5)");
-    {
+    if (held) {
+        const records::Buyback& b = *held->accept->buyback;
+        if (b.to != ctx.user_id.bytes || now >= b.until)
+            throw std::runtime_error("возврат подписан не вам или его срок прошёл "
+                                     "(records.md §9.8)");
+        if (!(held->accept->work == a.work))
+            throw std::runtime_error("возврат этой покупки — о другой вещи (--work)");
+        std::cerr << "выкуп по подписанному возврату: " << b.units << " стч, до " << b.until
+                  << " — держатель в сделке не участвует\n";
+    } else {
         records::Transfer probe{};
         probe.from      = ctx.user_id.bytes;
         probe.timestamp = now;
@@ -1765,7 +1814,9 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     // Перепродажа (records.md §9.8 v4): цена — доля того, что держатель заплатил за
     // купленное, без наценки и без труда; оси определены при первой продаже.
     double resale_units = 0.0;
-    if (resale) {
+    if (held) {
+        resale_units = held->accept->buyback->units;
+    } else if (resale) {
         const auto h = load_holding(ctx, via, *release->holding);
         const records::HoldingLot* hl = nullptr;
         if (h)
@@ -1786,9 +1837,10 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     const std::string release_ref =
         a.release ? to_hex(a.release->chain) + "/" + to_hex(a.release->hash) : std::string{};
     const bool        piece     = portion || resale;   // a result of its own: its release
-    const std::string my_source = resale
-        ? to_hex(release->holding->chain) + "/" + to_hex(release->holding->hash)
-        : to_hex(a.work.chain) + "/" + to_hex(a.work.hash);
+    const std::string my_source =
+        held     ? to_hex(a.release->chain) + "/" + to_hex(a.release->hash)
+        : resale ? to_hex(release->holding->chain) + "/" + to_hex(release->holding->hash)
+                 : to_hex(a.work.chain) + "/" + to_hex(a.work.hash);
     if (const auto mine = own_deal_on(ctx, a.work, piece ? a.release : std::optional<Ref>{});
         !mine.empty())
         throw std::runtime_error(std::string("вы уже приняли и оплатили ") +
@@ -1844,6 +1896,22 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
                       << "ч (доля порции)\n";
     } else {
         appraise_whole(ctx, via, argc, argv, work, a, axis_args, share_args, like_s, raw_s, lu_s);
+    }
+    // Выкуп с адресом (records.md §9.8 v5): покупая, подписываем возврат — адресату,
+    // до срока, не дороже уплаченного. Без него такой отпуск не завершить.
+    if (release && release->addressed) {
+        const double pay = a.labor_units + (a.carried_units ? *a.carried_units : 0.0);
+        const auto   ps  = flag_val(argc, argv, "--buyback-price");
+        records::Buyback b{};
+        b.to    = release->addressed->to;
+        b.until = release->addressed->until;
+        b.units = ps.empty() ? pay : std::stod(ps);
+        if (b.units > pay + 1e-9)
+            throw std::runtime_error("возврат дороже покупки — наценки нет (records.md §9.8)");
+        a.buyback = b;
+        std::cerr << "выкуп с адресом: подписываю возврат " << short_hex(b.to) << " за "
+                  << b.units << " стч до " << b.until << " — до срока продать это можно "
+                     "только ему\n";
     }
 
     // v3 (economy.md §2б): record the normalizer this appraisal was made against,
@@ -2096,6 +2164,24 @@ static records::LotLink next_lot_link(Context& ctx, const std::string& via, cons
                          std::move(want), now);
 }
 
+// --buyback | --buyback-to ЦЕПЬ, --buyback-days N | --buyback-until TS: an
+// addressed buyout (records.md §9.8 v5) — until the term the buyer sells it on
+// only to the addressee and pre-signs that return in its purchase. Plain
+// --buyback names oneself: storage, repair, rent.
+static std::optional<records::Addressed> addressed_from_flags(Context& ctx, int argc,
+                                                              char** argv, int64_t now) {
+    const auto to_s = flag_val(argc, argv, "--buyback-to");
+    if (to_s.empty() && !flag_present(argc, argv, "--buyback")) return std::nullopt;
+    records::Addressed ad{};
+    ad.to = to_s.empty() ? ctx.user_id.bytes : uid_from_hex(to_s);
+    const auto until_s = flag_val(argc, argv, "--buyback-until");
+    ad.until = !until_s.empty()
+        ? static_cast<int64_t>(std::stoll(until_s))
+        : now + static_cast<int64_t>(
+              std::stod(flag_val(argc, argv, "--buyback-days", "30")) * 86400.0);
+    return ad;
+}
+
 // Which lot of a purchase: the one there is, or the output named by --out.
 static const records::HoldingLot& pick_holding_lot(const std::vector<records::HoldingLot>& lots,
                                                    const std::string& out_s) {
@@ -2149,6 +2235,16 @@ static int cmd_release(const fs::path& data_dir, int argc, char** argv) {
         : rl.timestamp + static_cast<int64_t>(
               std::stod(flag_val(argc, argv, "--days", "7")) * 86400.0);
 
+    rl.addressed = addressed_from_flags(ctx, argc, argv, rl.timestamp);
+    if (rl.addressed) {
+        if (rl.addressed->until <= rl.expires)
+            throw std::runtime_error("срок возврата не позже срока отпуска — выкупать было бы "
+                                     "некогда (records.md §9.8)");
+        std::cerr << "выкуп с адресом: до " << rl.addressed->until << " покупатель продаст "
+                     "это только " << short_hex(rl.addressed->to) << " — и подпишет возврат в "
+                     "самой покупке (records.md §9.8)\n";
+    }
+
     const auto qty_s   = flag_val(argc, argv, "--qty");
     const auto units_s = flag_val(argc, argv, "--units");
 
@@ -2164,6 +2260,25 @@ static int cmd_release(const fs::path& data_dir, int argc, char** argv) {
         if (qty_s.empty() && units_s.empty())
             throw std::runtime_error("купленное перепродают порцией: --qty или --units "
                                      "(records.md §9.8)");
+        // Покупка с адресом (records.md §9.8 v5): до срока её продают только
+        // адресату, по подписанному возврату, и выкупает он сам; выкупил — продавать
+        // нечего.
+        if (const auto& b = bought->accept->buyback) {
+            if (rl.timestamp < b->until)
+                throw std::runtime_error("покупка с адресом: до " + std::to_string(b->until) +
+                                         " её продают только " + short_hex(b->to) +
+                                         " — по подписанному возврату, выкупает он сам "
+                                         "(records.md §9.8)");
+            const std::string mine = to_hex(work.chain) + "/" + to_hex(work.hash);
+            if (const auto st = fetch_work_status(via, bought->accept->work); st && st->is_object())
+                if (const auto* bbs = jarr(st->object, "buybacks"))
+                    for (const auto& x : bbs->array)
+                        if (x.is_object() && jstr(x.object, "ref") == mine)
+                            if (const auto* tk = records::json::find(x.object, "taken");
+                                tk && tk->boolean)
+                                throw std::runtime_error("покупку уже выкупил адресат — продавать "
+                                                         "нечего (records.md §9.8)");
+        }
         const auto& hl = pick_holding_lot(h->lots, flag_val(argc, argv, "--out"));
         const auto& o  = h->work.outputs[hl.out];
         rl.work    = bought->accept->work;
@@ -2462,6 +2577,13 @@ static int cmd_stock(const fs::path& data_dir, int argc, char** argv) {
         const auto  ref = jstr(h, "ref");
         std::cout << "  «" << jstr(h, "action") << "» — покупка "
                   << ref.substr(ref.find('/') + 1, 12) << "\n";
+        if (const auto* b = records::json::find(h, "buyback"); b && b->is_object()) {
+            const auto* tk = records::json::find(b->object, "taken");
+            std::cout << "      выкуп с адресом: " << jstr(b->object, "to").substr(0, 16)
+                      << "… за " << jnum(b->object, "units") << " стч до "
+                      << static_cast<int64_t>(jnum(b->object, "until"))
+                      << (tk && tk->boolean ? " — выкуплено" : "") << "\n";
+        }
         if (const auto* lots = jarr(h, "lots"))
             for (const auto& lv : lots->array) {
                 if (!lv.is_object()) continue;
@@ -3699,11 +3821,25 @@ static int cmd_transfer_recv(const fs::path& data_dir, int argc, char** argv) {
         std::optional<std::array<uint8_t, 32>> customer;
         if (const auto w = load_record(ctx, "", t->accept->work))
             if (const auto* wr = std::get_if<WorkRecord>(&*w)) customer = wr->customer;
-        std::optional<records::Release> release;
+        std::optional<records::Release>  release;
+        std::optional<records::Transfer> bought;   // own purchase, bought back on its return
         if (t->accept->release)
-            if (const auto r = load_record(ctx, "", *t->accept->release))
+            if (const auto r = load_record(ctx, "", *t->accept->release)) {
                 if (const auto* rl = std::get_if<records::Release>(&*r)) release = *rl;
-        if (!records::addressed_to(*t, customer, release ? &*release : nullptr))
+                else if (const auto* p = std::get_if<records::Transfer>(&*r)) bought = *p;
+            }
+        // Выкуп по заранее подписанному возврату и выкуп с адресом (records.md §9.8 v5).
+        if (bought && !records::completes_buyback(*t, *bought))
+            throw std::runtime_error("выкуп не по подписанному возврату — сделка ничего не "
+                                     "завершает, часы не принимаются (records.md §9.8)");
+        if (release && release->addressed) {
+            double paid = 0.0;
+            for (const auto& o : t->origins) paid += o.units;
+            if (!records::honours_buyout(*t->accept, paid, *release->addressed))
+                throw std::runtime_error("покупка по выкупу с адресом без подписанного возврата "
+                                         "— она ничего не завершает (records.md §9.8)");
+        }
+        if (!bought && !records::addressed_to(*t, customer, release ? &*release : nullptr))
             throw std::runtime_error(
                 "сделка не по адресу: вы не отпускали эту работу плательщику — ни "
                 "заказчиком в записи труда, ни отпуском (или отпуск истёк). Такая "
@@ -3729,6 +3865,11 @@ static int cmd_transfer_recv(const fs::path& data_dir, int argc, char** argv) {
             if (!terms || !records::meets_terms(*t->accept, *terms))
                 throw std::runtime_error("сделка по порции не по ценнику партии — она ничего не "
                                          "завершает, часы не принимаются (records.md §9.8)");
+        } else if (!bought && t->accept->axes.empty()) {
+            // Приёмки без разбивки не существует (ИР-022): одним переносом платят
+            // только за перепродажу или выкуп, а это — оплата нашей работы.
+            throw std::runtime_error("оплата работы без разбивки по осям — такой приёмки нет, "
+                                     "часы не принимаются (ИР-022)");
         }
     }
     // Transfer v3: a self-issuing transfer must be threaded (economy.md §4.3).
@@ -5550,6 +5691,9 @@ Labor:
                                        carried_units is derived automatically
                                        from the work's carry — never by hand
     [--pledge REF]                     the own pledge this deal closes
+    [--buyback-of REF]                 buy back on a pre-signed return
+    [--buyback-price P]                the return signed on an addressed buyout
+                                       (no more than paid; less for rent)
     [--release REF]                    the seller's release to you — see
                                        records.md §9.8; found at the aggregator
                                        by default. A deal the seller did not
@@ -5561,6 +5705,10 @@ Labor:
     [--qty Q | --units N1,N2 [--out N]] a portion of lot N at its price tag —
                                        a link of the lot's sub-thread; never
                                        more than it holds, a unit sold once
+    [--buyback | --buyback-to CHAIN]   an addressed buyout (records.md §9.8):
+    [--buyback-days N]                 until the term the buyer sells it on
+                                       only to the addressee, and pre-signs
+                                       the return in the purchase
   writeoff WORK --qty Q --reason T  Write off part of a lot — spoiled, lost,
     [--out N] [--via URL]              used up (records.md §9.9); WORK may be
                                        an own purchase

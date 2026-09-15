@@ -75,6 +75,8 @@ struct DealsOnTable {
     std::set<std::array<uint8_t, 32>> sold_whole;     // works whose whole result a deal paid for
     // Purchases of goods that happened — the buyers' stock, to sell on (v4).
     std::map<std::array<uint8_t, 32>, std::vector<records::HoldingLot>> holdings;
+    // Purchases bought back by their addressee on the pre-signed return (v5).
+    std::set<std::array<uint8_t, 32>> bought_back;
 
     // The deal that counts for its result: statistics read only these.
     bool counts(const std::array<uint8_t, 32>& deal) const {

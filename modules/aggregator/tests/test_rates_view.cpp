@@ -873,3 +873,155 @@ TEST_F(RatesViewTest, ResaleMovesHoursButNoPrice) {
     EXPECT_EQ(day.axes[0].deals, 1u);                           // цену двигает только первая продажа
     EXPECT_NEAR(day.axes[0].hours, 4.0, 1e-9);
 }
+
+// Выкуп с адресом (records.md §9.8 v5): Алиса отдаёт Бобу хлеб выкупом с адресом
+// на себя. Покупка без подписанного возврата ничего не завершает; с возвратом —
+// Боб до срока может продать хлеб только Алисе, а она выкупает сама, по
+// подписанной цене, без его участия.
+TEST_F(RatesViewTest, AddressedBuyoutAndPreSignedReturn) {
+    const UserId carol = make_chain(0xC7);
+    records::WorkRecord bake{};
+    bake.hours   = 10.0;
+    bake.outputs = {{"хлеб", 100.0, "шт", std::nullopt, 10.0}};
+    bake.axes    = {{test_axis(), 1.0}};
+    const Block work = add(alice_, bake);
+
+    const auto release_to_bob = [&](uint64_t seq, std::optional<records::Ref> prev,
+                                    double after) {
+        records::Release rl{};
+        rl.work      = ref_to(alice_, work);
+        rl.to        = bob_.bytes;
+        rl.timestamp = kDay;
+        rl.expires   = kDay + 1000;
+        records::LotLink lot{};
+        lot.qty   = 40;
+        lot.seq   = seq;
+        lot.prev  = prev;
+        lot.after = after;
+        rl.lot    = lot;
+        rl.addressed = records::Addressed{alice_.bytes, kDay + 5000};
+        return add(alice_, rl);
+    };
+    const auto buy = [&](const Block& rb, bool sign) {
+        records::Acceptance a{};
+        a.work        = ref_to(alice_, work);
+        a.release     = ref_to(alice_, rb);
+        a.hours_raw   = 4.0;
+        a.labor_units = 4.0;
+        a.axes        = {{test_axis(), 4.0}};
+        if (sign) a.buyback = records::Buyback{alice_.bytes, 4.0, kDay + 5000};
+        records::Transfer t{};
+        t.from      = bob_.bytes;
+        t.to        = alice_.bytes;
+        t.origins   = { {bob_.bytes, 4.0} };
+        t.accept    = a;
+        t.timestamp = kDay + 100;
+        return add(bob_, t);
+    };
+    const Block r1 = release_to_bob(0, std::nullopt, 40);
+    const auto unsigned_buy = Crypto::hash_block(buy(r1, false)).bytes;   // без возврата
+    const Block r2 = release_to_bob(1, ref_to(alice_, r1), 80);
+    const Block held = buy(r2, true);                                     // с возвратом
+
+    // Боб до срока продаёт Кэрол — не в счёт: до срока — только Алисе.
+    records::Release resale{};
+    resale.work      = ref_to(alice_, work);
+    resale.holding   = ref_to(bob_, held);
+    resale.to        = carol.bytes;
+    resale.timestamp = kDay + 200;
+    resale.expires   = kDay + 2000;
+    records::LotLink l{};
+    l.qty   = 10;
+    l.after = 10;
+    resale.lot = l;
+    const Block rs = add(bob_, resale);
+    records::Acceptance ca{};
+    ca.work          = ref_to(alice_, work);
+    ca.release       = ref_to(bob_, rs);
+    ca.carried_units = 1.0;
+    records::Transfer ct{};
+    ct.from      = carol.bytes;
+    ct.to        = bob_.bytes;
+    ct.origins   = { {carol.bytes, 1.0} };
+    ct.accept    = ca;
+    ct.timestamp = kDay + 300;
+    const auto carol_buy = Crypto::hash_block(add(carol, ct)).bytes;
+
+    // Алиса выкупает сама — по подписанной цене, называя покупку Боба.
+    records::Acceptance ba{};
+    ba.work          = ref_to(alice_, work);
+    ba.release       = ref_to(bob_, held);
+    ba.carried_units = 4.0;
+    records::Transfer bt{};
+    bt.from      = alice_.bytes;
+    bt.to        = bob_.bytes;
+    bt.origins   = { {alice_.bytes, 4.0} };
+    bt.accept    = ba;
+    bt.timestamp = kDay + 400;
+    const Block back_block = add(alice_, bt);
+    const auto  back       = Crypto::hash_block(back_block).bytes;
+
+    // Выкупив своё, Алиса — держатель: её продажа дальше — перепродажа, одним
+    // переносом, хотя платят мастеру.
+    records::Release again{};
+    again.work      = ref_to(alice_, work);
+    again.holding   = ref_to(alice_, back_block);
+    again.to        = carol.bytes;
+    again.timestamp = kDay + 500;
+    again.expires   = kDay + 2000;
+    records::LotLink l2{};
+    l2.qty   = 10;
+    l2.after = 10;
+    again.lot = l2;
+    const Block ra = add(alice_, again);
+    records::Acceptance aa{};
+    aa.work          = ref_to(alice_, work);
+    aa.release       = ref_to(alice_, ra);
+    aa.carried_units = 1.0;                                // 10 из 40 выкупленных за 4
+    records::Transfer at{};
+    at.from      = carol.bytes;
+    at.to        = alice_.bytes;
+    at.origins   = { {carol.bytes, 1.0} };
+    at.accept    = aa;
+    at.timestamp = kDay + 600;
+    const auto from_maker = Crypto::hash_block(add(carol, at)).bytes;
+
+    const auto deals = read_deals(*storage_);
+    const auto held_hash = Crypto::hash_block(held).bytes;
+    EXPECT_FALSE(deals.moves_hours(unsigned_buy));               // без возврата — ничтожна
+    EXPECT_TRUE(deals.counts(held_hash));                        // с возвратом — сделка
+    // До срока — только Алисе: отпуск Боба Кэрол не признан, её часы ушли, но
+    // купленное не в счёт — как порция сверх партии.
+    EXPECT_TRUE(deals.recognition.unsound.count(carol_buy));
+    EXPECT_FALSE(deals.recognition.resold.count(carol_buy));
+    EXPECT_TRUE(deals.recognition.resold.count(back));           // выкуп — перенос
+    EXPECT_TRUE(deals.bought_back.count(held_hash));
+    EXPECT_TRUE(deals.recognition.resold.count(from_maker));     // мастер-держатель перепродал
+}
+
+// Приёмки без разбивки не существует (ИР-022): одним переносом у мастера
+// покупают только то, что он держит; оплата его работы без разбивки ничтожна.
+TEST_F(RatesViewTest, AMakerSaleWithoutAxesIsVoid) {
+    records::WorkRecord job{};
+    job.hours = 2.0;
+    job.axes  = {{test_axis(), 1.0}};
+    const Block work = add(alice_, job);
+    records::Release rl{};
+    rl.work      = ref_to(alice_, work);
+    rl.to        = bob_.bytes;
+    rl.timestamp = kDay;
+    rl.expires   = kDay + 1000;
+    const Block rb = add(alice_, rl);
+    records::Acceptance a{};
+    a.work          = ref_to(alice_, work);
+    a.release       = ref_to(alice_, rb);
+    a.carried_units = 2.0;
+    records::Transfer t{};
+    t.from      = bob_.bytes;
+    t.to        = alice_.bytes;
+    t.origins   = { {bob_.bytes, 2.0} };
+    t.accept    = a;
+    t.timestamp = kDay + 100;
+    const auto deal = Crypto::hash_block(add(bob_, t)).bytes;
+    EXPECT_FALSE(read_deals(*storage_).moves_hours(deal));
+}

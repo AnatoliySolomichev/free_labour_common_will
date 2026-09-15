@@ -271,6 +271,19 @@ struct LotLink {
     }
 };
 
+// An addressed buyout (records.md §9.8 v5, ИР-023, пункт 8): ownership and risk
+// go to the buyer, but until `until` its next sale is recognized only to the
+// addressee — the seller itself (storage, repair, rent) or a named recipient
+// (carriage). The buyer pre-signs that return in the very purchase (Buyback).
+struct Addressed {
+    std::array<uint8_t, 32> to{};
+    int64_t                 until = 0;
+
+    bool operator==(const Addressed& o) const noexcept {
+        return to == o.to && until == o.until;
+    }
+};
+
 // A release (records.md §9.8, ИР-023): the seller gives the result of an own work
 // to a named buyer. Only that buyer's deal can complete it, and only before
 // `expires`. Without a release — or a customer on the WorkRecord itself — a deal
@@ -290,6 +303,10 @@ struct Release {
     // still names the product's birth record: the serial does not change hands;
     // the lot link is one of the purchase's sub-thread.
     std::optional<Ref>      holding;
+    // v5 (ИР-023, пункт 8): an addressed buyout — the buyer may sell on only to
+    // the addressee until the term, and pre-signs that return in the very deal
+    // by which it buys (Acceptance.buyback).
+    std::optional<Addressed> addressed;
 };
 
 // A write-off (records.md §9.9, ИР-023): part of a lot leaves it without a sale —
@@ -339,6 +356,20 @@ struct AcceptanceAxis {
     }
 };
 
+// The pre-signed return (records.md §9.8 v5, ИР-023, пункт 8): buying on an
+// addressed buyout, the buyer signs in that very deal that it releases what it
+// bought to `to` for `units` until `until`. The addressee then buys back on its
+// own, and no holder can stall it; the price is no more than was paid.
+struct Buyback {
+    std::array<uint8_t, 32> to{};
+    double                  units = 0;
+    int64_t                 until = 0;
+
+    bool operator==(const Buyback& o) const noexcept {
+        return to == o.to && units == o.units && until == o.until;
+    }
+};
+
 // The acceptance: what was received, how good, what it is worth and why
 // (records.md §9.5). Since 2026-09-14 (ИР-023) not a record of its own but the
 // `accept` field of the buyer's Transfer — the appraisal and its payment are one
@@ -375,6 +406,9 @@ struct Acceptance {
     // record naming the payer as the buyer. Absent when the work itself names the
     // payer as its customer (records.md §9.4).
     std::optional<Ref>             release;
+    // v5: the pre-signed return, when the release bought is an addressed
+    // buyout (records.md §9.8 v5).
+    std::optional<Buyback>         buyback;
 };
 
 // ── Production records (records.md §10, v2 — ИР-011) ─────────────────────────

@@ -245,4 +245,16 @@ bool meets_resale(const Acceptance& a, double price) noexcept {
            std::abs(carried - price) <= 1e-6;
 }
 
+bool honours_buyout(const Acceptance& a, double paid, const Addressed& buyout) noexcept {
+    return a.buyback && a.buyback->to == buyout.to && a.buyback->until == buyout.until &&
+           a.buyback->units <= paid + 1e-6;
+}
+
+bool completes_buyback(const Transfer& deal, const Transfer& purchase) noexcept {
+    if (!deal.accept || !purchase.accept || !purchase.accept->buyback) return false;
+    const Buyback& b = *purchase.accept->buyback;
+    return deal.from == b.to && deal.to == purchase.from && deal.timestamp < b.until &&
+           deal.accept->work == purchase.accept->work && meets_resale(*deal.accept, b.units);
+}
+
 } // namespace records

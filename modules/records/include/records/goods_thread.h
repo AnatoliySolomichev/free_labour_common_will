@@ -144,4 +144,15 @@ double resale_price(const HoldingLot& lot, double qty) noexcept;
 // Whether an acceptance pays a resale exactly: carried cost only.
 bool meets_resale(const Acceptance& a, double price) noexcept;
 
+// ── Addressed buyout (records.md §9.8 v5, ИР-023, пункт 8) ───────────────────
+
+// Whether a purchase honours the seller's addressed buyout: it pre-signs the
+// return to the addressee, for the same term, at no more than it paid.
+bool honours_buyout(const Acceptance& a, double paid, const Addressed& buyout) noexcept;
+
+// Whether `deal` buys back what `purchase` bought, on its pre-signed return: by
+// the addressee, from the holder, before the term, the same product, at the
+// signed price — carried cost only, like any resale. No holder takes part.
+bool completes_buyback(const Transfer& deal, const Transfer& purchase) noexcept;
+
 } // namespace records

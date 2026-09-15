@@ -1526,6 +1526,9 @@ void AggregatorServer::setup_routes() {
                 if (r.release.holding)     // a resale of this purchase (records.md §9.8 v4)
                     body += ",\"holding\":\"" + to_hex(r.release.holding->chain) + "/"
                           + to_hex(r.release.holding->hash) + "\"";
+                if (r.release.addressed)   // an addressed buyout (records.md §9.8 v5)
+                    body += ",\"addressed\":{\"to\":\"" + to_hex(r.release.addressed->to)
+                          + "\",\"until\":" + std::to_string(r.release.addressed->until) + "}";
                 if (r.release.lot) {       // a portion (records.md §9.8 v2)
                     const auto lot   = deals.lots.find(
                         {r.release.holding ? r.release.holding->hash : wh, r.release.lot->out});
@@ -1571,11 +1574,33 @@ void AggregatorServer::setup_routes() {
                                 source = to_hex(r.release.holding->chain) + "/"
                                        + to_hex(r.release.holding->hash);
                         }
+                    for (const auto& p : deals.all)   // a buyback names the holder's purchase (v5)
+                        if (p.hash == d.accept().release->hash && p.accept().buyback) {
+                            portion = true;
+                            source  = to_hex(p.payer.bytes) + "/" + to_hex(p.hash);
+                        }
                     body += ",\"release\":\"" + to_hex(d.accept().release->chain) + "/"
                           + to_hex(d.accept().release->hash) + "\",\"portion\":"
                           + (portion ? "true" : "false");
                 }
                 body += ",\"source\":\"" + source + "\"}";
+            }
+            // Pre-signed returns of purchases of this product (records.md §9.8 v5).
+            body += "],\"buybacks\":[";
+            first = true;
+            for (const auto& p : deals.all) {
+                const auto& pa = p.accept();
+                if (!pa.buyback || pa.work.hash != wh || pa.work.chain != ch ||
+                    !deals.moves_hours(p.hash))
+                    continue;
+                if (!first) body += ',';
+                first = false;
+                body += "{\"ref\":\"" + to_hex(p.payer.bytes) + "/" + to_hex(p.hash)
+                      + "\",\"holder\":\"" + to_hex(p.payer.bytes)
+                      + "\",\"to\":\"" + to_hex(pa.buyback->to)
+                      + "\",\"units\":" + std::to_string(pa.buyback->units)
+                      + ",\"until\":" + std::to_string(pa.buyback->until)
+                      + ",\"taken\":" + (deals.bought_back.count(p.hash) ? "true" : "false") + "}";
             }
             body += "],\"oversold\":";
             body += rc.oversold.count(wh) ? "true" : "false";
@@ -1769,8 +1794,13 @@ void AggregatorServer::setup_routes() {
                 first = false;
                 body += "{\"ref\":\"" + to_hex(d.payer.bytes) + "/" + to_hex(d.hash)
                       + "\",\"work\":\"" + to_hex(work.chain) + "/" + to_hex(work.hash)
-                      + "\",\"action\":\"" + json_escape(w->second.record.action)
-                      + "\",\"lots\":[";
+                      + "\",\"action\":\"" + json_escape(w->second.record.action) + "\"";
+                if (const auto& b = d.accept().buyback)   // выкуп с адресом (records.md §9.8 v5)
+                    body += ",\"buyback\":{\"to\":\"" + to_hex(b->to) + "\",\"units\":"
+                          + std::to_string(b->units) + ",\"until\":" + std::to_string(b->until)
+                          + ",\"taken\":" + (deals.bought_back.count(d.hash) ? "true" : "false")
+                          + "}";
+                body += ",\"lots\":[";
                 for (std::size_t i = 0; i < lots.size(); ++i) {
                     double cost = 0.0;
                     for (const auto& hl : h->second)

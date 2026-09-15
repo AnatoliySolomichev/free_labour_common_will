@@ -1179,3 +1179,45 @@ TEST(RecordsCodec, WriteOffOfAPurchaseRoundtrip) {
     ASSERT_TRUE(d.holding.has_value());
     EXPECT_EQ(*d.holding, *wo.holding);
 }
+
+// ── Выкуп с адресом и заранее подписанный возврат (records.md §9.8 v5) ───────
+
+TEST(RecordsCodec, AddressedBuyoutRoundtrip) {
+    Release rl = release_of(0xB2);
+    rl.addressed = Addressed{make_uid(0x53), rl.timestamp + 86400};   // вернуть мастеру за сутки
+    EXPECT_EQ(std::get<Release>(roundtrip(Record{rl})).addressed, rl.addressed);
+    rl.addressed->until = rl.timestamp;                                // срок прошёл
+    EXPECT_THROW(Codec::encode(Record{rl}), CodecError);
+}
+
+// Возврат едет в самой покупке: не себе, на срок впереди и не дороже уплаченного.
+TEST(RecordsCodec, PreSignedReturnRidesInThePurchase) {
+    Acceptance a = plain_acceptance(2.0);
+    Transfer   t = deal_of(a);
+    t.accept->buyback = Buyback{make_uid(0x53), 2.0, t.timestamp + 86400};
+    EXPECT_EQ(std::get<Transfer>(roundtrip(Record{t})).accept->buyback, t.accept->buyback);
+
+    t.accept->buyback->units = 2.5;                                    // дороже покупки
+    EXPECT_THROW(Codec::encode(Record{t}), CodecError);
+    t.accept->buyback->units = 2.0;
+    t.accept->buyback->until = t.timestamp;                            // срок прошёл
+    EXPECT_THROW(Codec::encode(Record{t}), CodecError);
+    t.accept->buyback->until = t.timestamp + 1;
+    t.accept->buyback->to    = t.from;                                 // себе
+    EXPECT_THROW(Codec::encode(Record{t}), CodecError);
+}
+
+// Мастер, выкупивший своё, продаёт его дальше одним переносом — по отпуску; без
+// отпуска приёмки без разбивки в его цепь не существует (ИР-022).
+TEST(RecordsCodec, AMakerHoldingItsOwnSellsOnByCarryOnly) {
+    Acceptance a{};
+    a.work          = make_ref(0x53, 0x54);                 // работа мастера 0x53
+    a.quality       = "как новый";
+    a.carried_units = 2.0;
+    Transfer t = deal_of(a);                                 // платят мастеру
+    EXPECT_THROW(Codec::encode(Record{t}), CodecError);      // без отпуска — нет
+    t.accept->release = make_ref(0x53, 0x57);
+    EXPECT_NO_THROW(Codec::encode(Record{t}));
+    t.accept->hours_raw = 1.0;                               // с трудом — нужна разбивка
+    EXPECT_THROW(Codec::encode(Record{t}), CodecError);
+}

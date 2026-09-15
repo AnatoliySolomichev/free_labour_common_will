@@ -365,3 +365,46 @@ TEST(Holding, AResaleIsCarriedCostOnly) {
     a.labor_units   = 0.1;                                      // труд в перепродаже
     EXPECT_FALSE(meets_resale(a, 0.6));
 }
+
+// ── Выкуп с адресом (records.md §9.8 v5, ИР-023, пункт 8) ────────────────────
+
+TEST(Buyout, APurchaseOnAnAddressedBuyoutPreSignsTheReturn) {
+    const Addressed buyout{h(0xA1), 5000};
+    Acceptance a{};
+    EXPECT_FALSE(honours_buyout(a, 3.0, buyout));                   // без возврата — нет
+    a.buyback = Buyback{h(0xA1), 3.0, 5000};
+    EXPECT_TRUE(honours_buyout(a, 3.0, buyout));
+    a.buyback->units = 3.5;                                          // дороже уплаченного
+    EXPECT_FALSE(honours_buyout(a, 3.0, buyout));
+    a.buyback = Buyback{h(0xB2), 3.0, 5000};                         // не тому
+    EXPECT_FALSE(honours_buyout(a, 3.0, buyout));
+}
+
+// Адресат выкупает сам — держатель в сделке не участвует; но только он, до срока
+// и по подписанной цене.
+TEST(Buyout, TheAddresseeBuysBackOnItsOwn) {
+    Transfer purchase{};
+    purchase.from = h(0xC3);                                         // держатель
+    Acceptance pa{};
+    pa.work.hash.fill(0x54);
+    pa.buyback = Buyback{h(0xA1), 3.0, 5000};
+    purchase.accept = pa;
+
+    Transfer back{};
+    back.from      = h(0xA1);                                        // адресат
+    back.to        = h(0xC3);
+    back.timestamp = 4000;
+    Acceptance ba{};
+    ba.work          = pa.work;
+    ba.carried_units = 3.0;
+    back.accept = ba;
+    EXPECT_TRUE(completes_buyback(back, purchase));
+    back.timestamp = 5000;                                           // срок прошёл
+    EXPECT_FALSE(completes_buyback(back, purchase));
+    back.timestamp = 4000;
+    back.from = h(0xB2);                                             // не адресат
+    EXPECT_FALSE(completes_buyback(back, purchase));
+    back.from = h(0xA1);
+    back.accept->carried_units = 2.0;                                // не по подписанной цене
+    EXPECT_FALSE(completes_buyback(back, purchase));
+}
