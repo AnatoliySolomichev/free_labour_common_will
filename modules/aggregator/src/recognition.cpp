@@ -65,7 +65,8 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
 
         if (const auto* w = std::get_if<records::WorkRecord>(&rec)) {
             out.works[bh.bytes] = WorkOnTable{owner, *w};
-            observed[owner].push_back({bh.bytes, records::labor_interval(*w), w->thread});
+            observed[owner].push_back({bh.bytes, records::labor_interval(*w), w->thread,
+                                       block->timestamp_claimed});
         } else if (const auto* rl = std::get_if<records::Release>(&rec)) {
             // The seller: the worker of the work, or the holder of a purchase (v4).
             const auto& seller = rl->holding ? rl->holding->chain : rl->work.chain;

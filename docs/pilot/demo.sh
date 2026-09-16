@@ -34,6 +34,7 @@ VIA="http://localhost:$PORT"
 
 # ── Временная песочница и уборка ─────────────────────────────────────────────
 work="$(mktemp -d)"
+NOW="$(date +%s)"   # время работ называем сами (records.md §9.4 v5)
 agg_pid=""
 cleanup() {
     [[ -n "$agg_pid" ]] && kill "$agg_pid" 2>/dev/null || true
@@ -146,7 +147,7 @@ fi
 
 # Работа без заказа: кому достаётся результат, решает продавец (records.md §9.5).
 # Пока Анна не отпустила булочки Вере, сделки нет; после отпуска — есть.
-W2="$("$BC" --data-dir "$work/anna" work log --action "булочки на витрину" --hours 1 \
+W2="$("$BC" --data-dir "$work/anna" work log --action "булочки на витрину" --hours 1 --start "$(( NOW - 25200 ))" \
       --axis-share "$(axis pace)=1.0" --via "$VIA" 2>/dev/null | after 'hash: ')"
 if "$BC" --data-dir "$work/vera" accept --work "$ANNA/$W2" --quality "свежие" \
         --axis "$(axis pace)=1.0" --via "$VIA" >/dev/null 2>&1; then

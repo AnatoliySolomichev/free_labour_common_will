@@ -73,6 +73,13 @@ LaborThread check_labor_thread(const std::array<uint8_t, 32>& chain,
         }
         if (!reach || w->interval.second > reach->interval.second) reach = w;
     }
+
+    // Будущих часов не заявляют (records.md §9.4 v5, решение участника 2026-09-16):
+    // labor that ends later than the block declaring it was written takes hours
+    // nobody has worked yet — and it would hold the place of the real work still
+    // ahead. Such a work is out of the thread; a deal on it counts for nothing.
+    for (const auto& [hash, w] : by_hash)
+        if (w->written > 0 && w->interval.second > w->written) out.ahead.insert(hash);
     return out;
 }
 

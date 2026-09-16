@@ -1615,6 +1615,8 @@ void AggregatorServer::setup_routes() {
                     state = "unthreaded";
                 } else if (t->second.broken.count(wh)) {
                     state = "broken";
+                } else if (t->second.ahead.count(wh)) {
+                    state = "ahead";               // records.md §9.4 v5: труд из будущего
                 } else if (t->second.overlapping.count(wh)) {
                     state = "crossing";
                     for (const auto& [a, b] : t->second.overlaps) {
@@ -1700,6 +1702,7 @@ void AggregatorServer::setup_routes() {
                 const auto  iv = records::labor_interval(r);
                 const char* fault = th.broken.count(h)      ? "broken"
                                   : th.unthreaded.count(h)  ? "unthreaded"
+                                  : th.ahead.count(h)       ? "ahead"
                                   : th.overlapping.count(h) ? "crossing" : "";
                 if (!first) body += ',';
                 first = false;

@@ -50,6 +50,7 @@ VIA="http://localhost:$PORT"
 
 # ── Временная песочница и уборка ─────────────────────────────────────────────
 work="$(mktemp -d)"
+NOW="$(date +%s)"   # время работ называем сами (records.md §9.4 v5)
 agg_pid=""
 cleanup() {
     [[ -n "$agg_pid" ]] && kill "$agg_pid" 2>/dev/null || true
@@ -322,7 +323,7 @@ bcp pelageya fetch "${CID[galina]}/$WORK_galina" --via "$VIA" >/dev/null
 ACC_galina=$(bcp pelageya accept --work "${CID[galina]}/$WORK_galina" --quality "аккуратно" --coef 1.0 --axis-share "$(axis precision)=0.5" --axis-share "$(axis physical)=0.3" --axis-share "$(axis pace)=0.2" --via "$VIA" | after 'acceptance ref: ')
 hr "без заказа результат отдаёт тот, кто работал: отпуск (bc release, records.md §9.8)"
 W_gal0=$(bcp galina work log --title "парикмахер" --action "Укладка — клиент без записи" \
-         --hours 1 --via "$VIA" | after 'hash: ')
+         --hours 1 --start "$(( NOW - 7200 ))" --via "$VIA" | after 'hash: ')
 say "Дмитрий хочет оплатить укладку, но Галина ещё не назвала покупателя:"
 bcp dmitry accept --work "${CID[galina]}/$W_gal0" --quality "аккуратно" \
     --axis "$(axis precision)=1.0" --via "$VIA" 2>&1 | tail -1 | sed 's/^/   /' || true
@@ -355,13 +356,13 @@ PY
 hr "«такая же работа, как та» — образцы работ (bc accept --like, ИР-022)"
 say "вторая стрижка, вторая проводка и второй обед принимаются по образцу первых:"
 say "разбивка копируется у образца, а ссылка на него остаётся в приёмке"
-W_gal2=$(bcp galina work log --title "парикмахер" --action "Стрижка" --hours 1 --for "${CID[irina]}" --via "$VIA" | after 'hash: ')
+W_gal2=$(bcp galina work log --title "парикмахер" --action "Стрижка" --hours 1 --start "$(( NOW - 10800 ))" --for "${CID[irina]}" --via "$VIA" | after 'hash: ')
 bcp irina fetch "${CID[galina]}/$W_gal2" --via "$VIA" >/dev/null
 A_gal2=$(bcp irina accept --work "${CID[galina]}/$W_gal2" --quality "аккуратно" --like "$ACC_galina" --via "$VIA" | after 'acceptance ref: ')
-W_bor2=$(bcp boris work log --title "электрик, 4-й разряд" --action "Розетка в мастерской" --hours 1 --for "${CID[dmitry]}" --via "$VIA" | after 'hash: ')
+W_bor2=$(bcp boris work log --title "электрик, 4-й разряд" --action "Розетка в мастерской" --hours 1 --start "$(( NOW - 14400 ))" --for "${CID[dmitry]}" --via "$VIA" | after 'hash: ')
 bcp dmitry fetch "${CID[boris]}/$W_bor2" --via "$VIA" >/dev/null
 A_bor2=$(bcp dmitry accept --work "${CID[boris]}/$W_bor2" --quality "работает" --like "$ACC_boris" --via "$VIA" | after 'acceptance ref: ')
-W_ann2=$(bcp anna work log --title "повар, 5-й разряд" --action "Обед для мастерской" --hours 2 --for "${CID[boris]}" --via "$VIA" | after 'hash: ')
+W_ann2=$(bcp anna work log --title "повар, 5-й разряд" --action "Обед для мастерской" --hours 2 --start "$(( NOW - 28800 ))" --for "${CID[boris]}" --via "$VIA" | after 'hash: ')
 bcp boris fetch "${CID[anna]}/$W_ann2" --via "$VIA" >/dev/null
 A_ann2=$(bcp boris accept --work "${CID[anna]}/$W_ann2" --quality "вкусно" --like "$ACC_anna" --via "$VIA" | after 'acceptance ref: ')
 say "у каждой приёмки теперь like: ссылка на образец (bc list покажет её)"
@@ -372,6 +373,7 @@ bcp galina thread --via "$VIA" | sed 's/^/   /'
 hr "партия на склад: пироги порциями, списание и остаток (bc release --qty, bc writeoff, records.md §9.8)"
 say "Анна печёт 12 пирогов без заказа, ценник k = 1.1; отпускает Борису 5, Ирине 4, 2 подгорели"
 W_pies=$(bcp anna work log --title "повар, 5-й разряд" --action "Пироги на витрину" --hours 3 \
+         --start "$(( NOW - 39600 ))" \
          --output "пирог:12:шт::k=1.1" --axis-share "$(axis physical)=0.5" \
          --axis-share "$(axis knowledge)=0.5" --via "$VIA" | after 'hash: ')
 bcp anna release "$W_pies" --to "${CID[boris]}" --qty 5 --days 2 --via "$VIA" 2>&1 | sed 's/^/   /'
@@ -387,7 +389,7 @@ bcp anna thread --via "$VIA" | sed 's/^/   /'
 hr "партия со штучным учётом: табуреты с клеймом (bc release --units, records.md §9.8)"
 say "Дмитрий делает три табурета с клеймами Т-1, Т-2, Т-3; Вера берёт Т-2 — по ценнику"
 W_stools=$(bcp dmitry work log --title "столяр, 6-й разряд" --action "Табуреты с клеймом" \
-           --hours 3 --output "табурет:3:шт::k=1:Т-1,Т-2,Т-3" \
+           --hours 3 --start "$(( NOW - 28800 ))" --output "табурет:3:шт::k=1:Т-1,Т-2,Т-3" \
            --axis-share "$(axis precision)=1" --via "$VIA" | after 'hash: ')
 bcp dmitry release "$W_stools" --to "${CID[vera]}" --units Т-2 --days 2 --via "$VIA" 2>&1 | sed 's/^/   /'
 OUT_st="$(bcp vera accept --work "${CID[dmitry]}/$W_stools" --quality "крепкий" --via "$VIA" 2>&1)"
@@ -604,7 +606,7 @@ if bcp boris accept --work "${CID[anna]}/$WORK_anna" --quality "перекупл
 else echo "   ✓ посторонний чужой заказ не купит (records.md §9.5)"; fi
 # одни и те же часы дважды не записать: нить труда (records.md §9.4)
 if bcp galina work log --action "та же укладка ещё раз" --hours 1 \
-        --start "$(( $(date +%s) - 1800 ))" --via "$VIA" >/dev/null 2>&1; then
+        --start "$(( $(date +%s) - 3600 ))" --via "$VIA" >/dev/null 2>&1; then
     echo "   ✗ работа на уже заявленных часах записалась"; fail=1
 else echo "   ✓ одни и те же часы дважды не записать (нить труда, records.md §9.4)"; fi
 # больше, чем осталось в партии, не отпустить (records.md §9.8)

@@ -90,7 +90,7 @@ axis_shares() {  # $1 — слаг профессии
   esac
 }
 month_date(){ date -u -d "$YEAR-01-15 +$1 months" '+%Y-%m-%d %H:%M:%S'; }
-set_month(){ FT=(faketime "$(month_date "$1")"); }
+set_month(){ FT=(faketime "$(month_date "$1")"); MTS="$(date -u -d "$(month_date "$1")" +%s)"; }
 
 # ── Случайность, воспроизводимая по SEED ─────────────────────────────────────
 # Ни RANDOM, ни srand в awk для этого не годятся: rnd зовут через $(…), а bash
@@ -193,6 +193,7 @@ done
 
 # ── Одна сделка: заказчик c нанимает работника w на h часов ──────────────────
 declare -A SAMPLE   # профессия → приёмка-образец (первая сделка профессии)
+declare -A USED    # цепь → часов уже заявлено в этом месяце (нить труда, records.md §9.4)
 ok_deals=0; fail_deals=0; total_hours=0
 printf 'month\tpayer\tworker\tspecialty\tlevel\thours\tcoef\n' > "$OUT/deals.tsv" 
 do_deal(){
@@ -208,7 +209,12 @@ do_deal(){
     coef="$(awk -v l="${LVL[$w]}" -v j="$(rnd 17)" 'BEGIN{printf "%.2f", 1.0+0.10*(l-4.5)+(j-8)/100}')"
     units="$(awk -v c="$coef" -v h="$h" 'BEGIN{printf "%.4f", c*h}')"
     # Работа на заказ клиента: результат отпущен ему самой записью (records.md §9.4).
-    wh="$(ftbc "p$w" work log --title "${PROF[$w]#prof.}, ${LVL[$w]}-й разряд" --action "услуга" --hours "$h" --for "${CID[$c]}" --via "$VIA" | after 'hash: ')"
+    # Время работы называем сами: работы месяца ложатся стопкой назад от его даты,
+    # не налегая друг на друга (records.md §9.4 v5).
+    local wstart
+    wstart="$(awk -v t="$MTS" -v u="${USED[$w]:-0}" -v h="$h" 'BEGIN{printf "%d", t-(u+h)*3600}')"
+    USED[$w]="$(awk -v u="${USED[$w]:-0}" -v h="$h" 'BEGIN{printf "%g", u+h}')"
+    wh="$(ftbc "p$w" work log --title "${PROF[$w]#prof.}, ${LVL[$w]}-й разряд" --action "услуга" --hours "$h" --start "$wstart" --for "${CID[$c]}" --via "$VIA" | after 'hash: ')"
     [[ -z "$wh" ]] && { ((fail_deals++)); return; }
     ftbc "p$c" fetch "${CID[$w]}/$wh" --via "$VIA" >/dev/null 2>&1 || { ((fail_deals++)); return; }
     # Первая сделка профессии становится её ОБРАЗЦОМ; следующие принимаются
@@ -251,6 +257,7 @@ merge_pair(){
 ok_seals=0; ok_pledges=0
 for ((m=0;m<MONTHS;m++)); do
     set_month "$m"
+    USED=()                     # новый месяц — свободные часы
     md="$(month_date "$m")"
     # экономика: торговля ПРЕИМУЩЕСТВЕННО внутри района — пары повторяются за год,
     # бумага возвращается эмитентам (погашение), замкнутость района растёт.

@@ -219,6 +219,7 @@ PY
 #   default — цена по умолчанию из сетевых цен прошлого месяца;
 #   hidden  — цена щита, а разбивка — по осям проводки (надбавка не названа).
 declare -A SAMPLE SHARES     # ключ образца → приёмка-образец; → «ось=доля …»
+declare -A USED              # цепь → часов уже заявлено в этом месяце (records.md §9.4)
 ok=0; fail=0; hours_total=0
 printf 'month\tpayer\tworker\tkind\tsample\thours\trate\tmult\ttag\tunits\tcarried\tshares\n' > "$OUT/deals.tsv"
 deal(){
@@ -235,8 +236,12 @@ deal(){
     units="$(awk -v r="$rate" -v h="$h" 'BEGIN{printf "%.4f", r*h}')"
     [[ "$kd" == hleb ]] && extra=(--tool "${TOOL_H:0:12}:$h" --material "${MAT_H:0:12}:12")
     # Работа на заказ клиента: результат отпущен ему самой записью (records.md §9.4).
+    # Время работы называем сами: работы месяца — стопкой назад от его даты.
+    local wstart
+    wstart="$(awk -v t="$TS" -v u="${USED[$w]:-0}" -v h="$h" 'BEGIN{printf "%d", t-(u+h)*3600}')"
+    USED[$w]="$(awk -v u="${USED[$w]:-0}" -v h="$h" 'BEGIN{printf "%g", u+h}')"
     wh="$(ftbc "$w" work log --title "${KT[$kd]}" --action "${KT[$kd]}" --hours "$h" \
-          --for "${CID[$c]}" "${extra[@]}" --via "$VIA" | after 'hash: ')"
+          --start "$wstart" --for "${CID[$c]}" "${extra[@]}" --via "$VIA" | after 'hash: ')"
     [[ -z "$wh" ]] && { ((fail++)); return; }
     ftbc "$c" fetch "${CID[$w]}/$wh" --via "$VIA" >/dev/null 2>&1 || { ((fail++)); return; }
     if [[ -n "${SAMPLE[$sk]:-}" ]]; then
@@ -274,6 +279,7 @@ deal(){
 # ═════════════════════════════════════════════════════════════════════════════
 for ((M=0; M<MONTHS; M++)); do
     set_month "$M"
+    USED=()                  # новый месяц — свободные часы
     MAT="$(ftbc vera material add "Мука пшеничная" --unit кг --cost 4 --qty 50 \
            --note "партия месяца $((M+1)): 2100руб / 525руб-ч = 4ч" --via "$VIA" | after 'material ref: ')"
     MAT_H="${MAT#*/}"

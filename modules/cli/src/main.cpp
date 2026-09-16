@@ -840,18 +840,28 @@ static void place_in_thread(Context& ctx, WorkRecord& wr, bool explicit_start) {
             if (records::intervals_cross(iv, o.interval)) return &o;
         return nullptr;
     };
+    // Будущих часов не заявляют (records.md §9.4 v5, решение участника 2026-09-16):
+    // записывают только законченную работу, иначе она заняла бы место той, что ещё
+    // впереди.
+    if (records::labor_interval(wr).second > static_cast<int64_t>(std::time(nullptr)))
+        throw std::runtime_error(
+            "работа кончается в будущем — записывают только законченную работу "
+            "(records.md §9.4). Без --start работа считается только что законченной");
+    // Клиент ничего не угадывает (решение участника 2026-09-16): часы заняты —
+    // отказ, а не сдвиг. Время работы называет человек, и только свободное.
     if (const auto* o = crossing()) {
-        if (explicit_start)
-            throw std::runtime_error(
-                "часы работы пересекаются с работой " + short_hex(o->hash) +
-                " — одни и те же часы не продаются дважды (records.md §9.4)");
-        // Без --start: самое позднее свободное окно, кончающееся не позже, чем
-        // работа «только что кончилась». Будущих часов клиент не заявляет — иначе
-        // они заняли бы место настоящей работы, которая ещё впереди.
         const int64_t length = records::labor_interval(wr).second - wr.start_ts;
-        while (const auto* c = crossing()) wr.start_ts = c->interval.first - length;
-        std::cerr << "нить труда: эти часы уже заняты другой работой — работа поставлена "
-                     "раньше, в свободное окно (начало " << wr.start_ts << ")\n";
+        const auto busy = [&](int64_t from) -> const records::ObservedWork* {
+            for (const auto& s : seen)
+                if (records::intervals_cross({from, from + length}, s.interval)) return &s;
+            return nullptr;
+        };
+        int64_t free_start = wr.start_ts;   // самое позднее свободное окно перед занятыми
+        while (const auto* c = busy(free_start)) free_start = c->interval.first - length;
+        throw std::runtime_error(
+            "эти часы уже заняты работой " + short_hex(o->hash) + " — одни и те же часы не "
+            "продаются дважды (records.md §9.4). Назовите время работы сами: ближайшее "
+            "свободное окно перед занятыми — --start " + std::to_string(free_start));
     }
 
     const auto th = records::check_labor_thread(ctx.user_id.bytes, seen);
@@ -1257,7 +1267,9 @@ static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
                      "                              отпущен ему этой же записью (records.md §9.4);\n"
                      "                              без него — bc release после работы\n"
                      "   [--start  UNIX_TS]         начало; по умолчанию работа только что\n"
-                     "                              кончилась (нить труда, records.md §9.4)\n"
+                     "                              кончилась. Часы заняты другой работой —\n"
+                     "                              отказ, время называет человек; будущим\n"
+                     "                              временем работу не кончают (records.md §9.4)\n"
                      "   [--axis-share ОСЬ=ДОЛЯ]    предложенная разбивка часов по осям,\n"
                      "                              сумма 1 — покупатель её подтверждает\n"
                      "   [--input  NAME:QTY:UNIT]   (repeatable)\n"
@@ -1790,6 +1802,10 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
                 "продавца, в счёт такая сделка не пойдёт (records.md §9.4)");
         if (state == "broken")
             throw std::runtime_error("звено нити труда битое — работа вне нити (records.md §9.4)");
+        if (state == "ahead")
+            throw std::runtime_error(
+                "работа кончается позже, чем записана, — это часы из будущего, которых ещё "
+                "никто не отработал; в счёт такая сделка не пойдёт (records.md §9.4)");
         if (state == "crossing") {
             std::string with;
             if (const auto* cs = jarr(status->object, "crosses"))

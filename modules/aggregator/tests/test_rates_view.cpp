@@ -1,4 +1,5 @@
 #include "aggregator/rates_view.h"
+#include <records/goods_thread.h>
 #include "aggregator/recognition.h"
 #include "labor_thread_support.h"
 #include "aggregator/server.h"
@@ -43,6 +44,12 @@ Block make_record_block(const UserId& owner, BlockIndex index,
     b.address           = {owner, 0x7FFF'FFFFu, index};
     b.prev_hash         = Hash::zero();
     b.timestamp_claimed = static_cast<Timestamp>(index) * 1000LL;
+    // Блок с записью труда не датируется раньше конца самой работы
+    // (records.md §9.4 v5): будущих часов не заявляют.
+    if (const auto* w = std::get_if<records::WorkRecord>(&rec)) {
+        const auto end = static_cast<Timestamp>(records::labor_interval(*w).second);
+        if (end > b.timestamp_claimed) b.timestamp_claimed = end;
+    }
     b.type              = BlockType::DATA;
     b.payload           = records::Codec::encode(rec);
     b.signature         = Signature::null();

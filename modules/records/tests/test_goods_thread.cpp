@@ -366,6 +366,20 @@ TEST(Holding, AResaleIsCarriedCostOnly) {
     EXPECT_FALSE(meets_resale(a, 0.6));
 }
 
+// Будущих часов не заявляют (records.md §9.4 v5, решение участника 2026-09-16):
+// работа, кончающаяся позже, чем записана, — вне нити, и сделка по ней не в счёт.
+TEST(LaborThread, LaborCannotEndAfterItWasWritten) {
+    auto done = link(0x01, 10, 12, 0, {});
+    done.written = 12 * kHour;                      // записана, когда кончилась
+    auto ahead = link(0x02, 12, 20, 1, {0x01});
+    ahead.written = 13 * kHour;                     // восемь часов вперёд, а записана через час
+    const auto th = check_labor_thread(kChain, {done, ahead});
+    EXPECT_TRUE(th.sound(h(0x01)));
+    EXPECT_FALSE(th.sound(h(0x02)));
+    EXPECT_TRUE(th.ahead.count(h(0x02)));
+    EXPECT_TRUE(th.linked.count(h(0x02)));          // звено в нити, но часы ещё ничьи
+}
+
 // ── Выкуп с адресом и аренда без ренты (records.md §9.8 v5, v6) ──────────────
 
 TEST(Buyout, APurchaseOnAnAddressedBuyoutPreSignsTheReturn) {

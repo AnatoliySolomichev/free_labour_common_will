@@ -36,6 +36,9 @@ struct ObservedWork {
     std::array<uint8_t, 32>     hash{};     // the WorkRecord block
     std::pair<int64_t, int64_t> interval;   // labor_interval(...)
     std::optional<ThreadLink>   link;       // absent: written outside the thread
+    // v5: the block's own time. Labor cannot end later than it was written —
+    // future hours are nobody's yet (records.md §9.4 v5). 0 — not known here.
+    int64_t                     written = 0;
 };
 
 struct LaborThread {
@@ -43,6 +46,7 @@ struct LaborThread {
     std::set<std::array<uint8_t, 32>> unthreaded;   // works written outside the thread
     std::set<std::array<uint8_t, 32>> broken;       // seq ≠ 1 + max(prev), or a prev that is no link of this chain
     std::set<std::array<uint8_t, 32>> overlapping;  // works whose hours cross another work's
+    std::set<std::array<uint8_t, 32>> ahead;        // v5: labor that ends after it was written
     // One signed proof per crossing found: the earlier-starting work first.
     std::vector<std::pair<std::array<uint8_t, 32>, std::array<uint8_t, 32>>> overlaps;
     std::vector<std::array<uint8_t, 32>> tips;      // links no link continues, ascending
@@ -51,7 +55,7 @@ struct LaborThread {
 
     // A work whose deal may count: in the thread, on hours of its own.
     bool sound(const std::array<uint8_t, 32>& work) const {
-        return linked.count(work) > 0 && overlapping.count(work) == 0;
+        return linked.count(work) > 0 && overlapping.count(work) == 0 && ahead.count(work) == 0;
     }
 };
 
