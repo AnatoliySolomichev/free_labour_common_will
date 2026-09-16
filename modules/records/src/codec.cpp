@@ -463,8 +463,25 @@ void enc_write_off(Buf& out, const WriteOff& w) {
     if (w.holding) { w_uint(out, 5); w_ref(out, *w.holding); }
 }
 
+// Ключ 10 (v3, ИР-023) — звено подниточки покупки, которым взят материал: он
+// куплен, а не оценён, и потрачен в своё производство (records.md §10.1).
+void check_paid_source(const std::string& basis, const std::optional<Ref>& src,
+                       const std::optional<LotLink>& lot, const char* what) {
+    if (basis != "paid" && basis != "est")
+        throw CodecError(std::string(what) + ": basis — «paid» или «est» (records.md §10.2)");
+    if (basis == "paid" && !src)
+        throw CodecError(std::string(what) + ": «paid» — это покупка, нужен src "
+                         "(records.md §10.2)");
+    if (basis == "est" && src)
+        throw CodecError(std::string(what) + ": оценка владельца не ссылается на покупку");
+    if (lot && !src)
+        throw CodecError(std::string(what) + ": звено партии бывает только у купленного "
+                         "(records.md §10.1)");
+}
+
 void enc_material(Buf& out, const Material& m) {
-    w_map(out, 10);
+    check_paid_source(m.basis, m.src, m.lot, "Material");
+    w_map(out, 10 + (m.lot ? 1 : 0));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Material));
     w_uint(out, 1); w_text(out, m.name);
     w_uint(out, 2); w_text(out, m.unit);
@@ -477,10 +494,12 @@ void enc_material(Buf& out, const Material& m) {
     w_uint(out, 8);
     if (m.origin) w_ref(out, *m.origin); else w_null(out);
     w_uint(out, 9); w_text(out, m.note);
+    if (m.lot) { w_uint(out, 10); w_lot_link(out, *m.lot); }
 }
 
 void enc_tool(Buf& out, const Tool& t) {
-    w_map(out, 10);
+    check_paid_source(t.basis, t.src, t.lot, "Tool");
+    w_map(out, 10 + (t.lot ? 1 : 0));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Tool));
     w_uint(out, 1); w_text(out, t.name);
     w_uint(out, 2); w_text(out, t.desc);
@@ -493,6 +512,7 @@ void enc_tool(Buf& out, const Tool& t) {
     w_uint(out, 8);
     if (t.origin) w_ref(out, *t.origin); else w_null(out);
     w_uint(out, 9); w_text(out, t.note);
+    if (t.lot) { w_uint(out, 10); w_lot_link(out, *t.lot); }
 }
 
 void enc_transfer(Buf& out, const Transfer& t) {
@@ -1052,7 +1072,11 @@ Acceptance dec_acceptance(CborReader& r) {
     return a;
 }
 
-Material dec_material_fields(CborReader& r) {
+LotLink dec_lot_link(CborReader& r);   // определён ниже, вместе с хвостом отпуска
+
+Material dec_material_fields(CborReader& r, uint64_t field_count) {
+    if (field_count < 10 || field_count > 11)
+        throw CodecError("Material: expected 10..11 fields");
     Material m{};
     expect_key(r, 1); m.name   = r.r_text();
     expect_key(r, 2); m.unit   = r.r_text();
@@ -1063,10 +1087,14 @@ Material dec_material_fields(CborReader& r) {
     expect_key(r, 7); m.src    = dec_opt_ref(r);
     expect_key(r, 8); m.origin = dec_opt_ref(r);
     expect_key(r, 9); m.note   = r.r_text();
+    if (field_count > 10) { expect_key(r, 10); m.lot = dec_lot_link(r); }
+    check_paid_source(m.basis, m.src, m.lot, "Material");
     return m;
 }
 
-Tool dec_tool_fields(CborReader& r) {
+Tool dec_tool_fields(CborReader& r, uint64_t field_count) {
+    if (field_count < 10 || field_count > 11)
+        throw CodecError("Tool: expected 10..11 fields");
     Tool t{};
     expect_key(r, 1); t.name   = r.r_text();
     expect_key(r, 2); t.desc   = r.r_text();
@@ -1077,6 +1105,8 @@ Tool dec_tool_fields(CborReader& r) {
     expect_key(r, 7); t.src    = dec_opt_ref(r);
     expect_key(r, 8); t.origin = dec_opt_ref(r);
     expect_key(r, 9); t.note   = r.r_text();
+    if (field_count > 10) { expect_key(r, 10); t.lot = dec_lot_link(r); }
+    check_paid_source(t.basis, t.src, t.lot, "Tool");
     return t;
 }
 
@@ -1382,8 +1412,8 @@ Record Codec::decode(const uint8_t* data, size_t len) {
         case RecordType::WorkRecord:  return dec_work_record_fields(r, field_count);
         case RecordType::Release:     return dec_release_fields(r, field_count);
         case RecordType::WriteOff:    return dec_write_off_fields(r, field_count);
-        case RecordType::Material:    return dec_material_fields(r);
-        case RecordType::Tool:        return dec_tool_fields(r);
+        case RecordType::Material:    return dec_material_fields(r, field_count);
+        case RecordType::Tool:        return dec_tool_fields(r, field_count);
         case RecordType::Transfer:    return dec_transfer_fields(r, field_count);
         case RecordType::Pledge:      return dec_pledge_fields(r);
         case RecordType::PledgeRevoke: return dec_pledge_revoke_fields(r);

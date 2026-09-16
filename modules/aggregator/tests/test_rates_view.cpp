@@ -1101,3 +1101,91 @@ TEST_F(RatesViewTest, ARentPaysExactlyTheWear) {
     ASSERT_EQ(h->second.size(), 1u);
     EXPECT_NEAR(h->second[0].cost, 95.0, 1e-9);
 }
+
+// Купленное — в своё производство (records.md §10.1 v3): Боб покупает 100 кг муки
+// за 10 и заводит 40 кг записью материала. Стоимость такой записи не объявляют —
+// это доля уплаченного; завышенная не признаётся. Что ушло в производство, того
+// уже не перепродать: звенья считаются в одной подниточке покупки.
+TEST_F(RatesViewTest, BoughtGoodsGoIntoProduction) {
+    const UserId carol = make_chain(0xC7);
+    records::WorkRecord mill{};
+    mill.hours   = 10.0;
+    mill.outputs = {{"мука", 100.0, "кг", std::nullopt, 10.0}};
+    mill.axes    = {{test_axis(), 1.0}};
+    const Block work = add(alice_, mill);
+
+    records::Release rl{};
+    rl.work      = ref_to(alice_, work);
+    rl.to        = bob_.bytes;
+    rl.timestamp = kDay;
+    rl.expires   = kDay + 1000;
+    records::LotLink lot{};
+    lot.qty   = 100;
+    lot.after = 100;
+    rl.lot    = lot;
+    const Block rb = add(alice_, rl);
+    records::Acceptance a{};
+    a.work        = ref_to(alice_, work);
+    a.release     = ref_to(alice_, rb);
+    a.hours_raw   = 10.0;
+    a.labor_units = 10.0;
+    a.axes        = {{test_axis(), 10.0}};
+    records::Transfer t{};
+    t.from      = bob_.bytes;
+    t.to        = alice_.bytes;
+    t.origins   = { {bob_.bytes, 10.0} };
+    t.accept    = a;
+    t.timestamp = kDay + 100;
+    const Block bought = add(bob_, t);
+
+    const auto take = [&](double qty, double cost, uint64_t seq,
+                          std::optional<records::Ref> prev, double after) {
+        records::Material m{};
+        m.name  = "мука";
+        m.unit  = "кг";
+        m.basis = "paid";
+        m.src   = ref_to(bob_, bought);
+        m.cost  = cost;
+        m.qty   = qty;
+        records::LotLink l{};
+        l.qty   = qty;
+        l.seq   = seq;
+        l.prev  = prev;
+        l.after = after;
+        m.lot   = l;
+        return add(bob_, m);
+    };
+    const Block honest = take(40, 4.0, 0, std::nullopt, 40);          // ровно доля уплаченного
+    const Block padded = take(10, 8.0, 1, ref_to(bob_, honest), 50);  // стоимость завышена
+
+    // Перепродать больше, чем осталось после производства, нельзя.
+    records::Release resale{};
+    resale.work      = ref_to(alice_, work);
+    resale.holding   = ref_to(bob_, bought);
+    resale.to        = carol.bytes;
+    resale.timestamp = kDay + 300;
+    resale.expires   = kDay + 2000;
+    records::LotLink rlk{};
+    rlk.qty   = 60;
+    rlk.seq   = 2;
+    rlk.prev  = ref_to(bob_, padded);
+    rlk.after = 110;
+    resale.lot = rlk;
+    const Block over = add(bob_, resale);
+
+    const auto deals = read_deals(*storage_);
+    const auto bought_hash = Crypto::hash_block(bought).bytes;
+    ASSERT_EQ(deals.assets.size(), 2u);
+    for (const auto& as : deals.assets) {
+        if (as.hash == Crypto::hash_block(honest).bytes) EXPECT_TRUE(as.sound);
+        if (as.hash == Crypto::hash_block(padded).bytes) EXPECT_FALSE(as.sound);
+    }
+    const auto lots = holding_summaries(deals, bought_hash);
+    ASSERT_EQ(lots.size(), 1u);
+    EXPECT_NEAR(lots[0].consumed, 50.0, 1e-9);     // 40 + 10 ушли в производство
+    EXPECT_NEAR(lots[0].remaining, 50.0, 1e-9);
+    EXPECT_EQ(lots[0].sold, 0.0);
+    const auto st = deals.lots.find({bought_hash, 0});
+    ASSERT_NE(st, deals.lots.end());
+    EXPECT_TRUE(st->second.invalid.count(Crypto::hash_block(over).bytes));
+}

@@ -79,6 +79,7 @@ struct ObservedLotLink {
     int64_t                 timestamp = 0;   // the record's own
     std::optional<int64_t>  expires;         // releases only — a write-off is final
     bool                    taken = false;   // a release some addressed deal completed
+    bool                    asset = false;   // v3: взято в своё производство (records.md §10.1)
 };
 
 struct LotState {

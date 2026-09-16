@@ -2039,6 +2039,20 @@ static OwnLot own_lot(Context& ctx, const Ref& work, uint32_t out,
                 lot.portions = true;
                 if (wo->lot.out == out)
                     lot.links.push_back({hash, wo->lot, wo->timestamp, std::nullopt, false});
+            } else if (const auto* m = std::get_if<records::Material>(&rec);
+                       m && m->lot && holding && m->src && *m->src == *holding) {
+                // Взятое в своё производство — звено той же подниточки покупки
+                // (records.md §10.1 v3): что израсходовано, того уже не продать.
+                lot.portions = true;
+                if (m->lot->out == out)
+                    lot.links.push_back({hash, *m->lot, b.timestamp_claimed, std::nullopt,
+                                         false, true});
+            } else if (const auto* tl = std::get_if<records::Tool>(&rec);
+                       tl && tl->lot && holding && tl->src && *tl->src == *holding) {
+                lot.portions = true;
+                if (tl->lot->out == out)
+                    lot.links.push_back({hash, *tl->lot, b.timestamp_claimed, std::nullopt,
+                                         false, true});
             }
         }
     }
@@ -2565,8 +2579,10 @@ static int cmd_thread(const fs::path& data_dir, int argc, char** argv) {
                     std::cout << "      партия «" << jstr(y, "resource") << "» " << jnum(y, "qty")
                               << " " << jstr(y, "unit") << ": продано " << jnum(y, "sold")
                               << ", ждёт оплаты " << jnum(y, "reserved")
-                              << ", списано " << jnum(y, "written_off")
-                              << ", в запасе " << jnum(y, "remaining");
+                              << ", списано " << jnum(y, "written_off");
+                    if (jnum(y, "consumed") > 0)
+                        std::cout << ", в производство " << jnum(y, "consumed");
+                    std::cout << ", в запасе " << jnum(y, "remaining");
                     if (jnum(y, "faults") > 0)
                         std::cout << "  ✗ звеньев не сходится: " << jnum(y, "faults");
                     if (const auto* fu = jarr(y, "free_units"); fu && !fu->array.empty()) {
@@ -2650,8 +2666,10 @@ static int cmd_stock(const fs::path& data_dir, int argc, char** argv) {
                 std::cout << "      «" << jstr(y, "resource") << "» " << jnum(y, "qty") << " "
                           << jstr(y, "unit") << " за " << jnum(y, "cost") << " стч: перепродано "
                           << jnum(y, "sold") << ", ждёт оплаты " << jnum(y, "reserved")
-                          << ", списано " << jnum(y, "written_off") << ", в запасе "
-                          << jnum(y, "remaining");
+                          << ", списано " << jnum(y, "written_off");
+                if (jnum(y, "consumed") > 0)
+                    std::cout << ", в производство " << jnum(y, "consumed");
+                std::cout << ", в запасе " << jnum(y, "remaining");
                 if (const auto* fu = jarr(y, "free_units"); fu && !fu->array.empty()) {
                     std::cout << "; номера:";
                     for (std::size_t i = 0; i < fu->array.size() && i < 8; ++i)
@@ -2665,17 +2683,60 @@ static int cmd_stock(const fs::path& data_dir, int argc, char** argv) {
 
 // ── bc tool — средства производства (ИР-011, records.md §10.2) ────────────────
 
+// Купленное — в своё производство (records.md §10.1 v3, ИР-023): запись материала
+// или средства производства заводится звеном подниточки своей покупки. Ни
+// стоимости, ни размера не объявляют: стоимость — доля уплаченного за взятое (как
+// при перепродаже), размер — само взятое. Что ушло в производство, то уже не
+// продать: звено считается в той же подниточке, что отпуски и списания.
+struct TakenFromPurchase {
+    records::LotLink lot;
+    double           cost = 0;
+    double           qty  = 0;
+    std::string      unit;
+    std::string      resource;
+};
+
+static TakenFromPurchase take_into_production(Context& ctx, const std::string& via,
+                                              const Ref& purchase, int argc, char** argv,
+                                              std::optional<double> qty,
+                                              std::vector<std::string> units, int64_t now) {
+    if (purchase.chain != ctx.user_id.bytes)
+        throw std::runtime_error("--paid: в своё производство заводят свою покупку");
+    const auto h = load_holding(ctx, via, purchase);
+    if (!h || h->lots.empty())
+        throw std::runtime_error("--paid: своей покупки не прочесть или в ней нет партии — "
+                                 "нужен --via (records.md §10.1)");
+    const auto& hl = pick_holding_lot(h->lots, flag_val(argc, argv, "--out"));
+    const auto& o  = h->work.outputs[hl.out];
+    TakenFromPurchase t{};
+    t.lot = take_from_lot(ctx, via, h->deal.accept->work, purchase,
+                          LotView{hl.out, hl.qty, hl.units, o.resource, o.unit},
+                          qty, std::move(units), now);
+    t.cost     = records::resale_price(hl, t.lot.qty);
+    t.qty      = t.lot.qty;
+    t.unit     = o.unit;
+    t.resource = o.resource;
+    std::cerr << "из своей покупки " << short_hex(purchase.hash) << ": " << qty_str(t.qty)
+              << " " << t.unit << " «" << t.resource << "» за " << t.cost
+              << "ч — доля уплаченного, без наценки; из купленных " << qty_str(hl.qty)
+              << " осталось " << qty_str(hl.qty - t.lot.after)
+              << " (records.md §10.1)\n";
+    return t;
+}
+
 // bc tool add ИМЯ --cost H --life HOURS [--serial S] [--desc T] [--note T]
 //             [--paid ACC_REF] [--origin TOOL_REF] [--leaf L] [--via URL]
 static int cmd_tool_add(const fs::path& data_dir, int argc, char** argv) {
     const auto pos    = get_positionals(argc, argv);
     const auto cost_s = flag_val(argc, argv, "--cost");
     const auto life_s = flag_val(argc, argv, "--life");
-    if (pos.size() < 3 || cost_s.empty() || life_s.empty()) {
+    const auto paid_s = flag_val(argc, argv, "--paid");
+    if (pos.size() < 3 || life_s.empty() || (paid_s.empty() && cost_s.empty())) {
         std::cerr <<
             "Usage: bc tool add ИМЯ --cost ТРУДОЧАСЫ --life ЧАСЫ_РЕСУРСА\n"
             "   [--serial S] [--desc TEXT] [--note TEXT]\n"
-            "   [--paid ACCEPT_REF]   куплен в системе — приёмка покупки\n"
+            "   [--paid ПОКУПКА]      взять из своей покупки: --paid ССЫЛКА\n"
+            "                         [--out N] [--units НОМЕР] — стоимость из сделки\n"
             "   [--origin TOOL_REF]   перевыпуск: перепродажа / переоценка вниз /\n"
             "                         повторный ввод (cost ≤ остатка предыдущей)\n"
             "   [--leaf L] [--via URL]\n"
@@ -2687,22 +2748,38 @@ static int cmd_tool_add(const fs::path& data_dir, int argc, char** argv) {
     t.name   = pos[2];
     t.desc   = flag_val(argc, argv, "--desc");
     t.serial = flag_val(argc, argv, "--serial");
-    t.cost   = std::stod(cost_s);
     t.life   = std::stod(life_s);
     t.note   = flag_val(argc, argv, "--note");
-    const auto paid_s   = flag_val(argc, argv, "--paid");
     const auto origin_s = flag_val(argc, argv, "--origin");
     t.basis = paid_s.empty() ? "est" : "paid";
-    if (!paid_s.empty())   t.src    = parse_ref(paid_s);
     if (!origin_s.empty()) t.origin = parse_ref(origin_s);
+
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+
+    if (!paid_s.empty()) {
+        // Куплен в системе (records.md §10.2 v3): стоимость — доля уплаченного за
+        // взятое, звеном подниточки своей покупки; ресурс `life` оценивает хозяин.
+        if (!cost_s.empty())
+            throw std::runtime_error("--cost с --paid не задают: стоимость — доля уплаченного "
+                                     "за взятое (records.md §10.2)");
+        t.src = parse_ref(paid_s);
+        const auto units = split_list(flag_val(argc, argv, "--units"));
+        const auto taken = take_into_production(
+            ctx, flag_val(argc, argv, "--via"), *t.src, argc, argv,
+            units.empty() ? std::optional<double>{1.0} : std::optional<double>{},
+            units, static_cast<int64_t>(std::time(nullptr)));
+        t.lot  = taken.lot;
+        t.cost = taken.cost;
+        if (t.serial.empty() && !taken.lot.units.empty()) t.serial = taken.lot.units.front();
+    } else {
+        t.cost = std::stod(cost_s);
+    }
     if (t.cost <= 0 || t.life <= 0)
         throw std::runtime_error("--cost и --life должны быть положительными");
     if (t.basis == "est" && t.note.empty())
         std::cerr << "предупреждение: est без --note — покупателю не из чего "
                      "проверить оценку\n";
-
-    const NodeIndex leaf = parse_leaf_index(argc, argv);
-    Context ctx(data_dir, leaf);
 
     // Reissue ceiling (records.md §10.2): new cost ≤ previous remainder.
     // Enforceable locally only for an own origin; a foreign seller's thread
@@ -2747,11 +2824,14 @@ static int cmd_material_add(const fs::path& data_dir, int argc, char** argv) {
     const auto unit_s = flag_val(argc, argv, "--unit");
     const auto cost_s = flag_val(argc, argv, "--cost");
     const auto qty_s  = flag_val(argc, argv, "--qty");
-    if (pos.size() < 3 || unit_s.empty() || cost_s.empty() || qty_s.empty()) {
+    const auto paid_s = flag_val(argc, argv, "--paid");
+    if (pos.size() < 3 || (paid_s.empty() && (unit_s.empty() || cost_s.empty() || qty_s.empty()))
+        || (!paid_s.empty() && qty_s.empty())) {
         std::cerr <<
             "Usage: bc material add ИМЯ --unit ЕД --cost ТРУДОЧАСЫ --qty РАЗМЕР\n"
             "   [--desc TEXT] [--note TEXT]\n"
-            "   [--paid ACCEPT_REF]   куплена в системе — приёмка покупки\n"
+            "   [--paid ПОКУПКА]      взять из своей покупки: --paid ССЫЛКА --qty КОЛ\n"
+            "                         [--out N] — стоимость и размер из самой сделки\n"
             "   [--origin MAT_REF]    перевыпуск (cost ≤ остатка предыдущей)\n"
             "   [--leaf L] [--via URL]\n"
             "Партия расходуется в работе флагом: bc work log ... "
@@ -2764,22 +2844,36 @@ static int cmd_material_add(const fs::path& data_dir, int argc, char** argv) {
     m.name = pos[2];
     m.unit = unit_s;
     m.desc = flag_val(argc, argv, "--desc");
-    m.cost = std::stod(cost_s);
-    m.qty  = std::stod(qty_s);
     m.note = flag_val(argc, argv, "--note");
-    const auto paid_s   = flag_val(argc, argv, "--paid");
     const auto origin_s = flag_val(argc, argv, "--origin");
     m.basis = paid_s.empty() ? "est" : "paid";
-    if (!paid_s.empty())   m.src    = parse_ref(paid_s);
     if (!origin_s.empty()) m.origin = parse_ref(origin_s);
+
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+
+    if (!paid_s.empty()) {
+        // Купленное — в своё производство (records.md §10.1 v3): числа из сделки.
+        if (!cost_s.empty())
+            throw std::runtime_error("--cost с --paid не задают: стоимость — доля уплаченного "
+                                     "за взятое (records.md §10.1)");
+        m.src = parse_ref(paid_s);
+        const auto t = take_into_production(ctx, flag_val(argc, argv, "--via"), *m.src,
+                                            argc, argv, std::stod(qty_s), {},
+                                            static_cast<int64_t>(std::time(nullptr)));
+        m.lot  = t.lot;
+        m.cost = t.cost;
+        m.qty  = t.qty;
+        if (m.unit.empty()) m.unit = t.unit;
+    } else {
+        m.cost = std::stod(cost_s);
+        m.qty  = std::stod(qty_s);
+    }
     if (m.cost <= 0 || m.qty <= 0)
         throw std::runtime_error("--cost и --qty должны быть положительными");
     if (m.basis == "est" && m.note.empty())
         std::cerr << "предупреждение: est без --note — покупателю не из чего "
                      "проверить оценку\n";
-
-    const NodeIndex leaf = parse_leaf_index(argc, argv);
-    Context ctx(data_dir, leaf);
 
     // Reissue ceiling (records.md §10.2): new cost ≤ previous remainder —
     // enforceable locally only for an own origin.

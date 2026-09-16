@@ -61,6 +61,19 @@ struct WriteOffEntry {
 // the output's index — or one lot of a purchase sold on (v4) — the purchase's
 // deal hash and the product's output index.
 using LotKey = std::pair<std::array<uint8_t, 32>, uint32_t>;
+// Купленное, заведённое в своё производство (records.md §10.1 v3, ИР-023):
+// запись материала или средства производства, взятая звеном подниточки своей
+// покупки. Стоимость такой записи не объявляют — это доля уплаченного за взятое.
+struct AssetEntry {
+    std::array<uint8_t, 32> hash{};        // the Material or Tool block
+    UserId                  owner;
+    records::Ref            src;           // the purchase it was taken from
+    records::LotLink        lot;
+    double                  cost = 0;      // what the record claims
+    int64_t                 timestamp = 0; // the block's own time
+    bool                    sound = false; // the claim checks out against the deal
+};
+
 
 struct DealsOnTable {
     std::vector<DealEntry>   all;          // every deal in the storage, in block-hash order
@@ -77,6 +90,8 @@ struct DealsOnTable {
     std::map<std::array<uint8_t, 32>, std::vector<records::HoldingLot>> holdings;
     // Purchases bought back by their addressee on the pre-signed return (v5).
     std::set<std::array<uint8_t, 32>> bought_back;
+    // Записи средств производства и материалов, заведённые своей покупкой (v3).
+    std::vector<AssetEntry> assets;
 
     // The deal that counts for its result: statistics read only these.
     bool counts(const std::array<uint8_t, 32>& deal) const {
@@ -109,6 +124,7 @@ struct LotSummary {
     double      qty = 0;          // the output's size
     double      sold = 0;         // portions a deal paid for
     double      written_off = 0;  // write-offs
+    double      consumed = 0;     // v3: взято в своё производство (records.md §10.1)
     double      reserved = 0;     // released and not yet paid for (live, or expired and not returned)
     double      remaining = 0;    // still in stock
     std::size_t faults = 0;       // links of the lot that do not check out

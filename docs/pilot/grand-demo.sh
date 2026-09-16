@@ -396,6 +396,12 @@ OUT_st="$(bcp vera accept --work "${CID[dmitry]}/$W_stools" --quality "креп�
 echo "$OUT_st" | sed 's/^/   /'
 STOOL_vera="$(printf '%s\n' "$OUT_st" | after 'acceptance ref: ')"
 bcp dmitry thread --via "$VIA" | sed 's/^/   /'
+say "Галина берёт Т-3 в салон и заводит его средством производства — стоимость из самой сделки"
+bcp dmitry release "$W_stools" --to "${CID[galina]}" --units Т-3 --days 2 --via "$VIA" 2>&1 | sed 's/^/   /'
+OUT_st3="$(bcp galina accept --work "${CID[dmitry]}/$W_stools" --quality "крепкий" --via "$VIA" 2>&1)"
+echo "$OUT_st3" | sed 's/^/   /'
+STOOL_galina="$(printf '%s\n' "$OUT_st3" | after 'acceptance ref: ')"
+bcp galina tool add "Табурет Т-3" --paid "$STOOL_galina" --life 2000 --via "$VIA" 2>&1 | sed 's/^/   /'
 
 hr "перепродажа: Борис отдаёт 2 пирога Галине по цене покупки (bc release ПОКУПКА, records.md §9.8)"
 say "серийник прежний — путь к записи, где пироги испекла Анна; цена — доля уплаченного, без наценки"
@@ -439,6 +445,25 @@ else
 fi
 say "у Ирины снова палатка — уже по остатку — и бумага Бориса на износ: ровно то, что было"
 bcp irina stock --via "$VIA" | sed 's/^/   /'
+
+hr "купленное — в своё производство: Анна берёт купленную муку в выпечку (records.md §10.1)"
+say "Семён мелет 50 кг муки и отпускает Анне 20 кг по ценнику; Анна заводит их записью материала"
+say "стоимость материала не объявляют — это доля уплаченного за взятое, прямо из сделки"
+W_flour=$(bcp semen work log --title "мельник" --action "Мука пшеничная" --hours 2 \
+          --output "мука:50:кг::k=1" --axis-share "$(axis physical)=1" --via "$VIA" | after 'hash: ')
+bcp semen release "$W_flour" --to "${CID[anna]}" --qty 20 --days 1 --via "$VIA" 2>&1 | sed 's/^/   /'
+OUT_fl="$(bcp anna accept --work "${CID[semen]}/$W_flour" --quality "сухая" --via "$VIA" 2>&1)"
+echo "$OUT_fl" | sed 's/^/   /'
+FLOUR_anna="$(printf '%s\n' "$OUT_fl" | after 'acceptance ref: ')"
+OUT_mat="$(bcp anna material add "Мука пшеничная" --paid "$FLOUR_anna" --qty 20 --via "$VIA" 2>&1)"
+echo "$OUT_mat" | sed 's/^/   /'
+MAT_anna="$(printf '%s\n' "$OUT_mat" | after 'material ref: ')"
+say "теперь мука — материал Анны: 12 кг уходит в булочки, перенос стоимости считается сам"
+bcp anna work log --title "повар, 5-й разряд" --action "Булочки из купленной муки" --hours 1 \
+    --start "$(( NOW - 43200 ))" --output "булочка:20:шт::k=1" \
+    --material "${MAT_anna#*/}:12" --axis-share "$(axis physical)=1" --via "$VIA" 2>&1 | sed 's/^/   /'
+say "склад Анны: купленные 20 кг целиком заведены в производство — продавать из них уже нечего"
+bcp anna stock --via "$VIA" | sed 's/^/   /'
 
 hr "облако образцов работ — из сделок, а не из каталога (bc cloud, ИР-022)"
 say "точка — образец, который повторили; место — из чего сложилась цена его семьи."
@@ -629,6 +654,10 @@ else echo "   ✓ купленное с адресом продаёт тольк
 if bcp boris release "$TENT_boris" --to "${CID[galina]}" --qty 1 --via "$VIA" >/dev/null 2>&1; then
     echo "   ✗ арендатор продал арендованное"; fail=1
 else echo "   ✓ арендованное не продать (records.md §9.8)"; fi
+# заведённое в своё производство не перепродать (records.md §10.1)
+if bcp anna release "$FLOUR_anna" --to "${CID[boris]}" --qty 5 --via "$VIA" >/dev/null 2>&1; then
+    echo "   ✗ перепродано то, что ушло в производство"; fail=1
+else echo "   ✓ заведённое в производство не перепродать (records.md §10.1)"; fi
 # переоценка печи ВВЕРХ обязана отклониться (перевыпуск только вниз)
 if bcp anna tool add "Печь подовая" --cost 400 --life 8000 --origin "$TOOL" --note "хочу дороже" >/dev/null 2>&1; then
     echo "   ✗ переоценка вверх прошла, а должна была отклониться"; fail=1

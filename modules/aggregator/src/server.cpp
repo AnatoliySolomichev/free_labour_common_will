@@ -164,6 +164,7 @@ std::string lot_json(const aggregator::LotSummary& l, const records::ResourceQty
          + "\",\"qty\":" + std::to_string(l.qty) + ",\"unit\":\"" + json_escape(o.unit)
          + "\",\"sold\":" + std::to_string(l.sold)
          + ",\"written_off\":" + std::to_string(l.written_off)
+         + ",\"consumed\":" + std::to_string(l.consumed)
          + ",\"reserved\":" + std::to_string(l.reserved)
          + ",\"remaining\":" + std::to_string(l.remaining)
          + ",\"faults\":" + std::to_string(l.faults)

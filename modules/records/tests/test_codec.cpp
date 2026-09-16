@@ -1242,3 +1242,26 @@ TEST(RecordsCodec, OutputServiceLifeRoundtrip) {
     wr.inputs[0].life = 600.0;                                         // у входа — нет
     EXPECT_THROW(Codec::encode(Record{wr}), CodecError);
 }
+
+// Купленное — в своё производство (records.md §10.1 v3): звено партии бывает
+// только у купленного, а «оценка владельца» на покупку не ссылается.
+TEST(RecordsCodec, MaterialTakenFromAPurchase) {
+    Material m{};
+    m.name  = "мука";
+    m.unit  = "кг";
+    m.cost  = 4.0;
+    m.qty   = 40.0;
+    m.basis = "paid";
+    m.src   = make_ref(0xB2, 0x11);          // своя покупка
+    LotLink l{};
+    l.qty   = 40.0;
+    l.after = 40.0;
+    m.lot   = l;
+    EXPECT_EQ(std::get<Material>(roundtrip(Record{m})).lot, m.lot);
+
+    m.src.reset();                            // звено без покупки
+    EXPECT_THROW(Codec::encode(Record{m}), CodecError);
+    m.src   = make_ref(0xB2, 0x11);
+    m.basis = "est";                          // оценка не ссылается на покупку
+    EXPECT_THROW(Codec::encode(Record{m}), CodecError);
+}

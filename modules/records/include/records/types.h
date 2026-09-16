@@ -437,6 +437,10 @@ struct Material {
     std::optional<Ref> src;     // paid: the purchase — the Transfer carrying its acceptance
     std::optional<Ref> origin;  // previous record of this batch (reissue)
     std::string        note;    // est: how the estimate was made; may be empty
+    // v3 (ИР-023): купленное — в своё производство. The link of the purchase's
+    // lot sub-thread this batch was taken by: what is spent into production is
+    // no longer for sale, and the cost comes from the deal (records.md §10.1).
+    std::optional<LotLink> lot;
 };
 
 // A tool/equipment instance with cost and design life (records.md §10.2). Wear carries
@@ -454,6 +458,9 @@ struct Tool {
     std::optional<Ref> src;     // paid: the purchase — the Transfer carrying its acceptance
     std::optional<Ref> origin;  // previous record of this instance (reissue)
     std::string        note;    // est: how the estimate was made; may be empty
+    // v3 (ИР-023): купленное — в своё производство, как у материала
+    // (records.md §10.2): звено подниточки покупки, которым взят этот экземпляр.
+    std::optional<LotLink> lot;
 };
 
 // ── Economy records (records.md §11) ─────────────────────────────────────────

@@ -42,7 +42,10 @@ LotSummary summarize(const DealsOnTable& deals, const LotKey& key, double qty,
         if (lot_key(w.writeoff.work, w.writeoff.holding, w.writeoff.lot.out) == key &&
             st.valid.count(w.hash))
             s.written_off += w.writeoff.lot.qty;
-    s.reserved = std::max(0.0, st.used - s.sold - s.written_off);
+    for (const auto& a : deals.assets)
+        if (LotKey{a.src.hash, a.lot.out} == key && st.valid.count(a.hash))
+            s.consumed += a.lot.qty;
+    s.reserved = std::max(0.0, st.used - s.sold - s.written_off - s.consumed);
     for (const auto& u : units)
         if (!st.held.count(u)) s.free_units.push_back(u);
     return s;
@@ -77,6 +80,16 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
             const auto& seller = wo->holding ? wo->holding->chain : wo->work.chain;
             if (seller != owner.bytes) continue;           // only one's own lot is written off
             out.writeoffs.push_back(WriteOffEntry{bh.bytes, owner, *wo});
+        } else if (const auto* m = std::get_if<records::Material>(&rec)) {
+            // Купленное — в своё производство (records.md §10.1 v3): запись заведена
+            // звеном подниточки своей же покупки.
+            if (m->src && m->lot && m->src->chain == owner.bytes)
+                out.assets.push_back({bh.bytes, owner, *m->src, *m->lot, m->cost,
+                                      block->timestamp_claimed, false});
+        } else if (const auto* tl = std::get_if<records::Tool>(&rec)) {
+            if (tl->src && tl->lot && tl->src->chain == owner.bytes)
+                out.assets.push_back({bh.bytes, owner, *tl->src, *tl->lot, tl->cost,
+                                      block->timestamp_claimed, false});
         } else if (const auto* t = std::get_if<records::Transfer>(&rec)) {
             if (!t->accept) continue;
             if (t->from != owner.bytes) continue;          // spoofed sender
@@ -202,6 +215,20 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
         if (state[i] == 1)
             if (auto lots = lots_of(i); !lots.empty()) out.holdings[out.all[i].hash] = std::move(lots);
 
+    // Стоимость купленного, заведённого в производство (records.md §10.1 v3): её
+    // не объявляют — это доля уплаченного за взятое, как при перепродаже. Запись
+    // с завышенной стоимостью не признаётся: перенос из неё был бы насосом (ИР-011).
+    for (auto& a : out.assets) {
+        const auto d = deal_at.find(a.src.hash);
+        if (d == deal_at.end() || out.all[d->second].payer.bytes != a.src.chain) continue;
+        if (state[d->second] != 1) continue;              // покупки не было
+        const auto h = out.holdings.find(a.src.hash);
+        if (h == out.holdings.end()) continue;
+        for (const auto& hl : h->second)
+            if (hl.out == a.lot.out)
+                a.sound = std::abs(a.cost - records::resale_price(hl, a.lot.qty)) <= 1e-6;
+    }
+
     // Lots (records.md §9.8): outputs sold in portions and purchases sold on,
     // every sub-thread checked. A link counts toward a lot only when its author
     // is that lot's seller — nobody writes into someone else's lot.
@@ -219,6 +246,12 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
             lot_links[lot_key(r.release.work, r.release.holding, r.release.lot->out)].push_back(
                 {r.hash, *r.release.lot, r.release.timestamp, r.release.expires,
                  out.taken.count(r.hash) > 0});
+    for (const auto& a : out.assets) {   // взятое в производство — звено той же подниточки
+        const auto d = deal_at.find(a.src.hash);
+        if (d != deal_at.end() && out.all[d->second].payer.bytes != a.src.chain) continue;
+        lot_links[{a.src.hash, a.lot.out}].push_back(
+            {a.hash, a.lot, a.timestamp, std::nullopt, false, true});
+    }
     for (const auto& w : out.writeoffs)
         if (belongs(w.writeoff.work, w.writeoff.holding))
             lot_links[lot_key(w.writeoff.work, w.writeoff.holding, w.writeoff.lot.out)].push_back(
