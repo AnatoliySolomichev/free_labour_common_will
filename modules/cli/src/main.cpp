@@ -1852,6 +1852,14 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
         if (!hl)
             throw std::runtime_error("перепродажа: покупки держателя не найти или в ней нет "
                                      "такой партии — нужен --via");
+        // Покупка с адресом (records.md §9.8 v5): до срока её продают только адресату,
+        // и чужая покупка тут ничтожна — часы ушли бы впустую.
+        if (const auto& b = h->deal.accept->buyback)
+            if (now < b->until && b->to != ctx.user_id.bytes)
+                throw std::runtime_error("эта вещь под выкупом с адресом: до " +
+                                         std::to_string(b->until) + " её продают только " +
+                                         short_hex(b->to) + " — такая сделка ничтожна "
+                                         "(records.md §9.8)");
         resale_units = records::resale_price(*hl, release->lot->qty);
         std::cerr << "перепродажа: " << qty_str(release->lot->qty) << " из купленных "
                   << "держателем " << qty_str(hl->qty) << " — по цене покупки: " << resale_units
@@ -4005,6 +4013,12 @@ static int cmd_transfer_recv(const fs::path& data_dir, int argc, char** argv) {
         if (release && release->holding) {
             // Перепродажа своей покупки (records.md §9.8 v4) — по цене покупки.
             const auto h = load_holding(ctx, via, *release->holding);
+            if (h)
+                if (const auto& b = h->deal.accept->buyback)
+                    if (t->timestamp < b->until && b->to != t->from)
+                        throw std::runtime_error("продано до срока выкупа с адресом и не "
+                                                 "адресату — сделка ничтожна, часы не "
+                                                 "принимаются (records.md §9.8)");
             const records::HoldingLot* hl = nullptr;
             if (h)
                 for (const auto& l : h->lots)

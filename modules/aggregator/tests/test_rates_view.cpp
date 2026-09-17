@@ -997,10 +997,9 @@ TEST_F(RatesViewTest, AddressedBuyoutAndPreSignedReturn) {
     const auto held_hash = Crypto::hash_block(held).bytes;
     EXPECT_FALSE(deals.moves_hours(unsigned_buy));               // без возврата — ничтожна
     EXPECT_TRUE(deals.counts(held_hash));                        // с возвратом — сделка
-    // До срока — только Алисе: отпуск Боба Кэрол не признан, её часы ушли, но
-    // купленное не в счёт — как порция сверх партии.
-    EXPECT_TRUE(deals.recognition.unsound.count(carol_buy));
-    EXPECT_FALSE(deals.recognition.resold.count(carol_buy));
+    // До срока — только Алисе: покупка Кэрол ничтожна, часы у неё и остались
+    // (решение участника 2026-09-16: препятствие видно покупателю заранее).
+    EXPECT_FALSE(deals.moves_hours(carol_buy));
     EXPECT_TRUE(deals.recognition.resold.count(back));           // выкуп — перенос
     EXPECT_TRUE(deals.bought_back.count(held_hash));
     EXPECT_TRUE(deals.recognition.resold.count(from_maker));     // мастер-держатель перепродал

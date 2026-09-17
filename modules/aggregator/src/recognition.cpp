@@ -181,6 +181,19 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
                     if (hl.out == release->lot->out)
                         ok = records::addressed_to(d.transfer, std::nullopt, release) &&
                              records::meets_resale(a, records::resale_price(hl, release->lot->qty));
+            // Покупка с адресом (records.md §9.8 v5, решение участника 2026-09-16):
+            // до срока её продают только адресату, а выкупленную — никому. Такая
+            // сделка ничтожна, а не просто несостоятельна: препятствие видно
+            // покупателю заранее, часы ему терять не за что.
+            if (ok && h)
+                if (const auto& b = out.all[*h].accept().buyback) {
+                    if (release->timestamp < b->until && release->to != b->to) {
+                        ok = false;
+                    } else {
+                        for (std::size_t j = 0; j < n && ok; ++j)
+                            if (buyback_of[j] && *buyback_of[j] == *h && addressed(j)) ok = false;
+                    }
+                }
         } else {
             const auto w = out.works.find(a.work.hash);
             const bool here = w != out.works.end() && w->second.worker.bytes == a.work.chain;
