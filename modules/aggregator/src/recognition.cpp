@@ -216,9 +216,17 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
             std::optional<Hash32> customer;
             if (here) customer = w->second.record.customer;
             ok = records::addressed_to(d.transfer, customer, release);
-            // Приёмки без разбивки не существует (ИР-022): одним переносом у мастера
-            // покупают только то, что он держит, — перепродажей или выкупом.
-            if (a.axes.empty()) ok = false;
+            // Машино-часы (ИР-023, пункт 9): труда в такой записи нет — платят
+            // ровно записанный износ, и разбивать нечего; приёмка с трудом по ней
+            // лгала бы о часах, которых никто не работал.
+            if (here && records::is_machine_hours(w->second.record)) {
+                ok = ok && records::meets_machine_hours(a, w->second.record);
+            } else if (a.axes.empty()) {
+                // Приёмки без разбивки не существует (ИР-022): одним переносом у
+                // мастера покупают только то, что он держит, — перепродажей или
+                // выкупом.
+                ok = false;
+            }
             // A portion from stock is sold on the lot's terms — take it or leave
             // it (records.md §9.8 v3): a deal that pays otherwise completes nothing.
             if (ok && release && release->lot) {

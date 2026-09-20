@@ -155,6 +155,19 @@ double resale_price(const HoldingLot& lot, double qty) noexcept;
 // Whether an acceptance pays a resale exactly: carried cost only.
 bool meets_resale(const Acceptance& a, double price) noexcept;
 
+// ── Машино-часы: аренда по счётчику (ИР-023, пункт 9) ───────────────────────
+
+// Работа без часов, у которой есть только перенос: владелец продаёт не труд, а
+// износ своей вещи по счётчику. Часов в ней нет — и нить труда такая запись не
+// занимает (records.md §9.4 v8).
+bool is_machine_hours(const WorkRecord& w) noexcept;
+
+// Приёмка машино-часов — чистый перенос: труда нет, разбивать нечего, а цена
+// обязана в точности равняться износу, который владелец записал звеном нити
+// переноса. Показания счётчика подписаны обеими сторонами: владелец — записью,
+// арендатор — этой приёмкой.
+bool meets_machine_hours(const Acceptance& a, const WorkRecord& w) noexcept;
+
 // ── Addressed buyout, rent without rent (records.md §9.8 v5, v6; ИР-023, п. 8) ──
 
 // Whether a purchase honours the seller's addressed buyout: it pre-signs the

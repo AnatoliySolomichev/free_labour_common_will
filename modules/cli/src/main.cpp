@@ -140,7 +140,7 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--tool", "--cost", "--life", "--serial", "--desc", "--note", "--paid",
     "--material", "--unit", "--qty",
     "--buyback-to", "--buyback-days", "--buyback-until", "--buyback-of",
-    "--improves", "--repair", "--spend",
+    "--improves", "--repair", "--spend", "--machine-hours", "--meter",
 };
 
 // True when a standalone flag (no value) is present.
@@ -2084,6 +2084,18 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
         if (a.carried_units)
             std::cerr << "перенос средств производства: " << *a.carried_units
                       << "ч (доля порции)\n";
+    } else if (work && records::is_machine_hours(*work)) {
+        // Машино-часы (ИР-023, пункт 9): труда в записи нет, цена — износ, который
+        // владелец записал звеном нити переноса; подписывая приёмку, мы соглашаемся
+        // и с показаниями счётчика.
+        double worn = 0.0;
+        for (const auto& ce : work->carry) worn += ce.carried;
+        a.hours_raw     = 0.0;
+        a.labor_units   = 0.0;
+        a.carried_units = worn;
+        a.axes.clear();
+        std::cerr << "машино-часы: плачу износ " << worn << "ч — труда в этой записи нет "
+                     "(records.md §9.4)\n";
     } else {
         // Изделие, в которое ушла своя продукция (records.md §9.4 v7): по умолчанию
         // цена складывается из часов всех работ; свои условия покупателя — как всегда.
@@ -2449,6 +2461,66 @@ static const records::HoldingLot& pick_holding_lot(const std::vector<records::Ho
 // whole, or a portion of one of its lots — to a named buyer. Only that buyer's
 // deal completes it, and only before the term; without it (or a customer on the
 // work itself) a deal on the work is void.
+// bc hire ИНСТРУМЕНТ --to ЦЕПЬ --machine-hours N [--meter TEXT] [--days D]
+// Аренда по счётчику (ИР-023, пункт 9): владелец не отдаёт вещь в собственность,
+// а продаёт её износ — машино-часы. Труда в такой записи нет: цена равна износу,
+// записанному звеном нити переноса. Показания счётчика подписывают обе стороны —
+// владелец этой записью, арендатор приёмкой. Риск поломки остаётся на владельце,
+// большого кредита арендатору не нужно.
+static int cmd_hire(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos  = get_positionals(argc, argv);
+    const auto to_s = flag_val(argc, argv, "--to");
+    const auto mh_s = flag_val(argc, argv, "--machine-hours");
+    if (pos.size() < 2 || to_s.empty() || mh_s.empty()) {
+        std::cerr <<
+            "Usage: bc hire ИНСТРУМЕНТ --to ЦЕПЬ --machine-hours ЧАСЫ\n"
+            "   [--meter TEXT]  показания счётчика, как они сняты («1240→1248»)\n"
+            "   [--days N] [--leaf L] [--via URL]\n"
+            "  продать износ своей вещи по счётчику (ИР-023): труда в записи нет,\n"
+            "  цена — записанный износ; арендатор платит его и заводит часы\n"
+            "  материалом (bc material add --paid), а риск поломки остаётся на вас.\n";
+        return 1;
+    }
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+    const double used = std::stod(mh_s);
+    if (!(used > 0.0)) throw std::runtime_error("--machine-hours: часов должно быть больше нуля");
+
+    const auto meter = flag_val(argc, argv, "--meter");
+    WorkRecord wr{};
+    wr.action   = meter.empty() ? "машино-часы" : "машино-часы (счётчик " + meter + ")";
+    wr.hours    = 0.0;                       // труда здесь нет — только износ
+    wr.start_ts = static_cast<int64_t>(std::time(nullptr));
+    wr.outputs.push_back(records::ResourceQty{"машино-часы", used, "маш·ч"});
+    attach_carry(ctx, wr, {pos[1] + ":" + mh_s});
+    if (wr.carry.empty())
+        throw std::runtime_error("износ не посчитан: средства производства с таким префиксом "
+                                 "в своей цепи нет — сперва bc tool add");
+    place_in_thread(ctx, wr, /*explicit_start=*/true);
+    const auto via = flag_val(argc, argv, "--via");
+    const Block wblock = append_record(ctx, Record{wr});
+    const Ref   work{ctx.user_id.bytes, Crypto::hash_block(wblock).bytes};
+    std::cout << "hire ref: " << to_hex(work.chain) << "/" << to_hex(work.hash) << "\n";
+    if (!via.empty()) upload_block(via, wblock);
+
+    records::Release rl{};
+    rl.work      = work;
+    rl.to        = uid_from_hex(to_s);
+    rl.timestamp = wr.start_ts;
+    rl.expires   = rl.timestamp + static_cast<int64_t>(
+                       std::stod(flag_val(argc, argv, "--days", "7")) * 86400.0);
+    const Block rblock = append_record(ctx, Record{rl});
+    std::cout << "release ref: " << to_hex(ctx.user_id.bytes) << "/"
+              << to_hex(Crypto::hash_block(rblock).bytes) << "\n";
+    double worn = 0.0;
+    for (const auto& ce : wr.carry) worn += ce.carried;
+    std::cerr << "машино-часы: " << qty_str(used) << " маш·ч → " << short_hex(rl.to)
+              << ", износ " << worn << "ч — это и есть цена; труда в записи нет "
+                 "(records.md §9.4)\n";
+    if (!via.empty()) upload_block(via, rblock);
+    return 0;
+}
+
 static int cmd_release(const fs::path& data_dir, int argc, char** argv) {
     const auto pos  = get_positionals(argc, argv);
     const auto to_s = flag_val(argc, argv, "--to");
@@ -6090,6 +6162,11 @@ Labor:
   writeoff WORK --qty Q --reason T  Write off part of a lot — spoiled, lost,
     [--out N] [--via URL]              used up (records.md §9.9); WORK may be
                                        an own purchase
+  hire TOOL --to CHAIN             Sell the wear of an own tool by the meter
+    --machine-hours N                  (ИР-023): the thing stays yours and so
+    [--meter TEXT] [--days N]          does the risk; there is no labor in the
+    [--via URL]                        record, and the price is the wear itself
+
   release PURCHASE --to CHAIN --qty Q  Resale (records.md §9.8): a portion of an
                                        own purchase at its share of the price
                                        paid — no markup; the serial stays the
@@ -6257,6 +6334,7 @@ int main(int argc, char** argv) {
         else if (cmd == "work"      && subcmd == "log")     return cmd_work_log(data_dir, argc, argv);
         else if (cmd == "accept")                           return cmd_accept(data_dir, argc, argv);
         else if (cmd == "release")                          return cmd_release(data_dir, argc, argv);
+        else if (cmd == "hire")                             return cmd_hire(data_dir, argc, argv);
         else if (cmd == "thread")                           return cmd_thread(data_dir, argc, argv);
         else if (cmd == "writeoff")                         return cmd_writeoff(data_dir, argc, argv);
         else if (cmd == "stock")                            return cmd_stock(data_dir, argc, argv);

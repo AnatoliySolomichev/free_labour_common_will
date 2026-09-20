@@ -482,6 +482,23 @@ W_table="$(printf '%s\n' "$OUT_tab" | after 'hash: ')"
 say "Галина принимает: час сборки и два часа ножек, по ценам дня каждой работы"
 bcp galina accept --work "${CID[dmitry]}/$W_table" --quality "ровный" --via "$VIA" 2>&1 | sed 's/^/   /'
 
+hr "аренда по счётчику: Дмитрий продаёт машино-часы верстака (ИР-023)"
+say "вещь и риск поломки остаются у Дмитрия; Борис покупает только износ, показания счётчика — в записи"
+OUT_hire="$(bcp dmitry hire "${TOOL2_H:0:12}" --to "${CID[boris]}" --machine-hours 4 \
+            --meter "1240→1244" --days 1 --via "$VIA" 2>&1)"
+echo "$OUT_hire" | sed 's/^/   /'
+W_hire="$(printf '%s\n' "$OUT_hire" | after 'hire ref: ')"
+OUT_mh="$(bcp boris accept --work "$W_hire" --quality "по счётчику" --via "$VIA" 2>&1)"
+echo "$OUT_mh" | sed 's/^/   /'
+MH_boris="$(printf '%s\n' "$OUT_mh" | after 'acceptance ref: ')"
+say "Борис заводит купленные часы материалом и тратит их в свою работу"
+OUT_mat="$(bcp boris material add "Машино-часы верстака" --paid "$MH_boris" --qty 4 --via "$VIA" 2>&1)"
+echo "$OUT_mat" | sed 's/^/   /'
+MAT_mh="$(printf '%s\n' "$OUT_mat" | after 'material ref: ')"
+bcp boris work log --title "электрик, 4-й разряд" --action "Щиток на верстаке" --hours 1 \
+    --start "$(( NOW - 21600 ))" --material "${MAT_mh#*/}:4" --for "${CID[galina]}" \
+    --axis-share "$(axis knowledge)=1" --via "$VIA" 2>&1 | sed 's/^/   /'
+
 hr "ремонт своего средства производства: печь дорожает ровно на оплаченный ремонт (ИР-015)"
 say "Борис меняет тэн в печи Анны на её заказ, Анна принимает работу и платит за неё"
 W_fix=$(bcp boris work log --title "электрик, 4-й разряд" --action "Замена тэна в печи" --hours 1 \

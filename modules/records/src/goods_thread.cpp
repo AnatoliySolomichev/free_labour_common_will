@@ -252,6 +252,19 @@ bool meets_resale(const Acceptance& a, double price) noexcept {
            std::abs(carried - price) <= 1e-6;
 }
 
+bool is_machine_hours(const WorkRecord& w) noexcept {
+    return w.hours == 0.0 && !w.carry.empty();
+}
+
+bool meets_machine_hours(const Acceptance& a, const WorkRecord& w) noexcept {
+    if (!is_machine_hours(w)) return false;
+    double worn = 0.0;
+    for (const auto& ce : w.carry) worn += ce.carried;
+    const double carried = a.carried_units ? *a.carried_units : 0.0;
+    return a.labor_units == 0.0 && a.hours_raw == 0.0 && a.axes.empty() && worn > 0.0 &&
+           std::abs(carried - worn) <= 1e-6;
+}
+
 std::optional<double> spent_hours(const WorkRecord& source, const LotLink& lot) noexcept {
     const auto part = portion_fraction(source, lot);
     if (!part) return std::nullopt;

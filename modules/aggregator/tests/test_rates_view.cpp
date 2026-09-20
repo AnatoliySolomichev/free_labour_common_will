@@ -1399,3 +1399,58 @@ TEST_F(RatesViewTest, OnlyAPaidRepairLiftsAToolsCost) {
     EXPECT_TRUE(deals.carry_sound(Crypto::hash_block(fixw).bytes));
     EXPECT_FALSE(deals.carry_sound(Crypto::hash_block(spoiled).bytes));
 }
+
+// Аренда по счётчику (ИР-023, пункт 9): Алиса продаёт износ своей печи — запись
+// без часов, в которой есть только перенос. Платят ровно износ; приёмка с трудом
+// по такой записи ничего не завершает — часов в ней никто не работал.
+TEST_F(RatesViewTest, MachineHoursArePaidAsWearOnly) {
+    records::Tool oven{};
+    oven.name  = "печь";
+    oven.cost  = 100.0;
+    oven.life  = 800.0;
+    oven.basis = "est";
+    oven.note  = "оценка владельца";
+    const Block tool = add(alice_, oven);
+
+    records::WorkRecord hire{};
+    hire.action  = "машино-часы (счётчик 1240→1244)";
+    hire.hours   = 0.0;                       // труда здесь нет
+    hire.outputs = {{"машино-часы", 4.0, "маш·ч"}};
+    records::CarryEntry ce{};
+    ce.src     = ref_to(alice_, tool);
+    ce.used    = 4.0;
+    ce.carried = 0.5;
+    ce.seq     = 0;
+    ce.after   = 0.5;
+    hire.carry.push_back(ce);
+    const Block hw = add(alice_, hire);
+
+    const auto sell = [&](double labor, double carried, int64_t at, uint8_t tag) {
+        records::Release rl{};
+        rl.work      = ref_to(alice_, hw);
+        rl.to        = bob_.bytes;
+        rl.timestamp = at;
+        rl.expires   = at + 1000;
+        const Block rb = add(alice_, rl);
+        records::Acceptance a{};
+        a.work          = ref_to(alice_, hw);
+        a.release       = ref_to(alice_, rb);
+        a.hours_raw     = labor > 0.0 ? 1.0 : 0.0;
+        a.labor_units   = labor;
+        a.carried_units = carried;
+        if (labor > 0.0) a.axes = {{test_axis(tag), labor}};
+        records::Transfer t{};
+        t.from      = bob_.bytes;
+        t.to        = alice_.bytes;
+        t.origins   = { {bob_.bytes, labor + carried} };
+        t.accept    = a;
+        t.timestamp = at + 100;
+        return Crypto::hash_block(add(bob_, t)).bytes;
+    };
+    const auto wear_only = sell(0.0, 0.5, kDay, 0x01);
+    const auto as_labor  = sell(1.0, 0.5, kDay + 2000, 0x01);
+
+    const auto deals = read_deals(*storage_);
+    EXPECT_TRUE(deals.counts(wear_only));          // заплачен ровно износ
+    EXPECT_FALSE(deals.moves_hours(as_labor));     // труда в записи нет — сделка ничтожна
+}

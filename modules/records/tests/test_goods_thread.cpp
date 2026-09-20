@@ -507,3 +507,27 @@ TEST(SpentLabor, APartBringsItsHoursNotItsPrice) {
     l.out = 1;
     EXPECT_FALSE(spent_hours(frame, l).has_value());   // такого выхода нет
 }
+
+// ── Машино-часы: аренда по счётчику (ИР-023, пункт 9) ───────────────────────
+
+TEST(MachineHours, WearIsThePriceAndThereIsNoLabor) {
+    WorkRecord hire{};
+    hire.hours = 0.0;                          // труда в записи нет
+    CarryEntry ce{};
+    ce.carried = 0.5;                          // только износ по счётчику
+    hire.carry.push_back(ce);
+    EXPECT_TRUE(is_machine_hours(hire));
+
+    Acceptance a{};
+    a.carried_units = 0.5;
+    EXPECT_TRUE(meets_machine_hours(a, hire));
+    a.labor_units = 0.1;                       // труд, которого не было
+    EXPECT_FALSE(meets_machine_hours(a, hire));
+    a.labor_units   = 0.0;
+    a.carried_units = 0.4;                     // меньше записанного износа
+    EXPECT_FALSE(meets_machine_hours(a, hire));
+    a.carried_units = 0.5;
+    hire.hours = 1.0;                          // с часами это обычная работа
+    EXPECT_FALSE(is_machine_hours(hire));
+    EXPECT_FALSE(meets_machine_hours(a, hire));
+}
