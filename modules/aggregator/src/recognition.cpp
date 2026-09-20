@@ -85,12 +85,16 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
             if (seller != owner.bytes) continue;           // only one's own lot is written off
             out.writeoffs.push_back(WriteOffEntry{bh.bytes, owner, *wo});
         } else if (const auto* m = std::get_if<records::Material>(&rec)) {
+            out.asset_records[bh.bytes] = AssetRecord{owner, m->cost, m->origin,
+                                                      std::nullopt, 0.0, true};
             // Купленное — в своё производство (records.md §10.1 v3): запись заведена
             // звеном подниточки своей же покупки.
             if (m->src && m->lot && m->src->chain == owner.bytes)
                 out.assets.push_back({bh.bytes, owner, *m->src, *m->lot, m->cost,
                                       block->timestamp_claimed, false});
         } else if (const auto* tl = std::get_if<records::Tool>(&rec)) {
+            out.asset_records[bh.bytes] = AssetRecord{owner, tl->cost, tl->origin,
+                                                      tl->repair, 0.0, true};
             if (tl->src && tl->lot && tl->src->chain == owner.bytes)
                 out.assets.push_back({bh.bytes, owner, *tl->src, *tl->lot, tl->cost,
                                       block->timestamp_claimed, false});
@@ -403,6 +407,46 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
         claims.push_back(c);
     }
     out.recognition = records::recognize_deals(claims);
+
+    // Нить переноса (ИР-011): сколько стоимости записи уже ушло в продукцию —
+    // последнее звено, написанное самим владельцем.
+    for (const auto& [wh, w] : out.works) {
+        (void)wh;
+        for (const auto& ce : w.record.carry) {
+            const auto a = out.asset_records.find(ce.src.hash);
+            if (a == out.asset_records.end() || ce.src.chain != w.worker.bytes ||
+                a->second.owner != w.worker)
+                continue;
+            a->second.collected = std::max(a->second.collected, ce.after);
+        }
+    }
+    // Ремонт — единственный законный путь стоимости вверх (ИР-015,
+    // records.md §10.2): перевыпуск не выше остатка прежней записи, а выше —
+    // ровно на принятый и оплаченный ремонт, и одна сделка оправдывает одно
+    // удорожание.
+    std::set<Hash32> spent_repairs;
+    for (auto& [ah, a] : out.asset_records) {
+        (void)ah;
+        if (!a.origin) continue;
+        const auto prev = out.asset_records.find(a.origin->hash);
+        if (prev == out.asset_records.end() || a.origin->chain != a.owner.bytes ||
+            prev->second.owner != a.owner) {
+            a.sound = false;                       // перевыпуск не своей записи
+            continue;
+        }
+        double allowed = prev->second.cost - prev->second.collected;
+        if (a.repair) {
+            const auto d = deal_at.find(a.repair->hash);
+            if (d != deal_at.end() && a.repair->chain == a.owner.bytes &&
+                out.all[d->second].payer == a.owner && out.moves_hours(out.all[d->second].hash) &&
+                spent_repairs.insert(a.repair->hash).second) {
+                double paid = 0.0;
+                for (const auto& o : out.all[d->second].transfer.origins) paid += o.units;
+                allowed += paid;
+            }
+        }
+        a.sound = a.cost <= allowed + 1e-9;
+    }
 
     // What was paid for: whole results, and portions.
     for (std::size_t i = 0; i < n; ++i) {

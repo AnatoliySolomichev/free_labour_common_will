@@ -1324,3 +1324,78 @@ TEST_F(RatesViewTest, OwnProductSpentIntoOwnProductionIsLabor) {
     const auto after = read_deals(*storage_);
     EXPECT_FALSE(after.counts(over_deal));      // звено не сходится — работа не в счёт
 }
+
+// Ремонт своего средства производства (ИР-015): стоимость вверх перевыпускают
+// ровно на принятый и оплаченный ремонт. Без него удорожание не признаётся, и
+// перенос из такой записи в продукцию тоже.
+TEST_F(RatesViewTest, OnlyAPaidRepairLiftsAToolsCost) {
+    records::Tool oven{};
+    oven.name  = "печь";
+    oven.cost  = 10.0;
+    oven.life  = 100.0;
+    oven.basis = "est";
+    oven.note  = "оценка владельца";
+    const Block first = add(alice_, oven);
+
+    records::WorkRecord bake{};          // печь отработала 2 ч своей стоимости
+    bake.hours    = 4.0;
+    bake.axes     = {{test_axis(), 1.0}};
+    bake.customer = bob_.bytes;
+    records::CarryEntry ce{};
+    ce.src     = ref_to(alice_, first);
+    ce.used    = 20.0;
+    ce.carried = 2.0;
+    ce.seq     = 0;
+    ce.after   = 2.0;
+    bake.carry.push_back(ce);
+    add(alice_, bake);
+
+    records::WorkRecord fix{};           // Боб чинит печь на заказ Алисы
+    fix.hours    = 3.0;
+    fix.axes     = {{test_axis(), 1.0}};
+    fix.customer = alice_.bytes;
+    const Block fixw = add(bob_, fix);
+    records::Acceptance fa{};
+    fa.work        = ref_to(bob_, fixw);
+    fa.hours_raw   = 3.0;
+    fa.labor_units = 3.0;
+    fa.axes        = {{test_axis(), 3.0}};
+    records::Transfer ft{};
+    ft.from      = alice_.bytes;
+    ft.to        = bob_.bytes;
+    ft.origins   = { {alice_.bytes, 3.0} };
+    ft.accept    = fa;
+    ft.timestamp = kDay + 200;
+    const Block paid = add(alice_, ft);
+
+    records::Tool lifted = oven;         // остаток 8 плюс ремонт 3
+    lifted.cost   = 11.0;
+    lifted.origin = ref_to(alice_, first);
+    lifted.repair = ref_to(alice_, paid);
+    const Block good = add(alice_, lifted);
+
+    records::Tool inflated = oven;       // то же самое, но без ремонта
+    inflated.cost   = 12.0;
+    inflated.origin = ref_to(alice_, first);
+    const Block bad = add(alice_, inflated);
+
+    records::WorkRecord after{};         // работа на раздутой стоимости
+    after.hours    = 1.0;
+    after.axes     = {{test_axis(), 1.0}};
+    after.customer = bob_.bytes;
+    records::CarryEntry ce2{};
+    ce2.src     = ref_to(alice_, bad);
+    ce2.used    = 10.0;
+    ce2.carried = 1.0;
+    ce2.seq     = 0;
+    ce2.after   = 1.0;
+    after.carry.push_back(ce2);
+    const Block spoiled = add(alice_, after);
+
+    const auto deals = read_deals(*storage_);
+    EXPECT_NEAR(deals.asset_records.at(Crypto::hash_block(first).bytes).collected, 2.0, 1e-9);
+    EXPECT_TRUE(deals.asset_records.at(Crypto::hash_block(good).bytes).sound);
+    EXPECT_FALSE(deals.asset_records.at(Crypto::hash_block(bad).bytes).sound);
+    EXPECT_TRUE(deals.carry_sound(Crypto::hash_block(fixw).bytes));
+    EXPECT_FALSE(deals.carry_sound(Crypto::hash_block(spoiled).bytes));
+}

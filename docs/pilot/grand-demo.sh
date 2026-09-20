@@ -482,6 +482,18 @@ W_table="$(printf '%s\n' "$OUT_tab" | after 'hash: ')"
 say "Галина принимает: час сборки и два часа ножек, по ценам дня каждой работы"
 bcp galina accept --work "${CID[dmitry]}/$W_table" --quality "ровный" --via "$VIA" 2>&1 | sed 's/^/   /'
 
+hr "ремонт своего средства производства: печь дорожает ровно на оплаченный ремонт (ИР-015)"
+say "Борис меняет тэн в печи Анны на её заказ, Анна принимает работу и платит за неё"
+W_fix=$(bcp boris work log --title "электрик, 4-й разряд" --action "Замена тэна в печи" --hours 1 \
+        --start "$(( NOW - 18000 ))" --for "${CID[anna]}" --axis-share "$(axis knowledge)=1" \
+        --via "$VIA" | after 'hash: ')
+OUT_fix="$(bcp anna accept --work "${CID[boris]}/$W_fix" --quality "греет как новая" --via "$VIA" 2>&1)"
+echo "$OUT_fix" | sed 's/^/   /'
+FIX_anna="$(printf '%s\n' "$OUT_fix" | after 'acceptance ref: ')"
+say "запись печи перевыпускается вверх — на остаток плюс оплаченный ремонт, и ни часом больше"
+bcp anna tool add "Печь подовая" --origin "$TOOL" --repair "$FIX_anna" --cost 315 --life 8000 \
+    --serial PP-2019-0417 --note "после замены тэна" --via "$VIA" 2>&1 | sed 's/^/   /'
+
 hr "облако образцов работ — из сделок, а не из каталога (bc cloud, ИР-022)"
 say "точка — образец, который повторили; место — из чего сложилась цена его семьи."
 say "соседи — те, кому платят за похожее; ставка — высота над картой, не координата"

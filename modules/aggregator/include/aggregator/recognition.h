@@ -61,6 +61,19 @@ struct WriteOffEntry {
 // the output's index — or one lot of a purchase sold on (v4) — the purchase's
 // deal hash and the product's output index.
 using LotKey = std::pair<std::array<uint8_t, 32>, uint32_t>;
+// Запись средства производства или материала на столе (ИР-011, ИР-015): её
+// стоимость, сколько из неё уже перенесено в продукцию и подкреплён ли
+// перевыпуск. Вниз стоимость перевыпускают всегда, вверх — только на принятый и
+// оплаченный ремонт (records.md §10.2).
+struct AssetRecord {
+    UserId                      owner;
+    double                      cost = 0;
+    std::optional<records::Ref> origin;
+    std::optional<records::Ref> repair;
+    double                      collected = 0;   // собрано нитью переноса
+    bool                        sound = true;
+};
+
 // Купленное, заведённое в своё производство (records.md §10.1 v3, ИР-023):
 // запись материала или средства производства, взятая звеном подниточки своей
 // покупки. Стоимость такой записи не объявляют — это доля уплаченного за взятое.
@@ -92,6 +105,9 @@ struct DealsOnTable {
     std::set<std::array<uint8_t, 32>> bought_back;
     // Записи средств производства и материалов, заведённые своей покупкой (v3).
     std::vector<AssetEntry> assets;
+    // Все записи средств производства и материалов: стоимость, собранное нитью
+    // переноса и законность перевыпуска (ИР-011, ИР-015).
+    std::map<std::array<uint8_t, 32>, AssetRecord> asset_records;
 
     // The deal that counts for its result: statistics read only these.
     bool counts(const std::array<uint8_t, 32>& deal) const {
@@ -101,6 +117,18 @@ struct DealsOnTable {
     // deal neither pays nor settles anything.
     bool moves_hours(const std::array<uint8_t, 32>& deal) const {
         return recognition.moves_hours(deal);
+    }
+    // Перенос работы считается, только если записи средств, из которых он идёт,
+    // законны: перевыпуск вверх — лишь на оплаченный ремонт (records.md §10.2).
+    // Записи, которой нет на столе, верим — это пробел, а не вина.
+    bool carry_sound(const std::array<uint8_t, 32>& work) const {
+        const auto w = works.find(work);
+        if (w == works.end()) return true;
+        for (const auto& ce : w->second.record.carry) {
+            const auto a = asset_records.find(ce.src.hash);
+            if (a != asset_records.end() && !a->second.sound) return false;
+        }
+        return true;
     }
     // A work whose deal may count: on the table in the chain its ref names, in
     // that chain's thread, on hours of its own (records.md §9.4 v4).

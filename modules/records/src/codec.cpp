@@ -516,7 +516,12 @@ void enc_material(Buf& out, const Material& m) {
 
 void enc_tool(Buf& out, const Tool& t) {
     check_paid_source(t.basis, t.src, t.lot, "Tool");
-    w_map(out, 10 + (t.lot ? 1 : 0));
+    // Ремонт поднимает стоимость только при перевыпуске (ИР-015): вещь, которой
+    // ещё не было, чинить нечего (records.md §10.2).
+    if (t.repair && !t.origin)
+        throw CodecError("Tool: ремонт поднимает стоимость только при перевыпуске — нужен "
+                         "origin (records.md §10.2)");
+    w_map(out, 10 + (t.lot ? 1 : 0) + (t.repair ? 1 : 0));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Tool));
     w_uint(out, 1); w_text(out, t.name);
     w_uint(out, 2); w_text(out, t.desc);
@@ -529,7 +534,8 @@ void enc_tool(Buf& out, const Tool& t) {
     w_uint(out, 8);
     if (t.origin) w_ref(out, *t.origin); else w_null(out);
     w_uint(out, 9); w_text(out, t.note);
-    if (t.lot) { w_uint(out, 10); w_lot_link(out, *t.lot); }
+    if (t.lot)    { w_uint(out, 10); w_lot_link(out, *t.lot); }
+    if (t.repair) { w_uint(out, 11); w_ref(out, *t.repair); }   // ИР-015
 }
 
 void enc_transfer(Buf& out, const Transfer& t) {
@@ -1123,8 +1129,8 @@ Material dec_material_fields(CborReader& r, uint64_t field_count) {
 }
 
 Tool dec_tool_fields(CborReader& r, uint64_t field_count) {
-    if (field_count < 10 || field_count > 11)
-        throw CodecError("Tool: expected 10..11 fields");
+    if (field_count < 10 || field_count > 12)
+        throw CodecError("Tool: expected 10..12 fields");
     Tool t{};
     expect_key(r, 1); t.name   = r.r_text();
     expect_key(r, 2); t.desc   = r.r_text();
@@ -1135,8 +1141,19 @@ Tool dec_tool_fields(CborReader& r, uint64_t field_count) {
     expect_key(r, 7); t.src    = dec_opt_ref(r);
     expect_key(r, 8); t.origin = dec_opt_ref(r);
     expect_key(r, 9); t.note   = r.r_text();
-    if (field_count > 10) { expect_key(r, 10); t.lot = dec_lot_link(r); }
+    uint64_t seen = 10;
+    for (uint64_t i = 10; i < field_count; ++i) {
+        const uint64_t key = r.r_uint();
+        if (key <= seen) throw CodecError("Tool: keys out of order");
+        seen = key;
+        if (key == 10)      t.lot    = dec_lot_link(r);
+        else if (key == 11) t.repair = dec_ref(r);
+        else throw CodecError("Tool: unknown field key");
+    }
     check_paid_source(t.basis, t.src, t.lot, "Tool");
+    if (t.repair && !t.origin)
+        throw CodecError("Tool: ремонт поднимает стоимость только при перевыпуске — нужен "
+                         "origin (records.md §10.2)");
     return t;
 }
 

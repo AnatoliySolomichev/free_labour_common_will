@@ -1293,3 +1293,18 @@ TEST(RecordsCodec, WorkSpendingItsOwnProduct) {
     wr.spends.push_back(sp);
     EXPECT_EQ(std::get<WorkRecord>(roundtrip(Record{wr})).spends, wr.spends);
 }
+
+// Ремонт — единственный путь стоимости вверх (ИР-015): он поднимает её только
+// при перевыпуске, у вещи, которая уже была.
+TEST(RecordsCodec, ToolRepairNeedsAReissue) {
+    Tool t{};
+    t.name   = "печь";
+    t.cost   = 10.0;
+    t.life   = 100.0;
+    t.basis  = "est";
+    t.note   = "оценка владельца";
+    t.repair = make_ref(0xA1, 0x55);
+    EXPECT_THROW(Codec::encode(Record{t}), CodecError);   // без перевыпуска нечего чинить
+    t.origin = make_ref(0xA1, 0x61);
+    EXPECT_EQ(std::get<Tool>(roundtrip(Record{t})).repair, t.repair);
+}

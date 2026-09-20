@@ -1947,6 +1947,13 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
             throw std::runtime_error(
                 "работа кончается позже, чем записана, — это часы из будущего, которых ещё "
                 "никто не отработал; в счёт такая сделка не пойдёт (records.md §9.4)");
+        // Перенос из записи, перевыпущенной вверх без оплаченного ремонта (ИР-015):
+        // такая стоимость взялась из воздуха, платить за неё не за что.
+        if (const auto* cs = records::json::find(status->object, "carry_sound");
+            cs && !cs->boolean)
+            throw std::runtime_error(
+                "перенос этой работы идёт из записи, перевыпущенной вверх без оплаченного "
+                "ремонта — такая стоимость ничем не подкреплена (records.md §10.2)");
         if (state == "crossing") {
             std::string with;
             if (const auto* cs = jarr(status->object, "crosses"))
@@ -2913,6 +2920,8 @@ static int cmd_tool_add(const fs::path& data_dir, int argc, char** argv) {
         std::cerr <<
             "Usage: bc tool add ИМЯ --cost ТРУДОЧАСЫ --life ЧАСЫ_РЕСУРСА\n"
             "   [--serial S] [--desc TEXT] [--note TEXT]\n"
+            "   [--repair СДЕЛКА]     своя сделка, которой принят и оплачен ремонт:\n"
+            "                         стоимость растёт ровно на неё (ИР-015)\n"
             "   [--paid ПОКУПКА]      взять из своей покупки: --paid ССЫЛКА\n"
             "                         [--out N] [--units НОМЕР] — стоимость из сделки\n"
             "   [--origin TOOL_REF]   перевыпуск: перепродажа / переоценка вниз /\n"
@@ -2969,10 +2978,31 @@ static int cmd_tool_add(const fs::path& data_dir, int argc, char** argv) {
                 throw std::runtime_error("--origin не найден в своей цепи");
             const auto   st        = carry_thread_state(ctx, prev[0].ref);
             const double remainder = prev[0].info.cost - st.collected;
-            if (t.cost > remainder + 1e-9) {
-                std::cerr << "отказ: cost " << t.cost << "ч выше остатка "
-                          << remainder << "ч предыдущей записи — перевыпуск "
-                          "только вниз (records.md §10.2)\n";
+            // Ремонт — единственный законный путь стоимости вверх (ИР-015): своя
+            // сделка, которой он принят и оплачен, поднимает потолок ровно на
+            // уплаченное. Одна сделка оправдывает одно удорожание.
+            double allowed = remainder;
+            if (const auto rep_s = flag_val(argc, argv, "--repair"); !rep_s.empty()) {
+                const Ref rref = parse_ref(rep_s);
+                if (rref.chain != ctx.user_id.bytes)
+                    throw std::runtime_error("--repair: ремонт оплачиваете вы сами — нужна своя "
+                                             "сделка (records.md §10.2)");
+                const auto  rrec = load_record(ctx, flag_val(argc, argv, "--via"), rref);
+                const auto* d    = rrec ? std::get_if<records::Transfer>(&*rrec) : nullptr;
+                if (!d || !d->accept)
+                    throw std::runtime_error("--repair: своей сделки с приёмкой не найти");
+                double paid = 0.0;
+                for (const auto& o : d->origins) paid += o.units;
+                t.repair = rref;
+                allowed += paid;
+                std::cerr << "ремонт принят и оплачен: " << paid << "ч — на столько стоимость "
+                             "может вырасти (ИР-015)\n";
+            }
+            if (t.cost > allowed + 1e-9) {
+                std::cerr << "отказ: cost " << t.cost << "ч выше допустимого "
+                          << allowed << "ч (остаток " << remainder
+                          << "ч плюс оплаченный ремонт) — стоимость вверх поднимает только "
+                             "ремонт (records.md §10.2)\n";
                 return 1;
             }
         } else {

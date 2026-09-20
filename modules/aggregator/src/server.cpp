@@ -1632,6 +1632,8 @@ void AggregatorServer::setup_routes() {
                         if (b == wh) crosses.push_back(a);
                     }
                 }
+                body += ",\"carry_sound\":" +
+                        std::string(deals.carry_sound(wh) ? "true" : "false");
                 body += ",\"thread_state\":\"" + std::string(state) + "\",\"crosses\":[";
                 for (std::size_t i = 0; i < crosses.size(); ++i)
                     body += std::string(i ? "," : "") + "\"" + to_hex(ch) + "/"
