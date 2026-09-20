@@ -451,3 +451,45 @@ TEST(Buyout, ARentPaysExactlyTheWear) {
     EXPECT_NEAR(buyback_price(lots, flat, 101 * kDaySec, 131 * kDaySec, true), 95.0, 1e-9);
     EXPECT_EQ(buyback_price(lots, flat, 101 * kDaySec, 131 * kDaySec, false), 100.0);
 }
+
+// Выкуп с ремонтом (ИР-015): одной сделкой платят и за вещь по норме, и за труд
+// держателя над ней; расходники ремонта идут переносом вместе с вещью.
+TEST(Buyout, ABuybackCanPayForTheHoldersRepair) {
+    BlockPath axis{};
+    axis.hash.fill(0x01);
+    const Ref mine{h(0xC3), h(0x77)};            // покупка держателя
+
+    Transfer purchase{};
+    purchase.from = h(0xC3);
+    Acceptance pa{};
+    pa.work.hash.fill(0x54);
+    pa.buyback = Buyback{h(0xA1), 5000};
+    purchase.accept = pa;
+
+    WorkRecord repair{};
+    repair.hours    = 2.0;
+    repair.improves = mine;
+    CarryEntry ce{};
+    ce.carried = 0.5;                             // расходники ремонта
+    repair.carry.push_back(ce);
+
+    Transfer back{};
+    back.from      = h(0xA1);
+    back.to        = h(0xC3);
+    back.timestamp = 4000;
+    Acceptance ba{};
+    ba.work          = Ref{h(0xC3), h(0x88)};     // работа держателя, не рождение вещи
+    ba.release       = mine;
+    ba.hours_raw     = 2.0;
+    ba.labor_units   = 2.0;
+    ba.axes          = {{axis, 2.0}};
+    ba.carried_units = 3.5;                       // вещь 3.0 + расходники 0.5
+    back.accept      = ba;
+    EXPECT_TRUE(completes_buyback(back, purchase, 3.0, &repair));
+    EXPECT_FALSE(completes_buyback(back, purchase, 3.0));          // без работы — не выкуп
+    back.accept->carried_units = 3.0;                              // забыли расходники
+    EXPECT_FALSE(completes_buyback(back, purchase, 3.0, &repair));
+    back.accept->carried_units = 3.5;
+    back.accept->labor_units   = 0.0;                              // труд без оплаты — не ремонт
+    EXPECT_FALSE(completes_buyback(back, purchase, 3.0, &repair));
+}

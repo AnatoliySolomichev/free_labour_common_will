@@ -250,6 +250,10 @@ struct WorkRecord {
     std::optional<ThreadLink> thread;
     // v4 (ИР-023): the worker's proposed breakdown of these hours by axis.
     std::vector<AxisShare>    axes;
+    // v6 (ИР-015): работа над своей покупкой — ремонт, наладка, улучшение. Нового
+    // изделия не рождается: дорожает сама вещь, и труд оплачивается той же
+    // сделкой, которой её выкупают назад (records.md §9.8 v7).
+    std::optional<Ref>        improves;
 };
 
 // A link of a lot's sub-thread (records.md §9.8 v2, ИР-023): a portion taken from

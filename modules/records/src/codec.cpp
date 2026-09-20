@@ -229,16 +229,22 @@ void check_work_record(const WorkRecord& wr) {
     }
     if (with_share != 0 && (with_share != wr.outputs.size() || std::abs(shares - 1.0) > 1e-9))
         throw CodecError("WorkRecord: доли — у всех выходов и в сумме 1 (records.md §9.4)");
+    // Работа над своей покупкой (ИР-015): нового изделия не рождается — дорожает
+    // сама вещь, поэтому выходов у такой работы нет (records.md §9.4 v6).
+    if (wr.improves && !wr.outputs.empty())
+        throw CodecError("WorkRecord: работа над своей покупкой не рождает нового выхода — "
+                         "дорожает сама вещь (records.md §9.4)");
 }
 
 void enc_work_record(Buf& out, const WorkRecord& wr) {
     // Key 1 (agent → Grade) is retired with the grade (ИР-022 шаг 11). The
-    // optional tail — carry (7), title (8), customer (9), thread (10), axes (11)
-    // — is written only when present and in ascending key order, so the
-    // encoding stays deterministic.
+    // optional tail — carry (7), title (8), customer (9), thread (10), axes (11),
+    // improves (12) — is written only when present and in ascending key order, so
+    // the encoding stays deterministic.
     check_work_record(wr);
     w_map(out, 6 + (wr.carry.empty() ? 0 : 1) + (wr.title.empty() ? 0 : 1)
-                 + (wr.customer ? 1 : 0) + (wr.thread ? 1 : 0) + (wr.axes.empty() ? 0 : 1));
+                 + (wr.customer ? 1 : 0) + (wr.thread ? 1 : 0) + (wr.axes.empty() ? 0 : 1)
+                 + (wr.improves ? 1 : 0));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::WorkRecord));
     w_uint(out, 2); w_text(out, wr.action);
     w_uint(out, 3); w_int64(out, wr.start_ts);
@@ -268,6 +274,7 @@ void enc_work_record(Buf& out, const WorkRecord& wr) {
             w_uint(out, 1); w_float64(out, x.share);
         }
     }
+    if (wr.improves) { w_uint(out, 12); w_ref(out, *wr.improves); }   // ИР-015
 }
 
 // The acceptance (records.md §9.5): since ИР-023 not a record of its own but the
@@ -959,7 +966,7 @@ WorkRecord dec_work_record_fields(CborReader& r, uint64_t field_count) {
         for (uint64_t i = 0; i < n; ++i) wr.outputs.push_back(dec_resource_qty(r));
     }
     // The optional tail, by key and ascending: carry (7), title (8), customer
-    // (9), thread (10), axes (11). Present means non-empty — an empty one is
+    // (9), thread (10), axes (11), improves (12). Present means non-empty — an empty one is
     // never written, so reading one would mean two encodings of the same record.
     uint64_t last = 6;
     for (uint64_t i = 6; i < field_count; ++i) {
@@ -987,6 +994,8 @@ WorkRecord dec_work_record_fields(CborReader& r, uint64_t field_count) {
             link.prev.reserve(static_cast<size_t>(n));
             for (uint64_t k = 0; k < n; ++k) link.prev.push_back(dec_ref(r));
             wr.thread = std::move(link);
+        } else if (key == 12) {
+            wr.improves = dec_ref(r);
         } else if (key == 11) {
             const uint64_t n = r.r_arr();
             if (n == 0) throw CodecError("WorkRecord: axes present but empty");

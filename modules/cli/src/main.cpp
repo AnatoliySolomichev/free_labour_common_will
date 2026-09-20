@@ -140,6 +140,7 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--tool", "--cost", "--life", "--serial", "--desc", "--note", "--paid",
     "--material", "--unit", "--qty",
     "--buyback-to", "--buyback-days", "--buyback-until", "--buyback-of",
+    "--improves", "--repair",
 };
 
 // True when a standalone flag (no value) is present.
@@ -1288,6 +1289,8 @@ static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
     // записью; без --for — отпуск потом (bc release, records.md §9.8).
     if (const auto for_s = flag_val(argc, argv, "--for"); !for_s.empty())
         wr.customer = uid_from_hex(for_s);
+    if (const auto imp_s = flag_val(argc, argv, "--improves"); !imp_s.empty())
+        wr.improves = parse_ref(imp_s);   // ИР-015, проверка — ниже, при открытой цепи
     // Без --start работа считается только что законченной (records.md §9.4 v4).
     const auto start_s = flag_val(argc, argv, "--start");
     wr.start_ts = start_s.empty()
@@ -1304,6 +1307,20 @@ static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
 
     const NodeIndex leaf = parse_leaf_index(argc, argv);
     Context ctx(data_dir, leaf);
+    // Работа над своей покупкой (ИР-015): ремонт, наладка, улучшение. Нового
+    // изделия не рождается — дорожает сама вещь, и труд оплачивается той же
+    // сделкой, которой её выкупают назад (records.md §9.8 v7).
+    if (wr.improves) {
+        if (wr.improves->chain != ctx.user_id.bytes)
+            throw std::runtime_error("--improves: работают над своей покупкой (records.md §9.4)");
+        const auto  prec = load_record(ctx, flag_val(argc, argv, "--via"), *wr.improves);
+        const auto* pt   = prec ? std::get_if<records::Transfer>(&*prec) : nullptr;
+        if (!pt || !pt->accept)
+            throw std::runtime_error("--improves: своей покупки с таким хешем нет");
+        if (!pt->accept->buyback)
+            std::cerr << "⚠ эта покупка не под выкупом с адресом — оплатить такой труд "
+                         "выкупом будет некому (records.md §9.8)\n";
+    }
     auto carry_specs = flag_all(argc, argv, "--tool");
     for (const auto& s : flag_all(argc, argv, "--material")) carry_specs.push_back(s);
     if (!carry_specs.empty()) attach_carry(ctx, wr, carry_specs);
@@ -1754,6 +1771,7 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     // Цену возврата не называет никто (records.md §9.8 v6): уплаченное держателем, а
     // для аренды — за вычетом износа по норме срока службы.
     double back_price = 0.0;
+    std::optional<WorkRecord> repair;   // работа держателя над этой вещью (ИР-015)
     if (held) {
         const records::Buyback& b = *held->accept->buyback;
         if (b.to != ctx.user_id.bytes || now >= b.until)
@@ -1771,6 +1789,32 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
             std::cerr << " — из уплаченных " << paid << " за вычетом износа по норме "
                       << paid - back_price << " (аренда: только износ, records.md §9.8)";
         std::cerr << ", до " << b.until << " — держатель в сделке не участвует\n";
+        // Выкуп с ремонтом (ИР-015): держатель работал над этой вещью — платим
+        // одной сделкой и за вещь, и за его труд, с разбивкой по осям.
+        auto rep_s = flag_val(argc, argv, "--repair");
+        if (rep_s.empty() && status && status->is_object())
+            if (const auto* bbs = jarr(status->object, "buybacks"))
+                for (const auto& x : bbs->array)
+                    if (x.is_object() &&
+                        jstr(x.object, "ref") == to_hex(a.release->chain) + "/" +
+                                                 to_hex(a.release->hash))
+                        rep_s = jstr(x.object, "repair");
+        if (!rep_s.empty()) {
+            const Ref  rref = parse_ref(rep_s);
+            const auto rrec = load_record(ctx, via, rref);
+            const auto* rw  = rrec ? std::get_if<WorkRecord>(&*rrec) : nullptr;
+            if (!rw || !rw->improves || !(*rw->improves == *a.release))
+                throw std::runtime_error("работа держателя над этой вещью не читается или она "
+                                         "о другой покупке — нужен --via (records.md §9.8)");
+            double spent = 0.0;
+            for (const auto& ce : rw->carry) spent += ce.carried;
+            back_price += spent;          // расходники ремонта — переносом
+            repair = *rw;
+            a.work = rref;                // платим за труд держателя над вещью
+            std::cerr << "ремонт держателя: «" << rw->action << "», " << rw->hours
+                      << " ч и расходников на " << spent << "ч — вещь дорожает на этот труд, "
+                         "и он оплачивается этой же сделкой (ИР-015)\n";
+        }
     } else {
         records::Transfer probe{};
         probe.from      = ctx.user_id.bytes;
@@ -1871,9 +1915,10 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     // чужой по адресу сделала бы результат «проданным дважды». Обхода нет.
     const std::string release_ref =
         a.release ? to_hex(a.release->chain) + "/" + to_hex(a.release->hash) : std::string{};
-    const bool        piece     = portion || resale;   // a result of its own: its release
+    const bool        piece     = (portion || resale) && !repair;   // свой результат: свой отпуск
     const std::string my_source =
-        held     ? to_hex(a.release->chain) + "/" + to_hex(a.release->hash)
+        repair   ? to_hex(a.work.chain) + "/" + to_hex(a.work.hash)   // ИР-015: труд держателя
+        : held   ? to_hex(a.release->chain) + "/" + to_hex(a.release->hash)
         : resale ? to_hex(release->holding->chain) + "/" + to_hex(release->holding->hash)
                  : to_hex(a.work.chain) + "/" + to_hex(a.work.hash);
     if (const auto mine = own_deal_on(ctx, a.work, piece ? a.release : std::optional<Ref>{});
@@ -1908,7 +1953,13 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
                                 "одного остатка дважды; в счёт не пойдёт (records.md §9.8)");
     }
 
-    if (resale) {
+    if (repair) {
+        // Выкуп с ремонтом (ИР-015): труд держателя оценивается как всякий другой —
+        // по осям, — а вещь и расходники идут переносом.
+        appraise_whole(ctx, via, argc, argv, &*repair, a, axis_args, share_args, like_s,
+                       raw_s, lu_s);
+        a.carried_units = resale_units;
+    } else if (resale) {
         a.hours_raw     = 0.0;
         a.labor_units   = 0.0;
         a.carried_units = resale_units;
@@ -1983,7 +2034,11 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     print_portions(t, me_hex, to_s);
     std::cout << "acceptance ref: " << me_hex << "/"
               << to_hex(Crypto::hash_block(block).bytes) << "\n";
-    if (resale) {
+    if (repair) {
+        std::cerr << "выкуплено с ремонтом одной записью: труд " << a.labor_units
+                  << " стч плюс вещь и расходники " << *a.carried_units
+                  << "ч (ИР-015, records.md §9.8)\n";
+    } else if (resale) {
         std::cerr << "куплено у держателя одной записью: " << payable
                   << "ч — перепродажа, без труда (records.md §9.8)\n";
     } else {
@@ -3993,10 +4048,15 @@ static int cmd_transfer_recv(const fs::path& data_dir, int argc, char** argv) {
         // v5, v6): цена возврата — уплаченное нами, для аренды — за вычетом износа.
         if (bought) {
             const auto h = load_holding(ctx, via, *t->accept->release);
+            std::optional<WorkRecord> mine;      // своя работа над этой вещью (ИР-015)
+            if (!(t->accept->work == bought->accept->work))
+                if (const auto wrec = load_record(ctx, via, t->accept->work))
+                    if (const auto* w = std::get_if<WorkRecord>(&*wrec)) mine = *w;
             if (!h || !records::completes_buyback(
                           *t, *bought,
                           records::buyback_price(h->lots, h->work, bought->timestamp,
-                                                 t->timestamp, bought->accept->buyback->wear)))
+                                                 t->timestamp, bought->accept->buyback->wear),
+                          mine ? &*mine : nullptr))
                 throw std::runtime_error("выкуп не по подписанному возврату или не по его цене "
                                          "(или записей не прочесть — нужен --via): сделка ничего "
                                          "не завершает, часы не принимаются (records.md §9.8)");

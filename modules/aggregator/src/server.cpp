@@ -1597,12 +1597,19 @@ void AggregatorServer::setup_routes() {
                     continue;
                 if (!first) body += ',';
                 first = false;
+                std::string repair;   // работа держателя над этой покупкой (ИР-015)
+                for (const auto& [rh, rw] : deals.works)
+                    if (rw.record.improves && rw.record.improves->hash == p.hash &&
+                        rw.record.improves->chain == p.payer.bytes && rw.worker == p.payer)
+                        repair = to_hex(p.payer.bytes) + "/" + to_hex(rh);
                 body += "{\"ref\":\"" + to_hex(p.payer.bytes) + "/" + to_hex(p.hash)
                       + "\",\"holder\":\"" + to_hex(p.payer.bytes)
                       + "\",\"to\":\"" + to_hex(pa.buyback->to)
                       + "\",\"until\":" + std::to_string(pa.buyback->until)
                       + ",\"wear\":" + (pa.buyback->wear ? "true" : "false")
-                      + ",\"taken\":" + (deals.bought_back.count(p.hash) ? "true" : "false") + "}";
+                      + ",\"taken\":" + (deals.bought_back.count(p.hash) ? "true" : "false")
+                      + (repair.empty() ? std::string{} : ",\"repair\":\"" + repair + "\"")
+                      + "}";
             }
             body += "],\"oversold\":";
             body += rc.oversold.count(wh) ? "true" : "false";

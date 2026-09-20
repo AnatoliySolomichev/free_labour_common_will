@@ -166,12 +166,20 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
             const std::size_t h = *buyback_of[i];
             const auto&       p = out.all[h];
             const auto        w = out.works.find(p.accept().work.hash);
+            // Выкуп с ремонтом (ИР-015): сделка называет работу держателя над этой
+            // покупкой — тогда платят и за вещь, и за труд над ней одной записью.
+            const records::WorkRecord* repair = nullptr;
+            if (!(a.work == p.accept().work))
+                if (const auto rw = out.works.find(a.work.hash);
+                    rw != out.works.end() && rw->second.worker.bytes == a.work.chain)
+                    repair = &rw->second.record;
             if (addressed(h) && w != out.works.end() &&
                 w->second.worker.bytes == p.accept().work.chain)
                 ok = records::completes_buyback(
                     d.transfer, p.transfer,
                     records::buyback_price(lots_of(h), w->second.record, p.transfer.timestamp,
-                                           d.transfer.timestamp, p.accept().buyback->wear));
+                                           d.transfer.timestamp, p.accept().buyback->wear),
+                    repair);
         } else if (release && release->holding) {
             // Перепродажа: the holder's purchase happened, of this very product,
             // and the price is its share of what the holder paid.
@@ -327,6 +335,9 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
         bool ok;
         if (buyback_of[i]) {
             ok = sound(*buyback_of[i]);          // what is bought back is what was bought
+            // Выкуп с ремонтом (ИР-015): труд держателя судится как любой другой —
+            // он обязан быть в его нити и на своих часах.
+            if (ok && !(a.work == out.all[*buyback_of[i]].accept().work)) ok = out.sound(a.work);
         } else if (release && release->holding) {
             const auto h = holding_deal(release->holding);
             ok = h && sound(*h) && link_valid(*release);
@@ -351,11 +362,16 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
         const records::Acceptance& a = d.accept();
         const records::Release* release = released[i];
         const bool buyback = buyback_of[i].has_value();
-        const bool resale  = buyback || (release && release->holding);
+        // Выкуп с ремонтом (ИР-015) — сделка за труд: источник у неё сама работа
+        // держателя, и в статистику она идёт как любая оплата труда. Выкуп без
+        // ремонта — только перенос, источник — покупка держателя.
+        const bool repaired = buyback && !(a.work == out.all[*buyback_of[i]].accept().work);
+        const bool resale   = (buyback && !repaired) || (release && release->holding);
         std::optional<Hash32> portion;
-        if ((release && release->lot) || buyback) portion = a.release->hash;
-        const Hash32 source = buyback ? a.release->hash                // the holder's purchase
-                            : resale  ? release->holding->hash : a.work.hash;
+        if ((release && release->lot) || (buyback && !repaired)) portion = a.release->hash;
+        const Hash32 source = repaired ? a.work.hash
+                            : buyback  ? a.release->hash                // the holder's purchase
+                            : resale   ? release->holding->hash : a.work.hash;
         records::DealClaim c{d.hash, source, d.payer.bytes, d.transfer.timestamp,
                              state[i] == 1, sound(i), portion};
         c.resale = resale;
@@ -366,7 +382,9 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
     // What was paid for: whole results, and portions.
     for (std::size_t i = 0; i < n; ++i) {
         const auto& d = out.all[i];
-        if (!out.moves_hours(d.hash) || buyback_of[i]) continue;
+        const bool repaired = buyback_of[i] &&
+            !(d.accept().work == out.all[*buyback_of[i]].accept().work);
+        if (!out.moves_hours(d.hash) || (buyback_of[i] && !repaired)) continue;
         if (released[i] && released[i]->lot) out.sold_releases.insert(d.accept().release->hash);
         else                                 out.sold_whole.insert(d.accept().work.hash);
     }

@@ -1265,3 +1265,16 @@ TEST(RecordsCodec, MaterialTakenFromAPurchase) {
     m.basis = "est";                          // оценка не ссылается на покупку
     EXPECT_THROW(Codec::encode(Record{m}), CodecError);
 }
+
+// Работа над своей покупкой (ИР-015): ремонт не рождает нового изделия —
+// дорожает сама вещь, поэтому выходов у такой работы нет.
+TEST(RecordsCodec, WorkImprovingAPurchase) {
+    WorkRecord wr{};
+    wr.action   = "перетяжка табурета";
+    wr.start_ts = 1'700'000'000LL;
+    wr.hours    = 1.5;
+    wr.improves = make_ref(0xB2, 0x44);          // своя покупка
+    EXPECT_EQ(std::get<WorkRecord>(roundtrip(Record{wr})).improves, wr.improves);
+    wr.outputs = {{"табурет", 1.0, "шт"}};
+    EXPECT_THROW(Codec::encode(Record{wr}), CodecError);
+}

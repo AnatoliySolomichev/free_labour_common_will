@@ -278,11 +278,24 @@ double buyback_price(const std::vector<HoldingLot>& lots, const WorkRecord& work
     return price;
 }
 
-bool completes_buyback(const Transfer& deal, const Transfer& purchase, double price) noexcept {
+bool completes_buyback(const Transfer& deal, const Transfer& purchase, double price,
+                       const WorkRecord* repair) noexcept {
     if (!deal.accept || !purchase.accept || !purchase.accept->buyback) return false;
     const Buyback& b = *purchase.accept->buyback;
-    return deal.from == b.to && deal.to == purchase.from && deal.timestamp < b.until &&
-           deal.accept->work == purchase.accept->work && meets_resale(*deal.accept, price);
+    if (!(deal.from == b.to && deal.to == purchase.from && deal.timestamp < b.until))
+        return false;
+    if (deal.accept->work == purchase.accept->work)                 // выкуп без ремонта
+        return !repair && meets_resale(*deal.accept, price);
+    // Выкуп с ремонтом (ИР-015): сделка называет работу держателя над этой самой
+    // покупкой. Вещь — по норме, расходники ремонта — переносом, труд — по осям.
+    if (!repair || !repair->improves || !deal.accept->release) return false;
+    if (!(*repair->improves == *deal.accept->release)) return false;
+    if (deal.accept->work.chain != purchase.from) return false;     // чужой труд сюда не вложить
+    double spent = 0.0;
+    for (const auto& ce : repair->carry) spent += ce.carried;
+    const double carried = deal.accept->carried_units ? *deal.accept->carried_units : 0.0;
+    return deal.accept->labor_units > 0.0 && !deal.accept->axes.empty() &&
+           std::abs(carried - (price + spent)) <= 1e-6;
 }
 
 } // namespace records

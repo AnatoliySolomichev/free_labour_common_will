@@ -170,6 +170,11 @@ double buyback_price(const std::vector<HoldingLot>& lots, const WorkRecord& work
 // Whether `deal` buys back what `purchase` bought, on its pre-signed return: by
 // the addressee, from the holder, before the term, the same product, at `price`
 // (buyback_price) — carried cost only, like any resale. No holder takes part.
-bool completes_buyback(const Transfer& deal, const Transfer& purchase, double price) noexcept;
+// `repair` — работа держателя над этой самой покупкой (ИР-015): ремонт и выкуп
+// одной сделкой. Тогда платят и за вещь по норме, и за труд держателя: перенос —
+// остаток вещи плюс расходники ремонта, труд — по осям, как в любой приёмке.
+// nullptr — выкуп без ремонта, только перенос.
+bool completes_buyback(const Transfer& deal, const Transfer& purchase, double price,
+                       const WorkRecord* repair = nullptr) noexcept;
 
 } // namespace records

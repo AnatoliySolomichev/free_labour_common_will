@@ -418,7 +418,11 @@ bcp vera release "$STOOL_vera" --to "${CID[dmitry]}" --units Т-2 --buyback --bu
 OUT_rep="$(bcp dmitry accept --work "${CID[dmitry]}/$W_stools" --quality "принят в ремонт" --via "$VIA" 2>&1)"
 echo "$OUT_rep" | sed 's/^/   /'
 REPAIR_dmitry="$(printf '%s\n' "$OUT_rep" | after 'acceptance ref: ')"
-say "Вера выкупает табурет сама — по подписанному возврату, без участия Дмитрия"
+say "Дмитрий чинит табурет: работа над своей покупкой — нового изделия нет, дорожает сама вещь"
+bcp dmitry work log --title "столяр, 6-й разряд" --action "Перетяжка сиденья" --hours 1 \
+    --start "$(( NOW - 32400 ))" --improves "$REPAIR_dmitry" \
+    --axis-share "$(axis precision)=1" --via "$VIA" 2>&1 | sed 's/^/   /'
+say "Вера выкупает табурет одной сделкой: за вещь по норме и за труд ремонта по осям (ИР-015)"
 bcp vera accept --work "${CID[dmitry]}/$W_stools" --quality "отремонтирован" --via "$VIA" 2>&1 | sed 's/^/   /'
 bcp dmitry stock --via "$VIA" | sed 's/^/   /'
 

@@ -1188,3 +1188,66 @@ TEST_F(RatesViewTest, BoughtGoodsGoIntoProduction) {
     ASSERT_NE(st, deals.lots.end());
     EXPECT_TRUE(st->second.invalid.count(Crypto::hash_block(over).bytes));
 }
+
+// Выкуп с ремонтом (ИР-015): Боб берёт табурет Алисы выкупом с адресом, чинит его
+// и Алиса выкупает одной сделкой — за вещь и за труд Боба по осям. Труд идёт в
+// счёт как всякий другой, а вещь дорожает ровно на него.
+TEST_F(RatesViewTest, ABuybackPaysForTheHoldersRepair) {
+    records::WorkRecord make{};
+    make.hours   = 10.0;
+    make.outputs = {{"табурет", 1.0, "шт"}};
+    make.axes    = {{test_axis(), 1.0}};
+    const Block work = add(alice_, make);
+
+    records::Release rl{};
+    rl.work      = ref_to(alice_, work);
+    rl.to        = bob_.bytes;
+    rl.timestamp = kDay;
+    rl.expires   = kDay + 1000;
+    rl.addressed = records::Addressed{alice_.bytes, kDay + 5000};
+    const Block rb = add(alice_, rl);
+
+    records::Acceptance a{};
+    a.work        = ref_to(alice_, work);
+    a.release     = ref_to(alice_, rb);
+    a.hours_raw   = 10.0;
+    a.labor_units = 10.0;
+    a.axes        = {{test_axis(), 10.0}};
+    a.buyback     = records::Buyback{alice_.bytes, kDay + 5000};
+    records::Transfer t{};
+    t.from      = bob_.bytes;
+    t.to        = alice_.bytes;
+    t.origins   = { {bob_.bytes, 10.0} };
+    t.accept    = a;
+    t.timestamp = kDay + 100;
+    const Block held = add(bob_, t);
+
+    records::WorkRecord repair{};      // работа держателя над своей покупкой
+    repair.hours    = 2.0;
+    repair.axes     = {{test_axis(), 1.0}};
+    repair.improves = ref_to(bob_, held);
+    const Block fix = add(bob_, repair);
+
+    records::Acceptance ba{};
+    ba.work          = ref_to(bob_, fix);        // платим за труд держателя
+    ba.release       = ref_to(bob_, held);       // по подписанному возврату
+    ba.hours_raw     = 2.0;
+    ba.labor_units   = 2.0;
+    ba.axes          = {{test_axis(), 2.0}};
+    ba.carried_units = 10.0;                     // вещь — по цене покупки, износа нет
+    records::Transfer bt{};
+    bt.from      = alice_.bytes;
+    bt.to        = bob_.bytes;
+    bt.origins   = { {bob_.bytes, 12.0} };
+    bt.accept    = ba;
+    bt.timestamp = kDay + 200;
+    const auto back = Crypto::hash_block(add(alice_, bt)).bytes;
+
+    const auto deals = read_deals(*storage_);
+    EXPECT_TRUE(deals.counts(back));                    // ремонт — оплаченный труд
+    EXPECT_TRUE(deals.bought_back.count(Crypto::hash_block(held).bytes));
+    const auto h = deals.holdings.find(back);
+    ASSERT_NE(h, deals.holdings.end());
+    ASSERT_EQ(h->second.size(), 1u);
+    EXPECT_NEAR(h->second[0].cost, 12.0, 1e-9);         // вещь подорожала на ремонт
+}
