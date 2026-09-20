@@ -241,6 +241,79 @@ do_deal(){
         "${m:-0}" "$c" "$w" "${PROF[$w]}" "${LVL[$w]}" "$h" "$coef" >> "$OUT/deals.tsv"
 }
 
+# ── Производство: партии, порции, перепродажа, машино-часы, своё в своё ─────
+# Всё это — механики ИР-023: продукция рождается записью труда, продаётся
+# порциями по ценнику, перепродаётся по цене покупки, а износ вещи продаётся
+# машино-часами. Несколько сцен в месяц, чтобы годовая картина их тоже видела.
+ok_lots=0; ok_portions=0; ok_resales=0; ok_hires=0; ok_assemblies=0
+declare -A TOOLREF          # цепь → своя запись средства производства
+WSTART=""                   # свободное окно месяца для цепи: часы ложатся стопкой назад
+wstart_for(){               # ставит WSTART и двигает счётчик занятых часов цепи
+    WSTART="$(awk -v t="$MTS" -v u="${USED[$1]:-0}" -v h="$2" 'BEGIN{printf "%d", t-(u+h)*3600}')"
+    USED[$1]="$(awk -v u="${USED[$1]:-0}" -v h="$2" 'BEGIN{printf "%g", u+h}')"
+}
+shares_of(){                # предложенная разбивка по профессии цепи
+    local out=() kv
+    for kv in $(axis_shares "${PROF[$1]}"); do out+=(--axis-share "$(axis "${kv%%=*}")=${kv##*=}"); done
+    printf '%s\n' "${out[@]}"
+}
+production_month(){
+    local maker="$1" b1="$2" b2="$3" b3="$4"
+    [[ -z "${CID[$maker]}" || -z "${CID[$b1]}" || -z "${CID[$b2]}" || -z "${CID[$b3]}" ]] && return
+    [[ "$maker" == "$b1" || "$maker" == "$b2" || "$maker" == "$b3" ]] && return
+    [[ "$b1" == "$b2" || "$b1" == "$b3" || "$b2" == "$b3" ]] && return
+    local sh=(); mapfile -t sh < <(shares_of "$maker")
+
+    # 1) партия на склад: 12 штук с ценником, две порции уходят по нему
+    local st wh
+    wstart_for "$maker" 3; st="$WSTART"
+    wh="$(ftbc "p$maker" work log --title "${PROF[$maker]#prof.}" --action "партия на склад" \
+          --hours 3 --start "$st" --output "изделие:12:шт::k=1" "${sh[@]}" --via "$VIA" \
+          | after 'hash: ')"
+    [[ -z "$wh" ]] && return
+    ((ok_lots++))
+    local acc1="" acc2=""
+    ftbc "p$maker" release "$wh" --to "${CID[$b1]}" --qty 5 --days 20 --via "$VIA" >/dev/null 2>&1 &&
+        acc1="$(ftbc "p$b1" accept --work "${CID[$maker]}/$wh" --quality ok --via "$VIA" | after 'acceptance ref: ')"
+    [[ -n "$acc1" ]] && { ((ok_portions++)); ftbc "p$maker" transfer recv "$acc1" --via "$VIA" >/dev/null 2>&1; }
+    ftbc "p$maker" release "$wh" --to "${CID[$b2]}" --qty 4 --days 20 --via "$VIA" >/dev/null 2>&1 &&
+        acc2="$(ftbc "p$b2" accept --work "${CID[$maker]}/$wh" --quality ok --via "$VIA" | after 'acceptance ref: ')"
+    [[ -n "$acc2" ]] && { ((ok_portions++)); ftbc "p$maker" transfer recv "$acc2" --via "$VIA" >/dev/null 2>&1; }
+
+    # 2) перепродажа: первый покупатель отдаёт две штуки третьему по цене покупки
+    if [[ -n "$acc1" ]]; then
+        local rs=""
+        ftbc "p$b1" release "$acc1" --to "${CID[$b3]}" --qty 2 --days 20 --via "$VIA" >/dev/null 2>&1 &&
+            rs="$(ftbc "p$b3" accept --work "${CID[$maker]}/$wh" --quality ok --via "$VIA" | after 'acceptance ref: ')"
+        [[ -n "$rs" ]] && { ((ok_resales++)); ftbc "p$b1" transfer recv "$rs" --via "$VIA" >/dev/null 2>&1; }
+    fi
+
+    # 3) аренда по счётчику: владелец продаёт износ своей вещи, вещь остаётся у него
+    [[ -z "${TOOLREF[$maker]:-}" ]] && TOOLREF[$maker]="$(ftbc "p$maker" tool add "станок" \
+        --cost 60 --life 3000 --note "оценка владельца" --via "$VIA" | after 'tool ref: ')"
+    if [[ -n "${TOOLREF[$maker]:-}" ]]; then
+        local hire mh=""
+        hire="$(ftbc "p$maker" hire "${TOOLREF[$maker]#*/}" --to "${CID[$b2]}" --machine-hours 6 \
+                --meter "по счётчику" --days 20 --via "$VIA" | after 'hire ref: ')"
+        [[ -n "$hire" ]] && mh="$(ftbc "p$b2" accept --work "$hire" --quality ok --via "$VIA" | after 'acceptance ref: ')"
+        [[ -n "$mh" ]] && { ((ok_hires++)); ftbc "p$maker" transfer recv "$mh" --via "$VIA" >/dev/null 2>&1; }
+    fi
+
+    # 4) своё в своё: деталь и сборка из неё — в изделие приходит труд, не цена
+    local pst ph ast ah asm=""
+    wstart_for "$maker" 2; pst="$WSTART"
+    ph="$(ftbc "p$maker" work log --title "${PROF[$maker]#prof.}" --action "деталь" --hours 2 \
+          --start "$pst" --output "деталь:4:шт::k=1" "${sh[@]}" --via "$VIA" | after 'hash: ')"
+    if [[ -n "$ph" ]]; then
+        wstart_for "$maker" 1; ast="$WSTART"
+        ah="$(ftbc "p$maker" work log --title "${PROF[$maker]#prof.}" --action "сборка из своих деталей" \
+              --hours 1 --start "$ast" --spend "$ph:4" --output "узел:1:шт" --for "${CID[$b3]}" \
+              "${sh[@]}" --via "$VIA" | after 'hash: ')"
+        [[ -n "$ah" ]] && asm="$(ftbc "p$b3" accept --work "${CID[$maker]}/$ah" --quality ok --via "$VIA" | after 'acceptance ref: ')"
+        [[ -n "$asm" ]] && { ((ok_assemblies++)); ftbc "p$maker" transfer recv "$asm" --via "$VIA" >/dev/null 2>&1; }
+    fi
+}
+
 # ── Одно слияние: b слушает раз, a инициирует ────────────────────────────────
 ok_merges=0
 merge_pair(){
@@ -271,6 +344,10 @@ for ((m=0;m<MONTHS;m++)); do
     done
     # немного межрайонных сделок — утечка «наружу», чтобы замкнутость была < 100%
     for ((s=0; s<POP/12+1; s++)); do do_deal "$(rnd "$POP")" "$(rnd "$POP")" "$(( 1 + $(rnd 8) ))"; done
+    # производство: партии, порции, перепродажа, машино-часы, своё в своё (ИР-023)
+    for ((s=0; s<2; s++)); do
+        production_month "$(rnd "$POP")" "$(rnd "$POP")" "$(rnd "$POP")" "$(rnd "$POP")"
+    done
     # слияния (рост DAG)
     for ((s=0;s<MERGES_PER_MONTH;s++)); do merge_pair "$(rnd "$POP")" "$(rnd "$POP")"; done
     # пломбы
@@ -283,7 +360,7 @@ for ((m=0;m<MONTHS;m++)); do
         a="$(rnd "$POP")"; j="$(rnd 3)"
         ftbc "p$a" pledge add --target "${IDEAREF[$j]}" --units "$(( 1 + $(rnd 5) ))" --via "$VIA" >/dev/null 2>&1 && ((ok_pledges++))
     done
-    log "▶ месяц $((m+1))/$MONTHS ($md): сделок ok=$ok_deals fail=$fail_deals · слияний=$ok_merges · пломб=$ok_seals · обещаний=$ok_pledges"
+    log "▶ месяц $((m+1))/$MONTHS ($md): сделок ok=$ok_deals fail=$fail_deals · слияний=$ok_merges · пломб=$ok_seals · обещаний=$ok_pledges · партий=$ok_lots порций=$ok_portions перепродаж=$ok_resales аренд=$ok_hires сборок=$ok_assemblies"
 done
 
 # ── Компрометации ключей (несколько в конце года) ────────────────────────────
@@ -341,10 +418,11 @@ PY
 )"
 
 # ── Сборка датасета и сводки (python) ────────────────────────────────────────
-python3 - "$OUT" "$POP" "$MONTHS" "$SEED" "$YEAR" "$ok_deals" "$fail_deals" "$total_hours" "$ok_merges" "$ok_seals" "$ok_pledges" "$ok_revokes" > "$OUT/sim-stats.txt" <<'PY'
+python3 - "$OUT" "$POP" "$MONTHS" "$SEED" "$YEAR" "$ok_deals" "$fail_deals" "$total_hours" "$ok_merges" "$ok_seals" "$ok_pledges" "$ok_revokes" "$ok_lots" "$ok_portions" "$ok_resales" "$ok_hires" "$ok_assemblies" > "$OUT/sim-stats.txt" <<'PY'
 import json,sys,glob,os,statistics as st
 out,POP,MONTHS,SEED,YEAR = sys.argv[1],int(sys.argv[2]),int(sys.argv[3]),int(sys.argv[4]),int(sys.argv[5])
 ok_deals,fail_deals,total_hours,ok_merges,ok_seals,ok_pledges,ok_revokes = map(int,sys.argv[6:13])
+lots,portions,resales,hires,assemblies = map(int,sys.argv[13:18])
 
 roster={}
 for line in open(os.path.join(out,'roster.tsv')):
@@ -411,7 +489,8 @@ active=[e for e in econ if e['issued']>0 or e['received']>0]
 dataset={
  'meta':{'population':POP,'active':len(active),'months':MONTHS,'seed':SEED,'year':YEAR,
          'deals_ok':ok_deals,'deals_fail':fail_deals,'labor_hours_transacted':total_hours,
-         'merges':ok_merges,'seals':ok_seals,'pledges':ok_pledges,'revocations':ok_revokes},
+         'merges':ok_merges,'seals':ok_seals,'pledges':ok_pledges,'revocations':ok_revokes,
+         'lots':lots,'portions':portions,'resales':resales,'hires':hires,'assemblies':assemblies},
  'population':[roster[k] for k in sorted(roster,key=int)],
  'economy':econ,
  'rates_by_month':rates_by_month,'rates_latest_month':rates_latest_month,
@@ -435,6 +514,8 @@ m=dataset['meta']
 P(f"  активны экономически: {m['active']}/{POP}")
 P(f"  сделок: {m['deals_ok']} (сбоев {m['deals_fail']}) · трудочасов проведено: {m['labor_hours_transacted']}")
 P(f"  слияний (DAG): {m['merges']} · пломб: {m['seals']} · обещаний: {m['pledges']} · отзывов ключей: {m['revocations']}")
+P(f"  продукция (ИР-023): партий {lots} · порций продано {portions} · перепродаж {resales} · "
+  f"аренд по счётчику {hires} · сборок из своих деталей {assemblies}")
 if issued:
     P(f"  бумаги эмитировано всего: {sum(issued):.0f}ч · погашено: {sum(e['redeemed'] for e in econ):.0f}ч "
       f"({100*sum(e['redeemed'] for e in econ)/ (sum(issued) or 1):.0f}%)")
