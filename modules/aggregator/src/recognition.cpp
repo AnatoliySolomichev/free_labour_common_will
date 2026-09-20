@@ -266,6 +266,46 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
                 a.sound = std::abs(a.cost - records::resale_price(hl, a.lot.qty)) <= 1e-6;
     }
 
+    // Нить переноса (ИР-011): сколько стоимости записи уже ушло в продукцию —
+    // последнее звено, написанное самим владельцем.
+    for (const auto& [wh, w] : out.works) {
+        (void)wh;
+        for (const auto& ce : w.record.carry) {
+            const auto a = out.asset_records.find(ce.src.hash);
+            if (a == out.asset_records.end() || ce.src.chain != w.worker.bytes ||
+                a->second.owner != w.worker)
+                continue;
+            a->second.collected = std::max(a->second.collected, ce.after);
+        }
+    }
+    // Ремонт — единственный законный путь стоимости вверх (ИР-015,
+    // records.md §10.2): перевыпуск не выше остатка прежней записи, а выше —
+    // ровно на принятый и оплаченный ремонт, и одна сделка оправдывает одно
+    // удорожание.
+    std::set<Hash32> spent_repairs;
+    for (auto& [ah, a] : out.asset_records) {
+        (void)ah;
+        if (!a.origin) continue;
+        const auto prev = out.asset_records.find(a.origin->hash);
+        if (prev == out.asset_records.end() || a.origin->chain != a.owner.bytes ||
+            prev->second.owner != a.owner) {
+            a.sound = false;                       // перевыпуск не своей записи
+            continue;
+        }
+        double allowed = prev->second.cost - prev->second.collected;
+        if (a.repair) {
+            const auto d = deal_at.find(a.repair->hash);
+            if (d != deal_at.end() && a.repair->chain == a.owner.bytes &&
+                out.all[d->second].payer == a.owner && state[d->second] == 1 &&
+                spent_repairs.insert(a.repair->hash).second) {
+                double paid = 0.0;
+                for (const auto& o : out.all[d->second].transfer.origins) paid += o.units;
+                allowed += paid;
+            }
+        }
+        a.sound = a.cost <= allowed + 1e-9;
+    }
+
     // Lots (records.md §9.8): outputs sold in portions and purchases sold on,
     // every sub-thread checked. A link counts toward a lot only when its author
     // is that lot's seller — nobody writes into someone else's lot.
@@ -366,7 +406,9 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
             const auto h = holding_deal(release->holding);
             ok = h && sound(*h) && link_valid(*release);
         } else {
-            ok = out.sound(a.work);
+            // Перенос из записи, перевыпущенной вверх без оплаченного ремонта, —
+            // стоимость из воздуха (ИР-015): такая работа к сделке не признаётся.
+            ok = out.sound(a.work) && out.carry_sound(a.work.hash);
             // Расход своей продукции (records.md §9.4 v7): труд детали приходит в
             // изделие, поэтому и работа-источник обязана быть в счёт, и её звено —
             // сходиться: иначе одни и те же часы продали бы дважды.
@@ -415,46 +457,6 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
         claims.push_back(c);
     }
     out.recognition = records::recognize_deals(claims);
-
-    // Нить переноса (ИР-011): сколько стоимости записи уже ушло в продукцию —
-    // последнее звено, написанное самим владельцем.
-    for (const auto& [wh, w] : out.works) {
-        (void)wh;
-        for (const auto& ce : w.record.carry) {
-            const auto a = out.asset_records.find(ce.src.hash);
-            if (a == out.asset_records.end() || ce.src.chain != w.worker.bytes ||
-                a->second.owner != w.worker)
-                continue;
-            a->second.collected = std::max(a->second.collected, ce.after);
-        }
-    }
-    // Ремонт — единственный законный путь стоимости вверх (ИР-015,
-    // records.md §10.2): перевыпуск не выше остатка прежней записи, а выше —
-    // ровно на принятый и оплаченный ремонт, и одна сделка оправдывает одно
-    // удорожание.
-    std::set<Hash32> spent_repairs;
-    for (auto& [ah, a] : out.asset_records) {
-        (void)ah;
-        if (!a.origin) continue;
-        const auto prev = out.asset_records.find(a.origin->hash);
-        if (prev == out.asset_records.end() || a.origin->chain != a.owner.bytes ||
-            prev->second.owner != a.owner) {
-            a.sound = false;                       // перевыпуск не своей записи
-            continue;
-        }
-        double allowed = prev->second.cost - prev->second.collected;
-        if (a.repair) {
-            const auto d = deal_at.find(a.repair->hash);
-            if (d != deal_at.end() && a.repair->chain == a.owner.bytes &&
-                out.all[d->second].payer == a.owner && out.moves_hours(out.all[d->second].hash) &&
-                spent_repairs.insert(a.repair->hash).second) {
-                double paid = 0.0;
-                for (const auto& o : out.all[d->second].transfer.origins) paid += o.units;
-                allowed += paid;
-            }
-        }
-        a.sound = a.cost <= allowed + 1e-9;
-    }
 
     // What was paid for: whole results, and portions.
     for (std::size_t i = 0; i < n; ++i) {

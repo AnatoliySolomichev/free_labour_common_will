@@ -1398,6 +1398,23 @@ TEST_F(RatesViewTest, OnlyAPaidRepairLiftsAToolsCost) {
     EXPECT_FALSE(deals.asset_records.at(Crypto::hash_block(bad).bytes).sound);
     EXPECT_TRUE(deals.carry_sound(Crypto::hash_block(fixw).bytes));
     EXPECT_FALSE(deals.carry_sound(Crypto::hash_block(spoiled).bytes));
+
+    // Сделка по работе с переносом из непризнанной записи не идёт в счёт:
+    // стоимость в ней взялась из воздуха (ИР-011, ИР-015).
+    records::Acceptance sa{};
+    sa.work          = ref_to(alice_, spoiled);
+    sa.hours_raw     = 1.0;
+    sa.labor_units   = 1.0;
+    sa.axes          = {{test_axis(), 1.0}};
+    sa.carried_units = 1.0;
+    records::Transfer stf{};
+    stf.from      = bob_.bytes;
+    stf.to        = alice_.bytes;
+    stf.origins   = { {bob_.bytes, 2.0} };
+    stf.accept    = sa;
+    stf.timestamp = kDay + 400;
+    const auto spoiled_deal = Crypto::hash_block(add(bob_, stf)).bytes;
+    EXPECT_FALSE(read_deals(*storage_).counts(spoiled_deal));
 }
 
 // Аренда по счётчику (ИР-023, пункт 9): Алиса продаёт износ своей печи — запись
