@@ -493,3 +493,17 @@ TEST(Buyout, ABuybackCanPayForTheHoldersRepair) {
     back.accept->labor_units   = 0.0;                              // труд без оплаты — не ремонт
     EXPECT_FALSE(completes_buyback(back, purchase, 3.0, &repair));
 }
+
+// ── Расход своей продукции в своё производство (records.md §9.4 v7) ──────────
+
+TEST(SpentLabor, APartBringsItsHoursNotItsPrice) {
+    WorkRecord frame{};
+    frame.hours   = 6.0;
+    frame.outputs = {{"рама", 3.0, "шт"}};
+    LotLink l{};
+    l.qty = 1.0;
+    ASSERT_TRUE(spent_hours(frame, l).has_value());
+    EXPECT_NEAR(*spent_hours(frame, l), 2.0, 1e-12);   // треть партии — треть часов
+    l.out = 1;
+    EXPECT_FALSE(spent_hours(frame, l).has_value());   // такого выхода нет
+}

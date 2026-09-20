@@ -221,6 +221,41 @@ struct AxisShare {
     }
 };
 
+// A link of a lot's sub-thread (records.md §9.8 v2, ИР-023): a portion taken from
+// one output of a work — released to a buyer or written off. One sub-thread per
+// lot across the whole chain (prev is a Ref, it crosses branches) and strict,
+// like the carry thread: two links with one seq are two sales from one
+// remainder. `after` checks out against the previous link alone, so the
+// remainder of a lot is known in O(1).
+struct LotLink {
+    uint32_t           out   = 0;   // index into the work's outputs
+    double             qty   = 0;   // taken by this link, in the output's unit
+    uint64_t           seq   = 0;   // link counter of the lot's sub-thread
+    std::optional<Ref> prev;        // the previous link; absent for the first
+    double             after = 0;   // taken from the lot after this link; ≤ the output's qty
+    std::vector<Ref>   returns;     // expired releases of this lot nobody took — back in stock
+    // v3: the numbered units taken, for a lot counted piece by piece; qty is
+    // their count. A unit is sold once (records.md §9.8).
+    std::vector<std::string> units;
+
+    bool operator==(const LotLink& o) const noexcept {
+        return out == o.out && qty == o.qty && seq == o.seq && prev == o.prev
+            && after == o.after && returns == o.returns && units == o.units;
+    }
+};
+
+// v7 (ИР-023): звено расхода своей продукции — какая своя работа и сколько из её
+// партии ушло в эту. Подниточка та же, что у продаж и списаний: что израсходовано,
+// то уже не продать; а в изделие приходит не цена детали, а её труд.
+struct SpendLink {
+    Ref     work;   // своя запись труда, чей выход расходуется
+    LotLink lot;    // звено подниточки её партии
+
+    bool operator==(const SpendLink& o) const noexcept {
+        return work == o.work && lot == o.lot;
+    }
+};
+
 // One act of work (records.md §9.4). The worker is the chain that signed the
 // block. There is no reference to a specialty or a grade (ИР-022 шаг 11): what
 // the work was is said by the breakdown of its price in the Acceptance
@@ -254,29 +289,10 @@ struct WorkRecord {
     // изделия не рождается: дорожает сама вещь, и труд оплачивается той же
     // сделкой, которой её выкупают назад (records.md §9.8 v7).
     std::optional<Ref>        improves;
-};
-
-// A link of a lot's sub-thread (records.md §9.8 v2, ИР-023): a portion taken from
-// one output of a work — released to a buyer or written off. One sub-thread per
-// lot across the whole chain (prev is a Ref, it crosses branches) and strict,
-// like the carry thread: two links with one seq are two sales from one
-// remainder. `after` checks out against the previous link alone, so the
-// remainder of a lot is known in O(1).
-struct LotLink {
-    uint32_t           out   = 0;   // index into the work's outputs
-    double             qty   = 0;   // taken by this link, in the output's unit
-    uint64_t           seq   = 0;   // link counter of the lot's sub-thread
-    std::optional<Ref> prev;        // the previous link; absent for the first
-    double             after = 0;   // taken from the lot after this link; ≤ the output's qty
-    std::vector<Ref>   returns;     // expired releases of this lot nobody took — back in stock
-    // v3: the numbered units taken, for a lot counted piece by piece; qty is
-    // their count. A unit is sold once (records.md §9.8).
-    std::vector<std::string> units;
-
-    bool operator==(const LotLink& o) const noexcept {
-        return out == o.out && qty == o.qty && seq == o.seq && prev == o.prev
-            && after == o.after && returns == o.returns && units == o.units;
-    }
+    // v7 (ИР-023): расход своей продукции в своё производство. Деталь не
+    // становится «товаром с ценой»: в изделие приходит её труд — часы той работы,
+    // — и подтверждает их покупатель готового изделия (records.md §9.4 v7).
+    std::vector<SpendLink>    spends;
 };
 
 // An addressed buyout (records.md §9.8 v5, ИР-023, пункт 8): ownership and risk

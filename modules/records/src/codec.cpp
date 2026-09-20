@@ -114,6 +114,8 @@ void w_resource_qty(Buf& out, const ResourceQty& rq) {
 
 // ── Per-type encoders ─────────────────────────────────────────────────────────
 
+void w_lot_link(Buf& out, const LotLink& l);   // определён ниже, вместе с отпуском
+
 void enc_fraud_claim(Buf& out, const FraudClaim& f) {
     w_map(out, 5);
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::FraudClaim));
@@ -239,12 +241,12 @@ void check_work_record(const WorkRecord& wr) {
 void enc_work_record(Buf& out, const WorkRecord& wr) {
     // Key 1 (agent → Grade) is retired with the grade (ИР-022 шаг 11). The
     // optional tail — carry (7), title (8), customer (9), thread (10), axes (11),
-    // improves (12) — is written only when present and in ascending key order, so
-    // the encoding stays deterministic.
+    // improves (12), spends (13) — is written only when present and in ascending
+    // key order, so the encoding stays deterministic.
     check_work_record(wr);
     w_map(out, 6 + (wr.carry.empty() ? 0 : 1) + (wr.title.empty() ? 0 : 1)
                  + (wr.customer ? 1 : 0) + (wr.thread ? 1 : 0) + (wr.axes.empty() ? 0 : 1)
-                 + (wr.improves ? 1 : 0));
+                 + (wr.improves ? 1 : 0) + (wr.spends.empty() ? 0 : 1));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::WorkRecord));
     w_uint(out, 2); w_text(out, wr.action);
     w_uint(out, 3); w_int64(out, wr.start_ts);
@@ -275,6 +277,14 @@ void enc_work_record(Buf& out, const WorkRecord& wr) {
         }
     }
     if (wr.improves) { w_uint(out, 12); w_ref(out, *wr.improves); }   // ИР-015
+    if (!wr.spends.empty()) {                       // ИР-023: своё в своё производство
+        w_uint(out, 13); w_arr(out, wr.spends.size());
+        for (const auto& sp : wr.spends) {
+            w_map(out, 2);
+            w_uint(out, 0); w_ref(out, sp.work);
+            w_uint(out, 1); w_lot_link(out, sp.lot);
+        }
+    }
 }
 
 // The acceptance (records.md §9.5): since ИР-023 not a record of its own but the
@@ -777,6 +787,8 @@ private:
 
 // ── Per-type decoders ─────────────────────────────────────────────────────────
 
+LotLink dec_lot_link(CborReader& r);   // определён ниже, вместе с хвостом отпуска
+
 // Called after map header and key-0 (type) have already been consumed.
 
 void expect_key(CborReader& r, uint64_t expected) {
@@ -966,7 +978,7 @@ WorkRecord dec_work_record_fields(CborReader& r, uint64_t field_count) {
         for (uint64_t i = 0; i < n; ++i) wr.outputs.push_back(dec_resource_qty(r));
     }
     // The optional tail, by key and ascending: carry (7), title (8), customer
-    // (9), thread (10), axes (11), improves (12). Present means non-empty — an empty one is
+    // (9), thread (10), axes (11), improves (12), spends (13). Present means non-empty — an empty one is
     // never written, so reading one would mean two encodings of the same record.
     uint64_t last = 6;
     for (uint64_t i = 6; i < field_count; ++i) {
@@ -994,6 +1006,17 @@ WorkRecord dec_work_record_fields(CborReader& r, uint64_t field_count) {
             link.prev.reserve(static_cast<size_t>(n));
             for (uint64_t k = 0; k < n; ++k) link.prev.push_back(dec_ref(r));
             wr.thread = std::move(link);
+        } else if (key == 13) {
+            const uint64_t n = r.r_arr();
+            if (n == 0) throw CodecError("WorkRecord: spends present but empty");
+            wr.spends.reserve(static_cast<size_t>(n));
+            for (uint64_t k = 0; k < n; ++k) {
+                if (r.r_map() != 2) throw CodecError("SpendLink: expected 2 fields");
+                SpendLink sp{};
+                expect_key(r, 0); sp.work = dec_ref(r);
+                expect_key(r, 1); sp.lot  = dec_lot_link(r);
+                wr.spends.push_back(std::move(sp));
+            }
         } else if (key == 12) {
             wr.improves = dec_ref(r);
         } else if (key == 11) {
@@ -1080,8 +1103,6 @@ Acceptance dec_acceptance(CborReader& r) {
     }
     return a;
 }
-
-LotLink dec_lot_link(CborReader& r);   // определён ниже, вместе с хвостом отпуска
 
 Material dec_material_fields(CborReader& r, uint64_t field_count) {
     if (field_count < 10 || field_count > 11)

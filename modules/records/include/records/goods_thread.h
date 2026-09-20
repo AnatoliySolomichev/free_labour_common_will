@@ -71,6 +71,12 @@ LaborThread check_labor_thread(const std::array<uint8_t, 32>& chain,
 // size, or several outputs without declared shares.
 std::optional<double> portion_fraction(const WorkRecord& wr, const LotLink& lot) noexcept;
 
+// Труд, пришедший в работу с её расходом своей продукции (records.md §9.4 v7,
+// ИР-023): часы работы-источника, приходящиеся на израсходованное. Деталь не
+// несёт цены — она несёт свои часы, и подтверждает их покупатель изделия.
+// nullopt — партию не оценить: нет такого выхода или доли не объявлены.
+std::optional<double> spent_hours(const WorkRecord& source, const LotLink& lot) noexcept;
+
 // One link of a lot's sub-thread as seen in a block of the chain: the release of
 // a portion, or a write-off.
 struct ObservedLotLink {

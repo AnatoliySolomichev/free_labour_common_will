@@ -469,6 +469,19 @@ bcp anna work log --title "повар, 5-й разряд" --action "Булочк
 say "склад Анны: купленные 20 кг целиком заведены в производство — продавать из них уже нечего"
 bcp anna stock --via "$VIA" | sed 's/^/   /'
 
+hr "своё в своё: Дмитрий ставит свои ножки в табурет — приходит труд, а не цена (records.md §9.4)"
+say "сначала четыре ножки, потом из них табурет на заказ Галины: в цене изделия — часы обеих работ"
+W_legs=$(bcp dmitry work log --title "столяр, 6-й разряд" --action "Ножки точёные" --hours 2 \
+         --start "$(( NOW - 39600 ))" --output "ножка:4:шт::k=1" \
+         --axis-share "$(axis precision)=1" --via "$VIA" | after 'hash: ')
+OUT_tab="$(bcp dmitry work log --title "столяр, 6-й разряд" --action "Табурет из своих ножек" \
+           --hours 1 --start "$(( NOW - 43200 ))" --output "табурет:1:шт" --spend "$W_legs:4" \
+           --for "${CID[galina]}" --axis-share "$(axis precision)=1" --via "$VIA" 2>&1)"
+echo "$OUT_tab" | sed 's/^/   /'
+W_table="$(printf '%s\n' "$OUT_tab" | after 'hash: ')"
+say "Галина принимает: час сборки и два часа ножек, по ценам дня каждой работы"
+bcp galina accept --work "${CID[dmitry]}/$W_table" --quality "ровный" --via "$VIA" 2>&1 | sed 's/^/   /'
+
 hr "облако образцов работ — из сделок, а не из каталога (bc cloud, ИР-022)"
 say "точка — образец, который повторили; место — из чего сложилась цена его семьи."
 say "соседи — те, кому платят за похожее; ставка — высота над картой, не координата"
@@ -662,6 +675,10 @@ else echo "   ✓ арендованное не продать (records.md §9.8
 if bcp anna release "$FLOUR_anna" --to "${CID[boris]}" --qty 5 --via "$VIA" >/dev/null 2>&1; then
     echo "   ✗ перепродано то, что ушло в производство"; fail=1
 else echo "   ✓ заведённое в производство не перепродать (records.md §10.1)"; fi
+# израсходованное в своё изделие не продать (records.md §9.4)
+if bcp dmitry release "$W_legs" --to "${CID[boris]}" --qty 1 --via "$VIA" >/dev/null 2>&1; then
+    echo "   ✗ проданы ножки, ушедшие в изделие"; fail=1
+else echo "   ✓ израсходованное в своё изделие не продать (records.md §9.4)"; fi
 # переоценка печи ВВЕРХ обязана отклониться (перевыпуск только вниз)
 if bcp anna tool add "Печь подовая" --cost 400 --life 8000 --origin "$TOOL" --note "хочу дороже" >/dev/null 2>&1; then
     echo "   ✗ переоценка вверх прошла, а должна была отклониться"; fail=1

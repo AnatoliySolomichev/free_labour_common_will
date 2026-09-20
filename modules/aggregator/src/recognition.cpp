@@ -45,6 +45,10 @@ LotSummary summarize(const DealsOnTable& deals, const LotKey& key, double qty,
     for (const auto& a : deals.assets)
         if (LotKey{a.src.hash, a.lot.out} == key && st.valid.count(a.hash))
             s.consumed += a.lot.qty;
+    for (const auto& [wh, w] : deals.works)       // расход своей продукции (v7)
+        for (const auto& sp : w.record.spends)
+            if (LotKey{sp.work.hash, sp.lot.out} == key && st.valid.count(wh))
+                s.consumed += sp.lot.qty;
     s.reserved = std::max(0.0, st.used - s.sold - s.written_off - s.consumed);
     for (const auto& u : units)
         if (!st.held.count(u)) s.free_units.push_back(u);
@@ -267,6 +271,14 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
             lot_links[lot_key(r.release.work, r.release.holding, r.release.lot->out)].push_back(
                 {r.hash, *r.release.lot, r.release.timestamp, r.release.expires,
                  out.taken.count(r.hash) > 0});
+    // Расход своей продукции в своё производство (records.md §9.4 v7): звено той
+    // же подниточки, что продажи и списания — израсходованного уже не продать.
+    for (const auto& [wh, w] : out.works)
+        for (const auto& sp : w.record.spends) {
+            if (sp.work.chain != w.worker.bytes) continue;         // расходуют только своё
+            lot_links[{sp.work.hash, sp.lot.out}].push_back(
+                {wh, sp.lot, records::labor_interval(w.record).second, std::nullopt, false, true});
+        }
     for (const auto& a : out.assets) {   // взятое в производство — звено той же подниточки
         const auto d = deal_at.find(a.src.hash);
         if (d != deal_at.end() && out.all[d->second].payer.bytes != a.src.chain) continue;
@@ -343,6 +355,19 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
             ok = h && sound(*h) && link_valid(*release);
         } else {
             ok = out.sound(a.work);
+            // Расход своей продукции (records.md §9.4 v7): труд детали приходит в
+            // изделие, поэтому и работа-источник обязана быть в счёт, и её звено —
+            // сходиться: иначе одни и те же часы продали бы дважды.
+            if (ok)
+                if (const auto w = out.works.find(a.work.hash); w != out.works.end())
+                    for (const auto& sp : w->second.record.spends) {
+                        const auto lot = out.lots.find({sp.work.hash, sp.lot.out});
+                        if (!out.sound(sp.work) || lot == out.lots.end() ||
+                            !lot->second.valid.count(a.work.hash)) {
+                            ok = false;
+                            break;
+                        }
+                    }
             if (ok && release && release->lot) {
                 const auto w = out.works.find(a.work.hash);
                 ok = link_valid(*release) && w != out.works.end() &&

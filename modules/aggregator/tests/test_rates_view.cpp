@@ -1251,3 +1251,76 @@ TEST_F(RatesViewTest, ABuybackPaysForTheHoldersRepair) {
     ASSERT_EQ(h->second.size(), 1u);
     EXPECT_NEAR(h->second[0].cost, 12.0, 1e-9);         // вещь подорожала на ремонт
 }
+
+// Своё в своё (records.md §9.4 v7): Алиса точит три рамы (6 ч), одну ставит в
+// велосипед (2 ч сборки) и продаёт его Бобу. Покупатель подтверждает часы обеих
+// работ — деталь принесла труд, а не цену, — а партия рам считает израсходованное.
+TEST_F(RatesViewTest, OwnProductSpentIntoOwnProductionIsLabor) {
+    records::WorkRecord frames{};
+    frames.hours   = 6.0;
+    frames.outputs = {{"рама", 3.0, "шт"}};
+    frames.axes    = {{test_axis(), 1.0}};
+    const Block part = add(alice_, frames);
+
+    records::WorkRecord build{};
+    build.hours    = 2.0;
+    build.outputs  = {{"велосипед", 1.0, "шт"}};
+    build.axes     = {{test_axis(), 1.0}};
+    build.customer = bob_.bytes;
+    records::SpendLink sp{};
+    sp.work      = ref_to(alice_, part);
+    sp.lot.qty   = 1.0;
+    sp.lot.after = 1.0;
+    build.spends.push_back(sp);
+    const Block bike = add(alice_, build);
+
+    records::Acceptance a{};
+    a.work        = ref_to(alice_, bike);
+    a.hours_raw   = 4.0;                        // 2 ч сборки + 2 ч рамы
+    a.labor_units = 4.0;
+    a.axes        = {{test_axis(), 4.0}};
+    records::Transfer t{};
+    t.from      = bob_.bytes;
+    t.to        = alice_.bytes;
+    t.origins   = { {bob_.bytes, 4.0} };
+    t.accept    = a;
+    t.timestamp = kDay + 100;
+    const auto deal = Crypto::hash_block(add(bob_, t)).bytes;
+
+    const auto deals = read_deals(*storage_);
+    EXPECT_TRUE(deals.counts(deal));
+    const auto lots = lot_summaries(deals, Crypto::hash_block(part).bytes);
+    ASSERT_EQ(lots.size(), 1u);
+    EXPECT_NEAR(lots[0].consumed, 1.0, 1e-9);   // одна рама ушла в изделие
+    EXPECT_NEAR(lots[0].remaining, 2.0, 1e-9);
+
+    // Сверх партии: ещё три рамы из трёх, одна из которых уже в велосипеде.
+    records::WorkRecord more{};
+    more.hours    = 1.0;
+    more.outputs  = {{"тележка", 1.0, "шт"}};
+    more.axes     = {{test_axis(), 1.0}};
+    more.customer = bob_.bytes;
+    records::SpendLink over{};
+    over.work      = ref_to(alice_, part);
+    over.lot.qty   = 3.0;
+    over.lot.seq   = 1;
+    over.lot.prev  = ref_to(alice_, bike);
+    over.lot.after = 4.0;                       // в партии всего три
+    more.spends.push_back(over);
+    const Block cart = add(alice_, more);
+
+    records::Acceptance a2{};
+    a2.work        = ref_to(alice_, cart);
+    a2.hours_raw   = 7.0;
+    a2.labor_units = 7.0;
+    a2.axes        = {{test_axis(), 7.0}};
+    records::Transfer t2{};
+    t2.from      = bob_.bytes;
+    t2.to        = alice_.bytes;
+    t2.origins   = { {bob_.bytes, 7.0} };
+    t2.accept    = a2;
+    t2.timestamp = kDay + 200;
+    const auto over_deal = Crypto::hash_block(add(bob_, t2)).bytes;
+    const auto after = read_deals(*storage_);
+    EXPECT_FALSE(after.counts(over_deal));      // звено не сходится — работа не в счёт
+}

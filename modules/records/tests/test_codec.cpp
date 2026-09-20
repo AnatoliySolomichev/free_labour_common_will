@@ -1278,3 +1278,18 @@ TEST(RecordsCodec, WorkImprovingAPurchase) {
     wr.outputs = {{"табурет", 1.0, "шт"}};
     EXPECT_THROW(Codec::encode(Record{wr}), CodecError);
 }
+
+// Расход своей продукции в своё производство (records.md §9.4 v7): изделие несёт
+// не цену детали, а её часы; само звено — такое же, как у продажи порции.
+TEST(RecordsCodec, WorkSpendingItsOwnProduct) {
+    WorkRecord wr{};
+    wr.action   = "сборка велосипеда";
+    wr.start_ts = 1'700'000'000LL;
+    wr.hours    = 2.0;
+    SpendLink sp{};
+    sp.work      = make_ref(0xA1, 0x22);      // своя прежняя работа — рама
+    sp.lot.qty   = 1.0;
+    sp.lot.after = 1.0;
+    wr.spends.push_back(sp);
+    EXPECT_EQ(std::get<WorkRecord>(roundtrip(Record{wr})).spends, wr.spends);
+}

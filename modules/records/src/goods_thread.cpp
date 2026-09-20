@@ -252,6 +252,12 @@ bool meets_resale(const Acceptance& a, double price) noexcept {
            std::abs(carried - price) <= 1e-6;
 }
 
+std::optional<double> spent_hours(const WorkRecord& source, const LotLink& lot) noexcept {
+    const auto part = portion_fraction(source, lot);
+    if (!part) return std::nullopt;
+    return *part * source.hours;
+}
+
 bool honours_buyout(const Acceptance& a, const Addressed& buyout) noexcept {
     return a.buyback && a.buyback->to == buyout.to && a.buyback->until == buyout.until &&
            a.buyback->wear == buyout.wear;

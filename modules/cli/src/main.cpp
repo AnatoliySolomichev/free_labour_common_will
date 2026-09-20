@@ -140,7 +140,7 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--tool", "--cost", "--life", "--serial", "--desc", "--note", "--paid",
     "--material", "--unit", "--qty",
     "--buyback-to", "--buyback-days", "--buyback-until", "--buyback-of",
-    "--improves", "--repair",
+    "--improves", "--repair", "--spend",
 };
 
 // True when a standalone flag (no value) is present.
@@ -1255,6 +1255,12 @@ static int cmd_react(const fs::path& data_dir, int argc, char** argv) {
 // point at (ИР-022 шаг 11): «кем работал» is free text for people, and what the
 // work was is said by the breakdown of its price at acceptance.
 static std::array<uint8_t, 32> uid_from_hex(const std::string& s);
+static Ref own_work_arg(Context& ctx, const std::string& arg);
+static records::LotLink next_lot_link(Context& ctx, const std::string& via, const Ref& work,
+                                      const WorkRecord& wr, uint32_t out,
+                                      std::optional<double> qty,
+                                      std::vector<std::string> want, bool for_sale,
+                                      int64_t now);   // оба определены ниже, вместе с партиями
 
 static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
     const auto action_s = flag_val(argc, argv, "--action");
@@ -1273,6 +1279,9 @@ static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
                      "                              временем работу не кончают (records.md §9.4)\n"
                      "   [--axis-share ОСЬ=ДОЛЯ]    предложенная разбивка часов по осям,\n"
                      "                              сумма 1 — покупатель её подтверждает\n"
+                     "   [--spend  РАБОТА:КОЛ[:ВЫХОД]] расход своей продукции в это\n"
+                     "                              изделие: приходит её труд, а не цена\n"
+                     "                              (repeatable, records.md §9.4)\n"
                      "   [--input  NAME:QTY:UNIT]   (repeatable)\n"
                      "   [--output ИМЯ:КОЛ:ЕД[:ДОЛЯ[:ЦЕНА[:НОМЕРА[:СРОК]]]]] партия (repeatable,\n"
                      "                              records.md §9.4): ДОЛЯ часов при нескольких\n"
@@ -1320,6 +1329,37 @@ static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
         if (!pt->accept->buyback)
             std::cerr << "⚠ эта покупка не под выкупом с адресом — оплатить такой труд "
                          "выкупом будет некому (records.md §9.8)\n";
+    }
+    // Расход своей продукции в своё производство (records.md §9.4 v7): деталь не
+    // становится товаром с ценой — в изделие приходит её труд, а звено подниточки
+    // держит счёт: что израсходовано, того уже не продать.
+    for (const auto& spec : flag_all(argc, argv, "--spend")) {
+        const auto first = spec.find(':');
+        if (first == std::string::npos)
+            throw std::runtime_error("--spend ждёт РАБОТА:КОЛИЧЕСТВО[:ВЫХОД], получено: " + spec);
+        const auto second = spec.find(':', first + 1);
+        const Ref  src    = own_work_arg(ctx, spec.substr(0, first));
+        const double qty  = std::stod(spec.substr(first + 1, second == std::string::npos
+                                                             ? std::string::npos
+                                                             : second - first - 1));
+        const auto out_i  = second == std::string::npos
+                            ? 0u : static_cast<uint32_t>(std::stoul(spec.substr(second + 1)));
+        const auto  srec  = load_record(ctx, flag_val(argc, argv, "--via"), src);
+        const auto* sw    = srec ? std::get_if<WorkRecord>(&*srec) : nullptr;
+        if (!sw) throw std::runtime_error("--spend: своей записи труда с таким хешем нет");
+        records::SpendLink sp{};
+        sp.work = src;
+        sp.lot  = next_lot_link(ctx, flag_val(argc, argv, "--via"), src, *sw, out_i, qty, {},
+                                /*for_sale=*/false,
+                                static_cast<int64_t>(std::time(nullptr)));
+        const auto hrs = records::spent_hours(*sw, sp.lot);
+        if (!hrs)
+            throw std::runtime_error("--spend: труд детали не оценить — у работы несколько "
+                                     "выходов без объявленных долей (records.md §9.4)");
+        std::cerr << "расход своего: " << qty_str(qty) << " " << sw->outputs[out_i].unit << " «"
+                  << sw->outputs[out_i].resource << "» из работы " << short_hex(src.hash)
+                  << " — в изделие приходит " << *hrs << " ч её труда (records.md §9.4)\n";
+        wr.spends.push_back(std::move(sp));
     }
     auto carry_specs = flag_all(argc, argv, "--tool");
     for (const auto& s : flag_all(argc, argv, "--material")) carry_specs.push_back(s);
@@ -1447,6 +1487,63 @@ static std::optional<Holding> load_holding(Context& ctx, const std::string& via,
     }
     h.lots = records::holding_lots(h.deal, h.work, h.bought ? &*h.bought : nullptr);
     return h;
+}
+
+// Работа с расходом своей продукции (records.md §9.4 v7): в изделие пришли часы
+// деталей, а не их цена. Часы каждой работы считаются по ценам ЕЁ дня
+// производства (решение участника 2026-09-20): труд был тогда. Перенос — свои
+// звенья плюс доля переноса израсходованных работ. false — оценить не вышло
+// (записей деталей нет или доли не объявлены), тогда торгуются обычным порядком.
+static bool appraise_with_spends(Context& ctx, const std::string& via, int argc, char** argv,
+                                 const WorkRecord& work, Acceptance& a) {
+    struct Piece { WorkRecord w; double hours; double carried; };
+    std::vector<Piece> pieces;
+    double own_carried = 0.0;
+    for (const auto& ce : work.carry) own_carried += ce.carried;
+    pieces.push_back({work, work.hours, own_carried});
+    for (const auto& sp : work.spends) {
+        const auto  rec = load_record(ctx, via, sp.work);
+        const auto* src = rec ? std::get_if<WorkRecord>(&*rec) : nullptr;
+        if (!src) return false;
+        const auto part = records::portion_fraction(*src, sp.lot);
+        if (!part) return false;
+        double c = 0.0;
+        for (const auto& ce : src->carry) c += ce.carried;
+        pieces.push_back({*src, *part * src->hours, *part * c});
+    }
+    const double k = std::stod(flag_val(argc, argv, "--k", "1.0"));
+    double hours = 0.0, units = 0.0, carried = 0.0;
+    std::vector<AcceptanceAxis> axes;
+    for (const auto& p : pieces) {
+        if (p.w.axes.empty()) return false;
+        auto prices = lookup_axis_prices_on(via, p.w.start_ts);
+        if (prices.empty()) prices = lookup_axis_prices(via);
+        double rate = 0.0;
+        for (const auto& x : p.w.axes)
+            if (const auto it = prices.find(x.axis.hash); it != prices.end()) rate += it->second;
+        if (!(rate > 0.0)) rate = 1.0;
+        const double u = p.hours * rate * k;
+        for (const auto& x : p.w.axes) {
+            const double add = u * x.share;
+            bool merged = false;
+            for (auto& y : axes)
+                if (y.axis == x.axis) { y.units += add; merged = true; break; }
+            if (!merged) axes.push_back(AcceptanceAxis{x.axis, add});
+        }
+        hours   += p.hours;
+        units   += u;
+        carried += p.carried;
+    }
+    a.hours_raw   = hours;
+    a.labor_units = units;
+    a.axes        = std::move(axes);
+    if (carried > 0.0) a.carried_units = carried;
+    std::cerr << "изделие с расходом своего: " << work.hours << " ч этой работы и "
+              << hours - work.hours << " ч в деталях, по ценам дня каждой работы — цена "
+              << units << " стч";
+    if (carried > 0.0) std::cerr << " плюс перенос " << carried << "ч";
+    std::cerr << " (records.md §9.4)\n";
+    return true;
 }
 
 // How a whole result is appraised (records.md §9.5): the buyer's breakdown by
@@ -1981,7 +2078,14 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
             std::cerr << "перенос средств производства: " << *a.carried_units
                       << "ч (доля порции)\n";
     } else {
-        appraise_whole(ctx, via, argc, argv, work, a, axis_args, share_args, like_s, raw_s, lu_s);
+        // Изделие, в которое ушла своя продукция (records.md §9.4 v7): по умолчанию
+        // цена складывается из часов всех работ; свои условия покупателя — как всегда.
+        const bool own_terms = !axis_args.empty() || !share_args.empty() || !like_s.empty() ||
+                               !raw_s.empty() || !lu_s.empty();
+        if (!(work && !work->spends.empty() && !own_terms &&
+              appraise_with_spends(ctx, via, argc, argv, *work, a)))
+            appraise_whole(ctx, via, argc, argv, work, a, axis_args, share_args, like_s,
+                           raw_s, lu_s);
     }
     // Выкуп с адресом (records.md §9.8 v5, v6): покупая, подписываем возврат —
     // адресату, до срока, на тех же условиях износа. Цены в нём нет: уплаченное, а
@@ -2102,6 +2206,17 @@ static OwnLot own_lot(Context& ctx, const Ref& work, uint32_t out,
                 lot.portions = true;
                 if (wo->lot.out == out)
                     lot.links.push_back({hash, wo->lot, wo->timestamp, std::nullopt, false});
+            } else if (const auto* sw = std::get_if<WorkRecord>(&rec);
+                       sw && !sw->spends.empty() && !holding) {
+                // Расход своей продукции в своё производство (records.md §9.4 v7):
+                // звено той же подниточки — израсходованного уже не продать.
+                for (const auto& sp : sw->spends) {
+                    if (!(sp.work == work)) continue;
+                    lot.portions = true;
+                    if (sp.lot.out == out)
+                        lot.links.push_back({hash, sp.lot, b.timestamp_claimed, std::nullopt,
+                                             false, true});
+                }
             } else if (const auto* m = std::get_if<records::Material>(&rec);
                        m && m->lot && holding && m->src && *m->src == *holding) {
                 // Взятое в своё производство — звено той же подниточки покупки
