@@ -100,6 +100,9 @@ data = {
     'index_stats': {'mean': round(sum(idx_vals) / len(idx_vals), 4) if idx_vals else 0,
                     'min': round(min(idx_vals), 4) if idx_vals else 0,
                     'max': round(max(idx_vals), 4) if idx_vals else 0},
+    # продукция (ИР-023): что за год случилось с вещами, а не только с услугами
+    'production': {k: meta.get(k, 0) for k in
+                   ('lots', 'portions', 'resales', 'hires', 'assemblies')},
     'match': {'closed': closed, 'total': len(needs),
               'rings': match.get('rings_total', 0), 'deficits': deficits},
     'footprints': rich,
@@ -190,6 +193,24 @@ title: Год жизни трудовой экономики
 
 ---
 
+## У вещи есть история
+
+Продукция рождается той же записью, что и труд, и дальше её путь читается подряд:
+партия → порция по ценнику → перепродажа по цене покупки → расход в своё производство.
+
+| за год | |
+|---|---|
+| Партий выпущено | **{data['production']['lots']}** |
+| Порций продано по ценнику | **{data['production']['portions']}** |
+| Перепродаж по цене покупки | **{data['production']['resales']}** |
+| Аренд по счётчику (машино-часы) | **{data['production']['hires']}** |
+| Сборок из своих деталей | **{data['production']['assemblies']}** |
+
+Аренда не приносит дохода: вещь возвращается по остатку после износа, посчитанному
+по сроку службы. Ремонт — единственный путь стоимости вверх, и только оплаченный.
+
+---
+
 ## Стыковка потребностей и навыков
 
 - Закрыто **{data['match']['closed']} из {data['match']['total']}** потребностей
@@ -234,6 +255,9 @@ summary = f"""# Год жизни трудовой экономики — выж
 - Индекс среднего трудочаса: {ix['mean']} (размах {ix['min']}…{ix['max']}) —
   эмиссия идёт в ногу с реально отработанными часами.
 - Сеть платит за час оси: {top_axes}.
+- Продукция: {data['production']['lots']} партий, {data['production']['portions']} порций по ценнику,
+  {data['production']['resales']} перепродаж по цене покупки, {data['production']['hires']} аренд по счётчику,
+  {data['production']['assemblies']} сборок из своих деталей.
 - Стыковка закрыла {data['match']['closed']} из {data['match']['total']} потребностей;
   дефицит: {', '.join(data['match']['deficits']) or '—'}.
 - Взаимных заверений в графе: {m['merges']}; пломб {m['seals']}; отзывов ключей {m['revocations']}.
