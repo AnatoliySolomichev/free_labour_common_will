@@ -4076,12 +4076,24 @@ static void print_footprint(Context& ctx,
         std::cout << "  ни одна её бумага ещё не вернулась к ней трудом\n";
 
     const auto acceptors = jnum(o, "acceptors");
-    if (acceptors > 0)
+    if (acceptors > 0) {
         std::cout << "  её труд приняли " << static_cast<int>(acceptors)
                   << " посторонних цеп. на " << jnum(o, "labor_outward")
                   << "h — они получили что-то настоящее\n";
-    else
+        // Заверенность — сигнал, а не пропуск (economy.md §4.2): часы, которые
+        // посторонние заверили пломбой на самой записи труда, видны отдельно.
+        const auto sealed = jnum(o, "labor_sealed");
+        const auto att    = jnum(o, "attesters");
+        if (sealed > 0)
+            std::cout << "    из них заверено пломбами посторонних: " << sealed << "h ("
+                      << static_cast<int>(att) << " цеп.); остальное — со слов сторон\n"
+                      << "    [склад пломб агрегатора подписи НЕ проверяет (sync.md §10.9):\n"
+                      << "     кому важно — проверяет пломбы по цепям свидетелей сам]\n";
+        else
+            std::cout << "    пломб посторонних на этих работах нет — всё со слов сторон\n";
+    } else {
         std::cout << "  её труд не принимал никто посторонний\n";
+    }
 
     const auto* ht = records::json::find(o, "has_turnover");
     if (!ht || !ht->boolean) {

@@ -600,6 +600,9 @@ bcp anna ideas top --via "$VIA" \
   | python3 -c 'import sys,json; d=json.load(sys.stdin); [print("   •",i["text"][:40],"— обещано %.0fч от %d чел."%(i["pledged_active"],i["pledgers"])) for i in d]' 2>/dev/null || true
 
 # ═════════════════════════════════════════════════════════════════════════════
+say "Пелагея была рядом, когда Дмитрий делал табуреты, и пломбирует его запись труда"
+bcp pelageya seal add "$W_stools" --via "$VIA" 2>&1 | sed 's/^/   /'
+
 act "14. Экономический след (bc trust) — слои 1–3 (ИР-010)"
 say "Анна смотрит на Дмитрия: она держала его бумагу и сливалась с ним — видит нить"
 echo

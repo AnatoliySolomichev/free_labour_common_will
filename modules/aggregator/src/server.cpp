@@ -1080,6 +1080,8 @@ void AggregatorServer::setup_routes() {
                 + ",\"redeemed_to_others\":"  + std::to_string(fp->redeemed_to_others)
                 + ",\"acceptors\":"           + std::to_string(fp->acceptors)
                 + ",\"labor_outward\":"       + std::to_string(fp->labor_outward)
+                + ",\"labor_sealed\":"        + std::to_string(fp->labor_sealed)
+                + ",\"attesters\":"           + std::to_string(fp->attesters)
                 + ",\"counterparties\":"      + std::to_string(fp->counterparties)
                 + ",\"internal_turnover\":"   + std::to_string(fp->internal_turnover)
                 + ",\"boundary_turnover\":"   + std::to_string(fp->boundary_turnover)

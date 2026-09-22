@@ -279,3 +279,52 @@ TEST_F(FootprintViewTest, UnknownChainHasNoFootprint) {
     transfer(anna, make_chain(0xB2), anna, 1.0);
     EXPECT_FALSE(FootprintView::build(*storage_).chain(stranger).has_value());
 }
+
+// Заверенность — сигнал, а не пропуск (records.md §12.11, решение участника
+// 2026-09-22): сделка считается и без пломб, но часы, которые посторонний заверил
+// пломбой на самой записи труда, видны в следе отдельно. Ни работник, ни
+// плательщик свидетелями не считаются.
+TEST_F(FootprintViewTest, SealsByOutsidersAreShownApart) {
+    const auto anna = make_chain(0xA1), vera = make_chain(0xB2);
+    const UserId witness = make_chain(0xE5);
+    const auto sealed_by = [&](const Block& work, const UserId& signer) {
+        Seal seal{};
+        seal.signer_id  = signer;
+        seal.block_hash = Crypto::hash_block(work);
+        seal.signature  = Signature::null();
+        seal.mode       = SealMode::BLIND;
+        seal.sealed_at  = 1000;
+        EXPECT_TRUE(storage_->put_seal_bytes(seal.block_hash, Serializer::encode(seal)));
+    };
+    const auto work_of = [&](const UserId& worker, const UserId& payer, double units) {
+        records::WorkRecord w{};
+        w.action   = "работа";
+        w.hours    = units;
+        w.customer = payer.bytes;
+        const Block work = add(worker, w);
+        records::Acceptance a{};
+        a.work.chain  = worker.bytes;
+        a.work.hash   = Crypto::hash_block(work).bytes;
+        a.hours_raw   = units;
+        a.labor_units = units;
+        a.axes        = {{test_axis(), units}};
+        records::Transfer t{};
+        t.from    = payer.bytes;
+        t.to      = worker.bytes;
+        t.origins = { {payer.bytes, units} };
+        t.accept  = a;
+        add(payer, t);
+        return work;
+    };
+
+    const Block seen   = work_of(anna, vera, 4.0);     // её заверит посторонний
+    const Block unseen = work_of(anna, vera, 6.0);     // эту — только свои
+    sealed_by(seen, witness);
+    sealed_by(unseen, anna);                            // сам работник — не свидетель
+    sealed_by(unseen, vera);                            // плательщик уже подписал приёмку
+
+    const auto fp = of(anna);
+    EXPECT_NEAR(fp.labor_outward, 10.0, 1e-9);          // сделки считаются обе
+    EXPECT_NEAR(fp.labor_sealed, 4.0, 1e-9);            // заверена посторонним — одна
+    EXPECT_EQ(fp.attesters, 1u);
+}

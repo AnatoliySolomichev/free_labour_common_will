@@ -38,6 +38,13 @@ struct ChainFootprint {
     double      redeemed_to_others = 0;          // own paper annihilated on return
     std::size_t acceptors         = 0;           // distinct chains that accepted its work
     double      labor_outward     = 0;           // labor_units accepted by others
+    // Заверенность — сигнал, а не пропуск (economy.md §4.2, решение участника
+    // 2026-09-22): сделка считается и без пломб, но часы, которые посторонние
+    // заверили пломбой на самой записи труда, видны отдельно. Ни работник, ни
+    // плательщик свидетелями не считаются: один заверял бы себя, у второго и так
+    // стоит подпись под приёмкой.
+    double      labor_sealed      = 0;           // из labor_outward: часы заверенных работ
+    std::size_t attesters         = 0;           // разные посторонние цепи с пломбами
     std::size_t counterparties    = 0;           // distinct chains it exchanged with
 
     // ── Layer 3: structural screening — catches LAZY farms only ─────────────

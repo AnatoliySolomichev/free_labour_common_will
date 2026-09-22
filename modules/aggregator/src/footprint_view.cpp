@@ -1,6 +1,7 @@
 #include "aggregator/footprint_view.h"
 #include "aggregator/recognition.h"
 
+#include <blockchain/serializer.h>
 #include <records/codec.h>
 #include <records/types.h>
 
@@ -26,7 +27,8 @@ FootprintView FootprintView::build(const AggregatorStorage& storage) {
     std::map<UserId, std::map<UserId, double>> adj;
     // Layer-2 tallies keyed by the chain they describe.
     std::map<UserId, std::set<UserId>> redeemer_sets, acceptor_sets;
-    std::map<UserId, double>           redeemed_to_others, labor_outward;
+    std::map<UserId, double>           redeemed_to_others, labor_outward, labor_sealed;
+    std::map<UserId, std::set<UserId>> attester_sets;
     // One result — one counted deal (records.md §9.5, ИР-023): one job paid for
     // by two chains is not «two outsiders took the labour»; and a deal the seller
     // did not address is void — it moves no paper at all.
@@ -80,6 +82,20 @@ FootprintView FootprintView::build(const AggregatorStorage& storage) {
             if (t->accept && deals.counts(bh.bytes)) {
                 acceptor_sets[to].insert(from);
                 labor_outward[to] += t->accept->labor_units;
+                // Кто посторонний заверил саму запись труда пломбой (economy.md §3):
+                // работник заверял бы себя, плательщик уже подписал приёмку.
+                std::set<UserId> witnesses;
+                for (const auto& raw : storage.get_seal_bytes(Hash{t->accept->work.hash})) {
+                    try {
+                        const auto seal = Serializer::decode_seal(raw.data(), raw.size());
+                        if (seal.signer_id != to && seal.signer_id != from)
+                            witnesses.insert(seal.signer_id);
+                    } catch (const std::exception&) { continue; }
+                }
+                if (!witnesses.empty()) {
+                    labor_sealed[to] += t->accept->labor_units;
+                    attester_sets[to].insert(witnesses.begin(), witnesses.end());
+                }
             }
         }
     }
@@ -120,6 +136,10 @@ FootprintView FootprintView::build(const AggregatorStorage& storage) {
             fp.acceptors = it->second.size();
         if (const auto it = labor_outward.find(subject); it != labor_outward.end())
             fp.labor_outward = it->second;
+        if (const auto it = labor_sealed.find(subject); it != labor_sealed.end())
+            fp.labor_sealed = it->second;
+        if (const auto it = attester_sets.find(subject); it != attester_sets.end())
+            fp.attesters = it->second.size();
 
         // Layer 3: the subject's circle is everything within TWO exchange hops
         // — the same reachability the trust footprint uses elsewhere (ИР-010:
