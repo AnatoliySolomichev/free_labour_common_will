@@ -94,6 +94,16 @@ public:
     std::vector<std::vector<uint8_t>> get_revocation_bytes(const UserId& chain) const;
     std::vector<UserId> all_revoked_chains() const;
 
+    // Key-path warehouse (sync.md §7.5; blockchain.md §7.5). Paths are opaque
+    // bytes keyed signing_key(32)‖BLAKE2b(bytes)(32). The warehouse carries
+    // them without looking inside: whether a path really leads from a chain's
+    // root to this key is decided by the reader (KeyPathCert::verify), so a
+    // forged claim costs the warehouse nothing and buys its author nothing.
+    // Throws: StorageError.
+    bool put_keypath_bytes(const PublicKey& key, const std::vector<uint8_t>& bytes);
+    std::vector<std::vector<uint8_t>> get_keypath_bytes(const PublicKey& key) const;
+    std::vector<PublicKey> all_keypath_keys() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

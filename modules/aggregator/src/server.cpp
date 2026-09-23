@@ -50,6 +50,17 @@ std::string to_hex(const std::array<uint8_t,N>& a) {
     return to_hex(a.data(), N);
 }
 
+// JSON array of hex-encoded keys (attesters of a footprint, records.md §12.11).
+std::string hex_array(const std::vector<blockchain::PublicKey>& keys) {
+    std::string out = "[";
+    for (std::size_t i = 0; i < keys.size(); ++i) {
+        if (i) out += ',';
+        out += '"' + to_hex(keys[i].bytes) + '"';
+    }
+    out += ']';
+    return out;
+}
+
 // The full path of an axis (records.md §4): chain/node/block/hash — the form
 // `bc accept --axis` takes.
 std::string block_path_str(const records::BlockPath& p) {
@@ -649,6 +660,72 @@ void AggregatorServer::setup_routes() {
         res.set_content(body, "application/cbor");
     });
 
+    // ── Key-path warehouse (sync.md §7.5; blockchain.md §7.5) ────────────────
+    //
+    // Who stands behind a seal: the node path from a chain's root down to the
+    // key that signed it. Bytes in, bytes out — the warehouse never checks a
+    // path, the reader runs KeyPathCert::verify itself. A forged path is
+    // rejected by the reader, so lying here gains nothing.
+
+    // Registered before /keypaths/:key — httplib matches in registration order.
+    svr.Get("/keypaths/manifest", [&](const httplib::Request&, httplib::Response& res) {
+        const auto keys = storage_.all_keypath_keys();
+        std::string body = "{\"hashes\":[";  // signing keys; same shape as other manifests
+        for (std::size_t i = 0; i < keys.size(); ++i) {
+            if (i) body += ',';
+            body += '"';
+            body += to_hex(keys[i].bytes);
+            body += '"';
+        }
+        body += "]}";
+        res.set_content(body, "application/json");
+    });
+
+    svr.Post("/keypaths/:key", [&](const httplib::Request& req, httplib::Response& res) {
+        auto k = hex_to_hash(req.path_params.at("key"));
+        if (!k) {
+            res.status = 400;
+            res.set_content("{\"error\":\"invalid key\"}", "application/json");
+            return;
+        }
+        if (req.body.empty() || req.body.size() > kKeyPathMaxBytes) {
+            res.status = 400;
+            res.set_content("{\"error\":\"bad size\"}", "application/json");
+            return;
+        }
+        PublicKey key{};
+        key.bytes = k->bytes;
+        try {
+            if (storage_.get_keypath_bytes(key).size() >= kKeyPathsPerKeyCap) {
+                res.status = 429;
+                res.set_content("{\"error\":\"key path list full\"}", "application/json");
+                return;
+            }
+            const bool stored = storage_.put_keypath_bytes(
+                key, {req.body.begin(), req.body.end()});
+            res.set_content(stored ? "{\"status\":\"stored\"}"
+                                   : "{\"status\":\"duplicate\"}",
+                            "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
+                            "application/json");
+        }
+    });
+
+    svr.Get("/keypaths/:key", [&](const httplib::Request& req, httplib::Response& res) {
+        auto k = hex_to_hash(req.path_params.at("key"));
+        if (!k) { res.status = 400; return; }
+        PublicKey key{};
+        key.bytes = k->bytes;
+        std::string body;
+        const auto paths = storage_.get_keypath_bytes(key);
+        cbor_array_head(body, paths.size());
+        for (const auto& p : paths)
+            cbor_bstr(body, std::string(p.begin(), p.end()));
+        res.set_content(body, "application/cbor");
+    });
+
     // ── Economy view (records.md §13) ─────────────────────────────────────────
     //
     // Derived data, recomputed per request by scanning known blocks. Every
@@ -1082,6 +1159,7 @@ void AggregatorServer::setup_routes() {
                 + ",\"labor_outward\":"       + std::to_string(fp->labor_outward)
                 + ",\"labor_sealed\":"        + std::to_string(fp->labor_sealed)
                 + ",\"attesters\":"           + std::to_string(fp->attesters)
+                + ",\"attester_keys\":"        + hex_array(fp->attester_keys)
                 + ",\"counterparties\":"      + std::to_string(fp->counterparties)
                 + ",\"internal_turnover\":"   + std::to_string(fp->internal_turnover)
                 + ",\"boundary_turnover\":"   + std::to_string(fp->boundary_turnover)
@@ -1973,6 +2051,40 @@ void AggregatorServer::sync_with_peer(const std::string& peer_url) {
             try {
                 if (storage_.put_revocation_bytes(
                         chain, {body.begin() + pos, body.begin() + pos + len}))
+                    ++gossiped;
+            } catch (...) {}
+            pos += static_cast<std::size_t>(len);
+        }
+    }
+
+    // 5. Pull key paths (sync.md §7.5): who stands behind a seal. Same shape —
+    // opaque bytes per signing key, verified by the reader's client, not here.
+    for (const Hash& kh : manifest_hashes("/keypaths/manifest")) {
+        auto res = cli.Get("/keypaths/" + to_hex(kh.bytes));
+        if (!res || res->status != 200) continue;
+        PublicKey key{};
+        key.bytes = kh.bytes;
+        const std::string& body = res->body;
+        std::size_t pos = 0;
+        auto head = [&](uint8_t expect_major) -> long long {
+            if (pos >= body.size()) return -1;
+            const uint8_t b = static_cast<uint8_t>(body[pos++]);
+            if ((b >> 5) != expect_major) return -1;
+            const uint8_t ai = b & 0x1F;
+            if (ai < 24) return ai;
+            int extra = ai == 24 ? 1 : ai == 25 ? 2 : ai == 26 ? 4 : ai == 27 ? 8 : -1;
+            if (extra < 0 || pos + extra > body.size()) return -1;
+            long long v = 0;
+            for (int i = 0; i < extra; ++i) v = (v << 8) | static_cast<uint8_t>(body[pos++]);
+            return v;
+        };
+        const long long n = head(4);
+        for (long long i = 0; i < n; ++i) {
+            const long long len = head(2);
+            if (len < 0 || pos + len > body.size()) break;
+            try {
+                if (storage_.put_keypath_bytes(
+                        key, {body.begin() + pos, body.begin() + pos + len}))
                     ++gossiped;
             } catch (...) {}
             pos += static_cast<std::size_t>(len);

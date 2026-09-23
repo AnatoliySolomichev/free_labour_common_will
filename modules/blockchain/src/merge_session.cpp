@@ -1,4 +1,5 @@
 #include "blockchain/merge_session.h"
+#include "blockchain/key_path.h"
 #include "blockchain/crypto.h"
 #include "blockchain/serializer.h"
 #include "blockchain/errors.h"
@@ -34,36 +35,16 @@ BranchTipInfo MergeSession::prepare_tip(const UserId& user_id,
 // ── Step 1b ───────────────────────────────────────────────────────────────────
 
 void MergeSession::verify_partner_tip(const BranchTipInfo& partner_tip) const {
-    if (partner_tip.path.empty())
-        throw ChainIntegrityError("partner BranchTipInfo has empty path");
-
-    // Verify root: self-signed, parent_hash == zero.
-    const Node& root = partner_tip.path[0];
-    if (root.index != 0)
-        throw ChainIntegrityError("first path node must be root (index 0)");
-    if (root.parent_hash != Hash::zero())
-        throw ChainIntegrityError("partner root node must have zero parent_hash");
-    {
-        Node to_sign = root;
-        to_sign.parent_sig = Signature::null();
-        auto b = Serializer::encode(to_sign);
-        if (!Crypto::verify(b.data(), b.size(), root.parent_sig, root.structural_pubkey))
-            throw SignatureError("partner root node self-signature invalid");
-    }
-
-    // Verify subsequent nodes: parent_hash linkage + signature by parent's working key.
-    for (size_t i = 1; i < partner_tip.path.size(); ++i) {
-        const Node& parent = partner_tip.path[i - 1];
-        const Node& child  = partner_tip.path[i];
-
-        if (child.parent_hash != Crypto::hash_node(parent))
-            throw ChainIntegrityError("partner path: node parent_hash mismatch");
-
-        Node to_sign = child;
-        to_sign.parent_sig = Signature::null();
-        auto cb = Serializer::encode(to_sign);
-        if (!Crypto::verify(cb.data(), cb.size(), child.parent_sig, parent.working_pubkey))
-            throw SignatureError("partner path: node signature invalid");
+    // Путь узлов партнёра — та же проверка, что у сертификата отзыва и пути
+    // ключа (blockchain.md §7.5): корень self-signed, звенья связаны хешем и
+    // подписаны ключом родителя. Отсюда и право доверять сохранённым узлам:
+    // в хранилище попадают только проверенные пути.
+    try {
+        verify_node_path(partner_tip.path);
+    } catch (const ChainIntegrityError& e) {
+        throw ChainIntegrityError(std::string("partner path: ") + e.what());
+    } catch (const SignatureError& e) {
+        throw SignatureError(std::string("partner path: ") + e.what());
     }
 
     // If partner included their tip block, verify its hash matches tip_hash.

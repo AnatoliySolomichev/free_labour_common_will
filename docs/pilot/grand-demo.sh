@@ -603,6 +603,14 @@ bcp anna ideas top --via "$VIA" \
 say "Пелагея была рядом, когда Дмитрий делал табуреты, и пломбирует его запись труда"
 bcp pelageya seal add "$W_stools" --via "$VIA" 2>&1 | sed 's/^/   /'
 
+hr "чей это ключ? (bc keypath who) — решает проверка, а не склад (blockchain.md §7.5)"
+PEL_KEY=$(bcp pelageya seal list "$W_stools" | after '  signer: ')
+say "пломбу подписал рабочий ключ ветки Пелагеи: ${PEL_KEY:0:16}…"
+say "Устин с Пелагеей не сливался — у него её узлов нет:"
+bcp ustin keypath who "$PEL_KEY" | sed 's/^/   /'
+say "теперь тот же вопрос со складом: агрегатор отдаёт путь, Устин проверяет сам"
+bcp ustin keypath who "$PEL_KEY" --via "$VIA" | sed 's/^/   /'
+
 act "14. Экономический след (bc trust) — слои 1–3 (ИР-010)"
 say "Анна смотрит на Дмитрия: она держала его бумагу и сливалась с ним — видит нить"
 echo
@@ -711,6 +719,15 @@ else echo "   ✓ заведённое в производство не пере
 if bcp dmitry release "$W_legs" --to "${CID[boris]}" --qty 1 --via "$VIA" >/dev/null 2>&1; then
     echo "   ✗ проданы ножки, ушедшие в изделие"; fail=1
 else echo "   ✓ израсходованное в своё изделие не продать (records.md §9.4)"; fi
+# путь ключа: посторонний приводит пломбу к цепи сам, по подписям (blockchain.md §7.5)
+if bcp ustin keypath who "$PEL_KEY" --via "$VIA" | grep -q "${CID[pelageya]}"; then
+    echo "   ✓ пломба приведена к цепи Пелагеи проверкой пути (blockchain.md §7.5)"
+else echo "   ✗ путь ключа не привёл пломбу к цепи"; fail=1; fi
+# подделанный путь читателем отвергается: ключ чужой, а подписи звеньев его не покрывают
+FAKE_KEY="$(printf '%064d' 7)"
+if bcp ustin keypath who "$FAKE_KEY" --via "$VIA" | grep -q "цепь неизвестна"; then
+    echo "   ✓ ключ без пути остаётся безымянным — он ничего не весит"
+else echo "   ✗ безымянный ключ выдан за цепь"; fail=1; fi
 # переоценка печи ВВЕРХ обязана отклониться (перевыпуск только вниз)
 if bcp anna tool add "Печь подовая" --cost 400 --life 8000 --origin "$TOOL" --note "хочу дороже" >/dev/null 2>&1; then
     echo "   ✗ переоценка вверх прошла, а должна была отклониться"; fail=1

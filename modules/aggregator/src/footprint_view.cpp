@@ -2,6 +2,7 @@
 #include "aggregator/recognition.h"
 
 #include <blockchain/serializer.h>
+#include <blockchain/crypto.h>
 #include <records/codec.h>
 #include <records/types.h>
 
@@ -84,12 +85,20 @@ FootprintView FootprintView::build(const AggregatorStorage& storage) {
                 labor_outward[to] += t->accept->labor_units;
                 // Кто посторонний заверил саму запись труда пломбой (economy.md §3):
                 // работник заверял бы себя, плательщик уже подписал приёмку.
+                // Подпись проверяем — она самодостаточна; чей это ключ,
+                // агрегатор не знает (blockchain.md §7.5, sync.md §10.9).
+                const Hash work_hash{t->accept->work.hash};
                 std::set<UserId> witnesses;
-                for (const auto& raw : storage.get_seal_bytes(Hash{t->accept->work.hash})) {
+                for (const auto& raw : storage.get_seal_bytes(work_hash)) {
                     try {
                         const auto seal = Serializer::decode_seal(raw.data(), raw.size());
-                        if (seal.signer_id != to && seal.signer_id != from)
-                            witnesses.insert(seal.signer_id);
+                        if (seal.signer_id == to || seal.signer_id == from) continue;
+                        if (!(seal.block_hash == work_hash))                continue;
+                        if (!blockchain::Crypto::verify(seal.block_hash.bytes.data(),
+                                                        seal.block_hash.bytes.size(),
+                                                        seal.signature, seal.signer_id))
+                            continue;
+                        witnesses.insert(seal.signer_id);
                     } catch (const std::exception&) { continue; }
                 }
                 if (!witnesses.empty()) {
@@ -138,8 +147,16 @@ FootprintView FootprintView::build(const AggregatorStorage& storage) {
             fp.labor_outward = it->second;
         if (const auto it = labor_sealed.find(subject); it != labor_sealed.end())
             fp.labor_sealed = it->second;
-        if (const auto it = attester_sets.find(subject); it != attester_sets.end())
+        if (const auto it = attester_sets.find(subject); it != attester_sets.end()) {
             fp.attesters = it->second.size();
+            // Сами ключи — читателю, чтобы он привёл их к цепям сам
+            // (blockchain.md §7.5). Шапка: больше и не нужно для суждения.
+            constexpr std::size_t kAttesterKeysShown = 32;
+            for (const auto& k : it->second) {
+                if (fp.attester_keys.size() >= kAttesterKeysShown) break;
+                fp.attester_keys.push_back(k);
+            }
+        }
 
         // Layer 3: the subject's circle is everything within TWO exchange hops
         // — the same reachability the trust footprint uses elsewhere (ИР-010:

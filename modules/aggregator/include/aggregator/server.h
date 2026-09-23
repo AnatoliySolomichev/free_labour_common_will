@@ -58,6 +58,8 @@ public:
     static constexpr std::size_t kSealsPerBlockCap = 4096;  // seals per block
     static constexpr std::size_t kRevocationsPerChainCap = 256;    // certificates per chain
     static constexpr std::size_t kRevocationCertMaxBytes = 16384;  // path ≤ 32 nodes + block
+    static constexpr std::size_t kKeyPathsPerKeyCap      = 8;      // claims per signing key
+    static constexpr std::size_t kKeyPathMaxBytes        = 16384;  // path ≤ 32 nodes
 
     ~AggregatorServer();
 

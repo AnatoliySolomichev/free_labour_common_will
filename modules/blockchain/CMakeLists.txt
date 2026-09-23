@@ -18,6 +18,7 @@ add_library(blockchain
     src/storage.cpp
     src/validator.cpp
     src/revocation.cpp
+    src/key_path.cpp
     src/seal_manager.cpp
     src/merge_session.cpp
     src/blockchain.cpp
@@ -58,6 +59,7 @@ add_executable(blockchain_tests
     tests/test_validator.cpp
     tests/test_blockchain.cpp
     tests/test_seal_manager.cpp
+    tests/test_key_path.cpp
     tests/test_merge_session.cpp
 )
 

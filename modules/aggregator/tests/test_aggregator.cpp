@@ -194,3 +194,46 @@ TEST_F(AggregatorStorageTest, PersistenceAcrossReopen) {
     ASSERT_TRUE(idea.has_value());
     EXPECT_EQ(idea->payload, payload);
 }
+
+// ── Склад путей ключей (sync.md §7.5) ─────────────────────────────────────────
+//
+// Склад возит байты и ничего не проверяет: что путь ведёт к этому ключу,
+// решает читатель (blockchain.md §7.5). Отсюда и требования — отдать всё, что
+// положили под ключ, не смешивая ключи, и не плодить копии одного и того же.
+
+TEST_F(AggregatorStorageTest, KeyPathWarehouseKeepsClaimsPerKey) {
+    const PublicKey pel = make_uid(0xE1), boris = make_uid(0xB0);
+    const std::vector<uint8_t> path_a{1, 2, 3}, path_b{4, 5, 6}, other{7};
+
+    EXPECT_TRUE(storage_->put_keypath_bytes(pel, path_a));
+    EXPECT_TRUE(storage_->put_keypath_bytes(pel, path_b));
+    EXPECT_TRUE(storage_->put_keypath_bytes(boris, other));
+
+    EXPECT_EQ(storage_->get_keypath_bytes(pel).size(), 2u);
+    ASSERT_EQ(storage_->get_keypath_bytes(boris).size(), 1u);
+    EXPECT_EQ(storage_->get_keypath_bytes(boris)[0], other);
+}
+
+TEST_F(AggregatorStorageTest, KeyPathWarehouseDedupesIdenticalBytes) {
+    const PublicKey pel = make_uid(0xE2);
+    const std::vector<uint8_t> path{9, 9, 9};
+
+    EXPECT_TRUE(storage_->put_keypath_bytes(pel, path));
+    EXPECT_FALSE(storage_->put_keypath_bytes(pel, path));   // тот же путь — та же запись
+    EXPECT_EQ(storage_->get_keypath_bytes(pel).size(), 1u);
+}
+
+TEST_F(AggregatorStorageTest, KeyPathManifestListsKeysOnce) {
+    const PublicKey a = make_uid(0x10), b = make_uid(0x20);
+    storage_->put_keypath_bytes(a, {1});
+    storage_->put_keypath_bytes(a, {2});
+    storage_->put_keypath_bytes(b, {3});
+
+    const auto keys = storage_->all_keypath_keys();
+    EXPECT_EQ(keys.size(), 2u);
+}
+
+TEST_F(AggregatorStorageTest, KeyPathWarehouseEmptyForUnknownKey) {
+    EXPECT_TRUE(storage_->get_keypath_bytes(make_uid(0x33)).empty());
+    EXPECT_TRUE(storage_->all_keypath_keys().empty());
+}

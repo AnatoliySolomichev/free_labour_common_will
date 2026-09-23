@@ -70,6 +70,7 @@ struct AggregatorStorage::Impl {
     MDB_dbi  dbi_comp  = 0; // snap_comps:  parent_root → left‖right (64B)
     MDB_dbi  dbi_seal  = 0; // seals: block_hash(32)‖blake2b(bytes)(32) → seal bytes
     MDB_dbi  dbi_rev   = 0; // revocations: chain(32)‖blake2b(bytes)(32) → certificate bytes
+    MDB_dbi  dbi_kpath = 0; // keypaths: signing_key(32)‖blake2b(bytes)(32) → node path bytes
 };
 
 // ── Constructor / Destructor ──────────────────────────────────────────────────
@@ -79,7 +80,7 @@ AggregatorStorage::AggregatorStorage(std::filesystem::path db_path)
 {
     std::filesystem::create_directories(db_path);
     lcheck(mdb_env_create(&impl_->env),              "mdb_env_create");
-    lcheck(mdb_env_set_maxdbs(impl_->env, 7),        "mdb_env_set_maxdbs");
+    lcheck(mdb_env_set_maxdbs(impl_->env, 8),        "mdb_env_set_maxdbs");
     lcheck(mdb_env_set_mapsize(impl_->env, 1u<<30),  "mdb_env_set_mapsize");
     lcheck(mdb_env_open(impl_->env, db_path.c_str(), 0, 0600), "mdb_env_open");
 
@@ -92,7 +93,8 @@ AggregatorStorage::AggregatorStorage(std::filesystem::path db_path)
         (rc = mdb_dbi_open(txn, "snap_leaves", MDB_CREATE, &impl_->dbi_leaf)) != MDB_SUCCESS ||
         (rc = mdb_dbi_open(txn, "snap_comps",  MDB_CREATE, &impl_->dbi_comp)) != MDB_SUCCESS ||
         (rc = mdb_dbi_open(txn, "seals",       MDB_CREATE, &impl_->dbi_seal)) != MDB_SUCCESS ||
-        (rc = mdb_dbi_open(txn, "revocations", MDB_CREATE, &impl_->dbi_rev))  != MDB_SUCCESS) {
+        (rc = mdb_dbi_open(txn, "revocations", MDB_CREATE, &impl_->dbi_rev))  != MDB_SUCCESS ||
+        (rc = mdb_dbi_open(txn, "keypaths",    MDB_CREATE, &impl_->dbi_kpath)) != MDB_SUCCESS) {
         mdb_txn_abort(txn);
         throw StorageError(std::string("mdb_dbi_open: ") + mdb_strerror(rc));
     }
@@ -495,6 +497,71 @@ std::vector<UserId> AggregatorStorage::all_revoked_chains() const {
         std::memcpy(c.bytes.data(), mk.mv_data, 32);
         if (result.empty() || !(result.back() == c))   // keys sorted: dedupe run
             result.push_back(c);
+    }
+    mdb_cursor_close(cur);
+    mdb_txn_abort(txn);
+    return result;
+}
+
+// ── Key-path warehouse (sync.md §7.5; blockchain.md §7.5) ────────────────────
+
+bool AggregatorStorage::put_keypath_bytes(const PublicKey& key,
+                                          const std::vector<uint8_t>& bytes) {
+    const Hash content = Crypto::hash(bytes.data(), bytes.size());
+    std::array<uint8_t, 64> k{};
+    std::memcpy(k.data(),      key.bytes.data(),     32);
+    std::memcpy(k.data() + 32, content.bytes.data(), 32);
+
+    MDB_val mk{k.size(),     k.data()};
+    MDB_val mv{bytes.size(), const_cast<uint8_t*>(bytes.data())};
+    MDB_txn* txn;
+    lcheck(mdb_txn_begin(impl_->env, nullptr, 0, &txn), "put_keypath: begin");
+    int rc = mdb_put(txn, impl_->dbi_kpath, &mk, &mv, MDB_NOOVERWRITE);
+    if (rc == MDB_KEYEXIST) { mdb_txn_abort(txn); return false; }
+    if (rc != MDB_SUCCESS)  { mdb_txn_abort(txn); lcheck(rc, "put_keypath"); }
+    lcheck(mdb_txn_commit(txn), "put_keypath: commit");
+    return true;
+}
+
+std::vector<std::vector<uint8_t>>
+AggregatorStorage::get_keypath_bytes(const PublicKey& key) const {
+    std::vector<std::vector<uint8_t>> result;
+    MDB_txn* txn;
+    lcheck(mdb_txn_begin(impl_->env, nullptr, MDB_RDONLY, &txn), "get_keypaths: begin");
+    MDB_cursor* cur;
+    if (mdb_cursor_open(txn, impl_->dbi_kpath, &cur) != MDB_SUCCESS) {
+        mdb_txn_abort(txn); return {};
+    }
+    std::array<uint8_t, 64> prefix{};
+    std::memcpy(prefix.data(), key.bytes.data(), 32);
+    MDB_val mk{prefix.size(), prefix.data()}, mv{};
+    int rc = mdb_cursor_get(cur, &mk, &mv, MDB_SET_RANGE);
+    while (rc == MDB_SUCCESS && mk.mv_size == 64 &&
+           std::memcmp(mk.mv_data, key.bytes.data(), 32) == 0) {
+        result.emplace_back(static_cast<const uint8_t*>(mv.mv_data),
+                            static_cast<const uint8_t*>(mv.mv_data) + mv.mv_size);
+        rc = mdb_cursor_get(cur, &mk, &mv, MDB_NEXT);
+    }
+    mdb_cursor_close(cur);
+    mdb_txn_abort(txn);
+    return result;
+}
+
+std::vector<PublicKey> AggregatorStorage::all_keypath_keys() const {
+    std::vector<PublicKey> result;
+    MDB_txn* txn;
+    lcheck(mdb_txn_begin(impl_->env, nullptr, MDB_RDONLY, &txn), "kpath_manifest: begin");
+    MDB_cursor* cur;
+    if (mdb_cursor_open(txn, impl_->dbi_kpath, &cur) != MDB_SUCCESS) {
+        mdb_txn_abort(txn); return {};
+    }
+    MDB_val mk{}, mv{};
+    while (mdb_cursor_get(cur, &mk, &mv, MDB_NEXT) == MDB_SUCCESS) {
+        if (mk.mv_size != 64) continue;
+        PublicKey key;
+        std::memcpy(key.bytes.data(), mk.mv_data, 32);
+        if (result.empty() || !(result.back() == key))   // keys sorted: dedupe run
+            result.push_back(key);
     }
     mdb_cursor_close(cur);
     mdb_txn_abort(txn);

@@ -1,6 +1,7 @@
 #include <blockchain/blockchain.h>
 #include <blockchain/crypto.h>
 #include <blockchain/fraud.h>
+#include <blockchain/key_path.h>
 #include <blockchain/merge_session.h>
 #include <blockchain/seal_manager.h>
 #include <blockchain/serializer.h>
@@ -1424,6 +1425,130 @@ static std::string jstr(const records::json::Object& o, const char* k);
 static double jnum(const records::json::Object& o, const char* k);
 static const records::json::Value* jarr(const records::json::Object& o,
                                         const char* k);
+
+// ── Чей это ключ: путь ключа (blockchain.md §7.5) ─────────────────────────────
+//
+// Пломбу подписывает рабочий ключ ветки, а имя цепи — её корневой ключ. Связь
+// между ними — путь узлов от корня до подписавшего, и она самопроверяема:
+// каждое звено подписано ключом родителя, корень подписал сам себя.
+//
+// Проверяет её ЧИТАТЕЛЬ, а не агрегатор (решение участника 2026-09-23,
+// sync.md §10.9): сначала ищет ключ среди узлов, которые у него уже есть —
+// свои и партнёрские, их приносит слияние (blockchain.md §6.4), — а если не
+// нашёл, просит путь у склада и проверяет сам. Агрегатор здесь почтальон:
+// подделанный путь отвергает проверка, а не доверие к складу.
+
+// Разбор CBOR-массива байтовых строк (ответ складов агрегатора).
+static std::vector<std::string> cbor_bstr_array(const std::string& body) {
+    std::vector<std::string> out;
+    std::size_t pos = 0;
+    auto head = [&](uint8_t expect_major) -> long long {
+        if (pos >= body.size()) return -1;
+        const uint8_t b = static_cast<uint8_t>(body[pos++]);
+        if ((b >> 5) != expect_major) return -1;
+        const uint8_t ai = b & 0x1F;
+        if (ai < 24) return ai;
+        int extra = ai == 24 ? 1 : ai == 25 ? 2 : ai == 26 ? 4 : ai == 27 ? 8 : -1;
+        if (extra < 0 || pos + extra > body.size()) return -1;
+        long long v = 0;
+        for (int i = 0; i < extra; ++i) v = (v << 8) | static_cast<uint8_t>(body[pos++]);
+        return v;
+    };
+    const long long n = head(4);
+    for (long long i = 0; i < n; ++i) {
+        const long long len = head(2);
+        if (len < 0 || pos + static_cast<std::size_t>(len) > body.size()) break;
+        out.emplace_back(body, pos, static_cast<std::size_t>(len));
+        pos += static_cast<std::size_t>(len);
+    }
+    return out;
+}
+
+// Выложить свой путь ключа на склад — чтобы посторонний читатель мог узнать,
+// чья пломба. Путь публичен по умолчанию (blockchain.md §8): он не открывает
+// ничего сверх того, что уже несёт подпись.
+static bool publish_key_path(const std::string& via, const IStorage& storage,
+                             const UserId& chain, NodeIndex node) {
+    if (via.empty()) return false;
+    try {
+        const KeyPath kp    = KeyPathCert::build(storage, chain, node);
+        const auto    bytes = Serializer::encode(kp);
+        httplib::Client cli(via);
+        cli.set_connection_timeout(5);
+        const auto res = cli.Post(
+            "/keypaths/" + to_hex(KeyPathCert::signer_key(kp).bytes),
+            std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size()),
+            "application/cbor");
+        return res && res->status == 200;
+    } catch (const std::exception&) {
+        return false;  // путь не сложился — не повод рушить основную операцию
+    }
+}
+
+// Приведение ключей к цепям. Локальные узлы читаются один раз; путь со склада
+// — по запросу и только для незнакомого ключа.
+class KeyOwners {
+public:
+    KeyOwners(IStorage& storage, std::string via)
+        : storage_(storage), via_(std::move(via)) {}
+
+    // Цепь, которой ключ доказанно принадлежит, либо nullopt.
+    std::optional<UserId> owner(const PublicKey& key) {
+        scan_local_once();
+        if (const auto it = known_.find(key); it != known_.end()) return it->second;
+        if (via_.empty() || !asked_.insert(key).second) return std::nullopt;
+        return fetch_and_verify(key);
+    }
+
+    // Ключ найден у себя, без обращения к складу?
+    bool locally_known(const PublicKey& key) {
+        scan_local_once();
+        return known_.count(key) > 0;
+    }
+
+private:
+    void scan_local_once() {
+        if (scanned_) return;
+        scanned_ = true;
+        try {
+            storage_.for_each_node([&](const UserId& chain, const Node& n) {
+                known_.emplace(n.working_pubkey, chain);
+                return true;
+            });
+        } catch (const std::exception&) {}
+    }
+
+    std::optional<UserId> fetch_and_verify(const PublicKey& key) {
+        httplib::Client cli(via_);
+        cli.set_connection_timeout(5);
+        const auto res = cli.Get("/keypaths/" + to_hex(key.bytes));
+        if (!res || res->status != 200) return std::nullopt;
+
+        for (const auto& raw : cbor_bstr_array(res->body)) {
+            try {
+                const KeyPath kp = Serializer::decode_key_path(
+                    reinterpret_cast<const uint8_t*>(raw.data()), raw.size());
+                const UserId chain = KeyPathCert::verify(kp);       // сами, не со слов
+                if (!(KeyPathCert::signer_key(kp) == key)) continue;
+
+                // Путь проверен — его узлы можно держать у себя: дальше этот
+                // ключ узнаётся без склада.
+                for (const Node& n : kp.path)
+                    if (!storage_.has_node(chain, n.index))
+                        storage_.put_node(chain, n);
+                known_.emplace(key, chain);
+                return chain;
+            } catch (const std::exception&) { continue; }  // подделка — мимо
+        }
+        return std::nullopt;
+    }
+
+    IStorage&   storage_;
+    std::string via_;
+    bool        scanned_ = false;
+    std::map<PublicKey, UserId> known_;
+    std::set<PublicKey>         asked_;
+};
 
 // The own deal on `work` already on record in the own branches: its ref, or
 // empty. One result — one deal (records.md §9.5, ИР-023): a second deal of the
@@ -4082,15 +4207,37 @@ static void print_footprint(Context& ctx,
                   << "h — они получили что-то настоящее\n";
         // Заверенность — сигнал, а не пропуск (economy.md §4.2): часы, которые
         // посторонние заверили пломбой на самой записи труда, видны отдельно.
+        // Агрегатор отдаёт ключи свидетелей; чьи они — проверяем здесь, по
+        // путям ключей (blockchain.md §7.5). Ключ без пути ничего не весит:
+        // ключей заводят сколько угодно, цепь с историей — нет.
         const auto sealed = jnum(o, "labor_sealed");
-        const auto att    = jnum(o, "attesters");
-        if (sealed > 0)
-            std::cout << "    из них заверено пломбами посторонних: " << sealed << "h ("
-                      << static_cast<int>(att) << " цеп.); остальное — со слов сторон\n"
-                      << "    [склад пломб агрегатора подписи НЕ проверяет (sync.md §10.9):\n"
-                      << "     кому важно — проверяет пломбы по цепям свидетелей сам]\n";
-        else
+        if (sealed > 0) {
+            std::vector<PublicKey> keys;
+            if (const auto* ka = jarr(o, "attester_keys"))
+                for (const auto& kv : ka->array) {
+                    PublicKey k{};
+                    if (kv.is_string() && from_hex(kv.string, k.bytes.data(), 32))
+                        keys.push_back(k);
+                }
+            KeyOwners owners(ctx.storage, via);
+            std::set<std::string> chains;
+            std::size_t nameless = 0;
+            for (const auto& k : keys) {
+                if (const auto chain = owners.owner(k)) chains.insert(to_hex(chain->bytes));
+                else                                    ++nameless;
+            }
+            std::cout << "    из них с пломбами посторонних: " << sealed
+                      << "h; остальное — со слов сторон\n";
+            std::cout << "    свидетели: цепей, которые вы проверили сами — "
+                      << chains.size() << "; ключей без пути — " << nameless << "\n";
+            for (const auto& c : chains)
+                std::cout << "      " << c.substr(0, 16) << "…  (путь ключа проверен)\n";
+            if (chains.empty())
+                std::cout << "      ни один ключ не приведён к цепи — эти пломбы "
+                             "ничего не весят\n";
+        } else {
             std::cout << "    пломб посторонних на этих работах нет — всё со слов сторон\n";
+        }
     } else {
         std::cout << "  её труд не принимал никто посторонний\n";
     }
@@ -5445,6 +5592,12 @@ static int cmd_seal_add(const fs::path& data_dir, int argc, char** argv) {
             "application/cbor");
         std::cerr << ((res && res->status == 200) ? "Published to " : "publish failed: ")
                   << via << "\n";
+        // Вместе с пломбой — путь своего ключа (blockchain.md §7.5): без него
+        // читатель видит только ключ, а ключей можно наделать сколько угодно.
+        std::cerr << (publish_key_path(via, ctx.storage, ctx.user_id, leaf)
+                          ? "Путь ключа выложен: читатель узнает, чья это пломба\n"
+                          : "Путь ключа выложить не удалось — пломба останется "
+                            "безымянным ключом\n");
     }
     return 0;
 }
@@ -5529,13 +5682,86 @@ static int cmd_seal_list(const fs::path& data_dir, int argc, char** argv) {
     }
 
     std::cout << seals.size() << " seal(s) for " << short_hex(block_hash.bytes) << ":\n\n";
+    KeyOwners owners(storage, via);
     for (size_t i = 0; i < seals.size(); ++i) {
         const auto& s = seals[i];
+        // Чей ключ — решает проверка пути, а не склад (blockchain.md §7.5).
+        const bool  mine  = owners.locally_known(s.signer_id);
+        const auto  chain = owners.owner(s.signer_id);
         std::cout << "#" << i << "\n"
                   << "  signer: " << to_hex(s.signer_id.bytes) << "\n"
+                  << "  chain:  "
+                  << (chain ? to_hex(chain->bytes) +
+                              (mine ? "  (путь уже лежал у вас)"
+                                    : "  (путь взят со склада, проверен вами)")
+                            : std::string("неизвестна — путь ключа не найден"))
+                  << "\n"
                   << "  mode:   " << (s.mode == SealMode::BLIND ? "BLIND" : "OPEN") << "\n"
                   << "  sig:    " << to_hex(s.signature.bytes) << "\n\n";
     }
+    return 0;
+}
+
+// bc keypath publish --via URL [--leaf L]
+// Выложить путь своего рабочего ключа: чтобы посторонний, увидев пломбу, мог
+// узнать, чья она (blockchain.md §7.5).
+static int cmd_keypath_publish(const fs::path& data_dir, int argc, char** argv) {
+    const auto via = flag_val(argc, argv, "--via");
+    if (via.empty()) {
+        std::cerr << "Usage: bc keypath publish --via URL [--leaf L]\n";
+        return 1;
+    }
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+
+    KeyPath kp;
+    try {
+        kp = KeyPathCert::build(ctx.storage, ctx.user_id, leaf);
+    } catch (const std::exception& e) {
+        std::cerr << "Путь не сложился: " << e.what() << "\n";
+        return 1;
+    }
+    if (!publish_key_path(via, ctx.storage, ctx.user_id, leaf)) {
+        std::cerr << "Склад недоступен: " << via << "\n";
+        return 1;
+    }
+    std::cout << "ключ:  " << to_hex(KeyPathCert::signer_key(kp).bytes) << "\n"
+              << "цепь:  " << to_hex(ctx.user_id.bytes) << "\n"
+              << "узлов в пути: " << kp.path.size() << "  → " << via << "\n"
+              << "(склад путь не проверяет — его проверит читатель)\n";
+    return 0;
+}
+
+// bc keypath who KEY_HEX [--via URL]
+// Чей это ключ. Ответ даёт проверка пути, а не склад.
+static int cmd_keypath_who(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);  // [keypath, who, <key>]
+    if (pos.size() < 3) {
+        std::cerr << "Usage: bc keypath who KEY_HEX [--via URL]\n";
+        return 1;
+    }
+    PublicKey key{};
+    if (!from_hex(pos[2], key.bytes.data(), 32)) {
+        std::cerr << "Invalid key hex (expected 64 hex chars)\n";
+        return 1;
+    }
+    LmdbStorage storage(data_dir / "db");
+    KeyOwners   owners(storage, flag_val(argc, argv, "--via"));
+
+    const bool mine  = owners.locally_known(key);
+    const auto chain = owners.owner(key);
+    if (!chain) {
+        std::cout << "ключ " << short_hex(key.bytes) << ": цепь неизвестна\n"
+                  << "  пути ключа нет ни у вас, ни на складе — такой ключ "
+                     "заводится за секунду\n"
+                  << "  и сам по себе не значит ничего (blockchain.md §7.5)\n";
+        return 0;
+    }
+    std::cout << "ключ " << short_hex(key.bytes) << " принадлежит цепи\n"
+              << "  " << to_hex(chain->bytes) << "\n"
+              << (mine ? "  (узлы этой цепи уже лежали у вас — от слияния "
+                         "или прошлой проверки)\n"
+                       : "  (путь взят со склада и проверен вами по подписям)\n");
     return 0;
 }
 
@@ -6252,6 +6478,11 @@ Seals (blockchain.md §7; gossip sync.md §7.2):
   seal list BLOCK_HASH_HEX         List seals for a block; --via pulls remote
     [--via URL]                        ones, verifying every signature locally
 
+Чей ключ стоит за пломбой (blockchain.md §7.5):
+  keypath publish --via URL        Выложить путь своего ключа на склад
+  keypath who KEY_HEX [--via URL]  Привести ключ к цепи: сперва по своим узлам,
+                                       потом по пути со склада — проверяя самому
+
 Fraud (records.md §3A, blockchain.md §6.5.6):
   fraud claim --kind KIND          Build a proof from the sync cache and write a
               --target REF                FraudClaim record (only when CONFIRMED)
@@ -6368,6 +6599,8 @@ int main(int argc, char** argv) {
         else if (cmd == "merge"     && subcmd == "serve")   return cmd_merge_serve(data_dir, argc, argv);
         else if (cmd == "seal"      && subcmd == "add")     return cmd_seal_add(data_dir, argc, argv);
         else if (cmd == "seal"      && subcmd == "list")    return cmd_seal_list(data_dir, argc, argv);
+        else if (cmd == "keypath"   && subcmd == "publish") return cmd_keypath_publish(data_dir, argc, argv);
+        else if (cmd == "keypath"   && subcmd == "who")     return cmd_keypath_who(data_dir, argc, argv);
         else if (cmd == "fraud"     && subcmd == "verify")  return cmd_fraud_verify(argc, argv);
         else if (cmd == "fraud"     && subcmd == "claim")   return cmd_fraud_claim(data_dir, argc, argv);
         else if (cmd == "revoke"    && subcmd == "create")  return cmd_revoke_create(data_dir, argc, argv);

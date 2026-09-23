@@ -286,15 +286,23 @@ TEST_F(FootprintViewTest, UnknownChainHasNoFootprint) {
 // плательщик свидетелями не считаются.
 TEST_F(FootprintViewTest, SealsByOutsidersAreShownApart) {
     const auto anna = make_chain(0xA1), vera = make_chain(0xB2);
-    const UserId witness = make_chain(0xE5);
-    const auto sealed_by = [&](const Block& work, const UserId& signer) {
+    // Пломба ценна подписью: агрегатор её проверяет, но чей это ключ — не знает
+    // (blockchain.md §7.5). Поэтому свидетель здесь — настоящая пара ключей.
+    const KeyPair witness_kp = Crypto::generate_keypair();
+    const auto seal_with = [&](const Block& work, const UserId& signer,
+                               const Signature& sig) {
         Seal seal{};
         seal.signer_id  = signer;
         seal.block_hash = Crypto::hash_block(work);
-        seal.signature  = Signature::null();
+        seal.signature  = sig;
         seal.mode       = SealMode::BLIND;
         seal.sealed_at  = 1000;
         EXPECT_TRUE(storage_->put_seal_bytes(seal.block_hash, Serializer::encode(seal)));
+    };
+    const auto sealed_by = [&](const Block& work, const KeyPair& kp) {
+        const Hash bh = Crypto::hash_block(work);
+        seal_with(work, kp.pub,
+                  Crypto::sign(bh.bytes.data(), bh.bytes.size(), kp.sec));
     };
     const auto work_of = [&](const UserId& worker, const UserId& payer, double units) {
         records::WorkRecord w{};
@@ -319,12 +327,52 @@ TEST_F(FootprintViewTest, SealsByOutsidersAreShownApart) {
 
     const Block seen   = work_of(anna, vera, 4.0);     // её заверит посторонний
     const Block unseen = work_of(anna, vera, 6.0);     // эту — только свои
-    sealed_by(seen, witness);
-    sealed_by(unseen, anna);                            // сам работник — не свидетель
-    sealed_by(unseen, vera);                            // плательщик уже подписал приёмку
+    sealed_by(seen, witness_kp);
+    seal_with(unseen, anna, Signature::null());         // сам работник — не свидетель
+    seal_with(unseen, vera, Signature::null());         // плательщик уже подписал приёмку
 
     const auto fp = of(anna);
     EXPECT_NEAR(fp.labor_outward, 10.0, 1e-9);          // сделки считаются обе
     EXPECT_NEAR(fp.labor_sealed, 4.0, 1e-9);            // заверена посторонним — одна
     EXPECT_EQ(fp.attesters, 1u);
+    ASSERT_EQ(fp.attester_keys.size(), 1u);             // ключ отдан читателю —
+    EXPECT_EQ(fp.attester_keys[0], witness_kp.pub);     // он приведёт его к цепи сам
+}
+
+// Пломба с негодной подписью — не пломба: её отбрасывают, не спрашивая, чья
+// она. Это единственное, что агрегатор может проверить сам (sync.md §10.9).
+TEST_F(FootprintViewTest, SealWithABadSignatureIsIgnored) {
+    const auto anna = make_chain(0xA3), vera = make_chain(0xB4);
+
+    records::WorkRecord w{};
+    w.action   = "работа";
+    w.hours    = 3.0;
+    w.customer = vera.bytes;
+    const Block work = add(anna, w);
+    records::Acceptance a{};
+    a.work.chain  = anna.bytes;
+    a.work.hash   = Crypto::hash_block(work).bytes;
+    a.hours_raw   = 3.0;
+    a.labor_units = 3.0;
+    a.axes        = {{test_axis(), 3.0}};
+    records::Transfer t{};
+    t.from    = vera.bytes;
+    t.to      = anna.bytes;
+    t.origins = { {vera.bytes, 3.0} };
+    t.accept  = a;
+    add(vera, t);
+
+    Seal seal{};
+    seal.signer_id  = Crypto::generate_keypair().pub;   // ключ настоящий,
+    seal.block_hash = Crypto::hash_block(work);
+    seal.signature  = Signature::null();                // подпись — нет
+    seal.mode       = SealMode::BLIND;
+    seal.sealed_at  = 1000;
+    ASSERT_TRUE(storage_->put_seal_bytes(seal.block_hash, Serializer::encode(seal)));
+
+    const auto fp = of(anna);
+    EXPECT_NEAR(fp.labor_outward, 3.0, 1e-9);
+    EXPECT_NEAR(fp.labor_sealed, 0.0, 1e-9);
+    EXPECT_EQ(fp.attesters, 0u);
+    EXPECT_TRUE(fp.attester_keys.empty());
 }

@@ -226,6 +226,40 @@ bool LmdbStorage::has_node(const UserId& user_id, NodeIndex index) const noexcep
     } catch (...) { return false; }
 }
 
+void LmdbStorage::for_each_node(
+    std::function<bool(const UserId&, const Node&)> visitor) const
+{
+    MDB_txn* txn;
+    lcheck(mdb_txn_begin(impl_->env, nullptr, MDB_RDONLY, &txn),
+           "for_each_node: begin");
+
+    MDB_cursor* cur;
+    if (mdb_cursor_open(txn, impl_->dbi_nodes, &cur) != MDB_SUCCESS) {
+        mdb_txn_abort(txn);
+        throw StorageError("for_each_node: cursor_open failed");
+    }
+
+    MDB_val mk{}, mv{};
+    int rc = mdb_cursor_get(cur, &mk, &mv, MDB_FIRST);
+    while (rc == MDB_SUCCESS) {
+        if (mk.mv_size == 36) {
+            try {
+                UserId chain{};
+                std::memcpy(chain.bytes.data(), mk.mv_data, 32);
+                Node n = Serializer::decode_node(
+                    static_cast<const uint8_t*>(mv.mv_data), mv.mv_size);
+                if (!visitor(chain, n)) break;
+            } catch (const SerializationError&) {
+                // skip malformed entries
+            }
+        }
+        rc = mdb_cursor_get(cur, &mk, &mv, MDB_NEXT);
+    }
+
+    mdb_cursor_close(cur);
+    mdb_txn_abort(txn);
+}
+
 // ── Blocks ────────────────────────────────────────────────────────────────────
 
 // Revocation index (blockchain.md §6.7): revoked_node → 8-byte entries (author node BE4 +

@@ -25,6 +25,13 @@ public:
 
     virtual bool has_node(const UserId& user_id, NodeIndex index) const noexcept = 0;
 
+    // Scan every stored node — own and imported from partners during merges
+    // (blockchain.md §6.4) — calling visitor(chain, node). Return false from the
+    // visitor to stop early. This is how a reader attributes a signing key to a
+    // chain on its own (blockchain.md §7.5). Throws: StorageError.
+    virtual void for_each_node(
+        std::function<bool(const UserId&, const Node&)> visitor) const = 0;
+
     // ── Blocks ────────────────────────────────────────────────────────────────
 
     // Store a block. Overwrites are forbidden.
@@ -108,6 +115,8 @@ public:
     void put_node(const UserId& user_id, const Node& node) override;
     Node get_node(const UserId& user_id, NodeIndex index) const override;
     bool has_node(const UserId& user_id, NodeIndex index) const noexcept override;
+    void for_each_node(
+        std::function<bool(const UserId&, const Node&)> visitor) const override;
 
     void  put_block(const Block& block) override;
     Block get_block(const BlockAddress& address) const override;
