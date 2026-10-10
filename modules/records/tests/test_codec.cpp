@@ -126,6 +126,41 @@ TEST(RecordsCodec, Copy) {
     EXPECT_EQ(decoded.source, c.source);
 }
 
+// ── Attest (пломба как запись, blockchain.md §7.4 v2) ────────────────────────
+
+TEST(RecordsCodec, AttestBlindRoundTrip) {
+    Attest a{ make_ref(0x01, 0x02), "blind", "" };
+    const auto decoded = std::get<Attest>(roundtrip(a));
+    EXPECT_EQ(decoded.target, a.target);
+    EXPECT_EQ(decoded.mode,   "blind");
+    EXPECT_TRUE(decoded.note.empty());
+}
+
+TEST(RecordsCodec, AttestOpenCarriesWhatWasSeen) {
+    Attest a{ make_ref(0x03, 0x04), "open", "видела, как Дмитрий собирал табуреты" };
+    const auto decoded = std::get<Attest>(roundtrip(a));
+    EXPECT_EQ(decoded.mode, "open");
+    EXPECT_EQ(decoded.note, a.note);
+}
+
+// Режим — это то, что свидетель утверждает, что видел; третьего нет.
+TEST(RecordsCodec, AttestRejectsUnknownMode) {
+    Attest a{ make_ref(0x01, 0x02), "maybe", "" };
+    EXPECT_THROW(Codec::encode(a), CodecError);
+}
+
+// Пломба без адресата ничего не заверяет.
+TEST(RecordsCodec, AttestRejectsEmptyTarget) {
+    {
+        Attest a{ make_ref(0x00, 0x02), "blind", "" };
+        EXPECT_THROW(Codec::encode(a), CodecError);
+    }
+    {
+        Attest a{ make_ref(0x01, 0x00), "blind", "" };
+        EXPECT_THROW(Codec::encode(a), CodecError);
+    }
+}
+
 // ── Reaction ──────────────────────────────────────────────────────────────────
 
 TEST(RecordsCodec, ReactionPositive) {

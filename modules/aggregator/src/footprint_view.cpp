@@ -35,6 +35,27 @@ FootprintView FootprintView::build(const AggregatorStorage& storage) {
     // did not address is void — it moves no paper at all.
     const auto deals = read_deals(storage);
 
+    // Пломбы — записи в ветках свидетелей (blockchain.md §7.4 v2): собираем их
+    // отдельным проходом, потому что порядок блоков произволен, а сделка
+    // спрашивает «кто заверил эту работу» уже готовым ответом. Чья пломба —
+    // говорит адрес блока, проверять подпись ключа и приводить его к цепи
+    // больше не нужно: блок подписан веткой самого свидетеля.
+    std::map<std::array<uint8_t, 32>, std::set<UserId>> attests_on;
+    for (const Hash& bh : storage.all_block_hashes()) {
+        const auto block = storage.get_block_by_hash(bh);
+        if (!block || block->type != BlockType::DATA) continue;
+        records::Record rec;
+        try {
+            rec = records::Codec::decode(block->payload.data(), block->payload.size());
+        } catch (const records::CodecError&) { continue; }
+        if (const auto* a = std::get_if<records::Attest>(&rec)) {
+            if (a->target.chain == block->address.user_id.bytes) continue;  // себя не заверяют
+            attests_on[a->target.hash].insert(block->address.user_id);
+        }
+    }
+    std::map<UserId, double>      vouched_hours;
+    std::map<UserId, std::size_t> vouched_works;
+
     for (const Hash& bh : storage.all_block_hashes()) {
         const auto block = storage.get_block_by_hash(bh);
         if (!block || block->type != BlockType::DATA) continue;
@@ -85,25 +106,19 @@ FootprintView FootprintView::build(const AggregatorStorage& storage) {
                 labor_outward[to] += t->accept->labor_units;
                 // Кто посторонний заверил саму запись труда пломбой (economy.md §3):
                 // работник заверял бы себя, плательщик уже подписал приёмку.
-                // Подпись проверяем — она самодостаточна; чей это ключ,
-                // агрегатор не знает (blockchain.md §7.5, sync.md §10.9).
-                const Hash work_hash{t->accept->work.hash};
                 std::set<UserId> witnesses;
-                for (const auto& raw : storage.get_seal_bytes(work_hash)) {
-                    try {
-                        const auto seal = Serializer::decode_seal(raw.data(), raw.size());
-                        if (seal.signer_id == to || seal.signer_id == from) continue;
-                        if (!(seal.block_hash == work_hash))                continue;
-                        if (!blockchain::Crypto::verify(seal.block_hash.bytes.data(),
-                                                        seal.block_hash.bytes.size(),
-                                                        seal.signature, seal.signer_id))
-                            continue;
-                        witnesses.insert(seal.signer_id);
-                    } catch (const std::exception&) { continue; }
-                }
+                if (const auto it = attests_on.find(t->accept->work.hash);
+                    it != attests_on.end())
+                    for (const auto& w : it->second)
+                        if (!(w == to) && !(w == from)) witnesses.insert(w);
                 if (!witnesses.empty()) {
                     labor_sealed[to] += t->accept->labor_units;
                     attester_sets[to].insert(witnesses.begin(), witnesses.end());
+                    // ...и то же самое со стороны свидетеля: за что он ручался.
+                    for (const auto& w : witnesses) {
+                        vouched_hours[w] += t->accept->labor_units;
+                        ++vouched_works[w];
+                    }
                 }
             }
         }
@@ -120,6 +135,9 @@ FootprintView FootprintView::build(const AggregatorStorage& storage) {
     }
     for (const auto& [chain, peers] : adj) { (void)peers; subjects.insert(chain); }
     for (const auto& [chain, s] : acceptor_sets) { (void)s; subjects.insert(chain); }
+    // Поручиться за чужой труд — тоже след: свидетеля видно и у него самого
+    // (records.md §12.11), даже если он больше ничем в обороте не отметился.
+    for (const auto& [chain, h] : vouched_hours) { (void)h; subjects.insert(chain); }
 
     for (const UserId& subject : subjects) {
         ChainFootprint fp{};
@@ -149,14 +167,18 @@ FootprintView FootprintView::build(const AggregatorStorage& storage) {
             fp.labor_sealed = it->second;
         if (const auto it = attester_sets.find(subject); it != attester_sets.end()) {
             fp.attesters = it->second.size();
-            // Сами ключи — читателю, чтобы он привёл их к цепям сам
-            // (blockchain.md §7.5). Шапка: больше и не нужно для суждения.
-            constexpr std::size_t kAttesterKeysShown = 32;
-            for (const auto& k : it->second) {
-                if (fp.attester_keys.size() >= kAttesterKeysShown) break;
-                fp.attester_keys.push_back(k);
+            // Кто именно заверил — читателю: он знает часть этих цепей лично
+            // и судит сам. Шапка: больше для суждения не нужно.
+            constexpr std::size_t kAttestersShown = 32;
+            for (const auto& c : it->second) {
+                if (fp.attester_chains.size() >= kAttestersShown) break;
+                fp.attester_chains.push_back(c);
             }
         }
+        if (const auto it = vouched_hours.find(subject); it != vouched_hours.end())
+            fp.vouched_hours = it->second;
+        if (const auto it = vouched_works.find(subject); it != vouched_works.end())
+            fp.vouched_works = it->second;
 
         // Layer 3: the subject's circle is everything within TWO exchange hops
         // — the same reachability the trust footprint uses elsewhere (ИР-010:

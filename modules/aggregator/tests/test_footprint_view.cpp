@@ -285,24 +285,17 @@ TEST_F(FootprintViewTest, UnknownChainHasNoFootprint) {
 // пломбой на самой записи труда, видны в следе отдельно. Ни работник, ни
 // плательщик свидетелями не считаются.
 TEST_F(FootprintViewTest, SealsByOutsidersAreShownApart) {
-    const auto anna = make_chain(0xA1), vera = make_chain(0xB2);
-    // Пломба ценна подписью: агрегатор её проверяет, но чей это ключ — не знает
-    // (blockchain.md §7.5). Поэтому свидетель здесь — настоящая пара ключей.
-    const KeyPair witness_kp = Crypto::generate_keypair();
-    const auto seal_with = [&](const Block& work, const UserId& signer,
-                               const Signature& sig) {
-        Seal seal{};
-        seal.signer_id  = signer;
-        seal.block_hash = Crypto::hash_block(work);
-        seal.signature  = sig;
-        seal.mode       = SealMode::BLIND;
-        seal.sealed_at  = 1000;
-        EXPECT_TRUE(storage_->put_seal_bytes(seal.block_hash, Serializer::encode(seal)));
-    };
-    const auto sealed_by = [&](const Block& work, const KeyPair& kp) {
-        const Hash bh = Crypto::hash_block(work);
-        seal_with(work, kp.pub,
-                  Crypto::sign(bh.bytes.data(), bh.bytes.size(), kp.sec));
+    const auto anna    = make_chain(0xA1), vera = make_chain(0xB2);
+    const auto witness = make_chain(0xE5);
+    // Пломба — запись в ветке свидетеля (blockchain.md §7.4 v2): чья она,
+    // говорит адрес блока, а не ключ в непрозрачных байтах склада.
+    const auto sealed_by = [&](const Block& work, const UserId& who,
+                               const UserId& whose) {
+        records::Attest at{};
+        at.target.chain = whose.bytes;
+        at.target.hash  = Crypto::hash_block(work).bytes;
+        at.mode         = "blind";
+        add(who, at);
     };
     const auto work_of = [&](const UserId& worker, const UserId& payer, double units) {
         records::WorkRecord w{};
@@ -327,21 +320,60 @@ TEST_F(FootprintViewTest, SealsByOutsidersAreShownApart) {
 
     const Block seen   = work_of(anna, vera, 4.0);     // её заверит посторонний
     const Block unseen = work_of(anna, vera, 6.0);     // эту — только свои
-    sealed_by(seen, witness_kp);
-    seal_with(unseen, anna, Signature::null());         // сам работник — не свидетель
-    seal_with(unseen, vera, Signature::null());         // плательщик уже подписал приёмку
+    sealed_by(seen,   witness, anna);
+    sealed_by(unseen, vera,    anna);                   // плательщик уже подписал приёмку
 
     const auto fp = of(anna);
     EXPECT_NEAR(fp.labor_outward, 10.0, 1e-9);          // сделки считаются обе
     EXPECT_NEAR(fp.labor_sealed, 4.0, 1e-9);            // заверена посторонним — одна
     EXPECT_EQ(fp.attesters, 1u);
-    ASSERT_EQ(fp.attester_keys.size(), 1u);             // ключ отдан читателю —
-    EXPECT_EQ(fp.attester_keys[0], witness_kp.pub);     // он приведёт его к цепи сам
+    ASSERT_EQ(fp.attester_chains.size(), 1u);           // видно, КТО заверил —
+    EXPECT_EQ(fp.attester_chains[0], witness);          // цепь, а не безымянный ключ
 }
 
-// Пломба с негодной подписью — не пломба: её отбрасывают, не спрашивая, чья
-// она. Это единственное, что агрегатор может проверить сам (sync.md §10.9).
-TEST_F(FootprintViewTest, SealWithABadSignatureIsIgnored) {
+// Другая сторона монеты: за что ручался сам свидетель. Ложная пломба стоит
+// ему его собственной истории, и это видно числом (records.md §12.11).
+TEST_F(FootprintViewTest, WhatAChainVouchedForIsCountedToo) {
+    const auto dmitry = make_chain(0xA7), vera = make_chain(0xB8);
+    const auto pelageya = make_chain(0xC9);
+
+    records::WorkRecord w{};
+    w.action   = "табуреты";
+    w.hours    = 5.0;
+    w.customer = vera.bytes;
+    const Block work = add(dmitry, w);
+    records::Acceptance a{};
+    a.work.chain  = dmitry.bytes;
+    a.work.hash   = Crypto::hash_block(work).bytes;
+    a.hours_raw   = 5.0;
+    a.labor_units = 5.0;
+    a.axes        = {{test_axis(), 5.0}};
+    records::Transfer t{};
+    t.from    = vera.bytes;
+    t.to      = dmitry.bytes;
+    t.origins = { {vera.bytes, 5.0} };
+    t.accept  = a;
+    add(vera, t);
+
+    records::Attest at{};
+    at.target.chain = dmitry.bytes;
+    at.target.hash  = a.work.hash;
+    at.mode         = "open";
+    at.note         = "видела, как он их собирал";
+    add(pelageya, at);
+
+    const auto seen = of(dmitry);
+    EXPECT_NEAR(seen.labor_sealed, 5.0, 1e-9);
+    EXPECT_EQ(seen.attesters, 1u);
+
+    const auto witness = of(pelageya);
+    EXPECT_NEAR(witness.vouched_hours, 5.0, 1e-9);   // поручилась за 5 часов чужого труда
+    EXPECT_EQ(witness.vouched_works, 1u);
+    EXPECT_NEAR(witness.labor_sealed, 0.0, 1e-9);    // своего заверенного труда у неё нет
+}
+
+// Себя не заверяют: своя подпись под своей записью не добавляет ничего.
+TEST_F(FootprintViewTest, SelfAttestationIsNotCounted) {
     const auto anna = make_chain(0xA3), vera = make_chain(0xB4);
 
     records::WorkRecord w{};
@@ -362,17 +394,16 @@ TEST_F(FootprintViewTest, SealWithABadSignatureIsIgnored) {
     t.accept  = a;
     add(vera, t);
 
-    Seal seal{};
-    seal.signer_id  = Crypto::generate_keypair().pub;   // ключ настоящий,
-    seal.block_hash = Crypto::hash_block(work);
-    seal.signature  = Signature::null();                // подпись — нет
-    seal.mode       = SealMode::BLIND;
-    seal.sealed_at  = 1000;
-    ASSERT_TRUE(storage_->put_seal_bytes(seal.block_hash, Serializer::encode(seal)));
+    records::Attest at{};
+    at.target.chain = anna.bytes;      // сама себе
+    at.target.hash  = a.work.hash;
+    at.mode         = "blind";
+    add(anna, at);
 
     const auto fp = of(anna);
     EXPECT_NEAR(fp.labor_outward, 3.0, 1e-9);
     EXPECT_NEAR(fp.labor_sealed, 0.0, 1e-9);
     EXPECT_EQ(fp.attesters, 0u);
-    EXPECT_TRUE(fp.attester_keys.empty());
+    EXPECT_TRUE(fp.attester_chains.empty());
+    EXPECT_NEAR(fp.vouched_hours, 0.0, 1e-9);
 }

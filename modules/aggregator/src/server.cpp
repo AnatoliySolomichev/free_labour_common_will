@@ -660,6 +660,44 @@ void AggregatorServer::setup_routes() {
         res.set_content(body, "application/cbor");
     });
 
+    // ── Пломбы как записи (blockchain.md §7.4 v2) ────────────────────────────
+    //
+    // Кто заверил эту запись: пломба лежит блоком в ветке свидетеля, поэтому
+    // «чья она» говорит адрес блока — ни склада, ни привязки ключа к цепи не
+    // требуется. Витрина производная: пересчитывается сканом, перепроверяется
+    // по сырым цепям.
+    svr.Get("/attests/:hash", [&](const httplib::Request& req, httplib::Response& res) {
+        auto th = hex_to_hash(req.path_params.at("hash"));
+        if (!th) {
+            res.status = 400;
+            res.set_content("{\"error\":\"invalid hash\"}", "application/json");
+            return;
+        }
+        std::string body = "[";
+        bool first = true;
+        for (const Hash& bh : storage_.all_block_hashes()) {
+            const auto block = storage_.get_block_by_hash(bh);
+            if (!block || block->type != blockchain::BlockType::DATA) continue;
+            records::Record rec;
+            try {
+                rec = records::Codec::decode(block->payload.data(), block->payload.size());
+            } catch (const records::CodecError&) { continue; }
+            const auto* a = std::get_if<records::Attest>(&rec);
+            if (!a || !(Hash{a->target.hash} == *th)) continue;
+            if (a->target.chain == block->address.user_id.bytes) continue;  // себя не заверяют
+            if (!first) body += ',';
+            first = false;
+            body += "{\"chain\":\""    + to_hex(block->address.user_id.bytes)
+                 + "\",\"mode\":\""   + json_escape(a->mode)
+                 + "\",\"note\":\""   + json_escape(a->note)
+                 + "\",\"at\":"        + std::to_string(block->timestamp_claimed)
+                 + ",\"block\":\""     + to_hex(bh.bytes)
+                 + "\"}";
+        }
+        body += ']';
+        res.set_content(body, "application/json");
+    });
+
     // ── Key-path warehouse (sync.md §7.5; blockchain.md §7.5) ────────────────
     //
     // Who stands behind a seal: the node path from a chain's root down to the
@@ -1159,7 +1197,9 @@ void AggregatorServer::setup_routes() {
                 + ",\"labor_outward\":"       + std::to_string(fp->labor_outward)
                 + ",\"labor_sealed\":"        + std::to_string(fp->labor_sealed)
                 + ",\"attesters\":"           + std::to_string(fp->attesters)
-                + ",\"attester_keys\":"        + hex_array(fp->attester_keys)
+                + ",\"attester_chains\":"      + hex_array(fp->attester_chains)
+                + ",\"vouched_hours\":"        + std::to_string(fp->vouched_hours)
+                + ",\"vouched_works\":"        + std::to_string(fp->vouched_works)
                 + ",\"counterparties\":"      + std::to_string(fp->counterparties)
                 + ",\"internal_turnover\":"   + std::to_string(fp->internal_turnover)
                 + ",\"boundary_turnover\":"   + std::to_string(fp->boundary_turnover)

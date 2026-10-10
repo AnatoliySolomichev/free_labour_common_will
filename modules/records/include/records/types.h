@@ -20,6 +20,7 @@ enum class RecordType : uint8_t {
     Composite    = 0x42,
     Copy         = 0x43,
     Reaction     = 0x44,
+    Attest       = 0x45,   // пломба: «я видел это состояние» (blockchain.md §7)
     // Labor
     // 0x50 Specialty, 0x51 Grade, 0x52 Worker — сняты (ИР-022 шаг 11): какой
     //      была работа, говорит разбивка её цены по осям, а не справочник и
@@ -140,6 +141,24 @@ struct Reaction {
 
     Ref    target;  // Copy or own record
     int8_t value;   // -128..+127  (negative = disagree, 0 = neutral, positive = agree)
+};
+
+// Пломба (blockchain.md §7.4 v2, решение участника 2026-10-10): одностороннее
+// «я видел это состояние», записанное БЛОКОМ в ветке самого свидетеля, а не
+// строкой в отдельной таблице. Из формы следует всё, чего у таблицы не было:
+// у пломбы есть место во времени (задним числом не вставить, от своей не
+// отпереться), её можно сосчитать, и чья она — говорит сама цепь, в которой
+// она лежит, без привязки ключа к цепи (blockchain.md §7.5).
+//
+// Заверение чужой работы теперь и стоит чего-то свидетелю: ложная пломба
+// остаётся в его собственной истории рядом со всем, что он о себе утверждает
+// (records.md §12.11).
+struct Attest {
+    static constexpr RecordType TYPE = RecordType::Attest;
+
+    Ref         target;  // что заверено: цепь и хеш блока
+    std::string mode;    // "blind" — видел только хеш; "open" — видел содержание
+    std::string note;    // что именно видел; может быть пустым
 };
 
 // ── Labor records (records.md §9) ────────────────────────────────────────────
@@ -699,6 +718,7 @@ using Record = std::variant<
     Composite,
     Copy,
     Reaction,
+    Attest,
     WorkRecord,
     Release,
     WriteOff,

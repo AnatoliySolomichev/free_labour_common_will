@@ -4207,40 +4207,42 @@ static void print_footprint(Context& ctx,
                   << "h — они получили что-то настоящее\n";
         // Заверенность — сигнал, а не пропуск (economy.md §4.2): часы, которые
         // посторонние заверили пломбой на самой записи труда, видны отдельно.
-        // Агрегатор отдаёт ключи свидетелей; чьи они — проверяем здесь, по
-        // путям ключей (blockchain.md §7.5). Ключ без пути ничего не весит:
-        // ключей заводят сколько угодно, цепь с историей — нет.
+        // Пломба — блок в ветке свидетеля (blockchain.md §7.4 v2), поэтому
+        // здесь цепи с историей, а не безымянные ключи.
         const auto sealed = jnum(o, "labor_sealed");
         if (sealed > 0) {
-            std::vector<PublicKey> keys;
-            if (const auto* ka = jarr(o, "attester_keys"))
-                for (const auto& kv : ka->array) {
-                    PublicKey k{};
-                    if (kv.is_string() && from_hex(kv.string, k.bytes.data(), 32))
-                        keys.push_back(k);
-                }
-            KeyOwners owners(ctx.storage, via);
-            std::set<std::string> chains;
-            std::size_t nameless = 0;
-            for (const auto& k : keys) {
-                if (const auto chain = owners.owner(k)) chains.insert(to_hex(chain->bytes));
-                else                                    ++nameless;
-            }
-            std::cout << "    из них с пломбами посторонних: " << sealed
+            std::cout << "    из них заверено посторонними цепями: " << sealed
                       << "h; остальное — со слов сторон\n";
-            std::cout << "    свидетели: цепей, которые вы проверили сами — "
-                      << chains.size() << "; ключей без пути — " << nameless << "\n";
-            for (const auto& c : chains)
-                std::cout << "      " << c.substr(0, 16) << "…  (путь ключа проверен)\n";
-            if (chains.empty())
-                std::cout << "      ни один ключ не приведён к цепи — эти пломбы "
-                             "ничего не весят\n";
+            if (const auto* ac = jarr(o, "attester_chains")) {
+                std::size_t known = 0;
+                for (const auto& cv : ac->array)
+                    if (cv.is_string() && seen_locally.count(cv.string)) ++known;
+                std::cout << "    свидетелей: " << ac->array.size()
+                          << " цеп., из них знакомы вам " << known << "\n";
+                for (const auto& cv : ac->array) {
+                    if (!cv.is_string()) continue;
+                    std::cout << "      " << cv.string.substr(0, 16) << "…"
+                              << (seen_locally.count(cv.string) ? "  (знакома вам)" : "")
+                              << "\n";
+                }
+            }
         } else {
             std::cout << "    пломб посторонних на этих работах нет — всё со слов сторон\n";
         }
     } else {
         std::cout << "  её труд не принимал никто посторонний\n";
     }
+
+    // Обратная сторона заверенности: за что ручалась сама эта цепь. Пломба
+    // теперь лежит в её истории, значит ложная остаётся при ней навсегда
+    // (records.md §12.11).
+    const auto vouched = jnum(o, "vouched_hours");
+    if (vouched > 0)
+        std::cout << "  сама заверила чужого труда: " << vouched << "h в "
+                  << static_cast<int>(jnum(o, "vouched_works"))
+                  << " записях — за ложную пломбу отвечать ей\n";
+    else
+        std::cout << "  чужого труда не заверяла ни разу\n";
 
     const auto* ht = records::json::find(o, "has_turnover");
     if (!ht || !ht->boolean) {
@@ -5530,42 +5532,56 @@ static int cmd_pledge_list(const fs::path& data_dir, int argc, char** argv) {
 
 // ── Seal commands ─────────────────────────────────────────────────────────────
 
-// bc seal add BLOCK_HASH_HEX [--leaf L]
-// bc seal add --mode open --idx BLOCK_IDX [--leaf L] [--user UID_HEX]
+// bc seal add BLOCK_HASH_HEX [--chain CHAIN_HEX] [--note TEXT] [--leaf L] [--via URL]
+// bc seal add --mode open --idx BLOCK_IDX --user UID_HEX [--note TEXT] [...]
+//
+// Пломба — ЗАПИСЬ В СВОЕЙ ВЕТКЕ (blockchain.md §7.4 v2, решение участника
+// 2026-10-10), а не строка в чужой таблице: у неё есть место во времени, её
+// можно сосчитать, и чья она — видно по цепи, в которой она лежит. Поэтому и
+// заверение чего-то стоит: ложная пломба останется в истории свидетеля.
 static int cmd_seal_add(const fs::path& data_dir, int argc, char** argv) {
     const bool open_mode = (flag_val(argc, argv, "--mode") == "open");
     const NodeIndex leaf  = parse_leaf_index(argc, argv);
     Context ctx(data_dir, leaf);
-    SealManager sm(ctx.storage);
 
-    Seal seal;
+    records::Attest a{};
+    a.mode = open_mode ? "open" : "blind";
+    a.note = flag_val(argc, argv, "--note");
+
     if (open_mode) {
-        const auto idx_s = flag_val(argc, argv, "--idx");
-        if (idx_s.empty()) {
-            std::cerr << "Usage: bc seal add --mode open --idx BLOCK_IDX [--leaf L] [--user UID_HEX]\n";
+        const auto idx_s  = flag_val(argc, argv, "--idx");
+        const auto user_s = flag_val(argc, argv, "--user");
+        if (idx_s.empty() || user_s.empty()) {
+            std::cerr << "Usage: bc seal add --mode open --idx BLOCK_IDX --user UID_HEX\n"
+                         "       (открытая пломба заверяет содержание — его надо иметь)\n";
             return 1;
         }
         BlockIndex block_idx;
         try { block_idx = static_cast<BlockIndex>(std::stoul(idx_s)); }
         catch (...) { std::cerr << "Invalid --idx value\n"; return 1; }
 
-        const auto user_s = flag_val(argc, argv, "--user");
-        UserId target_user = ctx.user_id;
-        if (!user_s.empty() && !from_hex(user_s, target_user.bytes.data(), 32)) {
+        UserId target_user{};
+        if (!from_hex(user_s, target_user.bytes.data(), 32)) {
             std::cerr << "Invalid --user hex\n";
             return 1;
         }
-
-        BlockAddress addr{target_user, leaf, block_idx};
-        const Block block = (target_user == ctx.user_id)
-            ? ctx.storage.get_block(addr)
-            : ctx.storage.get_external_block(addr);
-        seal = sm.create_open_seal(block, ctx.working_kp);
+        const BlockAddress addr{target_user, leaf, block_idx};
+        Block block;
+        try {
+            block = (target_user == ctx.user_id) ? ctx.storage.get_block(addr)
+                                                 : ctx.storage.get_external_block(addr);
+        } catch (const BlockchainError&) {
+            std::cerr << "Блока нет у вас — открытую пломбу ставят на то, что видели:\n"
+                         "  bc fetch ЦЕПЬ/ХЕШ --via URL\n";
+            return 1;
+        }
+        a.target.chain = target_user.bytes;
+        a.target.hash  = Crypto::hash_block(block).bytes;
     } else {
         const auto pos = get_positionals(argc, argv);  // [seal, add, <hash>]
         if (pos.size() < 3) {
-            std::cerr << "Usage: bc seal add BLOCK_HASH_HEX [--leaf L]\n"
-                         "       bc seal add --mode open --idx N [--leaf L] [--user UID]\n";
+            std::cerr << "Usage: bc seal add BLOCK_HASH_HEX [--chain CHAIN_HEX] [--note TEXT]\n"
+                         "       bc seal add --mode open --idx N --user UID [--note TEXT]\n";
             return 1;
         }
         Hash block_hash{};
@@ -5573,40 +5589,57 @@ static int cmd_seal_add(const fs::path& data_dir, int argc, char** argv) {
             std::cerr << "Invalid block hash hex (expected 64 hex chars)\n";
             return 1;
         }
-        seal = sm.create_seal(block_hash, ctx.working_kp, SealMode::BLIND);
+        a.target.hash = block_hash.bytes;
+
+        const auto chain_s = flag_val(argc, argv, "--chain");
+        if (!chain_s.empty()) {
+            if (!from_hex(chain_s, a.target.chain.data(), 32)) {
+                std::cerr << "Invalid --chain hex\n";
+                return 1;
+            }
+        } else {
+            // Чья это запись — ищем среди того, что у нас уже лежит.
+            bool found = false;
+            ctx.storage.for_each_external_block([&](const Block& b) {
+                if (Crypto::hash_block(b) == block_hash) {
+                    a.target.chain = b.address.user_id.bytes;
+                    found = true;
+                    return false;
+                }
+                return true;
+            });
+            if (!found) {
+                std::cerr << "Чья это запись — неизвестно: назовите цепь (--chain ЦЕПЬ)\n"
+                             "  либо возьмите блок к себе: bc fetch ЦЕПЬ/ХЕШ --via URL\n";
+                return 1;
+            }
+        }
     }
 
-    std::cout << "sealed:  " << to_hex(seal.block_hash.bytes) << "\n"
-              << "signer:  " << to_hex(seal.signer_id.bytes)  << "\n"
-              << "mode:    " << (seal.mode == SealMode::BLIND ? "BLIND" : "OPEN") << "\n";
-
-    // Publish to the seal warehouse (sync.md §7.2) — witnessing only carries
-    // weight when third parties can see it.
-    const auto via = flag_val(argc, argv, "--via");
-    if (!via.empty()) {
-        httplib::Client cli(via);  // scheme-aware: plain host:port, http:// or https://
-        cli.set_connection_timeout(5);
-        const auto bytes = Serializer::encode(seal);
-        const auto res   = cli.Post("/seals/" + to_hex(seal.block_hash.bytes),
-            std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size()),
-            "application/cbor");
-        std::cerr << ((res && res->status == 200) ? "Published to " : "publish failed: ")
-                  << via << "\n";
-        // Вместе с пломбой — путь своего ключа (blockchain.md §7.5): без него
-        // читатель видит только ключ, а ключей можно наделать сколько угодно.
-        std::cerr << (publish_key_path(via, ctx.storage, ctx.user_id, leaf)
-                          ? "Путь ключа выложен: читатель узнает, чья это пломба\n"
-                          : "Путь ключа выложить не удалось — пломба останется "
-                            "безымянным ключом\n");
+    // Себя не заверяют: своя подпись под своей же записью не добавляет ничего
+    // (records.md §12.11).
+    if (a.target.chain == ctx.user_id.bytes) {
+        std::cerr << "Это ваша собственная запись — себя не заверяют "
+                     "(records.md §12.11)\n";
+        return 1;
     }
-    return 0;
+
+    std::cout << "заверяю: " << short_hex(a.target.hash) << " из цепи "
+              << short_hex(a.target.chain) << "\n"
+              << "режим:   " << (open_mode ? "открытая — видел содержание"
+                                           : "слепая — видел, что блок существует")
+              << "\n";
+    return cmd_write(data_dir, argc, argv, a);
 }
 
-// bc seal list BLOCK_HASH_HEX
+// bc seal list BLOCK_HASH_HEX [--via URL]
+// Кто заверил эту запись. Пломба — блок в ветке свидетеля (blockchain.md §7.4
+// v2), поэтому «чья она» видно по цепи: ни склада, ни привязки ключа к цепи
+// больше не нужно. Склад пломб остался для со-подписей слияний.
 static int cmd_seal_list(const fs::path& data_dir, int argc, char** argv) {
     const auto pos = get_positionals(argc, argv);  // [seal, list, <hash>]
     if (pos.size() < 3) {
-        std::cerr << "Usage: bc seal list BLOCK_HASH_HEX\n";
+        std::cerr << "Usage: bc seal list BLOCK_HASH_HEX [--via URL]\n";
         return 1;
     }
     Hash block_hash{};
@@ -5614,91 +5647,76 @@ static int cmd_seal_list(const fs::path& data_dir, int argc, char** argv) {
         std::cerr << "Invalid block hash hex (expected 64 hex chars)\n";
         return 1;
     }
+    const auto via  = flag_val(argc, argv, "--via");
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
 
-    LmdbStorage storage(data_dir / "db");
-    SealManager  sm(storage);
-    auto         seals = sm.get_seals(block_hash);
+    struct Found { std::string chain, mode, note; long long at = 0; bool mine = false; };
+    std::vector<Found> found;
 
-    // --via: pull remote seals from the warehouse, verify each signature
-    // (the warehouse is untrusted) and keep the new ones locally.
-    const auto via = flag_val(argc, argv, "--via");
-    if (!via.empty()) {
-        httplib::Client cli(via);  // scheme-aware: plain host:port, http:// or https://
-        cli.set_connection_timeout(5);
-        const auto res = cli.Get("/seals/" + to_hex(block_hash.bytes));
-        if (res && res->status == 200) {
-            std::size_t imported = 0, rejected = 0;
-            const std::string& body = res->body;
-            std::size_t bpos = 0;
-            auto head = [&](uint8_t expect_major) -> long long {
-                if (bpos >= body.size()) return -1;
-                const uint8_t b = static_cast<uint8_t>(body[bpos++]);
-                if ((b >> 5) != expect_major) return -1;
-                const uint8_t ai = b & 0x1F;
-                if (ai < 24) return ai;
-                int extra = ai == 24 ? 1 : ai == 25 ? 2 : ai == 26 ? 4 : ai == 27 ? 8 : -1;
-                if (extra < 0 || bpos + extra > body.size()) return -1;
-                long long v = 0;
-                for (int i = 0; i < extra; ++i)
-                    v = (v << 8) | static_cast<uint8_t>(body[bpos++]);
-                return v;
-            };
-            const long long n = head(4);
-            for (long long i = 0; i < n; ++i) {
-                const long long len = head(2);
-                if (len < 0 || bpos + len > body.size()) break;
-                try {
-                    const Seal s = Serializer::decode_seal(
-                        reinterpret_cast<const uint8_t*>(body.data()) + bpos,
-                        static_cast<size_t>(len));
-                    const bool genuine =
-                        s.block_hash == block_hash &&
-                        Crypto::verify(s.block_hash.bytes.data(),
-                                       s.block_hash.bytes.size(),
-                                       s.signature, s.signer_id);
-                    const bool known =
-                        std::find(seals.begin(), seals.end(), s) != seals.end();
-                    if (!genuine) ++rejected;
-                    else if (!known) {
-                        storage.put_seal(s);
-                        seals.push_back(s);
-                        ++imported;
-                    }
-                } catch (const std::exception&) {
-                    ++rejected;
-                }
-                bpos += static_cast<std::size_t>(len);
-            }
-            std::cerr << "warehouse: " << imported << " new, " << rejected
-                      << " rejected\n";
-        } else {
-            std::cerr << "warehouse unreachable: " << via << "\n";
+    // Свои пломбы — из своих ветвей, без сети.
+    for (const NodeIndex node : ctx.local_branches()) {
+        std::vector<Block> blocks;
+        try { blocks = ctx.bc.get_branch(ctx.user_id, node); }
+        catch (const BlockchainError&) { continue; }
+        for (const auto& b : blocks) {
+            if (b.type != BlockType::DATA) continue;
+            try {
+                const auto rec = records::Codec::decode(b.payload.data(), b.payload.size());
+                if (const auto* a = std::get_if<records::Attest>(&rec))
+                    if (Hash{a->target.hash} == block_hash)
+                        found.push_back({to_hex(ctx.user_id.bytes), a->mode, a->note,
+                                         b.timestamp_claimed, true});
+            } catch (const std::exception&) { continue; }
         }
     }
 
-    if (seals.empty()) {
-        std::cout << "(no seals for this block)\n";
-        return 0;
+    // Чужие — витриной агрегатора; она производная и перепроверяема по цепям.
+    if (!via.empty()) {
+        const auto doc = fetch_json(via, "/attests/" + to_hex(block_hash.bytes));
+        if (doc && doc->is_array()) {
+            for (const auto& v : doc->array) {
+                if (!v.is_object()) continue;
+                const auto chain = jstr(v.object, "chain");
+                if (chain == to_hex(ctx.user_id.bytes)) continue;   // свои уже есть
+                found.push_back({chain, jstr(v.object, "mode"), jstr(v.object, "note"),
+                                 static_cast<long long>(jnum(v.object, "at")), false});
+            }
+        } else {
+            std::cerr << "агрегатор " << via << " недоступен — показаны только свои\n";
+        }
     }
 
-    std::cout << seals.size() << " seal(s) for " << short_hex(block_hash.bytes) << ":\n\n";
-    KeyOwners owners(storage, via);
-    for (size_t i = 0; i < seals.size(); ++i) {
-        const auto& s = seals[i];
-        // Чей ключ — решает проверка пути, а не склад (blockchain.md §7.5).
-        const bool  mine  = owners.locally_known(s.signer_id);
-        const auto  chain = owners.owner(s.signer_id);
-        std::cout << "#" << i << "\n"
-                  << "  signer: " << to_hex(s.signer_id.bytes) << "\n"
-                  << "  chain:  "
-                  << (chain ? to_hex(chain->bytes) +
-                              (mine ? "  (путь уже лежал у вас)"
-                                    : "  (путь взят со склада, проверен вами)")
-                            : std::string("неизвестна — путь ключа не найден"))
-                  << "\n"
-                  << "  mode:   " << (s.mode == SealMode::BLIND ? "BLIND" : "OPEN") << "\n"
-                  << "  sig:    " << to_hex(s.signature.bytes) << "\n\n";
+    if (found.empty()) {
+        std::cout << "пломб на " << short_hex(block_hash.bytes) << " нет"
+                  << (via.empty() ? " (у вас; чужие — с --via URL)\n" : "\n");
+    } else {
+        std::cout << "пломб на " << short_hex(block_hash.bytes) << ": " << found.size()
+                  << "\n";
+        for (const auto& f : found) {
+            std::cout << "  " << f.chain.substr(0, 16) << "…  "
+                      << (f.mode == "open" ? "открытая" : "слепая");
+            if (f.at > 0) {
+                const std::time_t t = static_cast<std::time_t>(f.at);
+                char buf[32];
+                std::strftime(buf, sizeof buf, "%Y-%m-%d %H:%M", std::gmtime(&t));
+                std::cout << ", " << buf;
+            }
+            if (f.mine)   std::cout << "  (ваша)";
+            std::cout << "\n";
+            if (!f.note.empty()) std::cout << "      «" << f.note << "»\n";
+        }
+        std::cout << "  [каждая пломба — блок в ветке свидетеля: за ложную "
+                     "отвечает он сам]\n";
     }
+
+    // Со-подписи слияний — другая сущность (blockchain.md §6.4): это не «я видел»,
+    // а «мы согласились», и живут они в таблице, не в ветке.
+    SealManager sm(ctx.storage);
+    const auto cosigs = sm.get_seals(block_hash);
+    if (!cosigs.empty())
+        std::cout << "\nсо-подписей слияния на этот блок: " << cosigs.size()
+                  << " (blockchain.md §6.4)\n";
     return 0;
 }
 
@@ -6469,14 +6487,15 @@ Merge, manual relay (blockchain.md §6.4 bilateral two-round protocol):
   merge cosign --draft HASH        Step 3: co-sign partner's draft_hash, print co_signature
   merge finalize --co-sig HEX      Step 4: attach partner co_sig, complete merge block
 
-Seals (blockchain.md §7; gossip sync.md §7.2):
-  seal add BLOCK_HASH_HEX          Create a BLIND seal on a block hash
-    [--via URL]                        (--via publishes it to the warehouse)
-  seal add --mode open             Create an OPEN seal (loads block from storage)
-           --idx BLOCK_IDX
-           [--user UID_HEX] [--via URL]
-  seal list BLOCK_HASH_HEX         List seals for a block; --via pulls remote
-    [--via URL]                        ones, verifying every signature locally
+Пломбы — «я видел это состояние» (blockchain.md §7.4, records.md §8.9):
+  seal add ХЕШ --chain ЦЕПЬ        Слепая пломба: запись в СВОЕЙ ветке о том,
+    [--note ТЕКСТ] [--via URL]         что чужой блок существует. Себя не заверяют;
+                                       --chain можно опустить, если блок у вас есть
+  seal add --mode open             Открытая пломба: заверяю содержание — значит
+           --idx N --user ЦЕПЬ         блок должен лежать у вас (bc fetch)
+    [--note ТЕКСТ] [--via URL]
+  seal list ХЕШ [--via URL]        Кто заверил запись: свои пломбы из своих
+                                       ветвей, чужие — витриной агрегатора
 
 Чей ключ стоит за пломбой (blockchain.md §7.5):
   keypath publish --via URL        Выложить путь своего ключа на склад

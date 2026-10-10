@@ -162,6 +162,25 @@ void enc_reaction(Buf& out, const Reaction& r) {
     w_uint(out, 2); w_int64(out, static_cast<int64_t>(r.value));
 }
 
+// Пломба как запись в ветке свидетеля (blockchain.md §7.4 v2).
+void check_attest(const Attest& a) {
+    if (a.mode != "blind" && a.mode != "open")
+        throw CodecError("Attest: mode обязан быть \"blind\" или \"open\" "
+                         "(blockchain.md §7.1)");
+    static const std::array<uint8_t, 32> zero{};
+    if (a.target.chain == zero || a.target.hash == zero)
+        throw CodecError("Attest: заверять нечего — цепь и хеш блока обязательны");
+}
+
+void enc_attest(Buf& out, const Attest& a) {
+    check_attest(a);
+    w_map(out, 4);
+    w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Attest));
+    w_uint(out, 1); w_ref(out, a.target);
+    w_uint(out, 2); w_text(out, a.mode);
+    w_uint(out, 3); w_text(out, a.note);
+}
+
 // One carry-thread link (records.md §9.4 v2, ИР-011).
 void w_carry_entry(Buf& out, const CarryEntry& ce) {
     w_map(out, 6);
@@ -952,6 +971,15 @@ Reaction dec_reaction_fields(CborReader& r) {
     return rx;
 }
 
+Attest dec_attest_fields(CborReader& r) {
+    Attest a{};
+    expect_key(r, 1); a.target = dec_ref(r);
+    expect_key(r, 2); a.mode   = r.r_text();
+    expect_key(r, 3); a.note   = r.r_text();
+    check_attest(a);
+    return a;
+}
+
 CarryEntry dec_carry_entry(CborReader& r) {
     if (r.r_map() != 6) throw CodecError("CarryEntry: expected 6 fields");
     CarryEntry ce{};
@@ -1422,6 +1450,7 @@ std::vector<uint8_t> Codec::encode(const Record& rec) {
         else if constexpr (std::is_same_v<T, Composite>)   enc_composite(out, r);
         else if constexpr (std::is_same_v<T, Copy>)        enc_copy(out, r);
         else if constexpr (std::is_same_v<T, Reaction>)    enc_reaction(out, r);
+        else if constexpr (std::is_same_v<T, Attest>)      enc_attest(out, r);
         else if constexpr (std::is_same_v<T, WorkRecord>)  enc_work_record(out, r);
         else if constexpr (std::is_same_v<T, Release>)     enc_release(out, r);
         else if constexpr (std::is_same_v<T, WriteOff>)    enc_write_off(out, r);
@@ -1456,6 +1485,7 @@ Record Codec::decode(const uint8_t* data, size_t len) {
         case RecordType::Composite:   return dec_composite_fields(r);
         case RecordType::Copy:        return dec_copy_fields(r);
         case RecordType::Reaction:    return dec_reaction_fields(r);
+        case RecordType::Attest:      return dec_attest_fields(r);
         case RecordType::WorkRecord:  return dec_work_record_fields(r, field_count);
         case RecordType::Release:     return dec_release_fields(r, field_count);
         case RecordType::WriteOff:    return dec_write_off_fields(r, field_count);

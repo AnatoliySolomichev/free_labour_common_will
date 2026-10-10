@@ -353,7 +353,8 @@ for ((m=0;m<MONTHS;m++)); do
     # пломбы
     for ((s=0;s<SEALS_PER_MONTH;s++)); do
         a="$(rnd "$POP")"; b="$(rnd "$POP")"
-        [[ -n "${SKREF[$b]:-}" ]] && ftbc "p$a" seal add "${SKREF[$b]#*/}" --via "$VIA" >/dev/null 2>&1 && ((ok_seals++))
+        [[ -n "${SKREF[$b]:-}" ]] && ftbc "p$a" seal add "${SKREF[$b]#*/}" \
+            --chain "${SKREF[$b]%%/*}" --via "$VIA" >/dev/null 2>&1 && ((ok_seals++))
     done
     # обещания под идеи
     for ((s=0;s<4;s++)); do

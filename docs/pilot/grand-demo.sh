@@ -576,8 +576,8 @@ bcp anna cache list | sed 's/^/   /' | head -18
 act "12. Пломбы (bc seal) — «я видел это состояние»"
 hr "слепая пломба на корневой блок Анны (подтверждает существование, не содержимое)"
 ANNA_ROOT="${SK_anna#*/}"
-bcp boris seal add "$ANNA_ROOT" --via "$VIA" | sed 's/^/   /'
-bcp vera  seal add "$ANNA_ROOT" --via "$VIA" >/dev/null
+bcp boris seal add "$ANNA_ROOT" --chain "${CID[anna]}" --via "$VIA" | sed 's/^/   /'
+bcp vera  seal add "$ANNA_ROOT" --chain "${CID[anna]}" --via "$VIA" >/dev/null
 say "Вера тоже поставила пломбу"
 hr "список пломб на блок (bc seal list — подтягивает чужие и проверяет подписи)"
 bcp anna seal list "$ANNA_ROOT" --via "$VIA" | sed 's/^/   /'
@@ -601,15 +601,15 @@ bcp anna ideas top --via "$VIA" \
 
 # ═════════════════════════════════════════════════════════════════════════════
 say "Пелагея была рядом, когда Дмитрий делал табуреты, и пломбирует его запись труда"
-bcp pelageya seal add "$W_stools" --via "$VIA" 2>&1 | sed 's/^/   /'
+bcp pelageya seal add "$W_stools" --chain "${CID[dmitry]}" --mode blind \
+    --note "видела, как он их собирал" --via "$VIA" 2>&1 | sed 's/^/   /'
 
-hr "чей это ключ? (bc keypath who) — решает проверка, а не склад (blockchain.md §7.5)"
-PEL_KEY=$(bcp pelageya seal list "$W_stools" | after '  signer: ')
-say "пломбу подписал рабочий ключ ветки Пелагеи: ${PEL_KEY:0:16}…"
-say "Устин с Пелагеей не сливался — у него её узлов нет:"
-bcp ustin keypath who "$PEL_KEY" | sed 's/^/   /'
-say "теперь тот же вопрос со складом: агрегатор отдаёт путь, Устин проверяет сам"
-bcp ustin keypath who "$PEL_KEY" --via "$VIA" | sed 's/^/   /'
+hr "кто заверил эту работу (bc seal list) — пломба лежит блоком в ветке свидетеля"
+bcp ustin seal list "$W_stools" --via "$VIA" | sed 's/^/   /'
+say "Устин с Пелагеей не знаком, но чья пломба — видно по цепи, в которой она лежит:"
+say "привязывать ключ к цепи больше не нужно (blockchain.md §7.4 v2)"
+hr "себя не заверяют — своя подпись под своей записью ничего не добавляет"
+bcp dmitry seal add "$W_stools" --chain "${CID[dmitry]}" --via "$VIA" 2>&1 | sed 's/^/   /' || true
 
 act "14. Экономический след (bc trust) — слои 1–3 (ИР-010)"
 say "Анна смотрит на Дмитрия: она держала его бумагу и сливалась с ним — видит нить"
@@ -719,15 +719,18 @@ else echo "   ✓ заведённое в производство не пере
 if bcp dmitry release "$W_legs" --to "${CID[boris]}" --qty 1 --via "$VIA" >/dev/null 2>&1; then
     echo "   ✗ проданы ножки, ушедшие в изделие"; fail=1
 else echo "   ✓ израсходованное в своё изделие не продать (records.md §9.4)"; fi
-# путь ключа: посторонний приводит пломбу к цепи сам, по подписям (blockchain.md §7.5)
-if bcp ustin keypath who "$PEL_KEY" --via "$VIA" | grep -q "${CID[pelageya]}"; then
-    echo "   ✓ пломба приведена к цепи Пелагеи проверкой пути (blockchain.md §7.5)"
-else echo "   ✗ путь ключа не привёл пломбу к цепи"; fail=1; fi
-# подделанный путь читателем отвергается: ключ чужой, а подписи звеньев его не покрывают
-FAKE_KEY="$(printf '%064d' 7)"
-if bcp ustin keypath who "$FAKE_KEY" --via "$VIA" | grep -q "цепь неизвестна"; then
-    echo "   ✓ ключ без пути остаётся безымянным — он ничего не весит"
-else echo "   ✗ безымянный ключ выдан за цепь"; fail=1; fi
+# пломба — блок в ветке свидетеля: видно, ЧЬЯ она, без привязки ключа к цепи
+if bcp ustin seal list "$W_stools" --via "$VIA" | grep -q "${CID[pelageya]:0:16}"; then
+    echo "   ✓ пломба Пелагеи видна постороннему по её цепи (blockchain.md §7.4 v2)"
+else echo "   ✗ пломба не видна постороннему"; fail=1; fi
+# за что ручался сам свидетель — видно в его следе
+if bcp ustin trust "${CID[pelageya]}" --via "$VIA" | grep -q "сама заверила чужого труда"; then
+    echo "   ✓ в следе свидетеля видно, за что он поручился (records.md §12.11)"
+else echo "   ✗ поручительство свидетеля не видно"; fail=1; fi
+# себя не заверяют
+if bcp dmitry seal add "$W_stools" --chain "${CID[dmitry]}" >/dev/null 2>&1; then
+    echo "   ✗ цепь заверила собственную запись"; fail=1
+else echo "   ✓ себя не заверяют (records.md §12.11)"; fi
 # переоценка печи ВВЕРХ обязана отклониться (перевыпуск только вниз)
 if bcp anna tool add "Печь подовая" --cost 400 --life 8000 --origin "$TOOL" --note "хочу дороже" >/dev/null 2>&1; then
     echo "   ✗ переоценка вверх прошла, а должна была отклониться"; fail=1
