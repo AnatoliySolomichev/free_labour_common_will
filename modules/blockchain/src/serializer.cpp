@@ -144,10 +144,17 @@ void enc_revocation_cert(Buf& out, const RevocationCertificate& c) {
 }
 
 void enc_key_path(Buf& out, const KeyPath& kp) {
-    w_map(out, 1);
+    // Ключ 1 — звенья смены рабочего ключа (blockchain.md §6.6); без них путь
+    // приводит к первоначальному ключу узла.
+    w_map(out, kp.rotations.empty() ? 1 : 2);
     w_uint(out, 0);
     w_arr(out, kp.path.size());
     for (const auto& n : kp.path) enc_node(out, n);
+    if (!kp.rotations.empty()) {
+        w_uint(out, 1);
+        w_arr(out, kp.rotations.size());
+        for (const auto& b : kp.rotations) enc_block(out, b);
+    }
 }
 
 void enc_merkle_proof(Buf& out, const MerkleTree::Proof& p) {
@@ -403,12 +410,20 @@ RevocationCertificate dec_revocation_cert(CborReader& r) {
 }
 
 KeyPath dec_key_path(CborReader& r) {
-    if (r.r_map() != 1) throw SerializationError("KeyPath: expected 1 field");
+    const uint64_t fields = r.r_map();
+    if (fields < 1 || fields > 2)
+        throw SerializationError("KeyPath: expected 1..2 fields");
     KeyPath kp{};
     expect_key(r, 0);
     const uint64_t n = r.r_arr();
     kp.path.reserve(static_cast<size_t>(n));
     for (uint64_t i = 0; i < n; ++i) kp.path.push_back(dec_node(r));
+    if (fields > 1) {
+        expect_key(r, 1);
+        const uint64_t m = r.r_arr();
+        kp.rotations.reserve(static_cast<size_t>(m));
+        for (uint64_t i = 0; i < m; ++i) kp.rotations.push_back(dec_block(r));
+    }
     return kp;
 }
 

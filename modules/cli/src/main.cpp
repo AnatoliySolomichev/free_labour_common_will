@@ -1541,12 +1541,46 @@ private:
     void scan_local_once() {
         if (scanned_) return;
         scanned_ = true;
+        std::map<std::pair<std::string, NodeIndex>, PublicKey> branch_key;
         try {
             storage_.for_each_node([&](const UserId& chain, const Node& n) {
                 known_.emplace(n.working_pubkey, chain);
+                branch_key[{to_hex(chain.bytes), n.index}] = n.working_pubkey;
                 return true;
             });
         } catch (const std::exception&) {}
+
+        // Ветка могла сменить рабочий ключ (blockchain.md §6.6) — тогда
+        // подписывает она уже не тем ключом, что записан в узле. Звенья смены
+        // проводим от узлового ключа и ТОЛЬКО с проверкой подписи: сохранённый
+        // чужой блок сам по себе ничего не доказывает.
+        std::map<std::pair<std::string, NodeIndex>, std::map<BlockIndex, Block>> rots;
+        try {
+            storage_.for_each_external_block([&](const Block& b) {
+                if (b.type == BlockType::KEY_ROTATION && b.payload.size() >= 32)
+                    rots[{to_hex(b.address.user_id.bytes), b.address.node_index}]
+                        [b.address.block_index] = b;
+                return true;
+            });
+        } catch (const std::exception&) {}
+
+        for (const auto& [branch, blocks] : rots) {
+            const auto it = branch_key.find(branch);
+            if (it == branch_key.end()) continue;      // узла этой ветки у нас нет
+            PublicKey key = it->second;
+            UserId    chain{};
+            if (!from_hex(branch.first, chain.bytes.data(), 32)) continue;
+            for (const auto& [idx, b] : blocks) {
+                (void)idx;
+                Block to_verify = b;
+                to_verify.signature = Signature::null();
+                const auto bytes = Serializer::encode(to_verify);
+                if (!Crypto::verify(bytes.data(), bytes.size(), b.signature, key))
+                    break;                              // звено не от прежнего ключа
+                std::copy(b.payload.begin(), b.payload.begin() + 32, key.bytes.begin());
+                known_.emplace(key, chain);
+            }
+        }
     }
 
     std::optional<UserId> fetch_and_verify(const PublicKey& key) {

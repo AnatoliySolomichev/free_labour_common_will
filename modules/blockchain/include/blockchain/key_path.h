@@ -13,6 +13,11 @@ namespace blockchain {
 // be trusted for the answer "this key belongs to that chain".
 struct KeyPath {
     std::vector<Node> path;   // nodes root → signer, inclusive
+    // Звенья смены рабочего ключа ветки (blockchain.md §6.6), по порядку:
+    // каждый блок подписан ПРЕЖНИМ ключом и называет новый. Без них путь
+    // заканчивается первоначальным ключом узла, и подпись ветки, сменившей
+    // ключ, к цепи не привести (ограничение снято 2026-10-10).
+    std::vector<Block> rotations;
 };
 
 // Shared link check for node paths (KeyPathCert and RevocationCert):
@@ -31,14 +36,18 @@ public:
     static KeyPath build(const IStorage& storage, const UserId& chain, NodeIndex node);
 
     // Autonomous verification — no storage access. Returns the chain identity.
-    // What it cannot prove: that the branch has not rotated its working key
-    // since (blockchain.md §6.6) — a rotated branch republishes its path.
+    // Проверяет и звенья смены ключа: каждое — блок типа KEY_ROTATION в ветке
+    // того же узла, подписанный ПРЕЖНИМ ключом, с новым ключом в payload, и
+    // блоки идут по возрастанию индекса. Чего проверка не доказывает: что
+    // ветка не сменила ключ ПОСЛЕ последнего приложенного звена — такая ветка
+    // публикует путь заново.
     // Throws: SignatureError, ChainIntegrityError.
     static UserId verify(const KeyPath& kp);
 
-    // Working key of the path tip — the key that signs in this branch.
+    // Ключ, которым ветка подписывает СЕЙЧАС: рабочий ключ последнего узла,
+    // проведённый через все звенья смены.
     // Throws: ChainIntegrityError (empty path).
-    static const PublicKey& signer_key(const KeyPath& kp);
+    static PublicKey signer_key(const KeyPath& kp);
 };
 
 } // namespace blockchain
