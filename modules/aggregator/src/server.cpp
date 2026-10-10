@@ -5,6 +5,7 @@
 #include "aggregator/economy_view.h"
 #include "aggregator/footprint_view.h"
 #include "aggregator/recognition.h"
+#include "aggregator/resource_view.h"
 #include "aggregator/match_view.h"
 #include "aggregator/profile_view.h"
 #include "aggregator/rates_view.h"
@@ -658,6 +659,64 @@ void AggregatorServer::setup_routes() {
         for (const auto& c : certs)
             cbor_bstr(body, std::string(c.begin(), c.end()));
         res.set_content(body, "application/cbor");
+    });
+
+    // ── Кому сколько ресурса вещи принадлежит (ИР-013) ───────────────────────
+    //
+    // Доля — купленная порция ресурса, а не дробь: витрина складывает продажи
+    // машино-часов, покупки и расход купленного. Производная, перепроверяемая
+    // по сырым записям, как всё здесь (records.md §13).
+    svr.Get("/resource/:chain/:hash", [&](const httplib::Request& req,
+                                          httplib::Response& res) {
+        auto ch = hex_to_hash(req.path_params.at("chain"));
+        auto th = hex_to_hash(req.path_params.at("hash"));
+        if (!ch || !th) {
+            res.status = 400;
+            res.set_content("{\"error\":\"invalid chain or hash\"}", "application/json");
+            return;
+        }
+        UserId chain{};
+        chain.bytes = ch->bytes;
+        try {
+            const auto split = ResourceView::build(
+                storage_, chain, th->bytes, static_cast<int64_t>(std::time(nullptr)));
+            if (!split.known) {
+                res.status = 404;
+                res.set_content("{\"error\":\"средства производства с таким хешем "
+                                "в этой цепи нет\"}", "application/json");
+                return;
+            }
+            std::string body = "{\"chain\":\""   + to_hex(split.keeper.bytes)
+                 + "\",\"tool\":\""             + to_hex(th->bytes)
+                 + "\",\"name\":\""             + json_escape(split.name)
+                 + "\",\"cost\":"               + std::to_string(split.cost)
+                 + ",\"life\":"                  + std::to_string(split.life)
+                 + ",\"days\":"                  + std::to_string(split.days)
+                 + ",\"collected\":"             + std::to_string(split.collected)
+                 + ",\"residual\":"              + std::to_string(split.residual)
+                 + ",\"sold_hours\":"            + std::to_string(split.sold_hours)
+                 + ",\"keeper_used\":"           + std::to_string(split.keeper_used)
+                 + ",\"pending_hours\":"         + std::to_string(split.pending_hours)
+                 + ",\"free_hours\":"            + std::to_string(split.free_hours)
+                 + ",\"over_used\":"             + (split.over_used ? "true" : "false")
+                 + ",\"holders\":[";
+            for (std::size_t i = 0; i < split.holders.size(); ++i) {
+                const auto& h = split.holders[i];
+                if (i) body += ',';
+                body += "{\"chain\":\""  + to_hex(h.chain.bytes)
+                     + "\",\"hours\":"   + std::to_string(h.hours)
+                     + ",\"paid\":"       + std::to_string(h.paid)
+                     + ",\"spent\":"      + std::to_string(h.spent)
+                     + ",\"left\":"       + std::to_string(h.left)
+                     + ",\"deal\":\""    + to_hex(h.deal) + "\"}";
+            }
+            body += "]}";
+            res.set_content(body, "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
+                            "application/json");
+        }
     });
 
     // ── Пломбы как записи (blockchain.md §7.4 v2) ────────────────────────────

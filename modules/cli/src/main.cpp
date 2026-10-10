@@ -3429,6 +3429,99 @@ static int cmd_tool_list(const fs::path& data_dir, int argc, char** argv) {
     return 0;
 }
 
+// bc tool shares ПРЕФИКС [--via URL]
+// Кому сколько ресурса вещи принадлежит (ИР-013): доля — не дробь, а
+// купленная порция ресурса. Считает агрегатор по сырым записям; число
+// перепроверяемо по цепям, как всё в его витринах (records.md §13).
+static int cmd_tool_shares(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);   // [tool, shares, <prefix>]
+    if (pos.size() < 3) {
+        std::cerr << "Usage: bc tool shares ПРЕФИКС_ХЕША [--chain ЦЕПЬ] [--via URL]\n"
+                     "  кому сколько ресурса принадлежит: доли — это купленные\n"
+                     "  машино-часы (ИР-013)\n";
+        return 1;
+    }
+    const auto via = flag_val(argc, argv, "--via");
+    if (via.empty()) {
+        std::cerr << "нужен --via URL: доли складывает агрегатор по всем цепям\n";
+        return 1;
+    }
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+
+    // Своя вещь — по префиксу хеша; чужая — по --chain и полному хешу.
+    std::string chain_hex = to_hex(ctx.user_id.bytes), hash_hex;
+    if (const auto c = flag_val(argc, argv, "--chain"); !c.empty()) {
+        chain_hex = c;
+        hash_hex  = pos[2];
+    } else {
+        const auto matches = find_own_assets(ctx, pos[2]);
+        if (matches.empty()) {
+            std::cerr << "не найдено в своей цепи: " << pos[2]
+                      << "  (для чужой вещи — --chain ЦЕПЬ и полный хеш)\n";
+            return 1;
+        }
+        if (matches.size() > 1) {
+            std::cerr << "префикс неоднозначен:\n";
+            for (const auto& m : matches)
+                std::cerr << "  " << short_hex(m.ref.hash) << "  " << m.info.name << "\n";
+            return 1;
+        }
+        hash_hex = to_hex(matches[0].ref.hash);
+    }
+
+    const auto doc = fetch_json(via, "/resource/" + chain_hex + "/" + hash_hex);
+    if (!doc || !doc->is_object()) {
+        std::cerr << "агрегатор " << via << " не знает эту вещь либо недоступен\n";
+        return 1;
+    }
+    const auto& o = doc->object;
+    const double life    = jnum(o, "life");
+    const double sold    = jnum(o, "sold_hours");
+    const double own     = jnum(o, "keeper_used");
+    const double pending = jnum(o, "pending_hours");
+    const double free_h  = jnum(o, "free_hours");
+
+    std::cout << jstr(o, "name") << "   [со слов агрегатора " << via
+              << "; перепроверяемо по цепям]\n"
+              << "  запись у " << chain_hex.substr(0, 16) << "…  —  у него вещь\n"
+              << "  стоимость " << jnum(o, "cost") << "ч, ресурс " << life
+              << " моточасов";
+    if (jnum(o, "days") > 0) std::cout << ", срок " << static_cast<int>(jnum(o, "days"))
+                                       << " дн.";
+    std::cout << "\n  собрано нитью: " << jnum(o, "collected")
+              << "ч   остаток: " << jnum(o, "residual") << "ч\n"
+              << "  ресурс: продано " << sold << ", истратил сам " << own
+              << ", отпущено и не оплачено " << pending
+              << ", свободно " << free_h << "\n";
+
+    const auto* hs = jarr(o, "holders");
+    if (!hs || hs->array.empty()) {
+        std::cout << "  дольщиков нет — весь ресурс у держателя\n";
+    } else {
+        std::cout << "  дольщики по моточасам (доля = купленный ресурс, ИР-013):\n";
+        for (const auto& hv : hs->array) {
+            if (!hv.is_object()) continue;
+            const auto chain = jstr(hv.object, "chain");
+            std::cout << "    " << chain.substr(0, 16) << "…  "
+                      << jnum(hv.object, "hours") << " маш·ч за "
+                      << jnum(hv.object, "paid") << "ч"
+                      << "   истрачено " << jnum(hv.object, "spent")
+                      << ", осталось " << jnum(hv.object, "left")
+                      << (chain == to_hex(ctx.user_id.bytes) ? "   (ваша доля)" : "")
+                      << "\n";
+        }
+        std::cout << "  в своих часах согласия ничьего не нужно; больше купленного "
+                     "не отработать\n";
+    }
+    const auto* ou = records::json::find(o, "over_used");
+    if (ou && ou->boolean)
+        std::cout << "  ⚠ распорядились большим ресурсом, чем есть ("
+                  << sold + own + pending << " из " << life
+                  << "): держатель работает на том, что продано\n";
+    return 0;
+}
+
 // bc tool show HASH_PREFIX [--leaf L] — audit one asset's carry thread
 static int cmd_tool_show(const fs::path& data_dir, int argc, char** argv) {
     const auto pos = get_positionals(argc, argv);
@@ -6564,6 +6657,9 @@ Means of production (ИР-011, records.md §10.2, records.md §9.4):
     --cost H --qty Q [--days D]        labor-hours, size in units; --days — the
     [--note "расчёт"] [--paid REF]     batch's calendar term. Spent by
     [--origin MAT_REF]                 --material in work log; est needs --note.
+  tool shares PREFIX --via URL     Кому сколько РЕСУРСА вещи принадлежит: доля
+    [--chain ЦЕПЬ]                     это купленные машино-часы, а не дробь
+                                       (ИР-013). Для чужой вещи — --chain
   tool list / material list        Own tools/batches: cost, collected, remainder
   tool show / material show PREFIX Audit one carry thread: invariant, forks,
                                        formula, resale ceiling (economy.md §5б)
@@ -6737,6 +6833,7 @@ int main(int argc, char** argv) {
         else if (cmd == "merge"     && subcmd == "serve")   return cmd_merge_serve(data_dir, argc, argv);
         else if (cmd == "seal"      && subcmd == "add")     return cmd_seal_add(data_dir, argc, argv);
         else if (cmd == "seal"      && subcmd == "list")    return cmd_seal_list(data_dir, argc, argv);
+        else if (cmd == "tool"      && subcmd == "shares")  return cmd_tool_shares(data_dir, argc, argv);
         else if (cmd == "keypath"   && subcmd == "publish") return cmd_keypath_publish(data_dir, argc, argv);
         else if (cmd == "keypath"   && subcmd == "who")     return cmd_keypath_who(data_dir, argc, argv);
         else if (cmd == "fraud"     && subcmd == "verify")  return cmd_fraud_verify(argc, argv);

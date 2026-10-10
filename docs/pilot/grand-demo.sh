@@ -517,6 +517,28 @@ bcp boris work log --title "электрик, 4-й разряд" --action "Щи�
     --start "$(( NOW - 21600 ))" --material "${MAT_mh#*/}:4" --for "${CID[galina]}" \
     --axis-share "$(axis knowledge)=1" --via "$VIA" 2>&1 | sed 's/^/   /'
 
+hr "доли в общей вещи — это купленный ресурс, а не дробь (ИР-013)"
+say "трое скинулись на станок Дмитрия: Галина и Пелагея покупают по 1000 моточасов вперёд"
+for who in galina pelageya; do
+    SH_hire="$(bcp dmitry hire "${TOOL2_H:0:12}" --to "${CID[$who]}" --machine-hours 1000 \
+               --via "$VIA" 2>&1 | after 'hire ref: ')"
+    [[ -z "$SH_hire" ]] && continue
+    SH_acc="$(bcp "$who" accept --work "$SH_hire" --quality "ресурс" --via "$VIA" 2>&1 \
+              | after 'acceptance ref: ')"
+    [[ -z "$SH_acc" ]] && continue
+    bcp dmitry transfer recv "$SH_acc" --via "$VIA" >/dev/null 2>&1 || true
+    SH_mat="$(bcp "$who" material add "Моточасы станка" --paid "$SH_acc" --qty 1000 \
+              --via "$VIA" 2>&1 | after 'material ref: ')"
+    if [[ "$who" == "galina" && -n "$SH_mat" ]]; then
+        bcp galina work log --title "плиточница, 5-й разряд" --action "Столешница на общем станке" \
+            --hours 2 --start "$(( NOW - 18000 ))" --material "${SH_mat#*/}:300" \
+            --axis-share "$(axis physical)=1" --via "$VIA" >/dev/null 2>&1 || true
+    fi
+done
+say "амортизацию никто не распределяет: каждый возместил своё, продав или истратив свои часы"
+say "в своих часах согласия ничьего не нужно — а больше купленного не отработать"
+bcp dmitry tool shares "${TOOL2_H:0:12}" --via "$VIA" | sed 's/^/   /'
+
 hr "ремонт своего средства производства: печь дорожает ровно на оплаченный ремонт (ИР-015)"
 say "Борис меняет тэн в печи Анны на её заказ, Анна принимает работу и платит за неё"
 W_fix=$(bcp boris work log --title "электрик, 4-й разряд" --action "Замена тэна в печи" --hours 1 \
@@ -749,6 +771,14 @@ else echo "   ✗ поручительство свидетеля не видн�
 if bcp dmitry seal add "$W_stools" --chain "${CID[dmitry]}" >/dev/null 2>&1; then
     echo "   ✗ цепь заверила собственную запись"; fail=1
 else echo "   ✓ себя не заверяют (records.md §12.11)"; fi
+# доли как купленный ресурс: витрина видит дольщиков и их остатки (ИР-013)
+SHARES="$(bcp dmitry tool shares "${TOOL2_H:0:12}" --via "$VIA" 2>&1 || true)"
+if grep -q "дольщики по моточасам" <<<"$SHARES"; then
+    echo "   ✓ доли видны как купленный ресурс (ИР-013)"
+else echo "   ✗ витрина долей не показала дольщиков"; fail=1; fi
+if grep -qE "истрачено 300" <<<"$SHARES"; then
+    echo "   ✓ истраченное дольщиком считается по его нити переноса"
+else echo "   ✗ расход дольщика не посчитан"; fail=1; fi
 # простой съедает потолок перевыпуска: две шкалы износа (ИР-011 v5)
 if command -v faketime >/dev/null; then
     if FAKETIME_DONT_FAKE_MONOTONIC=1 faketime "$(date -u -d '+30 days' '+%Y-%m-%d %H:%M:%S')" \
