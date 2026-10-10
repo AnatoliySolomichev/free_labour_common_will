@@ -185,9 +185,24 @@ LotState check_lot(const std::array<uint8_t, 32>& chain, double qty,
 
 std::optional<PortionTerms> portion_terms(const WorkRecord& wr, const LotLink& lot) {
     const auto f = portion_fraction(wr, lot);
-    if (!f || wr.axes.empty()) return std::nullopt;
+    if (!f) return std::nullopt;
     const ResourceQty& o = wr.outputs[lot.out];
-    if (!o.price) return std::nullopt;
+
+    // Смена машино-часов (ИР-013, доли как купленный ресурс): труда в записи
+    // нет, разбивать по осям нечего — порция платит СВОЮ ДОЛЮ ИЗНОСА, и
+    // только её. Так календарь смен продаётся сменами, а не целиком: смена —
+    // номерная единица партии, и дважды её не продать (records.md §9.8).
+    if (is_machine_hours(wr)) {
+        double carried = 0.0;
+        for (const auto& ce : wr.carry) carried += ce.carried;
+        PortionTerms t;
+        t.hours_raw     = 0.0;
+        t.labor_units   = 0.0;
+        t.carried_units = carried * *f;
+        return t;                       // оси пусты: часов труда здесь нет
+    }
+
+    if (wr.axes.empty() || !o.price) return std::nullopt;
 
     PortionTerms t;
     t.hours_raw   = wr.hours * *f;

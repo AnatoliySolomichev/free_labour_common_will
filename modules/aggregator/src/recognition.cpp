@@ -235,7 +235,11 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
             // ровно записанный износ, и разбивать нечего; приёмка с трудом по ней
             // лгала бы о часах, которых никто не работал.
             if (here && records::is_machine_hours(w->second.record)) {
-                ok = ok && records::meets_machine_hours(a, w->second.record);
+                // Целиком — платят весь записанный износ; сменой (порцией
+                // номерной партии, ИР-013) — её долю, и это проверяют условия
+                // порции ниже.
+                if (!(release && release->lot))
+                    ok = ok && records::meets_machine_hours(a, w->second.record);
             } else if (a.axes.empty()) {
                 // Приёмки без разбивки не существует (ИР-022): одним переносом у
                 // мастера покупают только то, что он держит, — перепродажей или

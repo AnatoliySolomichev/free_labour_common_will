@@ -1457,6 +1457,67 @@ TEST_F(RatesViewTest, OnlyAPaidRepairLiftsAToolsCost) {
     EXPECT_FALSE(read_deals(*storage_).counts(spoiled_deal));
 }
 
+// Календарь смен (ИР-013): смены — номерные единицы партии ресурса, каждая
+// продаётся один раз и платит СВОЮ ДОЛЮ износа, а не весь.
+TEST_F(RatesViewTest, OneShiftOfACalendarPaysItsShareOfTheWear) {
+    records::Tool oven{};
+    oven.name  = "печь";
+    oven.cost  = 300.0;
+    oven.life  = 8000.0;
+    oven.basis = "est";
+    oven.note  = "оценка владельца";
+    const Block tool = add(alice_, oven);
+
+    records::WorkRecord cal{};              // 4 смены по 8 моточасов
+    cal.action  = "календарь смен";
+    cal.hours   = 0.0;
+    records::ResourceQty out{};
+    out.resource = "смены";
+    out.qty      = 4.0;
+    out.unit     = "смена";
+    out.units    = {"пн-03", "вт-04", "ср-05", "чт-06"};
+    cal.outputs.push_back(out);
+    records::CarryEntry ce{};
+    ce.src     = ref_to(alice_, tool);
+    ce.used    = 32.0;
+    ce.carried = 32.0 / 8000.0 * 300.0;     // 1.2ч на весь календарь
+    ce.seq     = 0;
+    ce.after   = ce.carried;
+    cal.carry.push_back(ce);
+    const Block cw = add(alice_, cal);
+
+    records::Release rl{};                  // смена «пн-03» — Бобу
+    rl.work      = ref_to(alice_, cw);
+    rl.to        = bob_.bytes;
+    rl.timestamp = kDay;
+    rl.expires   = kDay + 10'000;
+    records::LotLink lot{};
+    lot.out   = 0;
+    lot.qty   = 1.0;
+    lot.seq   = 0;
+    lot.after = 1.0;
+    lot.units = {"пн-03"};
+    rl.lot    = lot;
+    const Block rb = add(alice_, rl);
+
+    records::Acceptance a{};
+    a.work          = ref_to(alice_, cw);
+    a.release       = ref_to(alice_, rb);
+    a.hours_raw     = 0.0;
+    a.labor_units   = 0.0;
+    a.carried_units = 0.3;                  // четверть износа календаря
+    records::Transfer t{};
+    t.from      = bob_.bytes;
+    t.to        = alice_.bytes;
+    t.origins   = { {bob_.bytes, 0.3} };
+    t.accept    = a;
+    t.timestamp = kDay + 100;
+    const auto shift_deal = Crypto::hash_block(add(bob_, t)).bytes;
+
+    const auto deals = read_deals(*storage_);
+    EXPECT_TRUE(deals.counts(shift_deal));   // смена куплена по своей доле износа
+}
+
 // Аренда по счётчику (ИР-023, пункт 9): Алиса продаёт износ своей печи — запись
 // без часов, в которой есть только перенос. Платят ровно износ; приёмка с трудом
 // по такой записи ничего не завершает — часов в ней никто не работал.

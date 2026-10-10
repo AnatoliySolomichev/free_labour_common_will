@@ -142,6 +142,7 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--material", "--unit", "--qty",
     "--buyback-to", "--buyback-days", "--buyback-until", "--buyback-of",
     "--improves", "--repair", "--spend", "--machine-hours", "--meter", "--no",
+    "--shifts",
 };
 
 // True when a standalone flag (no value) is present.
@@ -2589,7 +2590,9 @@ static records::LotLink next_lot_link(Context& ctx, const std::string& via, cons
         throw std::runtime_error("у работы несколько выходов, а долей часов нет — порцию не "
                                  "оценить; объявите их при записи работы: --output "
                                  "ИМЯ:КОЛ:ЕД:ДОЛЯ (records.md §9.4)");
-    if (for_sale && (!o.price || wr.axes.empty()))
+    // Смена машино-часов (ИР-013) — тоже порция, но ценника ей не нужно: цену
+    // задаёт доля записанного износа, а разбивать по осям нечего.
+    if (for_sale && !records::is_machine_hours(wr) && (!o.price || wr.axes.empty()))
         throw std::runtime_error("порции продаются по ценнику, «бери или нет» "
                                  "(records.md §9.8): у партии нет ценника или у работы — "
                                  "предложенной разбивки; назначьте их при записи работы: "
@@ -2665,31 +2668,53 @@ static const records::HoldingLot& pick_holding_lot(const std::vector<records::Ho
 // владелец этой записью, арендатор приёмкой. Риск поломки остаётся на владельце,
 // большого кредита арендатору не нужно.
 static int cmd_hire(const fs::path& data_dir, int argc, char** argv) {
-    const auto pos  = get_positionals(argc, argv);
-    const auto to_s = flag_val(argc, argv, "--to");
-    const auto mh_s = flag_val(argc, argv, "--machine-hours");
-    if (pos.size() < 2 || to_s.empty() || mh_s.empty()) {
+    const auto pos      = get_positionals(argc, argv);
+    const auto to_s     = flag_val(argc, argv, "--to");
+    const auto mh_s     = flag_val(argc, argv, "--machine-hours");
+    const auto shifts_s = flag_val(argc, argv, "--shifts");
+    // Календарь смен (ИР-013): смены — НОМЕРНЫЕ единицы партии ресурса, и
+    // покупателя у календаря пока нет; шлётся он сменами, через bc release.
+    const auto shifts   = split_list(shifts_s);
+    if (pos.size() < 2 || mh_s.empty() || (to_s.empty() && shifts.empty())) {
         std::cerr <<
             "Usage: bc hire ИНСТРУМЕНТ --to ЦЕПЬ --machine-hours ЧАСЫ\n"
             "   [--meter TEXT]  показания счётчика, как они сняты («1240→1248»)\n"
             "   [--days N] [--leaf L] [--via URL]\n"
             "  продать износ своей вещи по счётчику (ИР-023): труда в записи нет,\n"
             "  цена — записанный износ; арендатор платит его и заводит часы\n"
-            "  материалом (bc material add --paid), а риск поломки остаётся на вас.\n";
+            "  материалом (bc material add --paid), а риск поломки остаётся на вас.\n"
+            "\n"
+            "       bc hire ИНСТРУМЕНТ --shifts \"ИМЯ1,ИМЯ2,…\" --machine-hours ЧАСОВ_В_СМЕНЕ\n"
+            "  календарь смен (ИР-013): смены — номерные единицы партии ресурса,\n"
+            "  каждая продаётся один раз. Покупателя сразу не называют — смены\n"
+            "  уходят по одной: bc release РАБОТА --to ЦЕПЬ --units ИМЯ.\n"
+            "  Совладельцы подписывают согласие на календарь: bc consent add.\n";
         return 1;
     }
     const NodeIndex leaf = parse_leaf_index(argc, argv);
     Context ctx(data_dir, leaf);
-    const double used = std::stod(mh_s);
-    if (!(used > 0.0)) throw std::runtime_error("--machine-hours: часов должно быть больше нуля");
+    const double per = std::stod(mh_s);
+    if (!(per > 0.0)) throw std::runtime_error("--machine-hours: часов должно быть больше нуля");
+    const double used = shifts.empty() ? per : per * static_cast<double>(shifts.size());
 
     const auto meter = flag_val(argc, argv, "--meter");
     WorkRecord wr{};
-    wr.action   = meter.empty() ? "машино-часы" : "машино-часы (счётчик " + meter + ")";
+    wr.action   = !shifts.empty()
+        ? "календарь смен (" + std::to_string(shifts.size()) + " × " + mh_s + " маш·ч)"
+        : (meter.empty() ? "машино-часы" : "машино-часы (счётчик " + meter + ")");
     wr.hours    = 0.0;                       // труда здесь нет — только износ
     wr.start_ts = static_cast<int64_t>(std::time(nullptr));
-    wr.outputs.push_back(records::ResourceQty{"машино-часы", used, "маш·ч"});
-    attach_carry(ctx, wr, {pos[1] + ":" + mh_s});
+    if (shifts.empty()) {
+        wr.outputs.push_back(records::ResourceQty{"машино-часы", used, "маш·ч"});
+    } else {
+        records::ResourceQty out{};
+        out.resource = "смены";
+        out.qty      = static_cast<double>(shifts.size());
+        out.unit     = "смена";
+        out.units    = shifts;               // номер смены продаётся один раз
+        wr.outputs.push_back(out);
+    }
+    attach_carry(ctx, wr, {pos[1] + ":" + qty_str(used)});
     if (wr.carry.empty())
         throw std::runtime_error("износ не посчитан: средства производства с таким префиксом "
                                  "в своей цепи нет — сперва bc tool add");
@@ -2700,6 +2725,20 @@ static int cmd_hire(const fs::path& data_dir, int argc, char** argv) {
     std::cout << "hire ref: " << to_hex(work.chain) << "/" << to_hex(work.hash) << "\n";
     if (!via.empty()) upload_block(via, wblock);
 
+    double worn_total = 0.0;
+    for (const auto& ce : wr.carry) worn_total += ce.carried;
+    if (!shifts.empty()) {
+        // Календарь выпущен; покупателя нет — смены уходят по одной.
+        std::cerr << "календарь смен: " << shifts.size() << " × " << per
+                  << " маш·ч, износ всего " << worn_total << "ч — цена смены "
+                  << worn_total / static_cast<double>(shifts.size()) << "ч\n"
+                  << "  смена уходит по одной: bc release " << to_hex(work.hash)
+                  << " --to ЦЕПЬ --units ИМЯ\n"
+                  << "  дважды одну смену не продать (records.md §9.8); "
+                     "согласие совладельцев — bc consent add\n";
+        return 0;
+    }
+
     records::Release rl{};
     rl.work      = work;
     rl.to        = uid_from_hex(to_s);
@@ -2709,10 +2748,8 @@ static int cmd_hire(const fs::path& data_dir, int argc, char** argv) {
     const Block rblock = append_record(ctx, Record{rl});
     std::cout << "release ref: " << to_hex(ctx.user_id.bytes) << "/"
               << to_hex(Crypto::hash_block(rblock).bytes) << "\n";
-    double worn = 0.0;
-    for (const auto& ce : wr.carry) worn += ce.carried;
     std::cerr << "машино-часы: " << qty_str(used) << " маш·ч → " << short_hex(rl.to)
-              << ", износ " << worn << "ч — это и есть цена; труда в записи нет "
+              << ", износ " << worn_total << "ч — это и есть цена; труда в записи нет "
                  "(records.md §9.4)\n";
     if (!via.empty()) upload_block(via, rblock);
     return 0;

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <map>
+#include <set>
 
 namespace aggregator {
 
@@ -69,32 +70,57 @@ ResourceSplit ResourceView::build(const AggregatorStorage& storage,
     }
 
     // 3. Кто их купил. Сделка — Transfer с приёмкой внутри; платит покупатель,
-    //    и платит он ровно износ (records::meets_machine_hours).
-    std::map<UserId, ResourceHolder> by_chain;
-    std::map<RefHash, RefHash>       deal_of_sale;     // работа-продажа → сделка
+    //    и платит он ровно износ (records::meets_machine_hours). Календарь смен
+    //    (ИР-013) продаётся порциями — тогда покупателю ушла ДОЛЯ ресурса этой
+    //    записи, а не весь: сколько именно, говорит звено отпуска.
+    std::map<RefHash, const records::Release*> release_by_hash;
+    for (const auto& r : deals.releases) release_by_hash[r.hash] = &r.release;
+
+    std::map<UserId, ResourceHolder>       by_chain;
+    std::map<UserId, std::set<RefHash>>   deals_of;    // дольщик → все его покупки
+    std::map<RefHash, double>             sold_share;  // работа-продажа → доля оплаченного
     for (const auto& d : deals.all) {
         const auto s = sale_hours.find(d.accept().work.hash);
         if (s == sale_hours.end()) continue;
         if (!deals.moves_hours(d.hash)) continue;      // ничтожная сделка ничего не двигает
+        double share = 1.0;                            // куплено целиком
+        if (const auto& rr = d.accept().release) {
+            const auto r = release_by_hash.find(rr->hash);
+            if (r != release_by_hash.end() && r->second->lot) {
+                const auto w = deals.works.find(d.accept().work.hash);
+                const auto f = w != deals.works.end()
+                    ? records::portion_fraction(w->second.record, *r->second->lot)
+                    : std::optional<double>{};
+                if (f) share = *f;
+            }
+        }
+        const double hours = s->second * share;
         auto& h = by_chain[d.payer];
         h.chain  = d.payer;
-        h.hours += s->second;
+        h.hours += hours;
         h.paid  += d.accept().carried_units ? *d.accept().carried_units : 0.0;
-        h.deal   = d.hash;
-        out.sold_hours += s->second;
-        deal_of_sale[s->first] = d.hash;
+        h.deal   = d.hash;              // для показа — последняя
+        deals_of[d.payer].insert(d.hash);
+        out.sold_hours   += hours;
+        sold_share[s->first] += share;
     }
-    for (const auto& [wh, hours] : sale_hours)
-        if (!deal_of_sale.count(wh)) out.pending_hours += hours;   // отпущено, не оплачено
+    // Непроданное из уже выпущенного: ресурс записан нитью и обещан календарём,
+    // но ещё никем не куплен.
+    for (const auto& [wh, hours] : sale_hours) {
+        const auto it = sold_share.find(wh);
+        const double left = hours * (1.0 - (it == sold_share.end() ? 0.0 : it->second));
+        if (left > 1e-9) out.pending_hours += left;
+    }
 
     // 4. Сколько дольщик уже истратил. Купленные часы он заводит материалом
     //    своей покупкой (records.md §10.1 v3) и тратит нитью переноса — значит
     //    израсходованное читается прямо по звеньям той записи.
     std::map<RefHash, UserId> hour_assets;             // запись часов → чья
     for (const auto& a : deals.assets) {
-        const auto it = by_chain.find(a.owner);
-        if (it == by_chain.end()) continue;
-        if (!(a.src.hash == it->second.deal)) continue;
+        // Покупок у дольщика может быть несколько — и смена, и запас часов;
+        // материал ищем по ВСЕМ его покупкам этой вещи.
+        const auto it = deals_of.find(a.owner);
+        if (it == deals_of.end() || !it->second.count(a.src.hash)) continue;
         hour_assets[a.hash] = a.owner;
     }
     for (const auto& [wh, w] : deals.works) {

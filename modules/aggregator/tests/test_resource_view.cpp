@@ -318,3 +318,77 @@ TEST_F(ResourceViewTest, SelfConsentIsIgnored) {
     const auto deals = read_deals(*storage_);
     EXPECT_EQ(deals.consents.count(Crypto::hash_block(draft).bytes), 0u);
 }
+
+// Календарь смен (ИР-013): куплена смена — значит куплена её доля ресурса, а
+// не весь календарь; остальное записано, но ещё никем не взято.
+TEST_F(ResourceViewTest, CalendarSellsShiftsNotTheWholeResource) {
+    const Block tool = oven();
+
+    records::WorkRecord cal{};              // 4 смены по 500 моточасов = 2000
+    cal.action   = "календарь смен";
+    cal.hours    = 0.0;
+    cal.start_ts = kDay * 2;
+    records::ResourceQty out{};
+    out.resource = "смены";
+    out.qty      = 4.0;
+    out.unit     = "смена";
+    out.units    = {"пн", "вт", "ср", "чт"};
+    cal.outputs.push_back(out);
+    records::CarryEntry ce{};
+    ce.src     = ref_to(anna_, tool);
+    ce.used    = 2000.0;
+    ce.carried = 2000.0 / 8000.0 * 300.0;   // 75ч на весь календарь
+    ce.seq     = 0;
+    ce.after   = ce.carried;
+    cal.carry.push_back(ce);
+    const Block cw = add(anna_, cal, kDay * 2);
+
+    records::Release rl{};                  // смена «пн» — Борису
+    rl.work      = ref_to(anna_, cw);
+    rl.to        = boris_.bytes;
+    rl.timestamp = kDay * 2;
+    rl.expires   = kDay * 2 + 10'000;
+    records::LotLink lot{};
+    lot.out = 0; lot.qty = 1.0; lot.seq = 0; lot.after = 1.0; lot.units = {"пн"};
+    rl.lot  = lot;
+    const Block rb = add(anna_, rl, kDay * 2);
+
+    records::Acceptance a{};
+    a.work          = ref_to(anna_, cw);
+    a.release       = ref_to(anna_, rb);
+    a.hours_raw     = 0.0;
+    a.labor_units   = 0.0;
+    a.carried_units = 75.0 / 4.0;           // четверть износа календаря
+    records::Transfer t{};
+    t.from      = boris_.bytes;
+    t.to        = anna_.bytes;
+    t.origins   = { {boris_.bytes, 75.0 / 4.0} };
+    t.accept    = a;
+    t.timestamp = kDay * 2 + 100;
+    add(boris_, t, kDay * 2 + 100);
+
+    const auto split = ResourceView::build(*storage_, anna_,
+                                           Crypto::hash_block(tool).bytes, kDay * 3);
+    ASSERT_EQ(split.holders.size(), 1u);
+    EXPECT_EQ(split.holders[0].chain, boris_);
+    EXPECT_NEAR(split.holders[0].hours, 500.0, 1e-9);   // одна смена из четырёх
+    EXPECT_NEAR(split.sold_hours, 500.0, 1e-9);
+    EXPECT_NEAR(split.pending_hours, 1500.0, 1e-9);     // три смены записаны, но не взяты
+    EXPECT_NEAR(split.free_hours, 6000.0, 1e-9);
+}
+
+// У дольщика может быть несколько покупок одной вещи — и запас часов, и смена;
+// израсходованное считается по всем его записям, а не по последней.
+TEST_F(ResourceViewTest, HolderWithTwoPurchasesIsCountedWhole) {
+    const Block tool = oven();
+    const auto first  = sell_hours(tool, boris_, 1000.0, 0.0,  0, kDay * 2);
+    const auto second = sell_hours(tool, boris_, 500.0,  37.5, 1, kDay * 3);
+    spend_hours(boris_, first.second, 1000.0, 37.5, 400.0, kDay * 4);
+
+    const auto split = ResourceView::build(*storage_, anna_,
+                                           Crypto::hash_block(tool).bytes, kDay * 5);
+    ASSERT_EQ(split.holders.size(), 1u);
+    EXPECT_NEAR(split.holders[0].hours, 1500.0, 1e-9);
+    EXPECT_NEAR(split.holders[0].spent, 400.0, 1e-9);   // по первой покупке
+    EXPECT_NEAR(split.holders[0].left, 1100.0, 1e-9);
+}

@@ -535,15 +535,27 @@ for who in galina pelageya; do
             --axis-share "$(axis physical)=1" --via "$VIA" >/dev/null 2>&1 || true
     fi
 done
+say "расписание — календарь смен: смены это НОМЕРА партии ресурса, каждая продаётся один раз"
+SH_draft="$(bcp dmitry hire "${TOOL2_H:0:12}" --shifts "пн-03,вт-04,ср-05,чт-06" \
+            --machine-hours 50 --via "$VIA" 2>&1 | after 'hire ref: ')"
+SH_draft="${SH_draft#*/}"
 say "решения об общей вещи — согласием у себя: держатель составляет, дольщики подписывают"
-SH_draft="$(bcp dmitry concept add "Календарь смен станка на ноябрь: пн-ср Галина, чт-пт Пелагея" \
-            --tag kind:plan --via "$VIA" | after 'hash: ')"
 bcp galina   consent add "${CID[dmitry]}/$SH_draft" --note "мои смены устраивают" --via "$VIA" \
     2>&1 | sed 's/^/   /'
 bcp pelageya consent add "${CID[dmitry]}/$SH_draft" --no --note "в четверг не могу" --via "$VIA" \
     2>&1 | sed 's/^/   /'
 bcp ustin consent list "${CID[dmitry]}/$SH_draft" --via "$VIA" | sed 's/^/   /'
 say "общего объекта «решение» нет — порог считает читатель (ИР-012)"
+
+hr "смена уходит по одной и платит свою долю износа (ИР-013)"
+bcp dmitry release "$SH_draft" --to "${CID[galina]}" --units "пн-03" --via "$VIA" 2>&1 \
+    | sed 's/^/   /' | head -2
+bcp galina fetch "${CID[dmitry]}/$SH_draft" --via "$VIA" >/dev/null 2>&1 || true
+bcp galina accept --work "${CID[dmitry]}/$SH_draft" --quality "смена" --via "$VIA" 2>&1 \
+    | sed 's/^/   /' | head -4
+say "ту же смену второй раз не продать — номер уходит один раз:"
+bcp dmitry release "$SH_draft" --to "${CID[pelageya]}" --units "пн-03" --via "$VIA" 2>&1 \
+    | sed 's/^/   /' | head -2 || true
 
 say "амортизацию никто не распределяет: каждый возместил своё, продав или истратив свои часы"
 say "в своих часах согласия ничьего не нужно — а больше купленного не отработать"
@@ -781,6 +793,10 @@ else echo "   ✗ поручительство свидетеля не видн�
 if bcp dmitry seal add "$W_stools" --chain "${CID[dmitry]}" >/dev/null 2>&1; then
     echo "   ✗ цепь заверила собственную запись"; fail=1
 else echo "   ✓ себя не заверяют (records.md §12.11)"; fi
+# смену дважды не продать: номер — единица партии (ИР-013, records.md §9.8)
+if bcp dmitry release "$SH_draft" --to "${CID[ustin]}" --units "пн-03" --via "$VIA" >/dev/null 2>&1; then
+    echo "   ✗ смена пн-03 продана дважды"; fail=1
+else echo "   ✓ смену дважды не продать — номер уходит один раз (records.md §9.8)"; fi
 # согласие и отказ равно остаются в истории подписавшего (ИР-012)
 CONS="$(bcp ustin consent list "${CID[dmitry]}/$SH_draft" --via "$VIA" 2>&1 || true)"
 if grep -q "согласны 1, против 1" <<<"$CONS"; then
