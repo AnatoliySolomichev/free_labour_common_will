@@ -119,6 +119,21 @@ struct DealsOnTable {
     // Все записи средств производства и материалов: стоимость, собранное нитью
     // переноса и законность перевыпуска (ИР-011, ИР-015).
     std::map<std::array<uint8_t, 32>, AssetRecord> asset_records;
+    // Согласия на записи (ИР-012, решение участника 2026-10-10): запись → кто
+    // согласен (true) или против (false). Общего объекта «решение» нет — порог
+    // считается здесь, по N подписанным записям. Позднее согласие той же цепи
+    // отменяет прежнее (по времени блока), как у реакций (records.md §8.5).
+    std::map<std::array<uint8_t, 32>, std::map<UserId, bool>> consents;
+
+    // Кто согласился с этой записью (без тех, кто написал «против»).
+    std::set<UserId> consented(const std::array<uint8_t, 32>& target) const {
+        std::set<UserId> out;
+        const auto it = consents.find(target);
+        if (it == consents.end()) return out;
+        for (const auto& [chain, agreed] : it->second)
+            if (agreed) out.insert(chain);
+        return out;
+    }
 
     // The deal that counts for its result: statistics read only these.
     bool counts(const std::array<uint8_t, 32>& deal) const {

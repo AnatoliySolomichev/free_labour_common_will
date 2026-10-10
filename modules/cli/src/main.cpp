@@ -141,7 +141,7 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--tool", "--cost", "--life", "--days", "--serial", "--desc", "--note", "--paid",
     "--material", "--unit", "--qty",
     "--buyback-to", "--buyback-days", "--buyback-until", "--buyback-of",
-    "--improves", "--repair", "--spend", "--machine-hours", "--meter",
+    "--improves", "--repair", "--spend", "--machine-hours", "--meter", "--no",
 };
 
 // True when a standalone flag (no value) is present.
@@ -3429,6 +3429,114 @@ static int cmd_tool_list(const fs::path& data_dir, int argc, char** argv) {
     return 0;
 }
 
+// bc consent add ЦЕПЬ/ХЕШ [--no] [--note ТЕКСТ] [--via URL]
+// Согласие на чужую запись (ИР-012): «я не против — действуй». Пишется в свою
+// ветку; отказ — та же команда с --no, и он тоже остаётся в истории. Общего
+// объекта «решение» не образуется: порог считает читатель по этим записям.
+static int cmd_consent_add(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);   // [consent, add, <chain/hash>]
+    if (pos.size() < 3) {
+        std::cerr << "Usage: bc consent add ЦЕПЬ/ХЕШ [--no] [--note ТЕКСТ] [--via URL]\n"
+                     "  согласие на чужую запись (ИР-012): ремонт общей вещи, продажа\n"
+                     "  её самой, выпуск календаря смен. --no — записать отказ\n";
+        return 1;
+    }
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+
+    records::Consent c{};
+    const auto slash = pos[2].find('/');
+    if (slash == std::string::npos ||
+        !from_hex(pos[2].substr(0, slash), c.target.chain.data(), 32) ||
+        !from_hex(pos[2].substr(slash + 1), c.target.hash.data(), 32)) {
+        std::cerr << "ждём ЦЕПЬ/ХЕШ — обе части по 64 hex-символа\n";
+        return 1;
+    }
+    if (c.target.chain == ctx.user_id.bytes) {
+        std::cerr << "это ваша собственная запись — подпись под ней и есть "
+                     "ваше согласие (ИР-012)\n";
+        return 1;
+    }
+    c.agreed = !flag_present(argc, argv, "--no");
+    c.note   = flag_val(argc, argv, "--note");
+
+    std::cout << (c.agreed ? "согласен с " : "ПРОТИВ ") << short_hex(c.target.hash)
+              << " из цепи " << short_hex(c.target.chain) << "\n";
+    if (!c.agreed)
+        std::cerr << "  отказ остаётся в вашей истории — как и согласие (ИР-012)\n";
+    return cmd_write(data_dir, argc, argv, c);
+}
+
+// bc consent list ЦЕПЬ/ХЕШ [--via URL] — кто согласен, кто против
+static int cmd_consent_list(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);   // [consent, list, <chain/hash>]
+    if (pos.size() < 3) {
+        std::cerr << "Usage: bc consent list ЦЕПЬ/ХЕШ [--via URL]\n";
+        return 1;
+    }
+    const auto slash = pos[2].find('/');
+    const std::string hash_hex =
+        slash == std::string::npos ? pos[2] : pos[2].substr(slash + 1);
+    std::array<uint8_t, 32> target{};
+    if (!from_hex(hash_hex, target.data(), 32)) {
+        std::cerr << "Invalid hash hex\n";
+        return 1;
+    }
+    const auto via = flag_val(argc, argv, "--via");
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    Context ctx(data_dir, leaf);
+
+    struct Said { std::string chain, note; bool agreed = true; bool mine = false; };
+    std::vector<Said> said;
+    // Своё — из своих ветвей, без сети.
+    for (const NodeIndex node : ctx.local_branches()) {
+        std::vector<Block> blocks;
+        try { blocks = ctx.bc.get_branch(ctx.user_id, node); }
+        catch (const BlockchainError&) { continue; }
+        for (const auto& b : blocks) {
+            if (b.type != BlockType::DATA) continue;
+            try {
+                const auto rec = records::Codec::decode(b.payload.data(), b.payload.size());
+                if (const auto* c = std::get_if<records::Consent>(&rec))
+                    if (c->target.hash == target)
+                        said.push_back({to_hex(ctx.user_id.bytes), c->note, c->agreed, true});
+            } catch (const std::exception&) { continue; }
+        }
+    }
+    if (!via.empty()) {
+        const auto doc = fetch_json(via, "/consents/" + to_hex(target));
+        if (doc && doc->is_array())
+            for (const auto& v : doc->array) {
+                if (!v.is_object()) continue;
+                const auto chain = jstr(v.object, "chain");
+                if (chain == to_hex(ctx.user_id.bytes)) continue;   // своё уже есть
+                const auto* ag = records::json::find(v.object, "agreed");
+                said.push_back({chain, jstr(v.object, "note"),
+                                ag ? ag->boolean : true, false});
+            }
+        else
+            std::cerr << "агрегатор " << via << " недоступен — показано только своё\n";
+    }
+
+    if (said.empty()) {
+        std::cout << "согласий на " << short_hex(target) << " нет"
+                  << (via.empty() ? " (у вас; чужие — с --via URL)\n" : "\n");
+        return 0;
+    }
+    std::size_t yes = 0;
+    for (const auto& s : said) if (s.agreed) ++yes;
+    std::cout << "по записи " << short_hex(target) << ": согласны " << yes
+              << ", против " << said.size() - yes << "\n";
+    for (const auto& s : said) {
+        std::cout << "  " << (s.agreed ? "+ " : "− ") << s.chain.substr(0, 16) << "…"
+                  << (s.mine ? "  (ваше)" : "") << "\n";
+        if (!s.note.empty()) std::cout << "      «" << s.note << "»\n";
+    }
+    std::cout << "  [общего объекта «решение» нет: собрался ли порог — "
+                 "считает читатель (ИР-012)]\n";
+    return 0;
+}
+
 // bc tool shares ПРЕФИКС [--via URL]
 // Кому сколько ресурса вещи принадлежит (ИР-013): доля — не дробь, а
 // купленная порция ресурса. Считает агрегатор по сырым записям; число
@@ -6712,6 +6820,14 @@ Merge, manual relay (blockchain.md §6.4 bilateral two-round protocol):
   seal list ХЕШ [--via URL]        Кто заверил запись: свои пломбы из своих
                                        ветвей, чужие — витриной агрегатора
 
+Согласие на чужую запись (ИР-012):
+  consent add ЦЕПЬ/ХЕШ           «я не против — действуй»: ремонт общей вещи,
+    [--no] [--note ТЕКСТ]            продажа её самой, выпуск календаря смен.
+    [--via URL]                      --no пишет ОТКАЗ — он тоже остаётся в
+                                     вашей истории
+  consent list ЦЕПЬ/ХЕШ          Кто согласен, кто против. Общего объекта
+    [--via URL]                      «решение» нет — порог считает читатель
+
 Чей ключ стоит за пломбой (blockchain.md §7.5):
   keypath publish --via URL        Выложить путь своего ключа на склад
   keypath who KEY_HEX [--via URL]  Привести ключ к цепи: сперва по своим узлам,
@@ -6834,6 +6950,8 @@ int main(int argc, char** argv) {
         else if (cmd == "seal"      && subcmd == "add")     return cmd_seal_add(data_dir, argc, argv);
         else if (cmd == "seal"      && subcmd == "list")    return cmd_seal_list(data_dir, argc, argv);
         else if (cmd == "tool"      && subcmd == "shares")  return cmd_tool_shares(data_dir, argc, argv);
+        else if (cmd == "consent"   && subcmd == "add")     return cmd_consent_add(data_dir, argc, argv);
+        else if (cmd == "consent"   && subcmd == "list")    return cmd_consent_list(data_dir, argc, argv);
         else if (cmd == "keypath"   && subcmd == "publish") return cmd_keypath_publish(data_dir, argc, argv);
         else if (cmd == "keypath"   && subcmd == "who")     return cmd_keypath_who(data_dir, argc, argv);
         else if (cmd == "fraud"     && subcmd == "verify")  return cmd_fraud_verify(argc, argv);

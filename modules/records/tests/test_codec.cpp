@@ -161,6 +161,29 @@ TEST(RecordsCodec, AttestRejectsEmptyTarget) {
     }
 }
 
+// ── Consent (согласие на чужую запись, ИР-012) ───────────────────────────────
+
+TEST(RecordsCodec, ConsentAgreedRoundTrip) {
+    Consent c{ make_ref(0x01, 0x02), true, "календарь смен на октябрь" };
+    const auto decoded = std::get<Consent>(roundtrip(c));
+    EXPECT_EQ(decoded.target, c.target);
+    EXPECT_TRUE(decoded.agreed);
+    EXPECT_EQ(decoded.note, c.note);
+}
+
+// Отказ — тот же тип: и согласие, и отказ остаются в истории подписавшего.
+TEST(RecordsCodec, ConsentRefusalIsARecordToo) {
+    Consent c{ make_ref(0x03, 0x04), false, "не в этот срок" };
+    const auto decoded = std::get<Consent>(roundtrip(c));
+    EXPECT_FALSE(decoded.agreed);
+    EXPECT_EQ(decoded.note, "не в этот срок");
+}
+
+TEST(RecordsCodec, ConsentRejectsEmptyTarget) {
+    EXPECT_THROW(Codec::encode(Consent{ make_ref(0x00, 0x02), true, "" }), CodecError);
+    EXPECT_THROW(Codec::encode(Consent{ make_ref(0x01, 0x00), true, "" }), CodecError);
+}
+
 // ── Reaction ──────────────────────────────────────────────────────────────────
 
 TEST(RecordsCodec, ReactionPositive) {

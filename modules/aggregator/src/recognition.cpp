@@ -62,6 +62,9 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
     std::map<Hash32, std::size_t>                        release_at;   // release hash → index
     std::map<Hash32, std::size_t>                        deal_at;      // deal hash → index
     std::map<UserId, std::vector<records::ObservedWork>> observed;     // chain → its works
+    // Позднее согласие цепи отменяет прежнее — порядок блоков в хранилище
+    // произволен, поэтому сравниваем по времени блока (ИР-012).
+    std::map<std::pair<Hash32, UserId>, int64_t>          consent_at;
     for (const Hash& bh : storage.all_block_hashes()) {
         const auto block = storage.get_block_by_hash(bh);
         if (!block || block->type != BlockType::DATA) continue;
@@ -84,6 +87,16 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
             const auto& seller = wo->holding ? wo->holding->chain : wo->work.chain;
             if (seller != owner.bytes) continue;           // only one's own lot is written off
             out.writeoffs.push_back(WriteOffEntry{bh.bytes, owner, *wo});
+        } else if (const auto* c = std::get_if<records::Consent>(&rec)) {
+            // Согласие пишут у себя (ИР-012): чьё оно — говорит адрес блока.
+            // Себя не спрашивают: подпись под своей же записью и есть согласие.
+            if (c->target.chain == owner.bytes) continue;
+            auto& slot = out.consents[c->target.hash];
+            const auto prev = consent_at.find({c->target.hash, owner});
+            if (prev == consent_at.end() || prev->second <= block->timestamp_claimed) {
+                slot[owner] = c->agreed;
+                consent_at[{c->target.hash, owner}] = block->timestamp_claimed;
+            }
         } else if (const auto* m = std::get_if<records::Material>(&rec)) {
             out.asset_records[bh.bytes] =
                 AssetRecord{owner, m->cost, m->origin, std::nullopt, 0.0, true,

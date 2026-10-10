@@ -255,3 +255,66 @@ TEST_F(ResourceViewTest, UnknownToolIsReportedAsUnknown) {
     nothing.fill(0x77);
     EXPECT_FALSE(ResourceView::build(*storage_, anna_, nothing, kDay).known);
 }
+
+// ── Согласия на запись (ИР-012) ──────────────────────────────────────────────
+//
+// Общего объекта «решение артели» не образуется: порог считается по N
+// подписанным записям. Проверяем именно это — и что позднее слово цепи
+// отменяет прежнее.
+
+TEST_F(ResourceViewTest, ConsentsAreGatheredPerRecord) {
+    const Block draft = oven();                 // черновик в цепи Анны
+    const auto target = Crypto::hash_block(draft).bytes;
+
+    records::Consent yes{};
+    yes.target = ref_to(anna_, draft);
+    yes.agreed = true;
+    yes.note   = "согласна";
+    add(boris_, yes, kDay * 2);
+
+    records::Consent no{};
+    no.target = ref_to(anna_, draft);
+    no.agreed = false;
+    add(vera_, no, kDay * 2);
+
+    const auto deals = read_deals(*storage_);
+    const auto& said = deals.consents.at(target);
+    EXPECT_EQ(said.size(), 2u);
+    EXPECT_TRUE(said.at(boris_));
+    EXPECT_FALSE(said.at(vera_));
+
+    const auto agreed = deals.consented(target);
+    EXPECT_EQ(agreed.size(), 1u);               // против — не согласие
+    EXPECT_TRUE(agreed.count(boris_) > 0);
+}
+
+TEST_F(ResourceViewTest, LaterWordOfTheSameChainWins) {
+    const Block draft = oven();
+    const auto target = Crypto::hash_block(draft).bytes;
+
+    records::Consent first{};
+    first.target = ref_to(anna_, draft);
+    first.agreed = true;
+    add(boris_, first, kDay * 2);
+
+    records::Consent second{};
+    second.target = ref_to(anna_, draft);
+    second.agreed = false;                      // передумал
+    add(boris_, second, kDay * 3);
+
+    const auto deals = read_deals(*storage_);
+    EXPECT_FALSE(deals.consents.at(target).at(boris_));
+    EXPECT_TRUE(deals.consented(target).empty());
+}
+
+// Себя не спрашивают: подпись под своей же записью и есть согласие.
+TEST_F(ResourceViewTest, SelfConsentIsIgnored) {
+    const Block draft = oven();
+    records::Consent mine{};
+    mine.target = ref_to(anna_, draft);
+    mine.agreed = true;
+    add(anna_, mine, kDay * 2);
+
+    const auto deals = read_deals(*storage_);
+    EXPECT_EQ(deals.consents.count(Crypto::hash_block(draft).bytes), 0u);
+}

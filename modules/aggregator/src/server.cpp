@@ -661,6 +661,50 @@ void AggregatorServer::setup_routes() {
         res.set_content(body, "application/cbor");
     });
 
+    // ── Согласия на запись (ИР-012) ──────────────────────────────────────────
+    //
+    // Кто согласен с этой записью и кто против. Общего объекта «решение» нет:
+    // порог считает читатель по N подписанным записям, как признанность
+    // сделки. Позднее согласие цепи отменяет прежнее.
+    svr.Get("/consents/:hash", [&](const httplib::Request& req, httplib::Response& res) {
+        auto th = hex_to_hash(req.path_params.at("hash"));
+        if (!th) {
+            res.status = 400;
+            res.set_content("{\"error\":\"invalid hash\"}", "application/json");
+            return;
+        }
+        std::map<UserId, std::tuple<bool, std::string, int64_t>> latest;
+        for (const Hash& bh : storage_.all_block_hashes()) {
+            const auto block = storage_.get_block_by_hash(bh);
+            if (!block || block->type != blockchain::BlockType::DATA) continue;
+            records::Record rec;
+            try {
+                rec = records::Codec::decode(block->payload.data(), block->payload.size());
+            } catch (const records::CodecError&) { continue; }
+            const auto* c = std::get_if<records::Consent>(&rec);
+            if (!c || !(Hash{c->target.hash} == *th)) continue;
+            const UserId who = block->address.user_id;
+            if (c->target.chain == who.bytes) continue;      // себя не спрашивают
+            const auto prev = latest.find(who);
+            if (prev == latest.end() ||
+                std::get<2>(prev->second) <= block->timestamp_claimed)
+                latest[who] = {c->agreed, c->note, block->timestamp_claimed};
+        }
+        std::string body = "[";
+        bool first = true;
+        for (const auto& [who, v] : latest) {
+            if (!first) body += ',';
+            first = false;
+            body += "{\"chain\":\""   + to_hex(who.bytes)
+                 + "\",\"agreed\":"   + (std::get<0>(v) ? "true" : "false")
+                 + ",\"note\":\""     + json_escape(std::get<1>(v))
+                 + "\",\"at\":"       + std::to_string(std::get<2>(v))
+                 + "}";
+        }
+        body += ']';
+        res.set_content(body, "application/json");
+    });
+
     // ── Кому сколько ресурса вещи принадлежит (ИР-013) ───────────────────────
     //
     // Доля — купленная порция ресурса, а не дробь: витрина складывает продажи

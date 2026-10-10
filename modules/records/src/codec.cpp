@@ -181,6 +181,22 @@ void enc_attest(Buf& out, const Attest& a) {
     w_uint(out, 3); w_text(out, a.note);
 }
 
+// Согласие на чужую запись (ИР-012): «я не против» либо «я против».
+void check_consent(const Consent& c) {
+    static const std::array<uint8_t, 32> zero{};
+    if (c.target.chain == zero || c.target.hash == zero)
+        throw CodecError("Consent: соглашаться не с чем — цепь и хеш записи обязательны");
+}
+
+void enc_consent(Buf& out, const Consent& c) {
+    check_consent(c);
+    w_map(out, 4);
+    w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Consent));
+    w_uint(out, 1); w_ref(out, c.target);
+    w_uint(out, 2); w_uint(out, c.agreed ? 1u : 0u);
+    w_uint(out, 3); w_text(out, c.note);
+}
+
 // One carry-thread link (records.md §9.4 v2, ИР-011).
 void w_carry_entry(Buf& out, const CarryEntry& ce) {
     w_map(out, 6);
@@ -988,6 +1004,15 @@ Attest dec_attest_fields(CborReader& r) {
     return a;
 }
 
+Consent dec_consent_fields(CborReader& r) {
+    Consent c{};
+    expect_key(r, 1); c.target = dec_ref(r);
+    expect_key(r, 2); c.agreed = r.r_uint() != 0;
+    expect_key(r, 3); c.note   = r.r_text();
+    check_consent(c);
+    return c;
+}
+
 CarryEntry dec_carry_entry(CborReader& r) {
     if (r.r_map() != 6) throw CodecError("CarryEntry: expected 6 fields");
     CarryEntry ce{};
@@ -1474,6 +1499,7 @@ std::vector<uint8_t> Codec::encode(const Record& rec) {
         else if constexpr (std::is_same_v<T, Copy>)        enc_copy(out, r);
         else if constexpr (std::is_same_v<T, Reaction>)    enc_reaction(out, r);
         else if constexpr (std::is_same_v<T, Attest>)      enc_attest(out, r);
+        else if constexpr (std::is_same_v<T, Consent>)     enc_consent(out, r);
         else if constexpr (std::is_same_v<T, WorkRecord>)  enc_work_record(out, r);
         else if constexpr (std::is_same_v<T, Release>)     enc_release(out, r);
         else if constexpr (std::is_same_v<T, WriteOff>)    enc_write_off(out, r);
@@ -1509,6 +1535,7 @@ Record Codec::decode(const uint8_t* data, size_t len) {
         case RecordType::Copy:        return dec_copy_fields(r);
         case RecordType::Reaction:    return dec_reaction_fields(r);
         case RecordType::Attest:      return dec_attest_fields(r);
+        case RecordType::Consent:     return dec_consent_fields(r);
         case RecordType::WorkRecord:  return dec_work_record_fields(r, field_count);
         case RecordType::Release:     return dec_release_fields(r, field_count);
         case RecordType::WriteOff:    return dec_write_off_fields(r, field_count);

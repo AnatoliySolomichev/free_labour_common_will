@@ -535,6 +535,16 @@ for who in galina pelageya; do
             --axis-share "$(axis physical)=1" --via "$VIA" >/dev/null 2>&1 || true
     fi
 done
+say "решения об общей вещи — согласием у себя: держатель составляет, дольщики подписывают"
+SH_draft="$(bcp dmitry concept add "Календарь смен станка на ноябрь: пн-ср Галина, чт-пт Пелагея" \
+            --tag kind:plan --via "$VIA" | after 'hash: ')"
+bcp galina   consent add "${CID[dmitry]}/$SH_draft" --note "мои смены устраивают" --via "$VIA" \
+    2>&1 | sed 's/^/   /'
+bcp pelageya consent add "${CID[dmitry]}/$SH_draft" --no --note "в четверг не могу" --via "$VIA" \
+    2>&1 | sed 's/^/   /'
+bcp ustin consent list "${CID[dmitry]}/$SH_draft" --via "$VIA" | sed 's/^/   /'
+say "общего объекта «решение» нет — порог считает читатель (ИР-012)"
+
 say "амортизацию никто не распределяет: каждый возместил своё, продав или истратив свои часы"
 say "в своих часах согласия ничьего не нужно — а больше купленного не отработать"
 bcp dmitry tool shares "${TOOL2_H:0:12}" --via "$VIA" | sed 's/^/   /'
@@ -771,6 +781,15 @@ else echo "   ✗ поручительство свидетеля не видн�
 if bcp dmitry seal add "$W_stools" --chain "${CID[dmitry]}" >/dev/null 2>&1; then
     echo "   ✗ цепь заверила собственную запись"; fail=1
 else echo "   ✓ себя не заверяют (records.md §12.11)"; fi
+# согласие и отказ равно остаются в истории подписавшего (ИР-012)
+CONS="$(bcp ustin consent list "${CID[dmitry]}/$SH_draft" --via "$VIA" 2>&1 || true)"
+if grep -q "согласны 1, против 1" <<<"$CONS"; then
+    echo "   ✓ согласие и отказ посчитаны по записям (records.md §8.10)"
+else echo "   ✗ согласия не собрались: $CONS"; fail=1; fi
+# себя не спрашивают: подпись под своей записью и есть согласие
+if bcp dmitry consent add "${CID[dmitry]}/$SH_draft" >/dev/null 2>&1; then
+    echo "   ✗ цепь согласилась со своей же записью"; fail=1
+else echo "   ✓ себя не спрашивают (records.md §8.10)"; fi
 # доли как купленный ресурс: витрина видит дольщиков и их остатки (ИР-013)
 SHARES="$(bcp dmitry tool shares "${TOOL2_H:0:12}" --via "$VIA" 2>&1 || true)"
 if grep -q "дольщики по моточасам" <<<"$SHARES"; then
