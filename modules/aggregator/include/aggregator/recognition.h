@@ -19,6 +19,7 @@
 #include "aggregator.h"
 
 #include <records/acceptance.h>
+#include <records/carry.h>
 #include <records/goods_thread.h>
 #include <records/types.h>
 
@@ -72,6 +73,16 @@ struct AssetRecord {
     std::optional<records::Ref> repair;
     double                      collected = 0;   // собрано нитью переноса
     bool                        sound = true;
+    // Вторая шкала износа (ИР-011 v5, решение участника 2026-10-10):
+    // календарный срок записи и день, с которого он идёт. Остаток — по
+    // БОЛЬШЕМУ из двух износов, и это же потолок перевыпуска.
+    uint32_t                    days = 0;
+    int64_t                     started_at = 0;
+
+    // Остаток к возмещению на момент `at` (records.md §10.2).
+    double residual(int64_t at) const noexcept {
+        return records::residual_value(cost, collected, days, started_at, at);
+    }
 };
 
 // Купленное, заведённое в своё производство (records.md §10.1 v3, ИР-023):

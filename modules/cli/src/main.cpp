@@ -138,7 +138,7 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--acceptance", "--coef", "--k", "--with", "--to-node",
     "--node", "--ancestor", "--since", "--out", "--cert", "--hex",
     "--skill", "--need", "--search",
-    "--tool", "--cost", "--life", "--serial", "--desc", "--note", "--paid",
+    "--tool", "--cost", "--life", "--days", "--serial", "--desc", "--note", "--paid",
     "--material", "--unit", "--qty",
     "--buyback-to", "--buyback-days", "--buyback-until", "--buyback-of",
     "--improves", "--repair", "--spend", "--machine-hours", "--meter",
@@ -675,14 +675,25 @@ struct AssetInfo {
     std::string basis;            // "paid" | "est"
     bool        is_material = false;
     std::string unit;             // material only
+    // Вторая шкала износа (ИР-011 v5): календарный срок в днях и день записи,
+    // от которого он считается. Износ — больший из двух шкал.
+    uint32_t    days        = 0;
+    int64_t     started_at  = 0;
 };
 
 static std::optional<AssetInfo> asset_info(const Record& rec) {
     if (const auto* t = std::get_if<records::Tool>(&rec))
-        return AssetInfo{t->name, t->cost, t->life, t->basis, false, ""};
+        return AssetInfo{t->name, t->cost, t->life, t->basis, false, "",
+                         t->days ? *t->days : 0u, 0};
     if (const auto* m = std::get_if<records::Material>(&rec))
-        return AssetInfo{m->name, m->cost, m->qty, m->basis, true, m->unit};
+        return AssetInfo{m->name, m->cost, m->qty, m->basis, true, m->unit,
+                         m->days ? *m->days : 0u, 0};
     return std::nullopt;
+}
+
+// Остаток вещи на момент `at` — по большей из двух шкал (ИР-011 v5).
+static double asset_residual(const AssetInfo& a, double collected, int64_t at) {
+    return records::residual_value(a.cost, collected, a.days, a.started_at, at);
 }
 
 // A means-of-production record in the own chain, found by block-hash prefix
@@ -704,12 +715,13 @@ static std::vector<OwnAsset> find_own_assets(Context& ctx,
             Record rec;
             try { rec = Codec::decode(b.payload.data(), b.payload.size()); }
             catch (const CodecError&) { continue; }
-            const auto info = asset_info(rec);
+            auto info = asset_info(rec);
             if (!info) continue;
             const auto hash = Crypto::hash_block(b).bytes;
             if (!hash_prefix.empty() &&
                 to_hex(hash).compare(0, hash_prefix.size(), hash_prefix) != 0)
                 continue;
+            info->started_at = b.timestamp_claimed;   // день записи — начало срока
             out.push_back({Ref{ctx.user_id.bytes, hash}, *info});
         }
     }
@@ -788,11 +800,18 @@ static void attach_carry(Context& ctx, WorkRecord& wr,
                       << a.info.name << ", партия " << a.info.capacity << " "
                       << a.info.unit << ") — заведите новую партию для остатка\n";
 
+        // Момент использования — конец работы: по нему и считается
+        // календарный износ (ИР-011 v5), а не по «сейчас».
+        const int64_t at = wr.start_ts > 0
+            ? wr.start_ts + static_cast<int64_t>(wr.hours * 3600)
+            : static_cast<int64_t>(std::time(nullptr));
+
         records::CarryEntry ce{};
         ce.src     = a.ref;
         ce.used    = used;
         ce.carried = records::carry_step(a.info.cost, a.info.capacity,
-                                         used, st.collected);
+                                         used, st.collected,
+                                         a.info.days, a.info.started_at, at);
         ce.seq     = st.next_seq;
         ce.prev    = st.tip;
         ce.after   = st.collected + ce.carried;
@@ -801,10 +820,22 @@ static void attach_carry(Context& ctx, WorkRecord& wr,
         std::cerr << "  перенос: " << ce.carried << "ч  (" << a.info.name
                   << ", собрано " << ce.after << "/" << a.info.cost << "ч"
                   << (a.info.basis == "est" ? ", оценка владельца" : "") << ")";
+        // Если главной стала календарная шкала — сказать это прямо: простой
+        // съел часть возмещения, и вернуть её уже нельзя.
+        if (a.info.days > 0) {
+            const double by_time =
+                records::calendar_share(a.info.days, a.info.started_at, at) * a.info.cost;
+            if (by_time > st.collected + 1e-9)
+                std::cerr << "\n    по календарю износ уже " << by_time << "ч из "
+                          << a.info.cost << "ч (срок " << a.info.days
+                          << " дн.) — остаток к возмещению "
+                          << asset_residual(a.info, st.collected, at) << "ч";
+        }
         if (ce.carried <= 1e-9)
             std::cerr << (a.info.is_material
                           ? "  — партия исчерпана, заведите новую (records.md §10.1)"
-                          : "  — стоимость возвращена, работает бесплатно (records.md §9.4)");
+                          : "  — переносить нечего: стоимость возмещена или вышел срок"
+                            " (records.md §9.4)");
         std::cerr << "\n";
     }
 }
@@ -1798,6 +1829,7 @@ static void appraise_whole(Context& ctx, const std::string& via, int argc, char*
                             try {
                                 info = asset_info(Codec::decode(
                                     ablock->payload.data(), ablock->payload.size()));
+                                if (info) info->started_at = ablock->timestamp_claimed;
                             } catch (const CodecError&) {}
                         }
                         if (!info) {
@@ -1808,9 +1840,15 @@ static void appraise_whole(Context& ctx, const std::string& via, int argc, char*
                                       << to_hex(ce.src.hash) << ")\n";
                             continue;
                         }
+                        // Потолок — остаток по БОЛЬШЕЙ шкале на момент работы
+                        // (ИР-011 v5): простоявшая вещь переносит меньше.
+                        const int64_t used_at = wr->start_ts > 0
+                            ? wr->start_ts + static_cast<int64_t>(wr->hours * 3600)
+                            : wblock->timestamp_claimed;
                         const double expected = records::carry_step(
                             info->cost, info->capacity, ce.used,
-                            ce.after - ce.carried);
+                            ce.after - ce.carried,
+                            info->days, info->started_at, used_at);
                         if (std::abs(expected - ce.carried) > 1e-6)
                             std::cerr << "  ⚠ " << info->name << ": " << ce.carried
                                       << "ч НЕ по формуле переноса (ожидалось "
@@ -3116,6 +3154,8 @@ static int cmd_tool_add(const fs::path& data_dir, int argc, char** argv) {
     if (pos.size() < 3 || life_s.empty() || (paid_s.empty() && cost_s.empty())) {
         std::cerr <<
             "Usage: bc tool add ИМЯ --cost ТРУДОЧАСЫ --life ЧАСЫ_РЕСУРСА\n"
+            "   [--days СУТОК]        календарный срок службы: вторая шкала\n"
+            "                         износа, считается по большей (ИР-011 v5)\n"
             "   [--serial S] [--desc TEXT] [--note TEXT]\n"
             "   [--repair СДЕЛКА]     своя сделка, которой принят и оплачен ремонт:\n"
             "                         стоимость растёт ровно на неё (ИР-015)\n"
@@ -3161,6 +3201,13 @@ static int cmd_tool_add(const fs::path& data_dir, int argc, char** argv) {
     }
     if (t.cost <= 0 || t.life <= 0)
         throw std::runtime_error("--cost и --life должны быть положительными");
+    // Вторая шкала (ИР-011 v5): календарный срок службы, со дня этой записи.
+    // Износ считается по большей из двух — простой перестаёт быть бесплатным.
+    if (const auto d = flag_val(argc, argv, "--days"); !d.empty()) {
+        const long v = std::stol(d);
+        if (v <= 0) throw std::runtime_error("--days должен быть > 0");
+        t.days = static_cast<uint32_t>(v);
+    }
     if (t.basis == "est" && t.note.empty())
         std::cerr << "предупреждение: est без --note — покупателю не из чего "
                      "проверить оценку\n";
@@ -3174,7 +3221,10 @@ static int cmd_tool_add(const fs::path& data_dir, int argc, char** argv) {
             if (prev.empty())
                 throw std::runtime_error("--origin не найден в своей цепи");
             const auto   st        = carry_thread_state(ctx, prev[0].ref);
-            const double remainder = prev[0].info.cost - st.collected;
+            // Потолок — остаток по БОЛЬШЕЙ шкале на сейчас (ИР-011 v5):
+            // простоявшую вещь нельзя перевыпустить по прежней цене.
+            const double remainder = asset_residual(prev[0].info, st.collected,
+                                                    static_cast<int64_t>(std::time(nullptr)));
             // Ремонт — единственный законный путь стоимости вверх (ИР-015): своя
             // сделка, которой он принят и оплачен, поднимает потолок ровно на
             // уплаченное. Одна сделка оправдывает одно удорожание.
@@ -3212,8 +3262,11 @@ static int cmd_tool_add(const fs::path& data_dir, int argc, char** argv) {
     std::cout << "tool ref: " << to_hex(ctx.user_id.bytes) << "/"
               << to_hex(Crypto::hash_block(block).bytes) << "\n";
     std::cerr << "  " << t.name << "  " << t.cost << "ч, ресурс " << t.life
-              << "ч  [" << (t.basis == "paid" ? "куплен в системе"
-                                              : "оценка владельца") << "]\n"
+              << "ч";
+    if (t.days) std::cerr << ", срок " << *t.days << " дн. (износ — по большей "
+                             "из двух шкал, records.md §10.2)";
+    std::cerr << "  [" << (t.basis == "paid" ? "куплен в системе"
+                                             : "оценка владельца") << "]\n"
               << "  использование: bc work log ... --tool ПРЕФИКС_ХЕША:ЧАСЫ\n";
     const auto via = flag_val(argc, argv, "--via");
     if (!via.empty()) upload_block(via, block);
@@ -3276,6 +3329,11 @@ static int cmd_material_add(const fs::path& data_dir, int argc, char** argv) {
     }
     if (m.cost <= 0 || m.qty <= 0)
         throw std::runtime_error("--cost и --qty должны быть положительными");
+    if (const auto d = flag_val(argc, argv, "--days"); !d.empty()) {
+        const long v = std::stol(d);
+        if (v <= 0) throw std::runtime_error("--days должен быть > 0");
+        m.days = static_cast<uint32_t>(v);   // ИР-011 v5: срок партии
+    }
     if (m.basis == "est" && m.note.empty())
         std::cerr << "предупреждение: est без --note — покупателю не из чего "
                      "проверить оценку\n";
@@ -3287,7 +3345,8 @@ static int cmd_material_add(const fs::path& data_dir, int argc, char** argv) {
         if (prev.empty())
             throw std::runtime_error("--origin не найден в своей цепи");
         const auto   st        = carry_thread_state(ctx, prev[0].ref);
-        const double remainder = prev[0].info.cost - st.collected;
+        const double remainder = asset_residual(prev[0].info, st.collected,
+                                                static_cast<int64_t>(std::time(nullptr)));
         if (m.cost > remainder + 1e-9) {
             std::cerr << "отказ: cost " << m.cost << "ч выше остатка "
                       << remainder << "ч предыдущей записи (records.md §10.2)\n";
@@ -3299,8 +3358,9 @@ static int cmd_material_add(const fs::path& data_dir, int argc, char** argv) {
     std::cout << "material ref: " << to_hex(ctx.user_id.bytes) << "/"
               << to_hex(Crypto::hash_block(block).bytes) << "\n";
     std::cerr << "  " << m.name << "  " << m.cost << "ч / партия " << m.qty
-              << " " << m.unit << "  [" << (m.basis == "paid" ? "куплена"
-                                                              : "оценка") << "]\n"
+              << " " << m.unit;
+    if (m.days) std::cerr << ", срок " << *m.days << " дн.";
+    std::cerr << "  [" << (m.basis == "paid" ? "куплена" : "оценка") << "]\n"
               << "  расход: bc work log ... --material ПРЕФИКС_ХЕША:КОЛИЧЕСТВО\n";
     const auto via = flag_val(argc, argv, "--via");
     if (!via.empty()) upload_block(via, block);
@@ -3318,7 +3378,8 @@ static int cmd_tool_list(const fs::path& data_dir, int argc, char** argv) {
     }
     for (const auto& a : assets) {
         const auto   st        = carry_thread_state(ctx, a.ref);
-        const double remainder = std::max(0.0, a.info.cost - st.collected);
+        const double remainder = asset_residual(a.info, st.collected,
+                                                static_cast<int64_t>(std::time(nullptr)));
         std::cout << short_hex(a.ref.hash) << "  " << a.info.name
                   << "  " << a.info.cost << "ч"
                   << "  собрано " << st.collected << "ч"
@@ -3371,14 +3432,17 @@ static int cmd_tool_show(const fs::path& data_dir, int argc, char** argv) {
                 if (ce.src == a.ref) {
                     records::ObservedCarry o{};
                     o.entry      = ce;
-                    o.timestamp  = wr->start_ts;
+                    // Момент использования — КОНЕЦ работы: по нему норма и
+                    // считает календарный износ (ИР-011 v5).
+                    o.timestamp  = records::labor_interval(*wr).second;
                     o.block_hash = Crypto::hash_block(b).bytes;
                     links.push_back(o);
                 }
         }
     }
     const auto h = records::carry_history(std::move(links),
-                                          a.info.cost, a.info.capacity);
+                                          a.info.cost, a.info.capacity,
+                                          a.info.days, a.info.started_at);
 
     std::cout << a.info.name << "\n  ref: " << to_hex(ctx.user_id.bytes) << "/"
               << to_hex(a.ref.hash) << "\n"
@@ -3387,11 +3451,30 @@ static int cmd_tool_show(const fs::path& data_dir, int argc, char** argv) {
                                          : "оценка владельца") << "]\n"
               << "  " << (a.info.is_material ? "партия: " : "ресурс: ")
               << a.info.capacity
-              << (a.info.is_material ? " " + a.info.unit : "ч") << "\n"
-              << "  собрано: " << h.collected
+              << (a.info.is_material ? " " + a.info.unit : "ч") << "\n";
+
+    // Две шкалы износа (ИР-011 v5): остаток — по той, что дала больше.
+    const int64_t now = static_cast<int64_t>(std::time(nullptr));
+    const double  by_use_share  = a.info.cost > 0 ? h.collected / a.info.cost : 0;
+    const double  by_time_share =
+        records::calendar_share(a.info.days, a.info.started_at, now);
+    const double  remainder     = asset_residual(a.info, h.collected, now);
+    std::cout << "  собрано: " << h.collected
               << "ч   остаток (потолок перепродажи, economy.md §5б): "
-              << std::max(0.0, a.info.cost - h.collected) << "ч\n"
-              << "  звеньев нити: " << h.links_seen << "/" << h.links_expected
+              << remainder << "ч\n";
+    if (a.info.days > 0) {
+        std::cout << "  износ по использованию: "
+                  << static_cast<int>(by_use_share * 100 + 0.5) << "%"
+                  << "   по календарю: "
+                  << static_cast<int>(by_time_share * 100 + 0.5) << "%  (срок "
+                  << a.info.days << " дн.)\n"
+                  << "    считается по большей — "
+                  << (by_time_share > by_use_share ? "по календарю: простой "
+                         "съедает возмещение, и вернуть его уже нельзя"
+                       : "по использованию")
+                  << "\n";
+    }
+    std::cout << "  звеньев нити: " << h.links_seen << "/" << h.links_expected
               << (h.gaps ? "  — есть пропуски (картина неполная)" : "") << "\n";
 
     bool clean = true;
@@ -6436,15 +6519,17 @@ Labor:
 
 Means of production (ИР-011, records.md §10.2, records.md §9.4):
   tool add ИМЯ --cost H --life HRS Register a tool: cost in labor-hours,
-    [--serial S] [--desc T]            design life in tool-hours. Without
-    [--note "расчёт оценки"]           --paid the cost is the owner's estimate
-    [--paid ACCEPT_REF]                (est) — give --note with the arithmetic.
-    [--origin TOOL_REF]                Reissue: resale / downward revaluation /
-                                       re-entry; cost ≤ previous remainder.
+    [--days D]                         design life in tool-hours; --days adds
+    [--serial S] [--desc T]            the CALENDAR scale — wear counts by the
+    [--note "расчёт оценки"]           GREATER of the two, so idling is no
+    [--paid ACCEPT_REF]                longer free (ИР-011 v5). Without --paid
+    [--origin TOOL_REF]                the cost is the owner's estimate (est) —
+                                       give --note with the arithmetic. Reissue:
+                                       cost ≤ previous remainder by both scales.
   material add ИМЯ --unit U        Register a consumables batch: cost in
-    --cost H --qty Q                   labor-hours, size in units. Spent by
-    [--note "расчёт"] [--paid REF]     --material in work log; est needs --note.
-    [--origin MAT_REF]
+    --cost H --qty Q [--days D]        labor-hours, size in units; --days — the
+    [--note "расчёт"] [--paid REF]     batch's calendar term. Spent by
+    [--origin MAT_REF]                 --material in work log; est needs --note.
   tool list / material list        Own tools/batches: cost, collected, remainder
   tool show / material show PREFIX Audit one carry thread: invariant, forks,
                                        formula, resale ceiling (economy.md §5б)

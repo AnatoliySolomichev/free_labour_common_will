@@ -9,6 +9,21 @@ namespace {
 constexpr double EPS = 1e-6;
 }
 
+double calendar_share(uint32_t days, int64_t started_at, int64_t at) noexcept {
+    if (days == 0 || started_at <= 0 || at <= started_at) return 0;
+    constexpr double SEC_PER_DAY = 86400.0;
+    const double aged = static_cast<double>(at - started_at) / SEC_PER_DAY;
+    return std::min(1.0, aged / static_cast<double>(days));
+}
+
+double residual_value(double cost, double collected,
+                      uint32_t days, int64_t started_at, int64_t at) noexcept {
+    if (cost <= 0) return 0;
+    const double by_use  = std::max(0.0, collected);
+    const double by_time = calendar_share(days, started_at, at) * cost;
+    return std::max(0.0, cost - std::max(by_use, by_time));
+}
+
 double carry_step(double cost, double capacity, double used,
                   double collected_before) noexcept {
     if (cost <= 0 || capacity <= 0 || used <= 0) return 0;
@@ -17,8 +32,19 @@ double carry_step(double cost, double capacity, double used,
     return std::min(used / capacity * cost, remainder);
 }
 
+double carry_step(double cost, double capacity, double used,
+                  double collected_before,
+                  uint32_t days, int64_t started_at, int64_t at) noexcept {
+    if (cost <= 0 || capacity <= 0 || used <= 0) return 0;
+    const double remainder =
+        residual_value(cost, collected_before, days, started_at, at);
+    if (remainder <= 0) return 0;   // срок вышел — переносить уже нечего
+    return std::min(used / capacity * cost, remainder);
+}
+
 CarryHistory carry_history(std::vector<ObservedCarry> links,
-                           double cost, double capacity) {
+                           double cost, double capacity,
+                           uint32_t days, int64_t started_at) {
     CarryHistory h{};
     if (links.empty()) return h;
 
@@ -54,7 +80,8 @@ CarryHistory carry_history(std::vector<ObservedCarry> links,
         // Per-link recognition: the link itself declares collected_before as
         // after − carried, so the formula is checkable in isolation.
         const double before   = e.after - e.carried;
-        const double expected = carry_step(cost, capacity, e.used, before);
+        const double expected = carry_step(cost, capacity, e.used, before,
+                                           days, started_at, o.timestamp);
         if (std::abs(e.carried - expected) > EPS) h.formula_mismatch = true;
         if (e.after > cost + EPS)                 h.over_invariant   = true;
 

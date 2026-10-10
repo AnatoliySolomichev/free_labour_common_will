@@ -480,6 +480,10 @@ struct Material {
     // lot sub-thread this batch was taken by: what is spent into production is
     // no longer for sale, and the cost comes from the deal (records.md §10.1).
     std::optional<LotLink> lot;
+    // v4 (ИР-011 v5, 2026-10-10): календарный срок партии — скоропортящееся
+    // тоже изнашивается временем. Износ — больший из двух шкал, как у
+    // инструмента (records.md §10.1).
+    std::optional<uint32_t> days;
 };
 
 // A tool/equipment instance with cost and design life (records.md §10.2). Wear carries
@@ -505,6 +509,13 @@ struct Tool {
     // превысить остаток прежней ровно на принятый и оплаченный ремонт: `repair`
     // — своя сделка, которой он оплачен (records.md §10.2).
     std::optional<Ref>     repair;
+    // v5 (ИР-011, решение участника 2026-10-10): ВТОРАЯ ШКАЛА ИЗНОСА —
+    // календарный срок службы в днях, со дня этой записи. Износ считается по
+    // той шкале, что дала больше: вещь изнашивается и работой, и временем,
+    // поэтому простой перестаёт быть бесплатным. Правило «больший из двух»
+    // делает шкалу безопасной — добавить её можно только себе в убыток:
+    // остаток она способна лишь снизить (records.md §10.2).
+    std::optional<uint32_t> days;
 };
 
 // ── Economy records (records.md §11) ─────────────────────────────────────────

@@ -168,3 +168,82 @@ TEST(CarryReissue, GlobalInvariantAcrossOwners) {
     EXPECT_FALSE(b.over_invariant);
     EXPECT_DOUBLE_EQ(a.collected + b.collected, COST);
 }
+
+// ── Две шкалы износа: больший из двух (ИР-011 v5, решение участника) ─────────
+//
+// Эталон здесь — печь из обсуждения: стоимость 300ч, ресурс 8000 моточасов,
+// календарный срок 10 лет. Числа в тестах — те же, что в ИР-011.
+
+namespace {
+constexpr int64_t  T0       = 1'700'000'000;   // день записи
+constexpr int64_t  DAY      = 86'400;
+constexpr double   OVEN     = 300.0;
+constexpr double   OVEN_RES = 8000.0;
+constexpr uint32_t OVEN_DAYS = 3650;           // 10 лет
+}
+
+TEST(CalendarScale, ShareGrowsWithTimeAndStopsAtOne) {
+    EXPECT_DOUBLE_EQ(calendar_share(0, T0, T0 + 100 * DAY), 0.0);   // шкалы нет
+    EXPECT_DOUBLE_EQ(calendar_share(OVEN_DAYS, T0, T0), 0.0);       // в день записи
+    EXPECT_NEAR(calendar_share(OVEN_DAYS, T0, T0 + 1825 * DAY), 0.5, 1e-9);
+    EXPECT_DOUBLE_EQ(calendar_share(OVEN_DAYS, T0, T0 + 5000 * DAY), 1.0);  // не больше 1
+    EXPECT_DOUBLE_EQ(calendar_share(OVEN_DAYS, T0, T0 - DAY), 0.0);         // до записи
+}
+
+TEST(ResidualValue, TakesTheGreaterOfTheTwoWears) {
+    // Три года простоя, отработано 500 моточасов: по ресурсу собрано 18.75ч
+    // (6.25%), по календарю прошло 30% — остаток считается по календарю.
+    const int64_t at = T0 + 1095 * DAY;                 // 3 года
+    EXPECT_NEAR(residual_value(OVEN, 18.75, OVEN_DAYS, T0, at), 210.0, 0.5);
+    // Та же вещь без календарной шкалы: остаток только по собранному.
+    EXPECT_NEAR(residual_value(OVEN, 18.75, 0, T0, at), 281.25, 1e-9);
+    // Работала много, стояла мало — больше даёт шкала использования.
+    EXPECT_NEAR(residual_value(OVEN, 250.0, OVEN_DAYS, T0, T0 + 365 * DAY),
+                50.0, 1e-9);
+}
+
+TEST(ResidualValue, NeverNegativeAndZeroPastTheTerm) {
+    EXPECT_DOUBLE_EQ(residual_value(OVEN, OVEN + 50, 0, T0, T0), 0.0);
+    EXPECT_DOUBLE_EQ(residual_value(OVEN, 0, OVEN_DAYS, T0, T0 + 4000 * DAY), 0.0);
+}
+
+TEST(CarryStepCalendar, IdleThingCarriesLessThanItsUseWouldGive) {
+    // 100 моточасов из 8000 дали бы 3.75ч переноса...
+    EXPECT_NEAR(carry_step(OVEN, OVEN_RES, 100, 0), 3.75, 1e-9);
+    // ...и столько же, пока календарь не стал главной шкалой.
+    EXPECT_NEAR(carry_step(OVEN, OVEN_RES, 100, 0, OVEN_DAYS, T0, T0 + 30 * DAY),
+                3.75, 1e-9);
+    // Но у вещи, простоявшей почти весь срок, переносить почти нечего:
+    // остаток по календарю меньше, чем дала бы шкала использования.
+    EXPECT_NEAR(carry_step(OVEN, OVEN_RES, 1000, 0, OVEN_DAYS, T0,
+                           T0 + 3640 * DAY),
+                0.82, 0.02);
+}
+
+TEST(CarryStepCalendar, ExpiredTermCarriesNothing) {
+    EXPECT_DOUBLE_EQ(
+        carry_step(OVEN, OVEN_RES, 500, 0, OVEN_DAYS, T0, T0 + 4000 * DAY), 0.0);
+}
+
+TEST(CarryStepCalendar, WithoutTermNothingChanges) {
+    EXPECT_DOUBLE_EQ(carry_step(COST, LIFE, 10, 0, 0, T0, T0 + 9000 * DAY),
+                     carry_step(COST, LIFE, 10, 0));
+}
+
+// Каждое звено проверяется потолком НА СВОЁ ВРЕМЯ: законное тогда остаётся
+// законным, норма не переписывается задним числом.
+TEST(CarryHistoryCalendar, LinkIsJudgedAtItsOwnTime) {
+    auto early = link(0, 1000, 37.5, 37.5);     // в первый месяц: полный перенос
+    early.timestamp = T0 + 30 * DAY;
+    auto late  = link(1, 1000, 37.5, 75.0);     // через 9 лет: столько уже нельзя
+    late.timestamp  = T0 + 3285 * DAY;
+
+    const auto h = carry_history({early, late}, OVEN, OVEN_RES, OVEN_DAYS, T0);
+    EXPECT_TRUE(h.formula_mismatch);            // второе звено не по норме
+    EXPECT_EQ(h.links_seen, 2u);
+
+    // Одно раннее звено — без претензий.
+    const auto ok = carry_history({early}, OVEN, OVEN_RES, OVEN_DAYS, T0);
+    EXPECT_FALSE(ok.formula_mismatch);
+    EXPECT_NEAR(ok.collected, 37.5, 1e-9);
+}

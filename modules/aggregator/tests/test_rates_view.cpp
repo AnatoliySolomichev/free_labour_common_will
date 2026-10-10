@@ -1327,6 +1327,46 @@ TEST_F(RatesViewTest, OwnProductSpentIntoOwnProductionIsLabor) {
 
 // Ремонт своего средства производства (ИР-015): стоимость вверх перевыпускают
 // ровно на принятый и оплаченный ремонт. Без него удорожание не признаётся, и
+// Две шкалы износа (ИР-011 v5, решение участника 2026-10-10): простой съедает
+// потолок перевыпуска. Вещь, простоявшая больше половины срока, не может быть
+// перевыпущена по прежней цене — календарный износ уже случился.
+TEST_F(RatesViewTest, IdleTimeLowersTheReissueCeiling) {
+    const auto at_index = [&](const UserId& owner, const records::Record& rec,
+                              BlockIndex idx) {
+        const Block b = make_record_block(owner, idx, rec);
+        EXPECT_TRUE(storage_->add_block(b));
+        return b;
+    };
+
+    records::Tool oven{};
+    oven.name  = "печь";
+    oven.cost  = 10.0;
+    oven.life  = 100.0;
+    oven.basis = "est";
+    oven.note  = "оценка владельца";
+    oven.days  = 2;                      // срок службы — двое суток
+    const Block first = at_index(alice_, oven, 10);          // ts 10'000
+
+    // Простояла 95'000 с ≈ 1.1 суток из двух: по календарю износ ≈ 55%,
+    // остаток ≈ 4.5ч. Перевыпуск по прежней цене — не по норме.
+    records::Tool greedy = oven;
+    greedy.origin = ref_to(alice_, first);
+    const Block greedy_b = at_index(alice_, greedy, 105);    // ts 105'000
+
+    records::Tool honest = oven;
+    honest.cost   = 4.0;                 // в пределах остатка
+    honest.origin = ref_to(alice_, first);
+    const Block honest_b = at_index(alice_, honest, 106);
+
+    const auto deals = read_deals(*storage_);
+    const auto& src = deals.asset_records.at(Crypto::hash_block(first).bytes);
+    EXPECT_EQ(src.days, 2u);
+    EXPECT_NEAR(src.residual(105'000), 4.5, 0.1);            // по календарю
+    EXPECT_NEAR(src.residual(10'000),  10.0, 1e-9);          // в день записи — вся
+    EXPECT_FALSE(deals.asset_records.at(Crypto::hash_block(greedy_b).bytes).sound);
+    EXPECT_TRUE(deals.asset_records.at(Crypto::hash_block(honest_b).bytes).sound);
+}
+
 // перенос из такой записи в продукцию тоже.
 TEST_F(RatesViewTest, OnlyAPaidRepairLiftsAToolsCost) {
     records::Tool oven{};

@@ -517,7 +517,10 @@ void check_paid_source(const std::string& basis, const std::optional<Ref>& src,
 
 void enc_material(Buf& out, const Material& m) {
     check_paid_source(m.basis, m.src, m.lot, "Material");
-    w_map(out, 10 + (m.lot ? 1 : 0));
+    if (m.days && *m.days == 0)
+        throw CodecError("Material: календарный срок, если назван, обязан быть > 0 "
+                         "(records.md §10.1)");
+    w_map(out, 10 + (m.lot ? 1 : 0) + (m.days ? 1 : 0));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Material));
     w_uint(out, 1); w_text(out, m.name);
     w_uint(out, 2); w_text(out, m.unit);
@@ -530,7 +533,8 @@ void enc_material(Buf& out, const Material& m) {
     w_uint(out, 8);
     if (m.origin) w_ref(out, *m.origin); else w_null(out);
     w_uint(out, 9); w_text(out, m.note);
-    if (m.lot) { w_uint(out, 10); w_lot_link(out, *m.lot); }
+    if (m.lot)  { w_uint(out, 10); w_lot_link(out, *m.lot); }
+    if (m.days) { w_uint(out, 11); w_uint(out, *m.days); }   // ИР-011 v5
 }
 
 void enc_tool(Buf& out, const Tool& t) {
@@ -540,7 +544,10 @@ void enc_tool(Buf& out, const Tool& t) {
     if (t.repair && !t.origin)
         throw CodecError("Tool: ремонт поднимает стоимость только при перевыпуске — нужен "
                          "origin (records.md §10.2)");
-    w_map(out, 10 + (t.lot ? 1 : 0) + (t.repair ? 1 : 0));
+    if (t.days && *t.days == 0)
+        throw CodecError("Tool: календарный срок, если назван, обязан быть > 0 "
+                         "(records.md §10.2)");
+    w_map(out, 10 + (t.lot ? 1 : 0) + (t.repair ? 1 : 0) + (t.days ? 1 : 0));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Tool));
     w_uint(out, 1); w_text(out, t.name);
     w_uint(out, 2); w_text(out, t.desc);
@@ -555,6 +562,7 @@ void enc_tool(Buf& out, const Tool& t) {
     w_uint(out, 9); w_text(out, t.note);
     if (t.lot)    { w_uint(out, 10); w_lot_link(out, *t.lot); }
     if (t.repair) { w_uint(out, 11); w_ref(out, *t.repair); }   // ИР-015
+    if (t.days)   { w_uint(out, 12); w_uint(out, *t.days); }    // ИР-011 v5
 }
 
 void enc_transfer(Buf& out, const Transfer& t) {
@@ -1139,8 +1147,8 @@ Acceptance dec_acceptance(CborReader& r) {
 }
 
 Material dec_material_fields(CborReader& r, uint64_t field_count) {
-    if (field_count < 10 || field_count > 11)
-        throw CodecError("Material: expected 10..11 fields");
+    if (field_count < 10 || field_count > 12)
+        throw CodecError("Material: expected 10..12 fields");
     Material m{};
     expect_key(r, 1); m.name   = r.r_text();
     expect_key(r, 2); m.unit   = r.r_text();
@@ -1151,14 +1159,25 @@ Material dec_material_fields(CborReader& r, uint64_t field_count) {
     expect_key(r, 7); m.src    = dec_opt_ref(r);
     expect_key(r, 8); m.origin = dec_opt_ref(r);
     expect_key(r, 9); m.note   = r.r_text();
-    if (field_count > 10) { expect_key(r, 10); m.lot = dec_lot_link(r); }
+    uint64_t m_seen = 9;
+    for (uint64_t i = 10; i < field_count; ++i) {
+        const uint64_t key = r.r_uint();
+        if (key <= m_seen) throw CodecError("Material: keys out of order");
+        m_seen = key;
+        if (key == 10)      m.lot  = dec_lot_link(r);
+        else if (key == 11) m.days = static_cast<uint32_t>(r.r_uint());
+        else throw CodecError("Material: unknown field key");
+    }
+    if (m.days && *m.days == 0)
+        throw CodecError("Material: календарный срок, если назван, обязан быть > 0 "
+                         "(records.md §10.1)");
     check_paid_source(m.basis, m.src, m.lot, "Material");
     return m;
 }
 
 Tool dec_tool_fields(CborReader& r, uint64_t field_count) {
-    if (field_count < 10 || field_count > 12)
-        throw CodecError("Tool: expected 10..12 fields");
+    if (field_count < 10 || field_count > 13)
+        throw CodecError("Tool: expected 10..13 fields");
     Tool t{};
     expect_key(r, 1); t.name   = r.r_text();
     expect_key(r, 2); t.desc   = r.r_text();
@@ -1176,8 +1195,12 @@ Tool dec_tool_fields(CborReader& r, uint64_t field_count) {
         seen = key;
         if (key == 10)      t.lot    = dec_lot_link(r);
         else if (key == 11) t.repair = dec_ref(r);
+        else if (key == 12) t.days   = static_cast<uint32_t>(r.r_uint());
         else throw CodecError("Tool: unknown field key");
     }
+    if (t.days && *t.days == 0)
+        throw CodecError("Tool: календарный срок, если назван, обязан быть > 0 "
+                         "(records.md §10.2)");
     check_paid_source(t.basis, t.src, t.lot, "Tool");
     if (t.repair && !t.origin)
         throw CodecError("Tool: ремонт поднимает стоимость только при перевыпуске — нужен "

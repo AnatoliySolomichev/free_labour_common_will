@@ -85,16 +85,18 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
             if (seller != owner.bytes) continue;           // only one's own lot is written off
             out.writeoffs.push_back(WriteOffEntry{bh.bytes, owner, *wo});
         } else if (const auto* m = std::get_if<records::Material>(&rec)) {
-            out.asset_records[bh.bytes] = AssetRecord{owner, m->cost, m->origin,
-                                                      std::nullopt, 0.0, true};
+            out.asset_records[bh.bytes] =
+                AssetRecord{owner, m->cost, m->origin, std::nullopt, 0.0, true,
+                            m->days ? *m->days : 0u, block->timestamp_claimed};
             // Купленное — в своё производство (records.md §10.1 v3): запись заведена
             // звеном подниточки своей же покупки.
             if (m->src && m->lot && m->src->chain == owner.bytes)
                 out.assets.push_back({bh.bytes, owner, *m->src, *m->lot, m->cost,
                                       block->timestamp_claimed, false});
         } else if (const auto* tl = std::get_if<records::Tool>(&rec)) {
-            out.asset_records[bh.bytes] = AssetRecord{owner, tl->cost, tl->origin,
-                                                      tl->repair, 0.0, true};
+            out.asset_records[bh.bytes] =
+                AssetRecord{owner, tl->cost, tl->origin, tl->repair, 0.0, true,
+                            tl->days ? *tl->days : 0u, block->timestamp_claimed};
             if (tl->src && tl->lot && tl->src->chain == owner.bytes)
                 out.assets.push_back({bh.bytes, owner, *tl->src, *tl->lot, tl->cost,
                                       block->timestamp_claimed, false});
@@ -292,7 +294,10 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
             a.sound = false;                       // перевыпуск не своей записи
             continue;
         }
-        double allowed = prev->second.cost - prev->second.collected;
+        // Потолок перевыпуска — остаток прежней записи по БОЛЬШЕЙ из двух
+        // шкал на день новой (ИР-011 v5): простоявшую вещь нельзя
+        // перевыпустить по прежней цене, календарь уже съел часть.
+        double allowed = prev->second.residual(a.started_at);
         if (a.repair) {
             const auto d = deal_at.find(a.repair->hash);
             if (d != deal_at.end() && a.repair->chain == a.owner.bytes &&

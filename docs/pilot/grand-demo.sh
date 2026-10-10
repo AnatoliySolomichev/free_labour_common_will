@@ -448,6 +448,24 @@ else
         --via "$VIA" 2>&1 | sed 's/^/   /'
 fi
 say "у Ирины снова палатка — уже по остатку — и бумага Бориса на износ: ровно то, что было"
+
+hr "две шкалы износа: вещь изнашивается и работой, и временем (ИР-011 v5, records.md §10.2)"
+say "Устин завёл холодильный ларь: ресурс 5000 моточасов И срок службы 60 суток"
+CHEST=$(bcp ustin tool add "Ларь холодильный" --cost 60 --life 5000 --days 60 \
+        --note "оценка владельца: 24000руб / 400руб-ч = 60ч" --via "$VIA" | after 'tool ref: ')
+CHEST_H="${CHEST#*/}"
+if command -v faketime >/dev/null; then
+    say "прошло 30 суток, ларь стоял без дела — половина срока ушла, и это не вернуть"
+    FAKETIME_DONT_FAKE_MONOTONIC=1 faketime "$(date -u -d '+30 days' '+%Y-%m-%d %H:%M:%S')" \
+        "$BC" --data-dir "$work/ustin" tool show "${CHEST_H:0:12}" | sed 's/^/   /'
+    say "перевыпустить по прежней цене уже нельзя — календарь съел половину остатка"
+    FAKETIME_DONT_FAKE_MONOTONIC=1 faketime "$(date -u -d '+30 days' '+%Y-%m-%d %H:%M:%S')" \
+        "$BC" --data-dir "$work/ustin" tool add "Ларь холодильный" --cost 60 --life 5000 \
+        --days 60 --origin "$CHEST" --note "хочу прежнюю цену" 2>&1 | sed 's/^/   /' || true
+    say "вот он, ответ на «зачем давать вещь в работу»: простой дороже, чем износ"
+else
+    say "faketime не установлен — календарную шкалу вживую не показать"
+fi
 bcp irina stock --via "$VIA" | sed 's/^/   /'
 
 hr "купленное — в своё производство: Анна берёт купленную муку в выпечку (records.md §10.1)"
@@ -731,6 +749,14 @@ else echo "   ✗ поручительство свидетеля не видн�
 if bcp dmitry seal add "$W_stools" --chain "${CID[dmitry]}" >/dev/null 2>&1; then
     echo "   ✗ цепь заверила собственную запись"; fail=1
 else echo "   ✓ себя не заверяют (records.md §12.11)"; fi
+# простой съедает потолок перевыпуска: две шкалы износа (ИР-011 v5)
+if command -v faketime >/dev/null; then
+    if FAKETIME_DONT_FAKE_MONOTONIC=1 faketime "$(date -u -d '+30 days' '+%Y-%m-%d %H:%M:%S')" \
+         "$BC" --data-dir "$work/ustin" tool add "Ларь холодильный" --cost 60 --life 5000 \
+         --days 60 --origin "$CHEST" --note "прежняя цена" >/dev/null 2>&1; then
+        echo "   ✗ перевыпуск по прежней цене прошёл после 30 суток простоя"; fail=1
+    else echo "   ✓ простой съедает потолок перевыпуска (records.md §10.2 v5)"; fi
+fi
 # переоценка печи ВВЕРХ обязана отклониться (перевыпуск только вниз)
 if bcp anna tool add "Печь подовая" --cost 400 --life 8000 --origin "$TOOL" --note "хочу дороже" >/dev/null 2>&1; then
     echo "   ✗ переоценка вверх прошла, а должна была отклониться"; fail=1
