@@ -55,6 +55,10 @@ ResourceSplit ResourceView::build(const AggregatorStorage& storage,
     //    с одним переносом из неё (records.md §9.4 v8). Остальной перенос —
     //    расход ресурса самим держателем в своей продукции.
     std::map<RefHash, double> sale_hours;      // работа-продажа → моточасов
+    // Единица партии бывает не часом: календарь продаётся СМЕНАМИ (ИР-013), и
+    // одна смена несёт used/qty моточасов. Масштаб нужен, чтобы расход
+    // дольщика считался в часах ресурса, а не в сменах.
+    std::map<RefHash, double> hours_per_unit;
     for (const auto& [wh, w] : deals.works) {
         if (!(w.worker == chain)) continue;
         double used_here = 0;
@@ -65,8 +69,13 @@ ResourceSplit ResourceView::build(const AggregatorStorage& storage,
                 touches = true;
             }
         if (!touches) continue;
-        if (records::is_machine_hours(w.record)) sale_hours[wh] = used_here;
-        else                                     out.keeper_used += used_here;
+        if (records::is_machine_hours(w.record)) {
+            sale_hours[wh] = used_here;
+            const double qty = w.record.outputs.empty() ? 0.0 : w.record.outputs[0].qty;
+            hours_per_unit[wh] = qty > 0.0 ? used_here / qty : 1.0;
+        } else {
+            out.keeper_used += used_here;
+        }
     }
 
     // 3. Кто их купил. Сделка — Transfer с приёмкой внутри; платит покупатель,
@@ -78,6 +87,7 @@ ResourceSplit ResourceView::build(const AggregatorStorage& storage,
 
     std::map<UserId, ResourceHolder>       by_chain;
     std::map<UserId, std::set<RefHash>>   deals_of;    // дольщик → все его покупки
+    std::map<RefHash, double>             deal_scale;  // покупка → моточасов в единице
     std::map<RefHash, double>             sold_share;  // работа-продажа → доля оплаченного
     for (const auto& d : deals.all) {
         const auto s = sale_hours.find(d.accept().work.hash);
@@ -101,6 +111,8 @@ ResourceSplit ResourceView::build(const AggregatorStorage& storage,
         h.paid  += d.accept().carried_units ? *d.accept().carried_units : 0.0;
         h.deal   = d.hash;              // для показа — последняя
         deals_of[d.payer].insert(d.hash);
+        const auto hp = hours_per_unit.find(s->first);
+        deal_scale[d.hash] = hp == hours_per_unit.end() ? 1.0 : hp->second;
         out.sold_hours   += hours;
         sold_share[s->first] += share;
     }
@@ -115,20 +127,21 @@ ResourceSplit ResourceView::build(const AggregatorStorage& storage,
     // 4. Сколько дольщик уже истратил. Купленные часы он заводит материалом
     //    своей покупкой (records.md §10.1 v3) и тратит нитью переноса — значит
     //    израсходованное читается прямо по звеньям той записи.
-    std::map<RefHash, UserId> hour_assets;             // запись часов → чья
+    std::map<RefHash, std::pair<UserId, double>> hour_assets;  // запись → чья и масштаб
     for (const auto& a : deals.assets) {
         // Покупок у дольщика может быть несколько — и смена, и запас часов;
         // материал ищем по ВСЕМ его покупкам этой вещи.
         const auto it = deals_of.find(a.owner);
         if (it == deals_of.end() || !it->second.count(a.src.hash)) continue;
-        hour_assets[a.hash] = a.owner;
+        const auto sc = deal_scale.find(a.src.hash);
+        hour_assets[a.hash] = {a.owner, sc == deal_scale.end() ? 1.0 : sc->second};
     }
     for (const auto& [wh, w] : deals.works) {
         (void)wh;
         for (const auto& ce : w.record.carry) {
             const auto a = hour_assets.find(ce.src.hash);
-            if (a == hour_assets.end() || !(a->second == w.worker)) continue;
-            by_chain[w.worker].spent += ce.used;
+            if (a == hour_assets.end() || !(a->second.first == w.worker)) continue;
+            by_chain[w.worker].spent += ce.used * a->second.second;
         }
     }
 

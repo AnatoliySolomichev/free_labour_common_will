@@ -333,6 +333,17 @@ static std::string record_summary(const Record& rec) {
             ss << "[Reaction]    target:"
                << short_hex(r.target.chain) << "/" << short_hex(r.target.hash)
                << "  value:" << (v >= 0 ? "+" : "") << v;
+        } else if constexpr (std::is_same_v<T, records::Attest>) {
+            // Пломба: «я видел это состояние» (blockchain.md §7.4 v2).
+            ss << "[Attest]      "
+               << (r.mode == "open" ? "открытая" : "слепая") << "  "
+               << short_hex(r.target.chain) << "/" << short_hex(r.target.hash);
+            if (!r.note.empty()) ss << "  «" << r.note << "»";
+        } else if constexpr (std::is_same_v<T, records::Consent>) {
+            // Согласие или отказ (ИР-012, records.md §8.10).
+            ss << "[Consent]     " << (r.agreed ? "согласен" : "ПРОТИВ") << "  "
+               << short_hex(r.target.chain) << "/" << short_hex(r.target.hash);
+            if (!r.note.empty()) ss << "  «" << r.note << "»";
         } else if constexpr (std::is_same_v<T, WorkRecord>) {
             ss << "[WorkRecord]  \"" << r.action << "\"  " << r.hours << "h";
             if (!r.title.empty()) ss << "  [" << r.title << "]";
@@ -3354,13 +3365,18 @@ static int cmd_material_add(const fs::path& data_dir, int argc, char** argv) {
     const auto cost_s = flag_val(argc, argv, "--cost");
     const auto qty_s  = flag_val(argc, argv, "--qty");
     const auto paid_s = flag_val(argc, argv, "--paid");
+    // Номерная покупка (смена календаря, ИР-013) берётся по номеру, а не по
+    // количеству: --units вместо --qty.
+    const auto units_in = split_list(flag_val(argc, argv, "--units"));
     if (pos.size() < 3 || (paid_s.empty() && (unit_s.empty() || cost_s.empty() || qty_s.empty()))
-        || (!paid_s.empty() && qty_s.empty())) {
+        || (!paid_s.empty() && qty_s.empty() && units_in.empty())) {
         std::cerr <<
             "Usage: bc material add ИМЯ --unit ЕД --cost ТРУДОЧАСЫ --qty РАЗМЕР\n"
             "   [--desc TEXT] [--note TEXT]\n"
             "   [--paid ПОКУПКА]      взять из своей покупки: --paid ССЫЛКА --qty КОЛ\n"
-            "                         [--out N] — стоимость и размер из самой сделки\n"
+            "                         (номерную — --units НОМЕР,…: так берут смену\n"
+            "                         календаря, ИР-013); [--out N] — стоимость и\n"
+            "                         размер из самой сделки\n"
             "   [--origin MAT_REF]    перевыпуск (cost ≤ остатка предыдущей)\n"
             "   [--leaf L] [--via URL]\n"
             "Партия расходуется в работе флагом: bc work log ... "
@@ -3387,9 +3403,10 @@ static int cmd_material_add(const fs::path& data_dir, int argc, char** argv) {
             throw std::runtime_error("--cost с --paid не задают: стоимость — доля уплаченного "
                                      "за взятое (records.md §10.1)");
         m.src = parse_ref(paid_s);
-        const auto t = take_into_production(ctx, flag_val(argc, argv, "--via"), *m.src,
-                                            argc, argv, std::stod(qty_s), {},
-                                            static_cast<int64_t>(std::time(nullptr)));
+        const auto t = take_into_production(
+            ctx, flag_val(argc, argv, "--via"), *m.src, argc, argv,
+            qty_s.empty() ? std::optional<double>{} : std::optional<double>{std::stod(qty_s)},
+            units_in, static_cast<int64_t>(std::time(nullptr)));
         m.lot  = t.lot;
         m.cost = t.cost;
         m.qty  = t.qty;

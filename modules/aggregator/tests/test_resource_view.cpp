@@ -392,3 +392,84 @@ TEST_F(ResourceViewTest, HolderWithTwoPurchasesIsCountedWhole) {
     EXPECT_NEAR(split.holders[0].spent, 400.0, 1e-9);   // по первой покупке
     EXPECT_NEAR(split.holders[0].left, 1100.0, 1e-9);
 }
+
+// Купленная СМЕНА заводится в производство как «1 смена», а не как 8 моточасов
+// — значит расход надо считать в масштабе календаря, иначе витрина показала бы
+// «истрачено 1» вместо «истрачено 500» (ИР-013).
+TEST_F(ResourceViewTest, SpentShiftCountsInResourceHours) {
+    const Block tool = oven();
+
+    records::WorkRecord cal{};                  // 4 смены по 500 моточасов
+    cal.action   = "календарь смен";
+    cal.hours    = 0.0;
+    cal.start_ts = kDay * 2;
+    records::ResourceQty out{};
+    out.resource = "смены";
+    out.qty      = 4.0;
+    out.unit     = "смена";
+    out.units    = {"пн", "вт", "ср", "чт"};
+    cal.outputs.push_back(out);
+    records::CarryEntry ce{};
+    ce.src     = ref_to(anna_, tool);
+    ce.used    = 2000.0;
+    ce.carried = 75.0;
+    ce.seq     = 0;
+    ce.after   = 75.0;
+    cal.carry.push_back(ce);
+    const Block cw = add(anna_, cal, kDay * 2);
+
+    records::Release rl{};
+    rl.work      = ref_to(anna_, cw);
+    rl.to        = boris_.bytes;
+    rl.timestamp = kDay * 2;
+    rl.expires   = kDay * 2 + 10'000;
+    records::LotLink lot{};
+    lot.out = 0; lot.qty = 1.0; lot.seq = 0; lot.after = 1.0; lot.units = {"пн"};
+    rl.lot  = lot;
+    const Block rb = add(anna_, rl, kDay * 2);
+
+    records::Acceptance a{};
+    a.work          = ref_to(anna_, cw);
+    a.release       = ref_to(anna_, rb);
+    a.carried_units = 75.0 / 4.0;
+    records::Transfer t{};
+    t.from      = boris_.bytes;
+    t.to        = anna_.bytes;
+    t.origins   = { {boris_.bytes, 75.0 / 4.0} };
+    t.accept    = a;
+    t.timestamp = kDay * 2 + 100;
+    const Block deal = add(boris_, t, kDay * 2 + 100);
+
+    // Борис заводит смену материалом (1 смена за 18.75ч) и тратит её в работу.
+    records::Material m{};
+    m.name  = "смена печи";
+    m.unit  = "смена";
+    m.cost  = 75.0 / 4.0;
+    m.qty   = 1.0;
+    m.basis = "paid";
+    m.src   = ref_to(boris_, deal);
+    records::LotLink ml{};
+    ml.out = 0; ml.qty = 1.0; ml.seq = 0; ml.after = 1.0; ml.units = {"пн"};
+    m.lot  = ml;
+    const Block mb = add(boris_, m, kDay * 3);
+
+    records::WorkRecord bake{};
+    bake.action   = "выпечка в свою смену";
+    bake.hours    = 8.0;
+    bake.start_ts = kDay * 3;
+    records::CarryEntry bce{};
+    bce.src     = ref_to(boris_, mb);
+    bce.used    = 1.0;                          // одна смена
+    bce.carried = 75.0 / 4.0;
+    bce.seq     = 0;
+    bce.after   = bce.carried;
+    bake.carry.push_back(bce);
+    add(boris_, bake, kDay * 3 + 30'000);
+
+    const auto split = ResourceView::build(*storage_, anna_,
+                                           Crypto::hash_block(tool).bytes, kDay * 4);
+    ASSERT_EQ(split.holders.size(), 1u);
+    EXPECT_NEAR(split.holders[0].hours, 500.0, 1e-9);   // смена — это 500 моточасов
+    EXPECT_NEAR(split.holders[0].spent, 500.0, 1e-9);   // и истрачена она целиком
+    EXPECT_NEAR(split.holders[0].left, 0.0, 1e-9);
+}
