@@ -156,3 +156,45 @@ TEST(CreditHistory, UnorderedInputIsSorted) {
     EXPECT_DOUBLE_EQ(h.max_repaid, 4);
     EXPECT_FALSE(h.gaps);
 }
+
+// ── Сторно: оферта, которую продавец отверг или пропустил (records.md §11.5 v2) ──
+
+namespace {
+
+ObservedLink reversal(uint64_t seq, double units, double debt_after, uint8_t reverses) {
+    auto o = redeem(seq, units, debt_after);
+    o.is_reversal = true;
+    o.reverses    = hash_of(reverses);
+    return o;
+}
+
+} // namespace
+
+// Отвергнутая оферта не долг и не погашение: иначе отказ друга выдавался бы за
+// возвращённый долг — «доверили 1000 — вернул 1000».
+TEST(CreditHistory, AReversedOfferIsNeitherBorrowingNorRepayment) {
+    const auto h = credit_history({
+        issue(0, 10, -10),
+        issue(1, 1000, -1010, 0, 0xB0),       // оферта, которую отвергнут
+        issue(2, 5, -1015),
+        reversal(3, 1000, -15, 0xB0),         // сторно: бумага не родилась
+    });
+    EXPECT_DOUBLE_EQ(h.issued, 15);
+    EXPECT_DOUBLE_EQ(h.redeemed, 0);
+    EXPECT_DOUBLE_EQ(h.reversed, 1000);
+    EXPECT_EQ(h.reversals, 1u);
+    EXPECT_DOUBLE_EQ(h.max_debt, 15);
+    EXPECT_DOUBLE_EQ(h.max_repaid, 0);        // ничего не возвращено
+    EXPECT_DOUBLE_EQ(h.outstanding, 15);
+    EXPECT_FALSE(h.thread_inconsistent);      // нить сходится вместе со сторно
+    EXPECT_TRUE(h.growth_without_redemption); // две настоящие эмиссии, погашений нет
+}
+
+// Без звена сторно отвергнутая оферта неотличима от долга — и так и считается:
+// объявленный долг её включает.
+TEST(CreditHistory, WithoutTheReversalTheOfferStaysADebt) {
+    const auto h = credit_history({issue(0, 10, -10), issue(1, 1000, -1010, 0, 0xB0)});
+    EXPECT_DOUBLE_EQ(h.issued, 1010);
+    EXPECT_DOUBLE_EQ(h.max_debt, 1010);
+    EXPECT_FALSE(h.thread_inconsistent);
+}

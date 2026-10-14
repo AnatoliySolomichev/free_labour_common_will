@@ -59,6 +59,22 @@ struct ChainFootprint {
     std::size_t vouched_works     = 0;           // сколько таких работ
     std::size_t counterparties    = 0;           // distinct chains it exchanged with
 
+    // ── Paper she did not have (economy.md §4.4) ─────────────────────────────
+    // Deals and moves of hers that spend someone else's paper no bill covers —
+    // past what a bill holds, off its thread, from the wrong purse, from a block
+    // that never paid her. Such a deal moves nothing, but she signed it, and it
+    // stays visible here. A spend that fell through only because its source fell
+    // through upstream is not counted against her.
+    std::size_t unbacked_deals = 0;
+    double      unbacked_units = 0;              // hours of such paper she tried to spend
+    // A reversal of an own deal its seller in fact accepted: a debt declared
+    // away — two signed records contradict each other (records.md §11.5 v2).
+    std::size_t false_reversals = 0;
+    // Holders of HER paper with a negative balance. With every spend checked
+    // against its bill this must stay empty; it is shown, not hidden, so that
+    // anything that ever slips through is seen at once.
+    std::vector<PaperHolder> overdrawn;
+
     // ── Layer 3: structural screening — catches LAZY farms only ─────────────
     // Turnover inside the subject's circle (everything within two exchange
     // hops — ИР-010's reachability) vs. turnover crossing out of it. A closed

@@ -270,7 +270,7 @@ deal(){
     [[ -z "${SAMPLE[$sk]:-}" ]] && { SAMPLE[$sk]="$acc"; SHARES[$sk]="$shares"; }
     carried="$(sed -n 's/.*перенос средств производства: \([0-9.e-]*\)ч.*/\1/p' "$work/acc.err" | head -1)"
     # Приёмка и оплата — одна запись (records.md §9.5, ИР-023): bc accept платит сам.
-    ftbc "$w" transfer recv "$acc" --via "$VIA" >/dev/null 2>&1
+    ftbc "$w" transfer recv "$acc" --via "$VIA" --yes >/dev/null 2>&1
     ((ok++)); hours_total=$(( hours_total + h ))
     printf '%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$M" "$c" "$w" "$kd" "$sk" "$h" \
         "$rate" "$mult" "$tag" "$units" "${carried:-0}" "${shares% }" >> "$OUT/deals.tsv"

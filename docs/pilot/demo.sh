@@ -123,6 +123,9 @@ ACC="$(printf '%s\n' "$pay_out" | after 'acceptance ref: ')"
 echo "$pay_out" | sed 's/^/   /'
 say "разбивка: физический труд 2.4 + знание 2.1 + темп 1.5 = 6.0ч"
 
+hr "Анна проверяет оплату и принимает её — до этого сделка лишь оферта (economy.md §4.4)"
+"$BC" --data-dir "$work/anna" transfer recv "$ACC" --via "$VIA" --yes | sed 's/^/   /'
+
 # ── Взгляд на экономический след Анны ────────────────────────────────────────
 hr "Вера смотрит на след Анны (bc trust): слой 1 + слои 2–3"
 "$BC" --data-dir "$work/vera" trust "$ANNA" --via "$VIA"

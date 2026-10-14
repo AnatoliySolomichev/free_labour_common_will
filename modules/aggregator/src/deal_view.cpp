@@ -156,8 +156,12 @@ DealView DealView::build(const AggregatorStorage& storage) {
                 revokes.emplace_back(owner, pr->pledge.hash);
         } else if (const auto* t = std::get_if<records::Transfer>(&rec)) {
             if (t->from != owner.bytes) continue;       // spoofed sender
-            if (t->accept && !deals.moves_hours(bh.bytes)) {
-                ++unaddressed_of_work[t->accept->work.hash];   // void: counted, never shown
+            if (!t->accept) continue;                   // a move between own branches
+            if (!deals.moves_hours(bh.bytes)) {
+                // Void: counted, never shown. An offer still waiting, refused or
+                // lapsed is not «unaddressed» — it simply has not happened.
+                if (deals.recognition.unaddressed.count(bh.bytes))
+                    ++unaddressed_of_work[t->accept->work.hash];
                 continue;
             }
             double total = 0;

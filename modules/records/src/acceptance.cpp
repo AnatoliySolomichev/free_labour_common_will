@@ -32,6 +32,7 @@ DealRecognition recognize_deals(const std::vector<DealClaim>& claims) {
         bool whole = false, portions = false;
         for (const auto& [hash, c] : deals) {
             if (!c->addressed) { out.unaddressed.insert(hash); continue; }
+            if (!c->settled)   { out.unsettled.insert(hash);   continue; }
             (c->portion ? portions : whole) = true;
             by_result[c->portion ? *c->portion : work].push_back(c);
         }

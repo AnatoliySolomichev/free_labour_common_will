@@ -47,6 +47,7 @@ Block make_transfer(const UserId& from, const UserId& to, double units,
     t.to      = to.bytes;
     t.origins = { {from.bytes, units} };
     t.accept  = a;
+    t.until   = 1;   // v6: срок ответа продавца
     return make_block(from, index, BlockType::DATA, records::Codec::encode(t));
 }
 

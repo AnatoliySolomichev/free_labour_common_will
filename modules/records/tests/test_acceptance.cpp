@@ -200,3 +200,16 @@ TEST(DealRecognition, SettledExactly) {
     EXPECT_FALSE(settled_exactly(7.0, 6.0));          // переплата — тоже не «=»
     EXPECT_FALSE(settled_exactly(0.0, 0.0));          // из рук в руки ничего не ушло
 }
+
+// v6 (economy.md §4.4): адресованная сделка, которую продавец ещё не принял,
+// отверг или пропустил, ничего не двигает — и не мешает той, что её заменит.
+TEST(DealRecognition, AnUnsettledOfferStandsInNobodysWay) {
+    DealClaim refused = claim(0x01, kWork, kVera, 1000);
+    refused.settled = false;
+    const auto r = recognize_deals({refused, claim(0x02, kWork, kVera, 2000)});
+    EXPECT_EQ(r.unsettled, (Hashes{h(0x01)}));
+    EXPECT_EQ(r.recognized, (Hashes{h(0x02)}));   // не «повтор»: первая не состоялась
+    EXPECT_TRUE(r.repeated.empty());
+    EXPECT_FALSE(r.moves_hours(h(0x01)));
+    EXPECT_TRUE(r.moves_hours(h(0x02)));
+}

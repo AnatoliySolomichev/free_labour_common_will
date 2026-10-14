@@ -50,6 +50,7 @@ enum class RecordType : uint8_t {
     // 0x78 — DealProfile, снята: денег не несла, читателя не осталось
     //        (records.md §11.10); номер не переиспользуется.
     AxisDef         = 0x79,
+    DealReply       = 0x7A,   // ответ продавца на сделку (records.md §11.13)
 };
 
 // ── Cross-chain reference (records.md §4) ────────────────────────────────────
@@ -546,12 +547,21 @@ struct Tool {
 
 // Named portion of labor-hours: `units` hours backed by the debt of `issuer`
 // (records.md §12.7). Portions of different issuers never mix.
+//
+// v6 (economy.md §4.4, records.md §11.1): paper someone else issued is spent from
+// a BILL — the block it came to the payer in: a deal that paid him, or his own
+// move between branches. `src` names that block, `prev` the payer's previous
+// spend of the same bill (absent for the first), so every hour traces back hop
+// by hop to the self-issue it was born in. A self-issue names neither: that
+// paper is born in this very record.
 struct OriginQty {
     std::array<uint8_t, 32> issuer;  // debtor chain (UserId)
     double                  units;
+    std::optional<Ref>      src  = std::nullopt;   // v6: the bill — where this paper came to the payer
+    std::optional<Ref>      prev = std::nullopt;   // v6: the payer's previous spend of that bill
 
     bool operator==(const OriginQty& o) const noexcept {
-        return issuer == o.issuer && units == o.units;
+        return issuer == o.issuer && units == o.units && src == o.src && prev == o.prev;
     }
 };
 
@@ -585,6 +595,10 @@ struct EmissionLink {
 // even be written. A transfer without `accept` may only move own paper between
 // own branches (economy.md §5а). The codec refuses anything else; the old
 // `reason` (key 5) is retired. `settles` still names the Pledge a deal closes (v4).
+//
+// v6 (2026-10-14, economy.md §4.4): a deal is an OFFER until the seller answers
+// it with a DealReply by `until`; hours move only on his acceptance. Every
+// portion of someone else's paper names its bill (OriginQty::src/prev).
 struct Transfer {
     static constexpr RecordType TYPE = RecordType::Transfer;
 
@@ -597,19 +611,41 @@ struct Transfer {
     int64_t                   timestamp; // Unix timestamp UTC
     // Present iff origins contain a self-issued portion (issuer == from).
     std::optional<EmissionLink> emission;
+    // v6: the seller answers by this time, or the deal did not happen. Required
+    // on a deal, absent on a move between own branches — nobody to answer.
+    std::optional<int64_t>    until;
 };
 
 // Issuer's receipt for own paper returned by a payer's Transfer — the "+" link
 // of the emission thread (records.md §11.5, economy.md §4.3): the debt shrinks
 // by `units`. Written by the issuer upon receiving own paper; a chain's credit
 // history (max closed debt, repayment speed) reads straight off the thread.
+//
+// v2 (economy.md §4.4): a receipt naming the issuer's OWN deal is a reversal —
+// the seller refused that deal or let its term pass, so the paper it
+// self-issued was never born. It closes the "−" link that deal opened; it is
+// not a repayment and no credit history counts it as one.
 struct Redemption {
     static constexpr RecordType TYPE = RecordType::Redemption;
 
-    Ref          transfer;   // the payer's Transfer that returned the paper
+    Ref          transfer;   // the payer's Transfer that returned the paper — or own deal, reversed
     double       units;      // own paper annihilated
     EmissionLink link;       // mandatory: every redemption is threaded
     int64_t      timestamp;  // Unix timestamp UTC
+};
+
+// The seller's answer to a deal (records.md §11.13, economy.md §4.4): the
+// buyer's signed deal is an offer, and hours move only when the seller accepts
+// it by its term. Written in the seller's chain, in the very branch the deal
+// pays into — the purse being paid answers for itself. The first answer there is
+// final; an answer past the term does not count.
+struct DealReply {
+    static constexpr RecordType TYPE = RecordType::DealReply;
+
+    Ref         deal;               // the buyer's Transfer carrying the acceptance
+    bool        accepted = false;   // true — принял, false — отказ
+    std::string note;               // why; may be empty
+    int64_t     timestamp = 0;      // Unix timestamp UTC
 };
 
 // Public promise to pay (part of) the cost of future work (records.md §11.3).
@@ -766,7 +802,8 @@ using Record = std::variant<
     PledgeRevoke,
     Redemption,
     WorkCloud,
-    AxisDef
+    AxisDef,
+    DealReply
 >;
 
 } // namespace records

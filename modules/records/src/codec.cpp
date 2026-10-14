@@ -366,6 +366,26 @@ void w_acceptance(Buf& out, const Acceptance& a) {
 // checked on write and on read, so a record that breaks it can be neither
 // signed with this codec nor taken in from anyone else's.
 void check_transfer(const Transfer& t) {
+    // v6 (economy.md §4.4): every portion of someone else's paper names its bill —
+    // the block it came to the payer in — and one bill pays at most one portion.
+    // A self-issue names none: that paper is born in this very record.
+    std::set<std::tuple<std::array<uint8_t, 32>, std::array<uint8_t, 32>,
+                        std::array<uint8_t, 32>>> bills;
+    for (const auto& o : t.origins) {
+        if (!(o.units > 0.0) || !std::isfinite(o.units))
+            throw CodecError("Transfer: порция — положительное число часов");
+        if (o.issuer == t.from) {
+            if (o.src || o.prev)
+                throw CodecError("Transfer: своя бумага рождается в этой записи — векселя-"
+                                 "источника у самоэмиссии нет (economy.md §4.4)");
+            continue;
+        }
+        if (!o.src)
+            throw CodecError("Transfer: чужая бумага называет свой вексель — блок, в "
+                             "котором она пришла к плательщику (economy.md §4.4)");
+        if (!bills.insert({o.issuer, o.src->chain, o.src->hash}).second)
+            throw CodecError("Transfer: один вексель — одна порция");
+    }
     if (!t.accept) {
         // Without an acceptance only own paper may move, between own branches
         // (economy.md §5а): hours never go to another chain without accepted
@@ -376,11 +396,20 @@ void check_transfer(const Transfer& t) {
         for (const auto& o : t.origins)
             if (o.issuer == t.from)
                 throw CodecError("Transfer: между своими ветками своя бумага не ходит");
+        if (t.until)
+            throw CodecError("Transfer: у перемещения между своими ветками нет срока "
+                             "ответа — отвечать некому");
         return;
     }
     const Acceptance& a = *t.accept;
     if (t.to == t.from)
         throw CodecError("Transfer: самоприёмка ничего не заверяет (records.md §14.4)");
+    // v6: the deal is an offer the seller answers by its term (records.md §11.13).
+    if (!t.until)
+        throw CodecError("Transfer: у сделки обязан быть срок ответа продавца "
+                         "(records.md §11.1 v6)");
+    if (*t.until <= t.timestamp)
+        throw CodecError("Transfer: срок ответа продавца уже прошёл");
     if (a.release && a.release->chain != t.to)
         throw CodecError("Transfer: отпуск лежит в цепи продавца — to ≠ цепь отпуска "
                          "(records.md §9.8)");
@@ -587,16 +616,20 @@ void enc_transfer(Buf& out, const Transfer& t) {
     // so deterministic encoding (RFC 8949 §4.2.1) holds for every combination of
     // the optional tail: emission link (7–9), settled pledge (10), accept (11).
     check_transfer(t);
-    w_map(out, 6 + (t.emission ? 3 : 0) + (t.settles ? 1 : 0) + (t.accept ? 1 : 0));
+    w_map(out, 6 + (t.emission ? 3 : 0) + (t.settles ? 1 : 0) + (t.accept ? 1 : 0)
+                 + (t.until ? 1 : 0));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Transfer));
     w_uint(out, 1); w_fixed(out, t.from);
     w_uint(out, 2); w_fixed(out, t.to);
     w_uint(out, 3); w_uint(out, t.to_node);
     w_uint(out, 4); w_arr(out, t.origins.size());
     for (const auto& o : t.origins) {
-        w_map(out, 2);
+        // v6: the bill (2) and the previous spend of it (3), each only when set.
+        w_map(out, 2 + (o.src ? 1 : 0) + (o.prev ? 1 : 0));
         w_uint(out, 0); w_fixed(out, o.issuer);
         w_uint(out, 1); w_float64(out, o.units);
+        if (o.src)  { w_uint(out, 2); w_ref(out, *o.src); }
+        if (o.prev) { w_uint(out, 3); w_ref(out, *o.prev); }
     }
     w_uint(out, 6); w_int64(out, t.timestamp);
     if (t.emission) {
@@ -607,6 +640,24 @@ void enc_transfer(Buf& out, const Transfer& t) {
     }
     if (t.settles) { w_uint(out, 10); w_ref(out, *t.settles); }
     if (t.accept)  { w_uint(out, 11); w_acceptance(out, *t.accept); }
+    if (t.until)   { w_uint(out, 12); w_int64(out, *t.until); }       // v6
+}
+
+// The seller's answer to a deal (records.md §11.13).
+void check_deal_reply(const DealReply& d) {
+    static const std::array<uint8_t, 32> zero{};
+    if (d.deal.chain == zero || d.deal.hash == zero)
+        throw CodecError("DealReply: отвечать не на что — цепь и хеш сделки обязательны");
+}
+
+void enc_deal_reply(Buf& out, const DealReply& d) {
+    check_deal_reply(d);
+    w_map(out, 5);
+    w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::DealReply));
+    w_uint(out, 1); w_ref(out, d.deal);
+    w_uint(out, 2); w_uint(out, d.accepted ? 1u : 0u);
+    w_uint(out, 3); w_text(out, d.note);
+    w_uint(out, 4); w_int64(out, d.timestamp);
 }
 
 void enc_redemption(Buf& out, const Redemption& rd) {
@@ -1235,10 +1286,11 @@ Tool dec_tool_fields(CborReader& r, uint64_t field_count) {
 
 Transfer dec_transfer_fields(CborReader& r, uint64_t field_count) {
     // v5 (ИР-023): 6 required fields, then an optional ascending tail — emission
-    // link (7–9, all three), settled pledge (10), accept (11). Key 5 — the
-    // retired `reason` — is refused like any unknown key.
-    if (field_count < 6 || field_count > 11)
-        throw CodecError("Transfer: expected 6..11 fields");
+    // link (7–9, all three), settled pledge (10), accept (11), and since v6 the
+    // seller's term (12). Key 5 — the retired `reason` — is refused like any
+    // unknown key.
+    if (field_count < 6 || field_count > 12)
+        throw CodecError("Transfer: expected 6..12 fields");
     Transfer t{};
     expect_key(r, 1); r.r_fixed(t.from);
     expect_key(r, 2); r.r_fixed(t.to);
@@ -1253,10 +1305,20 @@ Transfer dec_transfer_fields(CborReader& r, uint64_t field_count) {
         const uint64_t n = r.r_arr();
         t.origins.reserve(static_cast<size_t>(n));
         for (uint64_t i = 0; i < n; ++i) {
-            if (r.r_map() != 2) throw CodecError("OriginQty: expected 2 fields");
+            const uint64_t m = r.r_map();
+            if (m < 2 || m > 4) throw CodecError("OriginQty: expected 2..4 fields");
             OriginQty o{};
             expect_key(r, 0); r.r_fixed(o.issuer);
             expect_key(r, 1); o.units = r.r_float64();
+            uint64_t last_key = 1;   // v6: bill (2), previous spend (3), ascending
+            for (uint64_t k = 2; k < m; ++k) {
+                const uint64_t key = r.r_uint();
+                if (key <= last_key) throw CodecError("OriginQty: keys out of order");
+                if (key == 2)      o.src  = dec_ref(r);
+                else if (key == 3) o.prev = dec_ref(r);
+                else throw CodecError("OriginQty: unknown field key");
+                last_key = key;
+            }
             t.origins.push_back(o);
         }
     }
@@ -1282,12 +1344,27 @@ Transfer dec_transfer_fields(CborReader& r, uint64_t field_count) {
             t.accept = dec_acceptance(r);
             read += 1;
             last  = 11;
+        } else if (key == 12) {
+            t.until = r.r_int();
+            read += 1;
+            last  = 12;
         } else {
             throw CodecError("Transfer: unknown field key");
         }
     }
     check_transfer(t);
     return t;
+}
+
+DealReply dec_deal_reply_fields(CborReader& r, uint64_t field_count) {
+    if (field_count != 5) throw CodecError("DealReply: expected 5 fields");
+    DealReply d{};
+    expect_key(r, 1); d.deal      = dec_ref(r);
+    expect_key(r, 2); d.accepted  = r.r_uint() != 0;
+    expect_key(r, 3); d.note      = r.r_text();
+    expect_key(r, 4); d.timestamp = r.r_int();
+    check_deal_reply(d);
+    return d;
 }
 
 LotLink dec_lot_link(CborReader& r) {
@@ -1512,6 +1589,7 @@ std::vector<uint8_t> Codec::encode(const Record& rec) {
         else if constexpr (std::is_same_v<T, Redemption>)  enc_redemption(out, r);
         else if constexpr (std::is_same_v<T, WorkCloud>)      enc_work_cloud(out, r);
         else if constexpr (std::is_same_v<T, AxisDef>)        enc_axis_def(out, r);
+        else if constexpr (std::is_same_v<T, DealReply>)      enc_deal_reply(out, r);
     }, rec);
     return out;
 }
@@ -1549,6 +1627,7 @@ Record Codec::decode(const uint8_t* data, size_t len) {
         case RecordType::WorkCloud:  return dec_work_cloud_fields(r, field_count);
         case RecordType::AxisDef:
             return dec_axis_def_fields(r, field_count);
+        case RecordType::DealReply:  return dec_deal_reply_fields(r, field_count);
         default:
             throw CodecError("CBOR: unknown record type discriminator");
     }

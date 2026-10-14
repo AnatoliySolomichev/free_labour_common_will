@@ -1,6 +1,7 @@
 #include "aggregator/cloud_view.h"
 #include <records/goods_thread.h>
 #include "labor_thread_support.h"
+#include "settlement_support.h"
 
 #include <blockchain/crypto.h>
 #include <blockchain/serializer.h>
@@ -107,7 +108,21 @@ protected:
         std::filesystem::remove_all(db_path_);
     }
 
+    // Через расчёт (economy.md §4.4): срок ответа, векселя и ответ продавца —
+    // как у клиентов (settlement_support.h).
     Block add(const UserId& owner, const records::Record& written) {
+        const records::Record rec = settle_.stamp(owner.bytes, written);
+        const Block b = add_one(owner, rec);
+        if (const auto r = settle_.placed(owner.bytes, rec, Crypto::hash_block(b).bytes)) {
+            UserId seller{};
+            seller.bytes = r->first;
+            add_one(seller, r->second);
+        }
+        return b;
+    }
+    Settlement settle_;
+
+    Block add_one(const UserId& owner, const records::Record& written) {
         const records::Record rec = threads_.stamp(owner.bytes, written);
         Block b{};
         b.address           = {owner, 0x7FFF'FFFFu, next_index_++};

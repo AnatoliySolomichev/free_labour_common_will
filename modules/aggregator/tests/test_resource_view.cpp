@@ -10,6 +10,8 @@
 #include <records/codec.h>
 #include <records/goods_thread.h>
 
+#include "settlement_support.h"
+
 #include <gtest/gtest.h>
 #include <filesystem>
 
@@ -65,7 +67,21 @@ protected:
         std::filesystem::remove_all(db_);
     }
 
-    Block add(const UserId& owner, const records::Record& rec, int64_t ts) {
+    // Через расчёт (economy.md §4.4): срок ответа, векселя и ответ продавца —
+    // как у клиентов (settlement_support.h).
+    Block add(const UserId& owner, const records::Record& written, int64_t ts) {
+        const records::Record rec = settle_.stamp(owner.bytes, written);
+        const Block b = add_one(owner, rec, ts);
+        if (const auto r = settle_.placed(owner.bytes, rec, Crypto::hash_block(b).bytes)) {
+            UserId seller{};
+            seller.bytes = r->first;
+            add_one(seller, r->second, ts);
+        }
+        return b;
+    }
+    Settlement settle_;
+
+    Block add_one(const UserId& owner, const records::Record& rec, int64_t ts) {
         const Block b = make_block(owner, next_++, rec, ts);
         EXPECT_TRUE(storage_->add_block(b));
         return b;

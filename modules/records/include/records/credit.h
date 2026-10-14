@@ -15,18 +15,26 @@ namespace records {
 
 // One emission-thread link as seen in a block of the subject's chain:
 // a self-issuing Transfer ("−", hours borrowed) or a Redemption ("+").
+// A Redemption naming the subject's own deal is a reversal (records.md §11.5
+// v2): that deal was refused or lapsed, its self-issue was never born — the
+// pair is no borrowing and no repayment, and the debt curve skips both.
 struct ObservedLink {
     EmissionLink            link;
     double                  units = 0;      // hours self-issued or redeemed
     bool                    is_redemption = false;
+    bool                    is_reversal   = false;   // a Redemption of own lapsed deal
+    std::array<uint8_t, 32> reverses{};     // for a reversal: the own deal's block hash
     int64_t                 timestamp = 0;  // record's claimed timestamp
     std::array<uint8_t, 32> block_hash{};   // carrier block (equivocation evidence)
 };
 
 struct CreditHistory {
-    // Sums over the seen part of the thread.
+    // Sums over the seen part of the thread. Reversed self-issues are in
+    // neither: offered, refused, never born.
     double issued   = 0;
     double redeemed = 0;
+    double   reversed  = 0;   // self-issue of own deals the sellers refused or let lapse
+    uint64_t reversals = 0;
 
     // Declared debt at the newest seen link (positive = hours owed).
     double outstanding = 0;

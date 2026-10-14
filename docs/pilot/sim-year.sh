@@ -233,7 +233,7 @@ do_deal(){
     [[ -z "$acc" ]] && { ((fail_deals++)); return; }
     [[ -z "${SAMPLE[${PROF[$w]}]:-}" ]] && SAMPLE[${PROF[$w]}]="$acc"
     # Приёмка и оплата — одна запись (records.md §9.5, ИР-023): bc accept платит сам.
-    ftbc "p$w" transfer recv "$acc" --via "$VIA" >/dev/null 2>&1
+    ftbc "p$w" transfer recv "$acc" --via "$VIA" --yes >/dev/null 2>&1
     ((ok_deals++)); total_hours=$(( total_hours + h ))
     # журнал сделок для анализа независимости контрагентов (ИР-021):
     # кто кому платил, за какую специальность/разряд, сколько часов и по какому k
@@ -275,17 +275,17 @@ production_month(){
     local acc1="" acc2=""
     ftbc "p$maker" release "$wh" --to "${CID[$b1]}" --qty 5 --days 20 --via "$VIA" >/dev/null 2>&1 &&
         acc1="$(ftbc "p$b1" accept --work "${CID[$maker]}/$wh" --quality ok --via "$VIA" | after 'acceptance ref: ')"
-    [[ -n "$acc1" ]] && { ((ok_portions++)); ftbc "p$maker" transfer recv "$acc1" --via "$VIA" >/dev/null 2>&1; }
+    [[ -n "$acc1" ]] && { ((ok_portions++)); ftbc "p$maker" transfer recv "$acc1" --via "$VIA" --yes >/dev/null 2>&1; }
     ftbc "p$maker" release "$wh" --to "${CID[$b2]}" --qty 4 --days 20 --via "$VIA" >/dev/null 2>&1 &&
         acc2="$(ftbc "p$b2" accept --work "${CID[$maker]}/$wh" --quality ok --via "$VIA" | after 'acceptance ref: ')"
-    [[ -n "$acc2" ]] && { ((ok_portions++)); ftbc "p$maker" transfer recv "$acc2" --via "$VIA" >/dev/null 2>&1; }
+    [[ -n "$acc2" ]] && { ((ok_portions++)); ftbc "p$maker" transfer recv "$acc2" --via "$VIA" --yes >/dev/null 2>&1; }
 
     # 2) перепродажа: первый покупатель отдаёт две штуки третьему по цене покупки
     if [[ -n "$acc1" ]]; then
         local rs=""
         ftbc "p$b1" release "$acc1" --to "${CID[$b3]}" --qty 2 --days 20 --via "$VIA" >/dev/null 2>&1 &&
             rs="$(ftbc "p$b3" accept --work "${CID[$maker]}/$wh" --quality ok --via "$VIA" | after 'acceptance ref: ')"
-        [[ -n "$rs" ]] && { ((ok_resales++)); ftbc "p$b1" transfer recv "$rs" --via "$VIA" >/dev/null 2>&1; }
+        [[ -n "$rs" ]] && { ((ok_resales++)); ftbc "p$b1" transfer recv "$rs" --via "$VIA" --yes >/dev/null 2>&1; }
     fi
 
     # 3) аренда по счётчику: владелец продаёт износ своей вещи, вещь остаётся у него
@@ -296,7 +296,7 @@ production_month(){
         hire="$(ftbc "p$maker" hire "${TOOLREF[$maker]#*/}" --to "${CID[$b2]}" --machine-hours 6 \
                 --meter "по счётчику" --days 20 --via "$VIA" | after 'hire ref: ')"
         [[ -n "$hire" ]] && mh="$(ftbc "p$b2" accept --work "$hire" --quality ok --via "$VIA" | after 'acceptance ref: ')"
-        [[ -n "$mh" ]] && { ((ok_hires++)); ftbc "p$maker" transfer recv "$mh" --via "$VIA" >/dev/null 2>&1; }
+        [[ -n "$mh" ]] && { ((ok_hires++)); ftbc "p$maker" transfer recv "$mh" --via "$VIA" --yes >/dev/null 2>&1; }
     fi
 
     # 4) своё в своё: деталь и сборка из неё — в изделие приходит труд, не цена
@@ -310,7 +310,7 @@ production_month(){
               --hours 1 --start "$ast" --spend "$ph:4" --output "узел:1:шт" --for "${CID[$b3]}" \
               "${sh[@]}" --via "$VIA" | after 'hash: ')"
         [[ -n "$ah" ]] && asm="$(ftbc "p$b3" accept --work "${CID[$maker]}/$ah" --quality ok --via "$VIA" | after 'acceptance ref: ')"
-        [[ -n "$asm" ]] && { ((ok_assemblies++)); ftbc "p$maker" transfer recv "$asm" --via "$VIA" >/dev/null 2>&1; }
+        [[ -n "$asm" ]] && { ((ok_assemblies++)); ftbc "p$maker" transfer recv "$asm" --via "$VIA" --yes >/dev/null 2>&1; }
     fi
 }
 

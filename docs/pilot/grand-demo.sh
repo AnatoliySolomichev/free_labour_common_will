@@ -76,6 +76,9 @@ axis() { awk -F'\t' -v s="$1" '$1==s{print $2}' "$AXREFS"; }
 # Вырезать «...МЕТКА<то, что после>» из stdin.
 after(){ sed -n "s/.*$1//p" | head -1; }
 uid()  { bcp "$1" identity show | after 'User ID: '; }
+# Оплата — оферта (economy.md §4.4): часы переходят, только когда продавец её
+# принял. take <кто> — продавец проверяет векселя и принимает всё, что ему предложили.
+take() { bcp "$1" transfer recv --all --yes --via "$VIA" >/dev/null 2>&1 || true; }
 short(){ printf '%s…' "${1:0:12}"; }
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -226,8 +229,9 @@ echo "$PAY1" | sed 's/^/   /'
 ACC_anna="$(printf '%s' "$PAY1" | after 'acceptance ref: ')"
 XFER1="$ACC_anna"
 paid1="$(printf '%s' "$PAY1" | grep -o 'paid [0-9.]*' | head -1 | awk '{print $2}')"
-# Анна принимает бумагу Дмитрия к себе в кошелёк (bc transfer recv)
-bcp anna transfer recv "$XFER1" --via "$VIA" >/dev/null
+# Анна проверяет векселя и принимает оплату — бумага Дмитрия у неё в кошельке
+# (bc transfer recv; до её ответа сделка — оферта, economy.md §4.4)
+bcp anna transfer recv "$XFER1" --via "$VIA" --yes >/dev/null
 say "Анна держит бумагу Дмитрия на $paid1ч (bc transfer recv)"
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -247,7 +251,7 @@ PAY2="$(bcp anna accept --work "$WORK_boris" --quality "аккуратно" --co
 echo "$PAY2" | sed 's/^/   /'
 ACC_boris="$(printf '%s' "$PAY2" | after 'acceptance ref: ')"
 XFER2="$ACC_boris"
-bcp boris transfer recv "$XFER2" --via "$VIA" >/dev/null
+bcp boris transfer recv "$XFER2" --via "$VIA" --yes >/dev/null
 say "→ Анна расплатилась бумагой Дмитрия: она пошла по кругу дальше, к Борису"
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -263,7 +267,7 @@ PAY3="$(bcp boris accept --work "$WORK_vera" --quality "по фигуре" --coe
 echo "$PAY3" | sed 's/^/   /'
 ACC_vera="$(printf '%s' "$PAY3" | after 'acceptance ref: ')"
 XFER3="$ACC_vera"
-bcp vera transfer recv "$XFER3" --via "$VIA" >/dev/null
+bcp vera transfer recv "$XFER3" --via "$VIA" --yes >/dev/null
 
 hr "Дмитрий-столяр чинит шкаф Веры (need.housing-repair) — со своими станком и досками"
 TOOL2=$(bcp dmitry tool add "Верстак с оснасткой" --cost 200 --life 5000 --serial VS-2021 \
@@ -285,7 +289,7 @@ PAY4="$(bcp vera accept --work "${CID[dmitry]}/$WORK_dmitry" --quality "как �
 echo "$PAY4" | sed 's/^/   /'
 ACC_dmitry="$(printf '%s' "$PAY4" | after 'acceptance ref: ')"
 XFER4="$ACC_dmitry"
-bcp dmitry transfer recv "$XFER4" --via "$VIA" >/dev/null
+bcp dmitry transfer recv "$XFER4" --via "$VIA" --yes >/dev/null
 say "→ бумага Дмитрия прошла Анна→Борис→Вера→Дмитрий и частично погашена у эмитента"
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -311,6 +315,7 @@ WORK_petr=$(bcp petr deal work "$ND_irina" --hours 1 --action "Плановый 
 bcp irina fetch "$WORK_petr" --via "$VIA" >/dev/null
 hr "приёмка оплачивает осмотр и закрывает обещание Ирины той же записью (--pledge)"
 bcp irina accept --work "$WORK_petr" --quality "здорова" --coef 1.0 --axis-share "$(axis responsibility)=0.5" --axis-share "$(axis knowledge)=0.5" --pledge "$PL_irina" --via "$VIA" 2>&1 | sed 's/^/   /'
+take petr
 hr "bc deal settle — оплачено уже приёмкой; settle только СПРАШИВАЕТ, закрыта ли потребность"
 bcp irina deal settle "$ND_irina" --yes --via "$VIA" | sed 's/^/   /'
 
@@ -321,6 +326,7 @@ WORK_galina=$(bcp galina work log --title "парикмахер" \
               --action "Стрижка перед сменой" --hours 1 --for "${CID[pelageya]}" --via "$VIA" | after 'hash: ')
 bcp pelageya fetch "${CID[galina]}/$WORK_galina" --via "$VIA" >/dev/null
 ACC_galina=$(bcp pelageya accept --work "${CID[galina]}/$WORK_galina" --quality "аккуратно" --coef 1.0 --axis-share "$(axis precision)=0.5" --axis-share "$(axis physical)=0.3" --axis-share "$(axis pace)=0.2" --via "$VIA" | after 'acceptance ref: ')
+take galina
 hr "без заказа результат отдаёт тот, кто работал: отпуск (bc release, records.md §9.8)"
 W_gal0=$(bcp galina work log --title "парикмахер" --action "Укладка — клиент без записи" \
          --hours 1 --start "$(( NOW - 7200 ))" --via "$VIA" | after 'hash: ')
@@ -333,12 +339,39 @@ OUT_gal0="$(bcp dmitry accept --work "${CID[galina]}/$W_gal0" --quality "акк�
             --axis "$(axis precision)=1.0" --via "$VIA" 2>&1)"
 echo "$OUT_gal0" | sed 's/^/   /'
 bcp galina transfer recv "$(printf '%s\n' "$OUT_gal0" | after 'acceptance ref: ')" \
-    --via "$VIA" >/dev/null
-hr "перевода без приёмки нет: bc transfer send снят (records.md §11.1)"
+    --via "$VIA" --yes >/dev/null
+hr "перевода другой цепи без приёмки нет: bc transfer send снят (records.md §11.1); между своими ветками — bc transfer move"
 bcp pelageya transfer send --to "${CID[galina]}" --units 1 --via "$VIA" 2>&1 | sed 's/^/   /' || true
 hr "кошелёк Анны (держит чужую бумагу) и Дмитрия (свой долг в обороте)"
 say "Анна:";   bcp anna   wallet | sed 's/^/     /'
 say "Дмитрий:"; bcp dmitry wallet | sed 's/^/     /'
+
+hr "оплата — оферта: продавец смотрит векселя и отвечает (economy.md §4.4)"
+say "Устин чинит Семёну забор; Семён сперва смотрит, чем заплатит (--dry-run ничего не подписывает)"
+W_fence=$(bcp ustin work log --title "плотник" --action "Ремонт забора" --hours 2 \
+          --start "$(( NOW - 54000 ))" --for "${CID[semen]}" --axis-share "$(axis physical)=1" \
+          --via "$VIA" | after 'hash: ')
+bcp semen accept --work "${CID[ustin]}/$W_fence" --quality "стоит" --dry-run --via "$VIA" 2>&1 \
+    | sed 's/^/   /'
+OFF_fence="$(bcp semen accept --work "${CID[ustin]}/$W_fence" --quality "стоит" --reply-within 1d \
+             --via "$VIA" 2>/dev/null | after 'acceptance ref: ')"
+bcp ustin transfer inbox --via "$VIA" | sed 's/^/   /'
+say "Устин отказывает с причиной — часы остаются у Семёна, сделки не было"
+bcp ustin transfer refuse "$OFF_fence" --note "возьму оплату после покраски" --via "$VIA" \
+    | sed 's/^/   /'
+say "Семён узнаёт ответ; своя бумага отвергнутой оферты не родилась — сторно в нити эмиссии"
+bcp semen transfer status --via "$VIA" 2>&1 | sed 's/^/   /'
+say "Семён предлагает снова — Устин проверяет каждую порцию и принимает"
+OFF_fence2="$(bcp semen accept --work "${CID[ustin]}/$W_fence" --quality "стоит, покрашен" \
+              --via "$VIA" 2>/dev/null | after 'acceptance ref: ')"
+bcp ustin transfer recv "$OFF_fence2" --via "$VIA" --yes | sed 's/^/   /'
+
+hr "перемещение бумаги между своими ветками (bc transfer move, economy.md §5а)"
+say "Анна откладывает 1ч бумаги Дмитрия в «сейф» — ветку 0x7ffffffe; тратить оттуда — её ключом"
+bcp anna branch init 0x7ffffffe >/dev/null 2>&1 || true
+bcp anna transfer move --to-node 0x7ffffffe --pay "${CID[dmitry]:0:12}=1" --via "$VIA" 2>&1 \
+    | sed 's/^/   /'
+say "сейф Анны:"; bcp anna wallet --leaf 0x7ffffffe | sed 's/^/     /'
 
 hr "сетевые цены осей (bc rates — подписанный DailyAggregate; ниже — по сделкам дня)"
 say "цены больше не по специальности: сколько сеть платит за час каждой оси."
@@ -359,12 +392,15 @@ say "разбивка копируется у образца, а ссылка н
 W_gal2=$(bcp galina work log --title "парикмахер" --action "Стрижка" --hours 1 --start "$(( NOW - 10800 ))" --for "${CID[irina]}" --via "$VIA" | after 'hash: ')
 bcp irina fetch "${CID[galina]}/$W_gal2" --via "$VIA" >/dev/null
 A_gal2=$(bcp irina accept --work "${CID[galina]}/$W_gal2" --quality "аккуратно" --like "$ACC_galina" --via "$VIA" | after 'acceptance ref: ')
+take galina
 W_bor2=$(bcp boris work log --title "электрик, 4-й разряд" --action "Розетка в мастерской" --hours 1 --start "$(( NOW - 14400 ))" --for "${CID[dmitry]}" --via "$VIA" | after 'hash: ')
 bcp dmitry fetch "${CID[boris]}/$W_bor2" --via "$VIA" >/dev/null
 A_bor2=$(bcp dmitry accept --work "${CID[boris]}/$W_bor2" --quality "работает" --like "$ACC_boris" --via "$VIA" | after 'acceptance ref: ')
+take boris
 W_ann2=$(bcp anna work log --title "повар, 5-й разряд" --action "Обед для мастерской" --hours 2 --start "$(( NOW - 28800 ))" --for "${CID[boris]}" --via "$VIA" | after 'hash: ')
 bcp boris fetch "${CID[anna]}/$W_ann2" --via "$VIA" >/dev/null
 A_ann2=$(bcp boris accept --work "${CID[anna]}/$W_ann2" --quality "вкусно" --like "$ACC_anna" --via "$VIA" | after 'acceptance ref: ')
+take anna
 say "у каждой приёмки теперь like: ссылка на образец (bc list покажет её)"
 
 hr "нить труда Галины — все её работы подряд, без пересечений (bc thread, records.md §9.4)"
@@ -382,6 +418,7 @@ OUT_pb="$(bcp boris accept --work "${CID[anna]}/$W_pies" --quality "свежие
 echo "$OUT_pb" | sed 's/^/   /'
 PIES_boris="$(printf '%s\n' "$OUT_pb" | after 'acceptance ref: ')"
 bcp irina accept --work "${CID[anna]}/$W_pies" --quality "свежие" --via "$VIA" 2>&1 | sed 's/^/   /'
+take anna
 bcp anna writeoff "$W_pies" --qty 2 --reason "подгорели" --via "$VIA" 2>&1 | sed 's/^/   /'
 say "нить Анны: у пирогов видно, сколько продано, списано и осталось"
 bcp anna thread --via "$VIA" | sed 's/^/   /'
@@ -395,18 +432,21 @@ bcp dmitry release "$W_stools" --to "${CID[vera]}" --units Т-2 --days 2 --via "
 OUT_st="$(bcp vera accept --work "${CID[dmitry]}/$W_stools" --quality "крепкий" --via "$VIA" 2>&1)"
 echo "$OUT_st" | sed 's/^/   /'
 STOOL_vera="$(printf '%s\n' "$OUT_st" | after 'acceptance ref: ')"
+take dmitry
 bcp dmitry thread --via "$VIA" | sed 's/^/   /'
 say "Галина берёт Т-3 в салон и заводит его средством производства — стоимость из самой сделки"
 bcp dmitry release "$W_stools" --to "${CID[galina]}" --units Т-3 --days 2 --via "$VIA" 2>&1 | sed 's/^/   /'
 OUT_st3="$(bcp galina accept --work "${CID[dmitry]}/$W_stools" --quality "крепкий" --via "$VIA" 2>&1)"
 echo "$OUT_st3" | sed 's/^/   /'
 STOOL_galina="$(printf '%s\n' "$OUT_st3" | after 'acceptance ref: ')"
+take dmitry
 bcp galina tool add "Табурет Т-3" --paid "$STOOL_galina" --life 2000 --via "$VIA" 2>&1 | sed 's/^/   /'
 
 hr "перепродажа: Борис отдаёт 2 пирога Галине по цене покупки (bc release ПОКУПКА, records.md §9.8)"
 say "серийник прежний — путь к записи, где пироги испекла Анна; цена — доля уплаченного, без наценки"
 bcp boris release "$PIES_boris" --to "${CID[galina]}" --qty 2 --days 1 --via "$VIA" 2>&1 | sed 's/^/   /'
 bcp galina accept --work "${CID[anna]}/$W_pies" --quality "свежие" --via "$VIA" 2>&1 | sed 's/^/   /'
+take boris
 say "склад Бориса (bc stock): из пяти купленных два перепроданы, три в запасе"
 bcp boris stock --via "$VIA" | sed 's/^/   /'
 
@@ -418,12 +458,14 @@ bcp vera release "$STOOL_vera" --to "${CID[dmitry]}" --units Т-2 --buyback --bu
 OUT_rep="$(bcp dmitry accept --work "${CID[dmitry]}/$W_stools" --quality "принят в ремонт" --via "$VIA" 2>&1)"
 echo "$OUT_rep" | sed 's/^/   /'
 REPAIR_dmitry="$(printf '%s\n' "$OUT_rep" | after 'acceptance ref: ')"
+take vera
 say "Дмитрий чинит табурет: работа над своей покупкой — нового изделия нет, дорожает сама вещь"
 bcp dmitry work log --title "столяр, 6-й разряд" --action "Перетяжка сиденья" --hours 1 \
     --start "$(( NOW - 32400 ))" --improves "$REPAIR_dmitry" \
     --axis-share "$(axis precision)=1" --via "$VIA" 2>&1 | sed 's/^/   /'
 say "Вера выкупает табурет одной сделкой: за вещь по норме и за труд ремонта по осям (ИР-015)"
 bcp vera accept --work "${CID[dmitry]}/$W_stools" --quality "отремонтирован" --via "$VIA" 2>&1 | sed 's/^/   /'
+take dmitry
 bcp dmitry stock --via "$VIA" | sed 's/^/   /'
 
 hr "аренда без ренты: Ирина сдаёт Борису палатку — платится только износ (records.md §9.8)"
@@ -436,6 +478,7 @@ bcp irina release "$W_tent" --to "${CID[boris]}" --rent --buyback-days 60 --days
 OUT_tent="$(bcp boris accept --work "${CID[irina]}/$W_tent" --quality "целая" --via "$VIA" 2>&1)"
 echo "$OUT_tent" | sed 's/^/   /'
 TENT_boris="$(printf '%s\n' "$OUT_tent" | after 'acceptance ref: ')"
+take irina   # до выкупа: выкуп «через месяц» — последний блок её цепи
 # Ирина больше ничего не пишет: её выкуп «через месяц» — последний блок её цепи.
 if command -v faketime >/dev/null; then
     say "прошло 30 дней: Ирина выкупает палатку без участия Бориса — 95 % цены; 5 % — износ, и только он"
@@ -448,6 +491,8 @@ else
         --via "$VIA" 2>&1 | sed 's/^/   /'
 fi
 say "у Ирины снова палатка — уже по остатку — и бумага Бориса на износ: ровно то, что было"
+say "ответа Бориса выкуп не ждёт: возврат он подписал сам, а платят ему его же бумагой (records.md §9.8)"
+take boris
 
 hr "две шкалы износа: вещь изнашивается и работой, и временем (ИР-011 v5, records.md §10.2)"
 say "Устин завёл холодильный ларь: ресурс 5000 моточасов И срок службы 60 суток"
@@ -477,6 +522,7 @@ bcp semen release "$W_flour" --to "${CID[anna]}" --qty 20 --days 1 --via "$VIA" 
 OUT_fl="$(bcp anna accept --work "${CID[semen]}/$W_flour" --quality "сухая" --via "$VIA" 2>&1)"
 echo "$OUT_fl" | sed 's/^/   /'
 FLOUR_anna="$(printf '%s\n' "$OUT_fl" | after 'acceptance ref: ')"
+take semen
 OUT_mat="$(bcp anna material add "Мука пшеничная" --paid "$FLOUR_anna" --qty 20 --via "$VIA" 2>&1)"
 echo "$OUT_mat" | sed 's/^/   /'
 MAT_anna="$(printf '%s\n' "$OUT_mat" | after 'material ref: ')"
@@ -499,6 +545,7 @@ echo "$OUT_tab" | sed 's/^/   /'
 W_table="$(printf '%s\n' "$OUT_tab" | after 'hash: ')"
 say "Галина принимает: час сборки и два часа ножек, по ценам дня каждой работы"
 bcp galina accept --work "${CID[dmitry]}/$W_table" --quality "ровный" --via "$VIA" 2>&1 | sed 's/^/   /'
+take dmitry
 
 hr "аренда по счётчику: Дмитрий продаёт машино-часы верстака (ИР-023)"
 say "вещь и риск поломки остаются у Дмитрия; Борис покупает только износ, показания счётчика — в записи"
@@ -509,6 +556,7 @@ W_hire="$(printf '%s\n' "$OUT_hire" | after 'hire ref: ')"
 OUT_mh="$(bcp boris accept --work "$W_hire" --quality "по счётчику" --via "$VIA" 2>&1)"
 echo "$OUT_mh" | sed 's/^/   /'
 MH_boris="$(printf '%s\n' "$OUT_mh" | after 'acceptance ref: ')"
+take dmitry
 say "Борис заводит купленные часы материалом и тратит их в свою работу"
 OUT_mat="$(bcp boris material add "Машино-часы верстака" --paid "$MH_boris" --qty 4 --via "$VIA" 2>&1)"
 echo "$OUT_mat" | sed 's/^/   /'
@@ -526,7 +574,7 @@ for who in galina pelageya; do
     SH_acc="$(bcp "$who" accept --work "$SH_hire" --quality "ресурс" --via "$VIA" 2>&1 \
               | after 'acceptance ref: ')"
     [[ -z "$SH_acc" ]] && continue
-    bcp dmitry transfer recv "$SH_acc" --via "$VIA" >/dev/null 2>&1 || true
+    bcp dmitry transfer recv "$SH_acc" --via "$VIA" --yes >/dev/null 2>&1 || true
     SH_mat="$(bcp "$who" material add "Моточасы станка" --paid "$SH_acc" --qty 1000 \
               --via "$VIA" 2>&1 | after 'material ref: ')"
     if [[ "$who" == "galina" && -n "$SH_mat" ]]; then
@@ -553,6 +601,7 @@ bcp dmitry release "$SH_draft" --to "${CID[galina]}" --units "пн-03" --via "$V
 bcp galina fetch "${CID[dmitry]}/$SH_draft" --via "$VIA" >/dev/null 2>&1 || true
 bcp galina accept --work "${CID[dmitry]}/$SH_draft" --quality "смена" --via "$VIA" 2>&1 \
     | sed 's/^/   /' | head -4
+take dmitry
 say "ту же смену второй раз не продать — номер уходит один раз:"
 bcp dmitry release "$SH_draft" --to "${CID[pelageya]}" --units "пн-03" --via "$VIA" 2>&1 \
     | sed 's/^/   /' | head -2 || true
@@ -569,6 +618,7 @@ W_fix=$(bcp boris work log --title "электрик, 4-й разряд" --actio
 OUT_fix="$(bcp anna accept --work "${CID[boris]}/$W_fix" --quality "греет как новая" --via "$VIA" 2>&1)"
 echo "$OUT_fix" | sed 's/^/   /'
 FIX_anna="$(printf '%s\n' "$OUT_fix" | after 'acceptance ref: ')"
+take boris
 say "запись печи перевыпускается вверх — на остаток плюс оплаченный ремонт, и ни часом больше"
 bcp anna tool add "Печь подовая" --origin "$TOOL" --repair "$FIX_anna" --cost 315 --life 8000 \
     --serial PP-2019-0417 --note "после замены тэна" --via "$VIA" 2>&1 | sed 's/^/   /'
@@ -724,6 +774,14 @@ checkn(){ if awk "BEGIN{exit !($2 $3)}"; then printf '   ✓ %s (%s)\n' "$1" "$2
 
 # перепись
 check "заведено 14 цепей" "$(echo "$people" | wc -w | tr -d ' ')" "14"
+# оплата — оферта: отказ ничего не сдвинул, повторная принята (economy.md §4.4)
+deal_status(){ curl -s "$VIA/deal/${1%/*}/${1#*/}" | python3 -c 'import json,sys;print(json.load(sys.stdin)["status"])'; }
+check "отказ продавца — оферта не состоялась" "$(deal_status "$OFF_fence")" "refused"
+check "повторная оферта принята продавцом" "$(deal_status "$OFF_fence2")" "accepted"
+# перемещение между своими ветками: бумага в сейфе Анны
+if bcp anna wallet --leaf 0x7ffffffe | grep -q "свободно 1h"; then
+    echo "   ✓ час бумаги Дмитрия в сейфе Анны (bc transfer move)"
+else echo "   ✗ перемещение не видно в сейфе"; fail=1; fi
 # амортизация: оплата ровно по потолку labor + перенос печи + перенос муки
 check "оплата = 6 + 0.23625 + 0.96" "$paid1" "7.19625"
 # кольца обмена нашлись

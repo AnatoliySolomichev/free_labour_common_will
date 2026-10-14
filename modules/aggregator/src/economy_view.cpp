@@ -73,9 +73,13 @@ EconomyView EconomyView::build(const AggregatorStorage& storage, int64_t now) {
                 revokes.emplace_back(owner, pr->pledge.hash);
         } else if (const auto* t = std::get_if<records::Transfer>(&rec)) {
             if (t->from != owner.bytes) continue;   // spoofed sender
+            // A move between own branches changes nothing chain-wide (economy.md §5а).
+            if (!t->accept) continue;
             // A deal the seller did not address is void (records.md §9.5): it
-            // neither issues, pays nor settles anything.
-            if (t->accept && !deals.moves_hours(bh.bytes)) continue;
+            // neither issues, pays nor settles anything — nor does an offer the
+            // seller has not accepted, refused, let lapse, or one paid with
+            // paper the payer never had (economy.md §4.4).
+            if (!deals.moves_hours(bh.bytes)) continue;
             double total = 0;
             for (const auto& o : t->origins) {
                 total += o.units;

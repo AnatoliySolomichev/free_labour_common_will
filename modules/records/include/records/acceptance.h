@@ -14,7 +14,12 @@
 //   addressed deals of one buyer      → the first counts; the others are
 //                                       repeats — hours went, nothing counts twice;
 //   addressed deals of two buyers     → the seller gave one result twice: none
-//                                       counts, and both addresses are the seller's.
+//                                       counts, and both addresses are the seller's;
+//   an addressed deal not settled     → an offer the seller has not accepted (yet),
+//                                       refused or let lapse, or one paid with
+//                                       paper the payer never had: it moves
+//                                       nothing and stands in nobody's way
+//                                       (economy.md §4.4).
 //
 // A result is the work as a whole, or one portion of one of its lots
 // (records.md §9.8 v2): a hundred buyers of one bake are a hundred deals, and a
@@ -72,6 +77,11 @@ struct DealClaim {
     // paid — the deal moves hours and counts in no labor statistic. `work` is
     // then the holder's purchase: each holder's stock is a source of its own.
     bool resale = false;
+    // v6 (economy.md §4.4): the seller accepted it by its term (or a buyback
+    // needed no answer) and its paper is backed. An offer still waiting, refused,
+    // lapsed or paid with paper the payer never had moves nothing — and does not
+    // stand in the way of the deal that replaces it.
+    bool settled = true;
 };
 
 struct DealRecognition {
@@ -81,6 +91,7 @@ struct DealRecognition {
     std::set<std::array<uint8_t, 32>> contested;    // deals on a result given to two buyers
     std::set<std::array<uint8_t, 32>> unsound;      // deals on an unsound result (see unsound_results)
     std::set<std::array<uint8_t, 32>> unaddressed;  // void: the seller named no such buyer
+    std::set<std::array<uint8_t, 32>> unsettled;    // addressed, but not (yet) settled — see DealClaim::settled
     // RESULTS given to two buyers or more — and WORKS sold whole and in portions.
     std::set<std::array<uint8_t, 32>> oversold;
     // RESULTS (a work, or the release of a portion) whose work is outside the

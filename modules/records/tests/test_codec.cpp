@@ -286,6 +286,7 @@ static Transfer deal_of(const Acceptance& a) {
     t.origins   = { {t.from, a.labor_units + (a.carried_units ? *a.carried_units : 0.0)} };
     t.accept    = a;
     t.timestamp = 1'700'000'100LL;
+    t.until     = t.timestamp + 86'400;   // v6: срок ответа продавца
     return t;
 }
 
@@ -311,7 +312,11 @@ TEST(RecordsCodec, DealRoundtrip) {
     Transfer   t = deal_of(a);
     t.to_node = 5;                                    // credited branch (per-branch purse)
     // Все три вида порций: своя (эмиссия), бумага получателя (погашение), чужая.
-    t.origins = { {make_uid(0xA1), 1.5}, {t.to, 0.5}, {make_uid(0xC3), 1.0} };
+    // Чужая бумага называет свой вексель — блок, где она пришла к плательщику, —
+    // и прошлую трату этого векселя (v6, economy.md §4.4).
+    t.origins = { {make_uid(0xA1), 1.5},
+                  {t.to, 0.5, make_ref(0xD4, 0x70), std::nullopt},
+                  {make_uid(0xC3), 1.0, make_ref(0xD5, 0x70), make_ref(0xA1, 0x71)} };
 
     const auto d = std::get<Transfer>(roundtrip(Record{t}));
     EXPECT_EQ(d.from, t.from);
@@ -319,6 +324,7 @@ TEST(RecordsCodec, DealRoundtrip) {
     EXPECT_EQ(d.to_node, 5u);
     EXPECT_EQ(d.origins, t.origins);
     EXPECT_EQ(d.timestamp, t.timestamp);
+    EXPECT_EQ(d.until, t.until);
     ASSERT_TRUE(d.accept.has_value());
     EXPECT_EQ(d.accept->work, a.work);
     EXPECT_EQ(d.accept->quality, a.quality);
@@ -380,7 +386,7 @@ TEST(RecordsCodec, TransferWithoutAcceptanceOnlyBetweenOwnBranches) {
     Transfer t{};
     t.from      = make_uid(0x01);
     t.to        = make_uid(0x02);
-    t.origins   = { {make_uid(0x03), 3.0} };
+    t.origins   = { {make_uid(0x03), 3.0, make_ref(0x04, 0x70), std::nullopt} };
     t.timestamp = 1LL;
     EXPECT_THROW(Codec::encode(Record{t}), CodecError);        // в чужую цепь — нельзя
 
@@ -391,6 +397,10 @@ TEST(RecordsCodec, TransferWithoutAcceptanceOnlyBetweenOwnBranches) {
     EXPECT_EQ(d.to_node, 9u);
 
     t.origins = { {t.from, 3.0} };                              // своя бумага себе — нет
+    EXPECT_THROW(Codec::encode(Record{t}), CodecError);
+
+    t.origins = { {make_uid(0x03), 3.0, make_ref(0x04, 0x70), std::nullopt} };
+    t.until   = 2LL;                                            // отвечать некому
     EXPECT_THROW(Codec::encode(Record{t}), CodecError);
 }
 
@@ -439,8 +449,8 @@ TEST(RecordsCodec, RetiredAcceptanceRecordIsRefused) {
     EXPECT_THROW(Codec::decode(old), CodecError);
 }
 
-// Хвост перевода — эмиссия (7–9), обещание (10), приёмка (11) — по возрастанию
-// ключей в любом сочетании (records.md §11.1 v4/v5).
+// Хвост перевода — эмиссия (7–9), обещание (10), приёмка (11), срок ответа (12) —
+// по возрастанию ключей в любом сочетании (records.md §11.1 v4–v6).
 TEST(RecordsCodec, TransferTailRoundtripsInEveryCombination) {
     const Transfer base = deal_of(plain_acceptance(3.0));      // самоэмиссия на 3ч
     EmissionLink link{};
@@ -449,14 +459,14 @@ TEST(RecordsCodec, TransferTailRoundtripsInEveryCombination) {
     link.debt_after = -3.0;
     const Ref pledge = make_ref(0x55, 0x66);
 
-    {   // map(7) — только приёмка
+    {   // map(8) — только приёмка и её срок
         const auto bytes = Codec::encode(Record{base});
-        EXPECT_EQ(bytes[0], 0xA7);
+        EXPECT_EQ(bytes[0], 0xA8);
         const auto d = std::get<Transfer>(Codec::decode(bytes));
         EXPECT_FALSE(d.settles.has_value());
         EXPECT_FALSE(d.emission.has_value());
     }
-    {   // map(8) — и обещание
+    {   // map(9) — и обещание
         Transfer t = base;
         t.settles  = pledge;
         const auto d = std::get<Transfer>(roundtrip(Record{t}));
@@ -464,7 +474,7 @@ TEST(RecordsCodec, TransferTailRoundtripsInEveryCombination) {
         EXPECT_EQ(*d.settles, pledge);
         EXPECT_FALSE(d.emission.has_value());
     }
-    {   // map(10) — и звено эмиссии
+    {   // map(11) — и звено эмиссии
         Transfer t = base;
         t.emission = link;
         const auto d = std::get<Transfer>(roundtrip(Record{t}));
@@ -472,12 +482,12 @@ TEST(RecordsCodec, TransferTailRoundtripsInEveryCombination) {
         EXPECT_EQ(d.emission->seq, 7u);
         EXPECT_FALSE(d.settles.has_value());
     }
-    {   // map(11) — всё сразу: закрыть обещание свежевыпущенной бумагой
+    {   // map(12) — всё сразу: закрыть обещание свежевыпущенной бумагой
         Transfer t = base;
         t.emission = link;
         t.settles  = pledge;
         const auto bytes = Codec::encode(Record{t});
-        EXPECT_EQ(bytes[0], 0xAB);
+        EXPECT_EQ(bytes[0], 0xAC);
         const auto d = std::get<Transfer>(Codec::decode(bytes));
         ASSERT_TRUE(d.settles.has_value());
         ASSERT_TRUE(d.emission.has_value());
@@ -660,7 +670,7 @@ TEST(RecordsCodec, TransferV3FirstLinkHasNoPrev) {
 
 TEST(RecordsCodec, TransferWithoutEmissionDecodes) {
     Transfer t = deal_of(plain_acceptance(1.0));
-    t.origins = { {make_uid(0x03), 1.0} };            // pure endorsement, no thread
+    t.origins = { {make_uid(0x03), 1.0, make_ref(0x04, 0x70), std::nullopt} };  // pure endorsement, no thread
     const auto decoded = std::get<Transfer>(roundtrip(Record{t}));
     EXPECT_FALSE(decoded.emission.has_value());
 }
@@ -1190,6 +1200,7 @@ TEST(RecordsCodec, ResaleIsCarriedCostOnly) {
     t.origins   = {{t.from, 0.55}};
     t.accept    = a;
     t.timestamp = 1;
+    t.until     = 2;
     EXPECT_EQ(std::get<Transfer>(roundtrip(Record{t})).accept->carried_units, 0.55);
 
     t.accept->labor_units = 0.5;                               // с трудом — не перепродажа
@@ -1365,4 +1376,71 @@ TEST(RecordsCodec, ToolRepairNeedsAReissue) {
     EXPECT_THROW(Codec::encode(Record{t}), CodecError);   // без перевыпуска нечего чинить
     t.origin = make_ref(0xA1, 0x61);
     EXPECT_EQ(std::get<Tool>(roundtrip(Record{t})).repair, t.repair);
+}
+
+// ── Transfer v6: срок ответа и векселя (economy.md §4.4, records.md §11.1) ────
+
+// Сделка — оферта: продавец отвечает к сроку, иначе её не было. Без срока оплата
+// повисала бы навсегда, поэтому кодек сделку без срока не пишет.
+TEST(RecordsCodec, DealWithoutTermOrPastItIsRefused) {
+    Transfer t = deal_of(plain_acceptance(2.0));
+    t.until.reset();
+    EXPECT_THROW(Codec::encode(Record{t}), CodecError);        // без срока
+    t.until = t.timestamp;
+    EXPECT_THROW(Codec::encode(Record{t}), CodecError);        // срок уже прошёл
+    t.until = t.timestamp + 60;
+    EXPECT_EQ(std::get<Transfer>(roundtrip(Record{t})).until, t.until);
+}
+
+// Чужая бумага называет свой вексель — блок, где она пришла к плательщику; своя
+// рождается в самой записи и не называет ничего.
+TEST(RecordsCodec, SomeoneElsesPaperNamesItsBill) {
+    Transfer t = deal_of(plain_acceptance(2.0));
+    t.origins = { {make_uid(0xC3), 2.0} };                     // чужая — без векселя
+    EXPECT_THROW(Codec::encode(Record{t}), CodecError);
+    t.origins[0].src = make_ref(0xD4, 0x70);
+    EXPECT_NO_THROW(Codec::encode(Record{t}));
+    t.origins = { {t.from, 2.0, make_ref(0xD4, 0x70), std::nullopt} };
+    EXPECT_THROW(Codec::encode(Record{t}), CodecError);        // у самоэмиссии векселя нет
+    t.origins = { {t.from, 2.0, std::nullopt, make_ref(0xA1, 0x71)} };
+    EXPECT_THROW(Codec::encode(Record{t}), CodecError);        // и прошлой траты нет
+}
+
+// Один вексель — одна порция; два векселя одного эмитента — две.
+TEST(RecordsCodec, OneBillPaysOnePortion) {
+    Transfer t = deal_of(plain_acceptance(2.0));
+    const Ref bill = make_ref(0xD4, 0x70);
+    t.origins = { {make_uid(0xC3), 1.0, bill, std::nullopt},
+                  {make_uid(0xC3), 1.0, bill, std::nullopt} };
+    EXPECT_THROW(Codec::encode(Record{t}), CodecError);
+    t.origins[1].src = make_ref(0xD5, 0x70);
+    const auto d = std::get<Transfer>(roundtrip(Record{t}));
+    ASSERT_EQ(d.origins.size(), 2u);
+    EXPECT_EQ(d.origins[1].src, t.origins[1].src);
+    t.origins[1].units = 0.0;                                   // пустая порция — не порция
+    t.origins[0].units = 2.0;
+    EXPECT_THROW(Codec::encode(Record{t}), CodecError);
+}
+
+TEST(RecordsCodec, DealReplyRoundtrip) {
+    DealReply r{};
+    r.deal      = make_ref(0xA1, 0x70);
+    r.accepted  = true;
+    r.timestamp = 1'700'000'200LL;
+    const auto d = std::get<DealReply>(roundtrip(Record{r}));
+    EXPECT_EQ(d.deal, r.deal);
+    EXPECT_TRUE(d.accepted);
+    EXPECT_EQ(d.note, "");
+    EXPECT_EQ(d.timestamp, r.timestamp);
+
+    r.accepted = false;                                         // отказ — та же запись
+    r.note     = "не беру бумагу 0xC3";
+    const auto n = std::get<DealReply>(roundtrip(Record{r}));
+    EXPECT_FALSE(n.accepted);
+    EXPECT_EQ(n.note, r.note);
+}
+
+TEST(RecordsCodec, DealReplyToNothingIsRefused) {
+    DealReply r{};
+    EXPECT_THROW(Codec::encode(Record{r}), CodecError);
 }

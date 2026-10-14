@@ -60,6 +60,7 @@ add_executable(aggregator_tests
     tests/test_relay.cpp
     tests/test_economy_view.cpp
     tests/test_footprint_view.cpp
+    tests/test_settlement.cpp
     tests/test_discovery_view.cpp
     tests/test_attestation_view.cpp
     tests/test_deal_view.cpp

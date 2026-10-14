@@ -1291,6 +1291,14 @@ void AggregatorServer::setup_routes() {
                 holders += "{\"chain\":\"" + to_hex(h.chain.bytes)
                          + "\",\"units\":" + std::to_string(h.units) + "}";
             }
+            // Отрицательный остаток не прячется (economy.md §4.4): при проверке
+            // векселей его быть не должно, и если он есть — это видно.
+            std::string overdrawn;
+            for (const auto& h : fp->overdrawn) {
+                if (!overdrawn.empty()) overdrawn += ",";
+                overdrawn += "{\"chain\":\"" + to_hex(h.chain.bytes)
+                           + "\",\"units\":" + std::to_string(h.units) + "}";
+            }
             const std::string body =
                   "{\"holders\":["            + holders + "]"
                 + ",\"paper_outstanding\":"   + std::to_string(fp->paper_outstanding)
@@ -1303,6 +1311,10 @@ void AggregatorServer::setup_routes() {
                 + ",\"attester_chains\":"      + hex_array(fp->attester_chains)
                 + ",\"vouched_hours\":"        + std::to_string(fp->vouched_hours)
                 + ",\"vouched_works\":"        + std::to_string(fp->vouched_works)
+                + ",\"unbacked_deals\":"       + std::to_string(fp->unbacked_deals)
+                + ",\"unbacked_units\":"       + std::to_string(fp->unbacked_units)
+                + ",\"false_reversals\":"      + std::to_string(fp->false_reversals)
+                + ",\"overdrawn\":["           + overdrawn + "]"
                 + ",\"counterparties\":"      + std::to_string(fp->counterparties)
                 + ",\"internal_turnover\":"   + std::to_string(fp->internal_turnover)
                 + ",\"boundary_turnover\":"   + std::to_string(fp->boundary_turnover)
@@ -1770,14 +1782,13 @@ void AggregatorServer::setup_routes() {
             body += "],\"deals\":[";
             first = true;
             const auto& rc = deals.recognition;
+            const auto  now = static_cast<int64_t>(std::time(nullptr));
             for (const auto& d : deals.all) {
                 if (d.accept().work.hash != wh || d.accept().work.chain != ch) continue;
-                const char* state = rc.recognized.count(d.hash) ? "recognized"
-                                  : rc.resold.count(d.hash)     ? "resold"
-                                  : rc.repeated.count(d.hash)   ? "repeated"
-                                  : rc.contested.count(d.hash)  ? "contested"
-                                  : rc.unsound.count(d.hash)    ? "unsound"
-                                  :                               "unaddressed";
+                // v6 (economy.md §4.4): an offer the seller has not accepted yet,
+                // refused, let lapse, or one paid with paper nobody had moves
+                // nothing — and is shown as such.
+                const char* state = deal_standing(deals, d, now);
                 double paid = 0;
                 for (const auto& o : d.transfer.origins) paid += o.units;
                 if (!first) body += ',';
@@ -1785,6 +1796,7 @@ void AggregatorServer::setup_routes() {
                 body += "{\"ref\":\"" + to_hex(d.payer.bytes) + "/" + to_hex(d.hash)
                       + "\",\"payer\":\"" + to_hex(d.payer.bytes)
                       + "\",\"timestamp\":" + std::to_string(d.transfer.timestamp)
+                      + ",\"until\":" + std::to_string(d.transfer.until.value_or(0))
                       + ",\"state\":\"" + state + "\""
                       + ",\"paid\":" + std::to_string(paid);
                 // What it bought from whom: the source is the maker's work, or the
@@ -1871,6 +1883,142 @@ void AggregatorServer::setup_routes() {
                 body += "]";
             }
             body += "}";
+            res.set_content(body, "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
+                            "application/json");
+        }
+    });
+
+    // ── GET /deal/<chain>/<hash> ─────────────────────────────────────────────
+    // One deal as an offer (economy.md §4.4, records.md §11.13): its term, the
+    // seller's answer that counted, and every portion with its bill — what the
+    // buyer reads to learn the outcome and the seller to check the paper.
+    svr.Get("/deal/:chain/:hash", [&](const httplib::Request& req,
+                                      httplib::Response& res) {
+        const auto chain = hex_to_hash(req.path_params.at("chain"));
+        const auto hash  = hex_to_hash(req.path_params.at("hash"));
+        if (!chain || !hash) {
+            res.status = 400;
+            res.set_content("{\"error\":\"invalid ref\"}", "application/json");
+            return;
+        }
+        try {
+            const auto deals = read_deals(storage_);
+            const auto now   = static_cast<int64_t>(std::time(nullptr));
+            const DealEntry* d = nullptr;
+            for (const auto& e : deals.all)
+                if (e.hash == hash->bytes && e.payer.bytes == chain->bytes) d = &e;
+            if (!d) {
+                res.status = 404;
+                res.set_content("{\"ref\":\"" + to_hex(chain->bytes) + "/" + to_hex(hash->bytes)
+                                    + "\",\"known\":false}",
+                                "application/json");
+                return;
+            }
+            const auto& t = d->transfer;
+            double paid = 0;
+            for (const auto& o : t.origins) paid += o.units;
+            const auto answer = deals.answer(d->hash);
+            std::string body =
+                "{\"ref\":\"" + to_hex(d->payer.bytes) + "/" + to_hex(d->hash) + "\""
+                + ",\"known\":true"
+                + ",\"payer\":\"" + to_hex(t.from) + "\""
+                + ",\"seller\":\"" + to_hex(t.to) + "\""
+                + ",\"to_node\":" + std::to_string(t.to_node)
+                + ",\"node\":" + std::to_string(d->node)
+                + ",\"timestamp\":" + std::to_string(t.timestamp)
+                + ",\"until\":" + std::to_string(t.until.value_or(0))
+                + ",\"price\":" + std::to_string(paid)
+                + ",\"status\":\""
+                + records::deal_status_name(records::deal_status(t, answer, now)) + "\""
+                + ",\"standing\":\"" + deal_standing(deals, *d, now) + "\""
+                + ",\"addressed\":"
+                + (deals.recognition.unaddressed.count(d->hash) ? "false" : "true")
+                + ",\"pre_accepted\":" + (deals.pre_accepted.count(d->hash) ? "true" : "false")
+                + ",\"backed\":" + (deals.unbacked.count(d->hash) ? "false" : "true");
+            if (const auto w = deals.unbacked_why.find(d->hash); w != deals.unbacked_why.end())
+                body += ",\"unbacked_why\":\"" + json_escape(w->second) + "\"";
+            if (const auto* r = deals.counted_reply(d->hash))
+                body += ",\"reply\":{\"ref\":\"" + to_hex(r->seen.author) + "/" + to_hex(r->hash)
+                      + "\",\"accepted\":" + (r->seen.reply.accepted ? "true" : "false")
+                      + ",\"note\":\"" + json_escape(r->seen.reply.note)
+                      + "\",\"timestamp\":" + std::to_string(r->seen.reply.timestamp) + "}";
+            body += ",\"portions\":[";
+            for (std::size_t i = 0; i < t.origins.size(); ++i) {
+                const auto& o = t.origins[i];
+                body += std::string(i ? "," : "") + "{\"issuer\":\"" + to_hex(o.issuer)
+                      + "\",\"units\":" + std::to_string(o.units);
+                if (o.src) {
+                    body += ",\"src\":\"" + to_hex(o.src->chain) + "/" + to_hex(o.src->hash) + "\"";
+                    if (o.prev)
+                        body += ",\"prev\":\"" + to_hex(o.prev->chain) + "/" + to_hex(o.prev->hash)
+                              + "\"";
+                    const auto b = deals.bills.find(
+                        BillKey{d->payer.bytes, o.src->chain, o.src->hash, o.issuer});
+                    if (b != deals.bills.end())
+                        body += ",\"bill\":{\"credited\":" + std::to_string(b->second.state.credited)
+                              + ",\"remaining\":" + std::to_string(b->second.state.remaining())
+                              + ",\"backed\":"
+                              + (b->second.state.backed.count(d->hash) ? "true" : "false")
+                              + ",\"fault\":\"" + json_escape(b->second.state.fault) + "\"}";
+                }
+                body += "}";
+            }
+            body += "]}";
+            res.set_content(body, "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
+                            "application/json");
+        }
+    });
+
+    // ── GET /inbox/<chain> ───────────────────────────────────────────────────
+    // Offers addressed to this chain that wait for its answer, each with its
+    // term (economy.md §4.4). A void offer — not addressed — is nothing and is
+    // not listed. A buyback paid with agreed paper needs no answer, but the holder
+    // still takes it in — his own paper comes home and wants its receipt — so it
+    // is listed, marked, until he has written anything about it.
+    svr.Get("/inbox/:chain", [&](const httplib::Request& req, httplib::Response& res) {
+        const auto chain = hex_to_hash(req.path_params.at("chain"));
+        if (!chain) {
+            res.status = 400;
+            res.set_content("{\"error\":\"invalid chain\"}", "application/json");
+            return;
+        }
+        try {
+            const auto deals = read_deals(storage_);
+            const auto now   = static_cast<int64_t>(std::time(nullptr));
+            std::string body = "{\"chain\":\"" + to_hex(chain->bytes) + "\",\"offers\":[";
+            bool first = true;
+            for (const auto& d : deals.all) {
+                const auto& t = d.transfer;
+                if (t.to != chain->bytes || deals.recognition.unaddressed.count(d.hash)) continue;
+                const bool pre = deals.pre_accepted.count(d.hash) > 0;
+                bool       said = false;   // the holder wrote anything about it
+                if (const auto r = deals.replies.find(d.hash); r != deals.replies.end())
+                    for (const auto& e : r->second) said = said || e.seen.author == t.to;
+                if (pre ? said
+                        : records::deal_status(t, deals.answer(d.hash), now) !=
+                              records::DealStatus::pending)
+                    continue;
+                double paid = 0;
+                for (const auto& o : t.origins) paid += o.units;
+                body += std::string(first ? "" : ",") + "{\"ref\":\"" + to_hex(d.payer.bytes)
+                      + "/" + to_hex(d.hash) + "\",\"payer\":\"" + to_hex(t.from)
+                      + "\",\"price\":" + std::to_string(paid)
+                      + ",\"timestamp\":" + std::to_string(t.timestamp)
+                      + ",\"until\":" + std::to_string(t.until.value_or(0))
+                      + ",\"to_node\":" + std::to_string(t.to_node)
+                      + ",\"backed\":" + (deals.unbacked.count(d.hash) ? "false" : "true")
+                      + ",\"pre_accepted\":" + (pre ? "true" : "false")
+                      + ",\"work\":\"" + to_hex(d.accept().work.chain) + "/"
+                      + to_hex(d.accept().work.hash) + "\"}";
+                first = false;
+            }
+            body += "]}";
             res.set_content(body, "application/json");
         } catch (const std::exception& e) {
             res.status = 500;

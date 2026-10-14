@@ -114,10 +114,25 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
                 out.assets.push_back({bh.bytes, owner, *tl->src, *tl->lot, tl->cost,
                                       block->timestamp_claimed, false});
         } else if (const auto* t = std::get_if<records::Transfer>(&rec)) {
-            if (!t->accept) continue;
             if (t->from != owner.bytes) continue;          // spoofed sender
+            if (!t->accept) {
+                // Чужая бумага между своими ветками (economy.md §5а): кодек пускает
+                // перевод без приёмки только из цепи в саму себя.
+                if (t->to == owner.bytes)
+                    out.moves.push_back(MoveEntry{bh.bytes, owner, *t, block->address.node_index,
+                                                  block->address.block_index});
+                continue;
+            }
             deal_at[bh.bytes] = out.all.size();
-            out.all.push_back(DealEntry{bh.bytes, owner, *t});
+            out.all.push_back(DealEntry{bh.bytes, owner, *t, block->address.node_index,
+                                        block->address.block_index});
+        } else if (const auto* dr = std::get_if<records::DealReply>(&rec)) {
+            // Ответ продавца (records.md §11.13): чей он и в какой ветке — говорит
+            // адрес блока; засчитывает его records::answer_of.
+            out.replies[dr->deal.hash].push_back(
+                ReplyEntry{bh.bytes, records::ObservedReply{*dr, owner.bytes,
+                                                            block->address.node_index,
+                                                            block->address.block_index}});
         }
     }
 
@@ -168,12 +183,199 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
         return records::holding_lots(out.all[j].transfer, w->second.record, released[j]);
     };
 
+    // ── The seller's answer (records.md §11.13) ──────────────────────────────
+    // A deal is an offer: the purse being paid accepts it by its term, or it did
+    // not happen. A buyback paid with paper the holder agreed to when he signed
+    // the return needs no answer (records::pre_accepted_buyback).
+    std::vector<bool> answered(n, false);
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto& d = out.all[i];
+        std::vector<records::ObservedReply> seen;
+        if (const auto r = out.replies.find(d.hash); r != out.replies.end())
+            for (const auto& e : r->second) seen.push_back(e.seen);
+        const auto a = records::answer_of(d.transfer, records::Ref{d.payer.bytes, d.hash}, seen);
+        out.answers[d.hash] = a;
+        const bool pre = buyback_of[i] && records::pre_accepted_buyback(d.transfer);
+        if (pre) out.pre_accepted.insert(d.hash);
+        answered[i] = pre || a.answer == records::Answer::accepted;
+    }
+
+    // ── Bills (economy.md §4.4) ──────────────────────────────────────────────
+    // Spends of someone else's paper: by deals (carriers 0..n-1) and by moves
+    // between own branches (n..n+m-1). Each names its bill and the spend before.
+    const std::size_t m = out.moves.size();
+    std::map<Hash32, std::size_t> move_at;
+    for (std::size_t j = 0; j < m; ++j) move_at[out.moves[j].hash] = j;
+    const auto carrier_transfer = [&](std::size_t c) -> const records::Transfer& {
+        return c < n ? out.all[c].transfer : out.moves[c - n].transfer;
+    };
+    const auto carrier_author = [&](std::size_t c) -> const UserId& {
+        return c < n ? out.all[c].payer : out.moves[c - n].owner;
+    };
+    const auto carrier_hash = [&](std::size_t c) -> const Hash32& {
+        return c < n ? out.all[c].hash : out.moves[c - n].hash;
+    };
+    const auto carrier_index = [&](std::size_t c) -> uint64_t {
+        return c < n ? out.all[c].index : out.moves[c - n].index;
+    };
+    const auto key_of = [&](std::size_t c, const records::OriginQty& o) {
+        return BillKey{carrier_author(c).bytes, o.src->chain, o.src->hash, o.issuer};
+    };
+    // Each bill's spends in branch order: (carrier, portion).
+    std::map<BillKey, std::vector<std::pair<std::size_t, std::size_t>>> spends_of;
+    for (std::size_t c = 0; c < n + m; ++c) {
+        const auto& t = carrier_transfer(c);
+        for (std::size_t p = 0; p < t.origins.size(); ++p)
+            if (t.origins[p].src) spends_of[key_of(c, t.origins[p])].push_back({c, p});
+    }
+    for (auto& [key, list] : spends_of) {
+        (void)key;
+        std::sort(list.begin(), list.end(), [&](const auto& a, const auto& b) {
+            const auto ia = carrier_index(a.first), ib = carrier_index(b.first);
+            return ia != ib ? ia < ib : carrier_hash(a.first) < carrier_hash(b.first);
+        });
+    }
+
+    // Whether a deal happened — addressed, answered, backed — whether a
+    // carrier's paper is backed, and whether a spend holds its hours. A bill's
+    // credit stands on its source having happened, and whether a spend fits
+    // depends only on the spends before it: every reference names an earlier
+    // block, so this recursion ends; a loop could not be written, and is
+    // refused if met.
+    std::vector<int8_t> eff_state(n, -1), back_state(n + m, -1), hold_state(n + m, -1);
+    std::function<bool(std::size_t)> addressed;
+    std::function<bool(std::size_t)> effective;
+    std::function<bool(std::size_t)> backed;
+
+    struct BillCredit {
+        uint32_t                purse = 0;
+        double                  credited = 0.0;
+        std::optional<uint64_t> arrived;   // the holder's acceptance of the paying deal
+        std::string             why;
+        bool                    upstream = false;
+    };
+    std::map<BillKey, BillCredit> credits;
+    std::function<BillCredit(const BillKey&)> credit_of = [&](const BillKey& key) -> BillCredit {
+        if (const auto it = credits.find(key); it != credits.end()) return it->second;
+        credits[key] = BillCredit{0, 0.0, std::nullopt, "вексель решается", false};   // a loop credits nothing
+        const auto& [holder, src_chain, src_hash, issuer] = key;
+        BillCredit b;
+        if (const auto d = deal_at.find(src_hash);
+            d != deal_at.end() && out.all[d->second].payer.bytes == src_chain) {
+            const auto& sd = out.all[d->second];
+            b.purse = sd.transfer.to_node;
+            if (sd.transfer.to != holder) {
+                b.why = "сделка-источник платила не этому держателю";
+            } else if (!effective(d->second)) {
+                b.why      = "сделка-источник не состоялась";
+                b.upstream = true;
+            } else {
+                b.credited = records::bill_credit(sd.transfer, issuer);
+                // Paper paid by a deal is the holder's from his acceptance on.
+                if (const auto* r = out.counted_reply(sd.hash)) b.arrived = r->seen.index;
+            }
+        } else if (const auto mv = move_at.find(src_hash);
+                   mv != move_at.end() && out.moves[mv->second].owner.bytes == src_chain) {
+            const auto& sm = out.moves[mv->second];
+            b.purse = sm.transfer.to_node;
+            if (sm.owner.bytes != holder) {
+                b.why = "перемещение-источник — чужое";
+            } else if (!backed(n + mv->second)) {
+                b.why      = "перемещение-источник не обеспечено";
+                b.upstream = true;
+            } else {
+                b.credited = records::bill_credit(sm.transfer, issuer);
+            }
+        } else {
+            b.why = "векселя-источника нет на столе";
+        }
+        return credits[key] = b;
+    };
+    // Whether a spend could hold hours at all: a move that stands, a deal that
+    // completes something and is paid with paper — the term and the answer are
+    // records::check_bill's to judge.
+    std::function<bool(std::size_t)> holds = [&](std::size_t c) -> bool {
+        if (hold_state[c] == 0 || hold_state[c] == 1) return hold_state[c] == 1;
+        if (hold_state[c] == 2) return false;
+        hold_state[c] = 2;
+        const bool ok = (c >= n || addressed(c)) && backed(c);
+        hold_state[c] = ok ? 1 : 0;
+        return ok;
+    };
+    const auto spend_of = [&](std::size_t c, std::size_t p, bool judge) {
+        const auto& t = carrier_transfer(c);
+        records::BillSpend sp{};
+        sp.hash      = carrier_hash(c);
+        sp.node      = c < n ? out.all[c].node : out.moves[c - n].node;
+        sp.index     = carrier_index(c);
+        sp.timestamp = t.timestamp;
+        sp.units     = t.origins[p].units;
+        sp.prev      = t.origins[p].prev;
+        sp.move      = c >= n;
+        if (c < n) {
+            sp.answer = out.answer(out.all[c].hash);
+            sp.until  = t.until.value_or(0);
+        }
+        if (judge) sp.stands = holds(c);
+        return sp;
+    };
+    // The bill as it stood when spend `c` was made: its credit, and the spends
+    // before it with what each still holds.
+    const auto bill_at = [&](const BillKey& key, std::size_t c) {
+        const BillCredit credit = credit_of(key);
+        std::vector<records::BillSpend> prefix;
+        for (const auto& [sc, sp] : spends_of[key]) {
+            const bool self = sc == c;
+            prefix.push_back(spend_of(sc, sp, !self));
+            if (self) break;
+        }
+        auto st = records::check_bill(std::get<0>(key), credit.purse, credit.credited,
+                                      credit.arrived, std::move(prefix));
+        if (!credit.why.empty()) st.fault = credit.why;
+        return std::make_pair(credit, st);
+    };
+    backed = [&](std::size_t c) -> bool {
+        if (back_state[c] == 0 || back_state[c] == 1) return back_state[c] == 1;
+        if (back_state[c] == 2) return false;
+        back_state[c] = 2;
+        const auto& t = carrier_transfer(c);
+        bool        ok = true, upstream = false;
+        std::string why;
+        for (const auto& o : t.origins) {
+            if (!o.src) continue;
+            const auto [credit, st] = bill_at(key_of(c, o), c);
+            if (st.backed.count(carrier_hash(c))) continue;
+            ok       = false;
+            why      = st.fault;
+            upstream = credit.upstream;
+            break;
+        }
+        back_state[c] = ok ? 1 : 0;
+        if (!ok) {
+            out.unbacked.insert(carrier_hash(c));
+            out.unbacked_why[carrier_hash(c)] = why;
+            if (upstream) out.unbacked_upstream.insert(carrier_hash(c));
+        } else if (c >= n) {
+            out.moves_backed.insert(carrier_hash(c));
+        }
+        return ok;
+    };
+    effective = [&](std::size_t i) -> bool {
+        if (eff_state[i] == 0 || eff_state[i] == 1) return eff_state[i] == 1;
+        if (eff_state[i] == 2) return false;
+        eff_state[i] = 2;
+        const bool ok = addressed(i) && answered[i] && backed(i);
+        eff_state[i] = ok ? 1 : 0;
+        return ok;
+    };
+
     // Whether the seller named the payer (records.md §9.5) on terms that were met
     // (records.md §9.8 v3, v4). A resale stands on the holder's purchase, so this
     // walks back along the purchases — a loop of them cannot be written, each
-    // deal names blocks that existed before it, and is refused if met.
+    // deal names blocks that existed before it, and is refused if met. The
+    // purchase must have happened: accepted by its seller and backed (v6).
     std::vector<int8_t> state(n, -1);   // -1 not yet, 0 no, 1 yes, 2 being decided
-    std::function<bool(std::size_t)> addressed = [&](std::size_t i) -> bool {
+    addressed = [&](std::size_t i) -> bool {
         if (state[i] == 0 || state[i] == 1) return state[i] == 1;
         if (state[i] == 2) return false;
         state[i] = 2;
@@ -196,7 +398,7 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
                 if (const auto rw = out.works.find(a.work.hash);
                     rw != out.works.end() && rw->second.worker.bytes == a.work.chain)
                     repair = &rw->second.record;
-            if (addressed(h) && w != out.works.end() &&
+            if (effective(h) && w != out.works.end() &&
                 w->second.worker.bytes == p.accept().work.chain)
                 ok = records::completes_buyback(
                     d.transfer, p.transfer,
@@ -207,7 +409,7 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
             // Перепродажа: the holder's purchase happened, of this very product,
             // and the price is its share of what the holder paid.
             const auto h = holding_deal(release->holding);
-            if (h && addressed(*h) && release->lot && release->work == out.all[*h].accept().work)
+            if (h && effective(*h) && release->lot && release->work == out.all[*h].accept().work)
                 for (const auto& hl : lots_of(*h))
                     if (hl.out == release->lot->out)
                         ok = records::addressed_to(d.transfer, std::nullopt, release) &&
@@ -222,7 +424,7 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
                         ok = false;
                     } else {
                         for (std::size_t j = 0; j < n && ok; ++j)
-                            if (buyback_of[j] && *buyback_of[j] == *h && addressed(j)) ok = false;
+                            if (buyback_of[j] && *buyback_of[j] == *h && effective(j)) ok = false;
                     }
                 }
         } else {
@@ -261,14 +463,32 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
         state[i] = ok ? 1 : 0;
         return ok;
     };
+    // A release is taken, a purchase bought back, only by a deal that happened.
     for (std::size_t i = 0; i < n; ++i) {
-        if (!addressed(i)) continue;
+        if (!effective(i)) continue;
         if (released[i]) out.taken.insert(out.all[i].accept().release->hash);
         if (buyback_of[i]) out.bought_back.insert(out.all[*buyback_of[i]].hash);
     }
+    // Every carrier's paper judged, whether or not anything reads it: an offer
+    // nobody accepted still shows what its payer tried to pay with. Then each
+    // bill as it stands now, for the views.
+    for (std::size_t c = 0; c < n + m; ++c) backed(c);
+    for (const auto& [key, list] : spends_of) {
+        const BillCredit credit = credit_of(key);
+        std::vector<records::BillSpend> all;
+        for (const auto& [sc, sp] : list) all.push_back(spend_of(sc, sp, true));
+        BillOnTable b;
+        b.purse    = credit.purse;
+        b.why      = credit.why;
+        b.upstream = credit.upstream;
+        b.state    = records::check_bill(std::get<0>(key), credit.purse, credit.credited,
+                                         credit.arrived, std::move(all));
+        if (!credit.why.empty()) b.state.fault = credit.why;
+        out.bills[key] = std::move(b);
+    }
     // Purchases of goods that happened: the buyers' stock.
     for (std::size_t i = 0; i < n; ++i)
-        if (state[i] == 1)
+        if (effective(i))
             if (auto lots = lots_of(i); !lots.empty()) out.holdings[out.all[i].hash] = std::move(lots);
 
     // Стоимость купленного, заведённого в производство (records.md §10.1 v3): её
@@ -277,7 +497,7 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
     for (auto& a : out.assets) {
         const auto d = deal_at.find(a.src.hash);
         if (d == deal_at.end() || out.all[d->second].payer.bytes != a.src.chain) continue;
-        if (state[d->second] != 1) continue;              // покупки не было
+        if (!effective(d->second)) continue;              // покупки не было
         const auto h = out.holdings.find(a.src.hash);
         if (h == out.holdings.end()) continue;
         for (const auto& hl : h->second)
@@ -318,7 +538,7 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
         if (a.repair) {
             const auto d = deal_at.find(a.repair->hash);
             if (d != deal_at.end() && a.repair->chain == a.owner.bytes &&
-                out.all[d->second].payer == a.owner && state[d->second] == 1 &&
+                out.all[d->second].payer == a.owner && effective(d->second) &&
                 spent_repairs.insert(a.repair->hash).second) {
                 double paid = 0.0;
                 for (const auto& o : out.all[d->second].transfer.origins) paid += o.units;
@@ -475,7 +695,8 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
                             : resale   ? release->holding->hash : a.work.hash;
         records::DealClaim c{d.hash, source, d.payer.bytes, d.transfer.timestamp,
                              state[i] == 1, sound(i), portion};
-        c.resale = resale;
+        c.resale  = resale;
+        c.settled = answered[i] && backed(i);    // v6: accepted in time and backed
         claims.push_back(c);
     }
     out.recognition = records::recognize_deals(claims);
@@ -534,6 +755,24 @@ double unconfirmed_hours(const DealsOnTable& deals, const std::array<uint8_t, 32
         gone += share * (s.sold + s.written_off) / o.qty;
     }
     return r.hours * std::max(0.0, 1.0 - gone);
+}
+
+} // namespace aggregator
+
+namespace aggregator {
+
+const char* deal_standing(const DealsOnTable& deals, const DealEntry& d, int64_t now) {
+    const auto& rc = deals.recognition;
+    if (rc.recognized.count(d.hash))  return "recognized";
+    if (rc.resold.count(d.hash))      return "resold";
+    if (rc.repeated.count(d.hash))    return "repeated";
+    if (rc.contested.count(d.hash))   return "contested";
+    if (rc.unsound.count(d.hash))     return "unsound";
+    if (rc.unaddressed.count(d.hash)) return "unaddressed";
+    // An offer that moved nothing (economy.md §4.4): paper no bill covers says
+    // more than the answer, then the answer — or the silence — itself.
+    if (deals.unbacked.count(d.hash)) return "unbacked";
+    return records::deal_status_name(records::deal_status(d.transfer, deals.answer(d.hash), now));
 }
 
 } // namespace aggregator

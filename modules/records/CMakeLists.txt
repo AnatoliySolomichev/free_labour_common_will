@@ -10,6 +10,7 @@ add_library(records
     src/draft.cpp
     src/acceptance.cpp
     src/goods_thread.cpp
+    src/settlement.cpp
 )
 
 target_include_directories(records PUBLIC include)
@@ -29,6 +30,7 @@ add_executable(records_tests
     tests/test_draft.cpp
     tests/test_acceptance.cpp
     tests/test_goods_thread.cpp
+    tests/test_settlement.cpp
 )
 
 target_link_libraries(records_tests PRIVATE

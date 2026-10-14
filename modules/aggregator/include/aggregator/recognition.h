@@ -11,22 +11,28 @@
 // only on a work in its
 // worker's goods thread, on hours no other work of that chain claims
 // (records.md §9.4 v4) — for a portion, also on a link of its lot that checks
-// out. Every view that reads deals reads them here, so that no two views
-// disagree about which deal happened. The rules themselves are records' — the
-// ones the client applies (records/acceptance.h, records/goods_thread.h); this
-// only gathers the seller's records and the buyers' claims.
+// out. Since v6 (economy.md §4.4) a deal is an offer: it happens only once its
+// seller accepted it by its term, and only if every portion of someone else's
+// paper is a spend its bill covers. Every view that reads deals reads them here,
+// so that no two views disagree about which deal happened. The rules themselves
+// are records' — the ones the client applies (records/acceptance.h,
+// records/goods_thread.h, records/settlement.h); this only gathers the seller's
+// records, the buyers' claims and the answers.
 
 #include "aggregator.h"
 
 #include <records/acceptance.h>
 #include <records/carry.h>
 #include <records/goods_thread.h>
+#include <records/settlement.h>
 #include <records/types.h>
 
 #include <array>
 #include <map>
 #include <optional>
 #include <set>
+#include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -36,8 +42,39 @@ struct DealEntry {
     std::array<uint8_t, 32> hash{};    // the deal block: the Transfer carrying the acceptance
     UserId                  payer{};   // the chain that wrote it — who accepted and paid
     records::Transfer       transfer;  // transfer.accept is always set
+    uint32_t                node  = 0; // the paying branch — the purse it spends from
+    uint64_t                index = 0; // the block's position in that branch
 
     const records::Acceptance& accept() const noexcept { return *transfer.accept; }
+};
+
+// A move of someone else's paper between own branches (economy.md §5а): a
+// Transfer without an acceptance, from the chain to itself. Nobody answers it.
+struct MoveEntry {
+    std::array<uint8_t, 32> hash{};
+    UserId                  owner{};
+    records::Transfer       transfer;  // from == to == owner, no accept
+    uint32_t                node  = 0; // the branch it spends from
+    uint64_t                index = 0;
+};
+
+// A seller's answer to a deal (records.md §11.13), and the block it lies in.
+struct ReplyEntry {
+    std::array<uint8_t, 32> hash{};
+    records::ObservedReply  seen;
+};
+
+// One bill (economy.md §4.4): whose hands, the block the paper came in, whose
+// paper. Spends by anyone but the one it came to are not spends of this bill.
+using BillKey = std::tuple<std::array<uint8_t, 32>,    // holder
+                           std::array<uint8_t, 32>,    // src chain
+                           std::array<uint8_t, 32>,    // src block hash
+                           std::array<uint8_t, 32>>;   // issuer
+struct BillOnTable {
+    uint32_t           purse = 0;      // the branch the paper came to
+    records::BillState state;
+    std::string        why;            // why nothing came at all: no source, or it did not happen
+    bool               upstream = false;  // the source itself fell through — not the holder's lie
 };
 
 // The seller's side of a deal.
@@ -125,6 +162,35 @@ struct DealsOnTable {
     // отменяет прежнее (по времени блока), как у реакций (records.md §8.5).
     std::map<std::array<uint8_t, 32>, std::map<UserId, bool>> consents;
 
+    // ── Settlement (economy.md §4.4, records.md §11.13) ────────────────────
+    // A deal is an offer until the seller answers it by its term; paper someone
+    // else issued is spent from bills, and a spend no bill covers is no paper.
+    std::vector<MoveEntry> moves;      // moves between own branches, written by their owner
+    std::map<std::array<uint8_t, 32>, std::vector<ReplyEntry>> replies;   // deal → answers seen
+    std::map<std::array<uint8_t, 32>, records::DealAnswer>     answers;   // deal → the answer that counts
+    std::set<std::array<uint8_t, 32>> pre_accepted;   // buybacks paid with agreed paper: no answer needed
+    std::set<std::array<uint8_t, 32>> unbacked;       // deals and moves spending paper no bill covers
+    std::set<std::array<uint8_t, 32>> unbacked_upstream;   // ...only because a source fell through
+    std::map<std::array<uint8_t, 32>, std::string> unbacked_why;
+    std::set<std::array<uint8_t, 32>> moves_backed;   // moves that stand
+    std::map<BillKey, BillOnTable>    bills;
+
+    // The seller's answer that counts for a deal (none: silent, late, or not his).
+    records::Answer answer(const std::array<uint8_t, 32>& deal) const {
+        if (pre_accepted.count(deal)) return records::Answer::accepted;
+        const auto a = answers.find(deal);
+        return a == answers.end() ? records::Answer::none : a->second.answer;
+    }
+    // The reply block that counted, if any.
+    const ReplyEntry* counted_reply(const std::array<uint8_t, 32>& deal) const {
+        const auto a = answers.find(deal);
+        const auto r = replies.find(deal);
+        if (a == answers.end() || !a->second.reply || r == replies.end() ||
+            *a->second.reply >= r->second.size())
+            return nullptr;
+        return &r->second[*a->second.reply];
+    }
+
     // Кто согласился с этой записью (без тех, кто написал «против»).
     std::set<UserId> consented(const std::array<uint8_t, 32>& target) const {
         std::set<UserId> out;
@@ -169,8 +235,17 @@ struct DealsOnTable {
 // One pass over the storage. A deal counts as written only by its own sender, a
 // release or write-off only by the worker of its work (the spoof guards every
 // view applies); the codec has already refused a deal that does not pay
-// exactly, pays itself or pays anyone but the worker.
+// exactly, pays itself or pays anyone but the worker. A deal moves hours only
+// when, besides, its seller accepted it by its term (or a buyback needed no
+// answer) and every portion of someone else's paper is a spend its bill covers
+// (economy.md §4.4).
 DealsOnTable read_deals(const AggregatorStorage& storage);
+
+// How a deal stands at `now`, as one word for the views: "recognized",
+// "resold", "repeated", "contested", "unsound" (hours moved), "unaddressed"
+// (void), or for an offer that moved nothing — "pending", "refused",
+// "expired", "unbacked".
+const char* deal_standing(const DealsOnTable& deals, const DealEntry& d, int64_t now);
 
 // One output of a work as a lot (records.md §9.8 v2): how much of it went where.
 struct LotSummary {

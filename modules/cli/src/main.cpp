@@ -15,6 +15,7 @@
 #include <records/acceptance.h>
 #include <records/goods_thread.h>
 #include <records/draft.h>
+#include <records/settlement.h>
 #include <records/types.h>
 #include <sync/dialogue_channel.h>
 #include <sync/participant_cache.h>
@@ -142,7 +143,7 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--material", "--unit", "--qty",
     "--buyback-to", "--buyback-days", "--buyback-until", "--buyback-of",
     "--improves", "--repair", "--spend", "--machine-hours", "--meter", "--no",
-    "--shifts",
+    "--shifts", "--pay", "--reply-within",
 };
 
 // True when a standalone flag (no value) is present.
@@ -1456,9 +1457,18 @@ static int cmd_work_log(const fs::path& data_dir, int argc, char** argv) {
 
 // Payment and JSON helpers live further down, with the economy and aggregator
 // verbs.
-static std::vector<records::OriginQty> pick_portions(Context& ctx,
-                                                     const std::string& to_hex_s,
-                                                     double units);
+static std::vector<records::OriginQty> pay_from_purse(Context& ctx,
+                                                      const std::array<uint8_t, 32>& to,
+                                                      double units, int argc, char** argv,
+                                                      bool agreed_only);
+static int64_t     reply_term(int argc, char** argv, int64_t now);
+static std::string when_utc(int64_t ts);
+static void        upload_provenance(Context& ctx, const std::string& via,
+                                     const records::Transfer& t);
+static std::string own_live_deal_on(Context& ctx, const Ref& work,
+                                    const std::optional<Ref>& portion);
+static void        learn_answers(Context& ctx, const std::string& via, bool reverse);
+static bool        state_moved(const std::string& s);
 static void attach_emission_link(Context& ctx, records::Transfer& t);
 static void print_portions(const records::Transfer& t, const std::string& me_hex,
                            const std::string& to_hex_s);
@@ -1626,30 +1636,6 @@ private:
     std::map<PublicKey, UserId> known_;
     std::set<PublicKey>         asked_;
 };
-
-// The own deal on `work` already on record in the own branches: its ref, or
-// empty. One result — one deal (records.md §9.5, ИР-023): a second deal of the
-// same buyer buys nothing, it only overpays. A portion of a lot is a result of
-// its own (records.md §9.8 v2): `portion` narrows the search to that release.
-static std::string own_deal_on(Context& ctx, const Ref& work,
-                               const std::optional<Ref>& portion = std::nullopt) {
-    for (const NodeIndex node : ctx.local_branches()) {
-        std::vector<Block> blocks;
-        try { blocks = ctx.bc.get_branch(ctx.user_id, node); }
-        catch (const BlockchainError&) { continue; }
-        for (const auto& b : blocks) {
-            if (b.type != BlockType::DATA) continue;
-            Record rec;
-            try { rec = Codec::decode(b.payload.data(), b.payload.size()); }
-            catch (const CodecError&) { continue; }
-            const auto* t = std::get_if<records::Transfer>(&rec);
-            if (t && t->accept && t->accept->work == work &&
-                (!portion || t->accept->release == portion))
-                return to_hex(ctx.user_id.bytes) + "/" + to_hex(Crypto::hash_block(b).bytes);
-        }
-    }
-    return {};
-}
 
 // The aggregator's view of one result (GET /work/<chain>/<hash>, records.md §9.5):
 // the work's customer, its releases and every deal naming it with its standing.
@@ -1952,6 +1938,7 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     const auto lu_s      = flag_val(argc, argv, "--labor-units");
     const auto like_s    = flag_val(argc, argv, "--like");
     const auto via       = flag_val(argc, argv, "--via");
+    const bool dry       = flag_present(argc, argv, "--dry-run");
     std::vector<std::string> axis_args, share_args;
     for (int i = 1; i + 1 < argc; ++i) {
         if (std::string(argv[i]) == "--axis")       axis_args.emplace_back(argv[i + 1]);
@@ -1985,7 +1972,15 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
                      "                            default: found at the aggregator. Not needed\n"
                      "                            when the work names you as its customer\n"
                      "    [--buyback-of  REF]     buy back a purchase on its pre-signed return\n"
-                     "                            (default: found at the aggregator)\n";
+                     "                            (default: found at the aggregator)\n"
+                     "  оплата — оферта: продавец отвечает к сроку (economy.md §4.4)\n"
+                     "    [--reply-within 3d]     срок ответа продавца: 45m, 2h, 3d (по умолчанию 3d)\n"
+                     "    [--pay SPEC]...         чем платить — вручную, остальное по правилу:\n"
+                     "                              self=ЧАСЫ            своя эмиссия\n"
+                     "                              ЭМИТЕНТ=ЧАСЫ         бумага эмитента, старшие векселя\n"
+                     "                              ЭМИТЕНТ@ВЕКСЕЛЬ=ЧАСЫ этот вексель (bc wallet)\n"
+                     "    [--no-self]             не выпускать своей бумаги; не хватит чужой — отказ\n"
+                     "    [--dry-run]             показать набор и ничего не подписывать\n";
         return 1;
     }
 
@@ -2234,15 +2229,20 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
         : held   ? to_hex(a.release->chain) + "/" + to_hex(a.release->hash)
         : resale ? to_hex(release->holding->chain) + "/" + to_hex(release->holding->hash)
                  : to_hex(a.work.chain) + "/" + to_hex(a.work.hash);
-    if (const auto mine = own_deal_on(ctx, a.work, piece ? a.release : std::optional<Ref>{});
+    // Ответы продавцов — сперва (economy.md §4.4): отвергнутая или просроченная
+    // оферта ничего не держит, её место свободно.
+    learn_answers(ctx, via, !dry);
+    if (const auto mine = own_live_deal_on(ctx, a.work, piece ? a.release : std::optional<Ref>{});
         !mine.empty())
-        throw std::runtime_error(std::string("вы уже приняли и оплатили ") +
+        throw std::runtime_error(std::string("у вас уже есть сделка на ") +
                                  (piece ? "эту порцию: " : "эту работу: ") + mine +
                                  " (records.md §9.5)");
     if (status && status->is_object()) {
         if (const auto* ds = jarr(status->object, "deals"))
             for (const auto& d : ds->array) {
-                if (!d.is_object() || jstr(d.object, "state") == "unaddressed") continue;
+                // Сделка, которая ничего не сдвинула — оферта без ответа, отказ,
+                // просрочка, бумага без векселя, — результат не продала (economy.md §4.4).
+                if (!d.is_object() || !state_moved(jstr(d.object, "state"))) continue;
                 if (jstr(d.object, "source") != my_source) continue;   // другой источник
                 const auto* p = records::json::find(d.object, "portion");
                 const bool theirs_portion = p && p->boolean;
@@ -2349,9 +2349,11 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     t.from      = ctx.user_id.bytes;
     t.to        = seller;
     t.to_node   = DEFAULT_LEAF;
-    t.origins   = pick_portions(ctx, to_s, payable);
+    t.origins   = pay_from_purse(ctx, seller, payable, argc, argv, held.has_value());
     t.accept    = a;
     t.timestamp = now;   // the same moment the addressing was checked against
+    // v6 (economy.md §4.4): an offer until the seller accepts it by this term.
+    t.until     = reply_term(argc, argv, now);
     // Transfer v4 (records.md §11.1): which own promise this deal closes.
     const auto pledge_s = flag_val(argc, argv, "--pledge");
     if (!pledge_s.empty()) t.settles = parse_ref(pledge_s);
@@ -2361,6 +2363,12 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
             find_external_by_hash(ctx, resale ? a.release->hash : a.work.hash))
         t.to_node = seller_block->address.node_index;
     attach_emission_link(ctx, t);   // self-issues are threaded (economy.md §4.3)
+    if (dry) {
+        print_portions(t, me_hex, to_s);
+        std::cout << "dry run: ничего не подписано — оферта на " << payable
+                  << "h, ответ продавца до " << when_utc(*t.until) << "\n";
+        return 0;
+    }
 
     const Block block = append_record(ctx, Record{t});
     print_portions(t, me_hex, to_s);
@@ -2379,7 +2387,12 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
         if (a.carried_units) std::cerr << " + перенос " << *a.carried_units << "ч";
         std::cerr << " = paid " << payable << "h\n";
     }
-    if (!via.empty()) upload_block(via, block);
+    std::cerr << "это оферта: часы перейдут, когда продавец примет её — до "
+              << when_utc(*t.until) << " (economy.md §4.4)\n";
+    if (!via.empty()) {
+        upload_provenance(ctx, via, t);   // векселя: продавцу проверить бумагу
+        upload_block(via, block);
+    }
     return 0;
 }
 
@@ -2925,7 +2938,7 @@ static int cmd_release(const fs::path& data_dir, int argc, char** argv) {
         if (const auto st = fetch_work_status(via, work); st && st->is_object())
             if (const auto* ds = jarr(st->object, "deals"))
                 for (const auto& d : ds->array)
-                    if (d.is_object() && jstr(d.object, "state") != "unaddressed")
+                    if (d.is_object() && state_moved(jstr(d.object, "state")))
                         throw std::runtime_error("работа уже продана: сделка " +
                                                  jstr(d.object, "ref") + " (records.md §9.5)");
         if (wr->customer)
@@ -4246,88 +4259,405 @@ static std::array<uint8_t, 32> uid_from_hex(const std::string& s) {
     return a;
 }
 
-// Analytic wallet view — no protocol enforcement (records.md §12.7).
-// Per-branch purses (economy.md §5а): holdings belong to the selected branch —
-// outgoing transfers written in it spend from it, incoming ones credited via
-// to_node fill it. Debt stays chain-level: issue/redemption sum over ALL
-// local branches — the person owes, whichever pocket spent.
-struct WalletView {
-    std::map<std::string, double> holdings;   // issuer hex → units held by this branch
-    double issued   = 0;                      // own paper in circulation (chain-wide)
-    double redeemed = 0;                      // own paper annihilated (chain-wide)
-    double debt() const { return issued - redeemed; }
-};
+// ── Settlement: offers, answers, bills (economy.md §4.4, records.md §11.13) ───
+//
+// A deal the buyer signs is an OFFER; hours move when the seller accepts it by
+// its term. Someone else's paper sits in a purse as BILLS — the blocks it came
+// in — each spent along its own thread, every spend naming the one before. All
+// of it is read from the blocks this device holds: its own branches and what it
+// fetched — the deals that paid it and the sellers' answers to its offers.
 
-static WalletView compute_wallet(Context& ctx) {
-    WalletView w;
-    const auto& me = ctx.user_id.bytes;
+using Hash32 = std::array<uint8_t, 32>;
 
-    for (const NodeIndex branch : ctx.local_branches()) {
-        std::vector<Block> blocks;
-        try { blocks = ctx.bc.get_branch(ctx.user_id, branch); }
-        catch (const BlockchainError&) { continue; }
-        for (const auto& b : blocks) {
-            if (b.type != BlockType::DATA) continue;
-            try {
-                const auto rec = Codec::decode(b.payload.data(), b.payload.size());
-                const auto* t  = std::get_if<records::Transfer>(&rec);
-                if (!t || t->from != me) continue;
-                for (const auto& o : t->origins) {
-                    if (o.issuer == me) w.issued += o.units;   // chain-level debt
-                    else if (branch == ctx.leaf)               // this purse spent
-                        w.holdings[to_hex(o.issuer.data(), 32)] -= o.units;
-                }
-            } catch (const CodecError&) {}
-        }
-    }
+// The seller's term when the buyer names none (bc accept --reply-within).
+static constexpr int64_t DEFAULT_REPLY_WINDOW = 3 * 86'400;
 
-    ctx.storage.for_each_external_block([&](const Block& b) {
-        if (b.type != BlockType::DATA) return true;
-        try {
-            const auto rec = Codec::decode(b.payload.data(), b.payload.size());
-            const auto* t  = std::get_if<records::Transfer>(&rec);
-            if (!t || t->to != me) return true;
-            if (b.address.user_id.bytes != t->from) return true;      // spoofed sender
-            for (const auto& o : t->origins) {
-                if (o.issuer == me) w.redeemed += o.units;            // redemption
-                else if (t->to_node == ctx.leaf)                      // this purse credited
-                    w.holdings[to_hex(o.issuer.data(), 32)] += o.units;
-            }
-        } catch (const CodecError&) {}
-        return true;
-    });
-
-    for (auto it = w.holdings.begin(); it != w.holdings.end();)
-        it = std::abs(it->second) < 1e-9 ? w.holdings.erase(it) : std::next(it);
-    return w;
+static bool jbool(const records::json::Object& o, const char* k, bool def) {
+    const auto* v = records::json::find(o, k);
+    return v && v->type == records::json::Value::Type::Bool ? v->boolean : def;
 }
 
-// Auto-selection of portions (records.md §11.1): receiver's own paper first
-// (it will annihilate), then other held paper, self-issue for the remainder.
-static std::vector<records::OriginQty> pick_portions(Context& ctx,
-                                                     const std::string& to_hex_s,
-                                                     double units) {
-    if (units <= 0) throw std::runtime_error("units must be positive");
-    std::vector<records::OriginQty> portions;
-    double remaining = units;
-    auto wallet = compute_wallet(ctx);
-    auto spend = [&](const std::string& issuer_hex) {
-        auto it = wallet.holdings.find(issuer_hex);
-        if (it == wallet.holdings.end() || it->second <= 0 || remaining <= 1e-9)
-            return;
-        const double take = std::min(it->second, remaining);
-        portions.push_back({uid_from_hex(issuer_hex), take});
-        remaining -= take;
-        it->second = 0;
+static std::string hours_str(double h) {
+    std::ostringstream os;
+    os << h;
+    return os.str();
+}
+
+static std::string when_utc(int64_t ts) {
+    const std::time_t t = static_cast<std::time_t>(ts);
+    char buf[32];
+    std::strftime(buf, sizeof buf, "%Y-%m-%d %H:%M UTC", std::gmtime(&t));
+    return buf;
+}
+
+// "45m", "2h", "3d", "1.5d" → seconds.
+static int64_t parse_duration(const std::string& s) {
+    if (s.size() < 2) throw std::runtime_error("срок: число и единица — 45m, 2h, 3d: " + s);
+    const char unit = s.back();
+    double v = 0;
+    try { v = std::stod(s.substr(0, s.size() - 1)); }
+    catch (...) { throw std::runtime_error("срок: число и единица — 45m, 2h, 3d: " + s); }
+    const double k = unit == 'm' ? 60.0 : unit == 'h' ? 3600.0 : unit == 'd' ? 86'400.0 : 0.0;
+    if (k == 0.0 || !(v > 0))
+        throw std::runtime_error("срок: число и единица — 45m, 2h, 3d: " + s);
+    return static_cast<int64_t>(v * k);
+}
+
+// What this device knows of its own money.
+struct Ledger {
+    struct Own {
+        Hash32            hash{};
+        uint32_t          node  = 0;
+        uint64_t          index = 0;
+        records::Transfer t;
     };
-    spend(to_hex_s);                                        // redemption first
-    for (const auto& [issuer, held] : wallet.holdings) {
-        (void)held;
-        spend(issuer);
+    std::vector<Own>                    mine;       // own transfers — deals and moves, every branch
+    std::map<Hash32, records::Transfer> incoming;   // deals that paid this chain
+    std::map<Hash32, records::Transfer> foreign;    // other chains' transfers seen (holders' purchases)
+    std::map<Hash32, std::vector<std::pair<Hash32, records::ObservedReply>>> replies;   // deal → answers
+    std::set<Hash32>                    reversed;   // own deals whose self-issue is already reversed
+};
+
+static Ledger read_ledger(Context& ctx) {
+    Ledger L;
+    const auto& me = ctx.user_id.bytes;
+    const auto digest = [&](const Block& b, bool own) {
+        if (b.type != BlockType::DATA) return;
+        records::Record rec;
+        try { rec = Codec::decode(b.payload.data(), b.payload.size()); }
+        catch (const CodecError&) { return; }
+        const Hash32 h      = Crypto::hash_block(b).bytes;
+        const auto&  author = b.address.user_id.bytes;
+        if (const auto* t = std::get_if<records::Transfer>(&rec)) {
+            if (t->from != author) return;                          // spoofed sender
+            if (own)              L.mine.push_back({h, b.address.node_index, b.address.block_index, *t});
+            else if (t->to == me) L.incoming[h] = *t;
+            else                  L.foreign[h]  = *t;
+        } else if (const auto* r = std::get_if<records::DealReply>(&rec)) {
+            L.replies[r->deal.hash].push_back(
+                {h, records::ObservedReply{*r, author, b.address.node_index, b.address.block_index}});
+        } else if (const auto* rd = std::get_if<records::Redemption>(&rec)) {
+            if (own && records::is_reversal(*rd, me)) L.reversed.insert(rd->transfer.hash);
+        }
+    };
+    for (const NodeIndex node : ctx.local_branches()) {
+        std::vector<Block> blocks;
+        try { blocks = ctx.bc.get_branch(ctx.user_id, node); }
+        catch (const BlockchainError&) { continue; }
+        for (const auto& b : blocks) digest(b, true);
     }
-    if (remaining > 1e-9)
-        portions.push_back({ctx.user_id.bytes, remaining});  // self-issue
-    return portions;
+    ctx.storage.for_each_external_block([&](const Block& b) {
+        if (b.address.user_id.bytes != me) digest(b, false);
+        return true;
+    });
+    for (auto& [deal, list] : L.replies) {   // a block fetched twice is one answer
+        (void)deal;
+        std::sort(list.begin(), list.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        list.erase(std::unique(list.begin(), list.end(),
+                               [](const auto& a, const auto& b) { return a.first == b.first; }),
+                   list.end());
+    }
+    return L;
+}
+
+// A buyback on the pre-signed return (records.md §9.8 v5): the deal names, as
+// its release, a purchase that pre-signed the return to the payer.
+static bool is_buyback(const Ledger& L, const records::Transfer& t) {
+    if (!t.accept || !t.accept->release) return false;
+    const auto& rh = t.accept->release->hash;
+    const auto returns_to_payer = [&](const records::Transfer& p) {
+        return p.accept && p.accept->buyback && p.accept->buyback->to == t.from;
+    };
+    for (const auto& o : L.mine)
+        if (o.hash == rh) return returns_to_payer(o.t);
+    if (const auto it = L.foreign.find(rh); it != L.foreign.end())
+        return returns_to_payer(it->second);
+    if (const auto it = L.incoming.find(rh); it != L.incoming.end())
+        return returns_to_payer(it->second);
+    return false;
+}
+
+// The seller's answer to a deal as far as this device knows (records.md §11.13);
+// `seen` gets the replies it was judged on, so the counted one can be read.
+static records::DealAnswer answer_known(const Ledger& L, const Hash32& hash,
+                                        const records::Transfer& t,
+                                        std::vector<records::ObservedReply>& seen) {
+    seen.clear();
+    if (const auto it = L.replies.find(hash); it != L.replies.end())
+        for (const auto& e : it->second) seen.push_back(e.second);
+    auto a = records::answer_of(t, records::Ref{t.from, hash}, seen);
+    // A buyback paid with paper the holder agreed to needs no answer.
+    if (a.answer == records::Answer::none && is_buyback(L, t) &&
+        records::pre_accepted_buyback(t))
+        a.answer = records::Answer::accepted;
+    return a;
+}
+
+static records::Answer known_answer(const Ledger& L, const Hash32& hash,
+                                    const records::Transfer& t) {
+    std::vector<records::ObservedReply> seen;
+    return answer_known(L, hash, t, seen).answer;
+}
+
+// One bill in a purse: someone else's paper that came in one block.
+struct PurseBill {
+    records::Ref            src;              // the deal that paid us, or our move
+    Hash32                  issuer{};
+    double                  credited = 0;
+    std::optional<uint64_t> arrived;          // our acceptance of the paying deal
+    int64_t                 received = 0;     // when it came
+    records::BillState      state;            // after every spend we know of
+    std::optional<Hash32>   last;             // our last spend of it — the next one's `prev`
+    double                  free    = 0;      // what may be spent now
+    double                  waiting = 0;      // held by our offers still waiting for an answer
+};
+
+static std::vector<PurseBill> purse_bills(const Ledger& L, const Hash32& me, uint32_t purse,
+                                          int64_t now) {
+    std::vector<PurseBill> out;
+    const auto issuers_of = [&](const records::Transfer& t) {
+        std::set<Hash32> s;
+        for (const auto& o : t.origins)
+            if (o.issuer != me) s.insert(o.issuer);
+        return s;
+    };
+    // What came in: deals that paid this purse and were accepted…
+    for (const auto& [h, s] : L.incoming) {
+        if (!s.accept || s.to_node != purse) continue;
+        std::vector<records::ObservedReply> seen;
+        const auto a = answer_known(L, h, s, seen);
+        if (a.answer != records::Answer::accepted) continue;
+        std::optional<uint64_t> arrived;
+        int64_t                 received = s.timestamp;
+        if (a.reply) {
+            arrived  = seen[*a.reply].index;
+            received = seen[*a.reply].reply.timestamp;
+        }
+        for (const auto& issuer : issuers_of(s)) {
+            PurseBill b;
+            b.src      = records::Ref{s.from, h};
+            b.issuer   = issuer;
+            b.credited = records::bill_credit(s, issuer);
+            b.arrived  = arrived;
+            b.received = received;
+            out.push_back(b);
+        }
+    }
+    // …and our own moves into it.
+    for (const auto& o : L.mine) {
+        if (o.t.accept || o.t.to_node != purse) continue;
+        for (const auto& issuer : issuers_of(o.t)) {
+            PurseBill b;
+            b.src      = records::Ref{me, o.hash};
+            b.issuer   = issuer;
+            b.credited = records::bill_credit(o.t, issuer);
+            b.received = o.t.timestamp;
+            out.push_back(b);
+        }
+    }
+    // Every spend of each bill, along its thread.
+    for (auto& b : out) {
+        std::vector<records::BillSpend> spends;
+        const Ledger::Own*              tail = nullptr;   // the latest spend from this purse
+        double                          tail_units = 0;
+        for (const auto& o : L.mine)
+            for (const auto& p : o.t.origins) {
+                if (!p.src || !(*p.src == b.src) || p.issuer != b.issuer) continue;
+                records::BillSpend sp{};
+                sp.hash      = o.hash;
+                sp.node      = o.node;
+                sp.index     = o.index;
+                sp.timestamp = o.t.timestamp;
+                sp.units     = p.units;
+                sp.prev      = p.prev;
+                sp.move      = !o.t.accept;
+                if (o.t.accept) {
+                    sp.answer = known_answer(L, o.hash, o.t);
+                    sp.until  = o.t.until.value_or(0);
+                    if (sp.answer == records::Answer::none && now <= sp.until) b.waiting += p.units;
+                }
+                spends.push_back(sp);
+                if (o.node == purse && (!tail || o.index > tail->index)) {
+                    tail       = &o;
+                    tail_units = p.units;
+                }
+            }
+        b.state = records::check_bill(me, purse, b.credited, b.arrived, spends);
+        b.free  = b.state.remaining();
+        if (tail) {
+            b.last = tail->hash;
+            // The latest offer, unanswered past its term, holds nothing any more:
+            // the next spend comes after the term.
+            if (tail->t.accept && known_answer(L, tail->hash, tail->t) == records::Answer::none &&
+                now > tail->t.until.value_or(0) && b.state.backed.count(tail->hash))
+                b.free += tail_units;
+        }
+    }
+    std::sort(out.begin(), out.end(), [](const PurseBill& a, const PurseBill& b) {
+        return a.received != b.received ? a.received < b.received : a.src.hash < b.src.hash;
+    });
+    return out;
+}
+
+// --pay SPEC (bc accept, bc transfer move): what pays, by hand.
+//   self=H           own issue
+//   ISSUER=H         that issuer's paper, oldest bills first
+//   ISSUER@BILL=H    that very bill — BILL is the block it came in, as bc wallet shows it
+// ISSUER and BILL are hex prefixes.
+struct PaySpec {
+    bool        self = false;
+    std::string issuer;
+    std::string bill;
+    double      units = 0;
+};
+
+static std::vector<PaySpec> parse_pay_specs(const std::vector<std::string>& args) {
+    std::vector<PaySpec> out;
+    const auto hexy = [](std::string& x) {
+        for (auto& c : x) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return !x.empty() && std::all_of(x.begin(), x.end(), [](char c) {
+            return std::isxdigit(static_cast<unsigned char>(c)) != 0;
+        });
+    };
+    for (const auto& a : args) {
+        const auto eq = a.rfind('=');
+        if (eq == std::string::npos || eq == 0)
+            throw std::runtime_error("--pay: ожидалось self=ЧАСЫ, ЭМИТЕНТ=ЧАСЫ или "
+                                     "ЭМИТЕНТ@ВЕКСЕЛЬ=ЧАСЫ, получено: " + a);
+        PaySpec s;
+        try { s.units = std::stod(a.substr(eq + 1)); }
+        catch (...) { throw std::runtime_error("--pay: часы — число: " + a); }
+        if (!(s.units > 0)) throw std::runtime_error("--pay: часы — положительное число: " + a);
+        const std::string who = a.substr(0, eq);
+        if (who == "self") {
+            s.self = true;
+            out.push_back(s);
+            continue;
+        }
+        const auto at = who.find('@');
+        s.issuer = who.substr(0, at);
+        if (at != std::string::npos) s.bill = who.substr(at + 1);
+        if (!hexy(s.issuer) || (at != std::string::npos && !hexy(s.bill)))
+            throw std::runtime_error("--pay: эмитент и вексель — hex-префиксы: " + a);
+        out.push_back(s);
+    }
+    return out;
+}
+
+// What pays `units` to `to` from a purse: the hand-picked first, then the
+// receiver's own paper (it comes home and annihilates), other paper oldest
+// bill first, own issue for the rest — unless `no_self`. A bill (or an
+// issuer's bills) named by hand gives exactly what was named: the rest never
+// comes from it. With `self_ok` false (a move between own branches) own paper
+// does not move at all.
+static std::vector<records::OriginQty> choose_portions(const std::vector<PurseBill>& bills,
+                                                       const Hash32& me, const Hash32& to,
+                                                       double units,
+                                                       const std::vector<PaySpec>& specs,
+                                                       bool no_self, bool self_ok = true) {
+    if (!(units > 0)) throw std::runtime_error("units must be positive");
+    std::vector<double> left, taken(bills.size(), 0.0);
+    std::vector<bool>   named(bills.size(), false);
+    for (const auto& b : bills) left.push_back(std::max(0.0, b.free));
+    double self = 0.0, need = units;
+    const auto take = [&](std::size_t i, double want) {
+        const double t = std::min(want, left[i]);
+        if (t <= 1e-9) return 0.0;
+        left[i]  -= t;
+        taken[i] += t;
+        return t;
+    };
+    for (const auto& s : specs) {
+        if (s.units > need + 1e-9)
+            throw std::runtime_error("--pay набирает больше, чем платится (" + hours_str(units) + "ч)");
+        if (s.self) {
+            if (!self_ok)
+                throw std::runtime_error("своя бумага между своими ветками не ходит (economy.md §5а)");
+            self += s.units;
+            need -= s.units;
+            continue;
+        }
+        std::vector<std::size_t> match;
+        std::set<std::string>    distinct;
+        for (std::size_t i = 0; i < bills.size(); ++i)
+            if (to_hex(bills[i].issuer).rfind(s.issuer, 0) == 0 &&
+                (s.bill.empty() || to_hex(bills[i].src.hash).rfind(s.bill, 0) == 0)) {
+                match.push_back(i);
+                distinct.insert(to_hex(bills[i].issuer) + to_hex(bills[i].src.hash));
+            }
+        const std::string name = s.issuer + (s.bill.empty() ? "" : "@" + s.bill);
+        if (match.empty())
+            throw std::runtime_error("--pay: в этом кошельке нет векселя " + name + " (bc wallet)");
+        if (!s.bill.empty() && distinct.size() > 1)
+            throw std::runtime_error("--pay: под " + name + " подходит несколько векселей — "
+                                     "уточните префикс (bc wallet)");
+        double got = 0.0;
+        for (const auto i : match) {
+            named[i] = true;
+            got += take(i, s.units - got);
+        }
+        if (got + 1e-9 < s.units)
+            throw std::runtime_error("--pay: по " + name + " свободно только " + hours_str(got) + "ч");
+        need -= s.units;
+    }
+    for (std::size_t i = 0; i < bills.size() && need > 1e-9; ++i)   // their paper comes home
+        if (bills[i].issuer == to && !named[i]) need -= take(i, need);
+    for (std::size_t i = 0; i < bills.size() && need > 1e-9; ++i)   // then the oldest bills
+        if (!named[i]) need -= take(i, need);
+    if (need > 1e-9) {
+        if (no_self || !self_ok)
+            throw std::runtime_error("чужой бумаги в этом кошельке не хватает — недостаёт " +
+                                     hours_str(need) + "ч (bc wallet)");
+        self += need;
+    }
+    std::vector<records::OriginQty> out;
+    if (self > 1e-9) out.push_back({me, self});
+    for (std::size_t i = 0; i < bills.size(); ++i)
+        if (taken[i] > 1e-9) {
+            records::OriginQty q{bills[i].issuer, taken[i], bills[i].src, std::nullopt};
+            if (bills[i].last) q.prev = records::Ref{me, *bills[i].last};
+            out.push_back(q);
+        }
+    return out;
+}
+
+// One of this chain's own blocks, by hash, from whatever local branch.
+static std::optional<Block> find_own_block(Context& ctx, const Hash32& hash) {
+    for (const NodeIndex node : ctx.local_branches()) {
+        std::vector<Block> blocks;
+        try { blocks = ctx.bc.get_branch(ctx.user_id, node); }
+        catch (const BlockchainError&) { continue; }
+        for (const auto& b : blocks)
+            if (Crypto::hash_block(b).bytes == hash) return b;
+    }
+    return std::nullopt;
+}
+
+// A block by Ref: own chain, the local external store, then the aggregator
+// (verified against the ref and cached).
+static std::optional<Block> find_block(Context& ctx, const std::string& via, const Ref& ref) {
+    if (ref.chain == ctx.user_id.bytes) return find_own_block(ctx, ref.hash);
+    if (auto b = find_external_by_hash(ctx, ref.hash)) return b;
+    if (via.empty()) return std::nullopt;
+    try {
+        const Block b = fetch_block_from(via, ref);
+        if (!ctx.storage.has_external_block(b.address)) ctx.storage.put_external_block(b);
+        return b;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+// Upload without a word — for the blocks that only back another one.
+static bool post_block(const std::string& via, const Block& block) {
+    httplib::Client cli(via);  // scheme-aware: plain host:port, http:// or https://
+    cli.set_connection_timeout(5);
+    const auto cbor = Serializer::encode(block);
+    const auto res  = cli.Post("/blocks",
+        std::string(reinterpret_cast<const char*>(cbor.data()), cbor.size()),
+        "application/cbor");
+    return res && res->status == 200;
 }
 
 // ── Emission thread (economy.md §4.3) ─────────────────────────────────────────
@@ -4408,19 +4738,181 @@ static void print_portions(const records::Transfer& t, const std::string& me_hex
                            const std::string& to_hex_s) {
     for (const auto& o : t.origins) {
         const std::string issuer = to_hex(o.issuer.data(), 32);
-        const char* kind = issuer == me_hex   ? "self-issued"
-                         : issuer == to_hex_s ? "returned to issuer"
-                                              : "endorsed";
-        std::cerr << "  " << o.units << "h  " << kind
-                  << "  (issuer " << issuer.substr(0, 16) << "...)\n";
+        const char* kind = issuer == me_hex   ? "своя эмиссия"
+                         : issuer == to_hex_s ? "бумага получателя — вернётся к нему"
+                                              : "чужая бумага";
+        std::cerr << "  " << o.units << "h  " << kind << "  (эмитент "
+                  << issuer.substr(0, 16) << "…";
+        if (o.src) std::cerr << ", вексель " << to_hex(o.src->hash).substr(0, 12) << "…";
+        std::cerr << ")\n";
     }
 }
 
-// bc wallet [--leaf L]
+// Where an own offer stands, as the aggregator reports it (records.md §11.13).
+struct OfferStatus {
+    Hash32      hash{};
+    Hash32      seller{};
+    double      price = 0, self = 0;   // self — own paper it issues
+    int64_t     until = 0;
+    std::string status;                // pending / accepted / refused / expired, or "?"
+    std::string note;                  // the seller's reason, if any
+    bool        backed = true;
+    std::string why;
+};
+
+// Learn the sellers' answers to own offers: the aggregator names the answer
+// that counted, and the answer itself is a block of the seller's chain, fetched
+// and checked like any other. With `reverse`, every own self-issuing offer that
+// ended refused or lapsed — as the aggregator, who sees the whole table, reports
+// it — gets its reversal: that paper was never born (records.md §11.5 v2).
+// The first answer is final, so only what is still open is asked about: offers
+// waiting, and lapsed ones whose own paper still needs its reversal.
+static std::vector<OfferStatus> refresh_offers(Context& ctx, const std::string& via,
+                                               bool reverse) {
+    std::vector<OfferStatus> out;
+    const Ledger L   = read_ledger(ctx);
+    const auto&  me  = ctx.user_id.bytes;
+    const auto   now = static_cast<int64_t>(std::time(nullptr));
+    for (const auto& o : L.mine) {
+        if (!o.t.accept) continue;
+        OfferStatus st;
+        st.hash   = o.hash;
+        st.seller = o.t.to;
+        st.until  = o.t.until.value_or(0);
+        for (const auto& p : o.t.origins) {
+            st.price += p.units;
+            if (p.issuer == me) st.self += p.units;
+        }
+        std::vector<records::ObservedReply> seen;
+        const auto known = answer_known(L, o.hash, o.t, seen);
+        if (known.answer != records::Answer::none) {
+            st.status = known.answer == records::Answer::accepted ? "accepted" : "refused";
+            if (known.reply) st.note = seen[*known.reply].reply.note;
+            if (!(known.answer == records::Answer::refused && reverse && st.self > 1e-9 &&
+                  !L.reversed.count(o.hash))) {
+                out.push_back(st);
+                continue;
+            }
+        } else if (now > st.until && (st.self <= 1e-9 || L.reversed.count(o.hash))) {
+            st.status = "expired";    // nothing left to learn or to reverse
+            out.push_back(st);
+            continue;
+        }
+        const auto doc = fetch_json(via, "/deal/" + to_hex(me) + "/" + to_hex(o.hash));
+        if (!doc || !doc->is_object()) {
+            st.status = "?";
+            out.push_back(st);
+            continue;
+        }
+        const auto& j = doc->object;
+        st.status = jstr(j, "status");
+        st.backed = jbool(j, "backed", true);
+        st.why    = jstr(j, "unbacked_why");
+        if (const auto* r = records::json::find(j, "reply"); r && r->is_object()) {
+            st.note = jstr(r->object, "note");
+            try {
+                const Block rb  = fetch_block_from(via, parse_ref(jstr(r->object, "ref")));
+                const auto  rec = Codec::decode(rb.payload.data(), rb.payload.size());
+                const auto* dr  = std::get_if<records::DealReply>(&rec);
+                if (dr && dr->deal.hash == o.hash && rb.address.user_id.bytes == o.t.to &&
+                    !ctx.storage.has_external_block(rb.address))
+                    ctx.storage.put_external_block(rb);
+            } catch (const std::exception&) {}
+        }
+        if (reverse && st.self > 1e-9 && !L.reversed.count(o.hash) &&
+            (st.status == "refused" || st.status == "expired")) {
+            const auto th = emission_thread_state(ctx);
+            records::Redemption rd{};
+            rd.transfer        = records::Ref{me, o.hash};
+            rd.units           = st.self;
+            rd.link.seq        = th.next_seq;
+            rd.link.prev       = th.tip;
+            rd.link.debt_after = th.debt + st.self;
+            rd.timestamp       = static_cast<int64_t>(std::time(nullptr));
+            post_block(via, append_record(ctx, Record{rd}));
+            std::cerr << "сторно #" << rd.link.seq << ": оферта " << to_hex(o.hash).substr(0, 12)
+                      << "… " << (st.status == "refused" ? "отвергнута" : "просрочена")
+                      << " — своя бумага " << st.self << "ч не родилась, объявленный долг "
+                      << rd.link.debt_after << "ч (records.md §11.5)\n";
+        }
+        out.push_back(st);
+    }
+    return out;
+}
+
+// The blocks the seller needs to check our paper (economy.md §4.4): for every
+// bill, the block it came in, our acceptance of it and our spends of it — and
+// through our own moves, back to the deal that paid us.
+static void upload_provenance(Context& ctx, const std::string& via, const records::Transfer& t) {
+    const Ledger L  = read_ledger(ctx);
+    const auto&  me = ctx.user_id.bytes;
+    std::set<Hash32> sent;
+    const auto send_own = [&](const Hash32& h) {
+        if (!sent.insert(h).second) return;
+        if (const auto b = find_own_block(ctx, h)) post_block(via, *b);
+    };
+    std::function<void(const records::Transfer&, int)> walk = [&](const records::Transfer& tr,
+                                                                  int depth) {
+        if (depth > 16) return;
+        for (const auto& p : tr.origins) {
+            if (!p.src) continue;
+            if (p.src->chain == me) {                    // our move: its paper in turn
+                send_own(p.src->hash);
+                for (const auto& o : L.mine)
+                    if (o.hash == p.src->hash) walk(o.t, depth + 1);
+            } else {
+                if (sent.insert(p.src->hash).second)
+                    if (const auto b = find_external_by_hash(ctx, p.src->hash)) post_block(via, *b);
+                if (const auto r = L.replies.find(p.src->hash); r != L.replies.end())
+                    for (const auto& [rh, seen] : r->second)
+                        if (seen.author == me) send_own(rh);
+            }
+            for (const auto& o : L.mine)                 // our spends of this bill
+                for (const auto& q : o.t.origins)
+                    if (q.src && *q.src == *p.src && q.issuer == p.issuer) send_own(o.hash);
+        }
+    };
+    walk(t, 0);
+}
+
+// What pays a deal from the --leaf purse (bc accept): --pay, then the rule
+// (choose_portions). The caller learns the sellers' answers first — a refused or
+// lapsed offer frees its bills (learn_answers). `agreed_only` (a buyback on the
+// pre-signed return, records.md §9.8 v5): by the rule only the holder's own paper
+// and own issue — the paper he agreed to when he signed the return, so the
+// buyback needs no answer; someone else's paper only when named by --pay.
+static std::vector<records::OriginQty> pay_from_purse(Context& ctx, const Hash32& to,
+                                                      double units, int argc, char** argv,
+                                                      bool agreed_only) {
+    const auto   now   = static_cast<int64_t>(std::time(nullptr));
+    const Ledger L     = read_ledger(ctx);
+    auto         bills = purse_bills(L, ctx.user_id.bytes, ctx.leaf, now);
+    const auto   specs = parse_pay_specs(flag_all(argc, argv, "--pay"));
+    if (agreed_only)
+        bills.erase(std::remove_if(bills.begin(), bills.end(),
+                                   [&](const PurseBill& b) {
+                                       if (b.issuer == to) return false;
+                                       for (const auto& s : specs)
+                                           if (!s.self && to_hex(b.issuer).rfind(s.issuer, 0) == 0)
+                                               return false;
+                                       return true;
+                                   }),
+                    bills.end());
+    return choose_portions(bills, ctx.user_id.bytes, to, units, specs,
+                           flag_present(argc, argv, "--no-self"));
+}
+
+// The seller's term for a new offer: --reply-within, or the default.
+static int64_t reply_term(int argc, char** argv, int64_t now) {
+    const auto s = flag_val(argc, argv, "--reply-within");
+    return now + (s.empty() ? DEFAULT_REPLY_WINDOW : parse_duration(s));
+}
+
+// bc wallet [--leaf L] [--via URL]
 static int cmd_wallet(const fs::path& data_dir, int argc, char** argv) {
     const NodeIndex leaf = parse_leaf_index(argc, argv);
+    const auto      via  = flag_val(argc, argv, "--via");
     Context ctx(data_dir, leaf);
-    const auto w = compute_wallet(ctx);
 
     // blockchain.md §6.7: surface the purse branch's own revocation state.
     if (auto rst = ctx.validator.effective_revocation(ctx.user_id, ctx.leaf))
@@ -4428,26 +4920,67 @@ static int cmd_wallet(const fs::path& data_dir, int argc, char** argv) {
                           ? "note: this branch was revoked and REPLACED (blockchain.md §6.7)\n"
                           : "WARNING: this branch is FROZEN by revocation (blockchain.md §6.7)\n");
 
-    double held = 0;
-    std::cout << "purse of branch 0x" << std::hex << ctx.leaf << std::dec
-              << " (paper of others):\n";
-    if (w.holdings.empty()) std::cout << "  (none)\n";
-    for (const auto& [issuer, units] : w.holdings) {
-        std::cout << "  " << issuer.substr(0, 16) << "...  " << units << "h\n";
-        held += units;
+    if (!via.empty()) refresh_offers(ctx, via, false);   // answers learnt; reversals — bc transfer status
+    const auto   now = static_cast<int64_t>(std::time(nullptr));
+    const auto&  me  = ctx.user_id.bytes;
+    const Ledger L   = read_ledger(ctx);
+    const auto   bills = purse_bills(L, me, ctx.leaf, now);
+
+    std::cout << "кошелёк ветки 0x" << std::hex << ctx.leaf << std::dec
+              << " — чужая бумага по векселям (economy.md §4.4):\n";
+    double free = 0, waiting = 0;
+    if (bills.empty()) std::cout << "  (нет)\n";
+    for (const auto& b : bills) {
+        if (b.free <= 1e-9 && b.waiting <= 1e-9) continue;
+        std::cout << "  вексель " << to_hex(b.src.hash).substr(0, 12) << "…  эмитент "
+                  << to_hex(b.issuer).substr(0, 12) << "…  свободно " << b.free << "h";
+        if (b.waiting > 1e-9) std::cout << "  (ещё " << b.waiting << "h держат оферты)";
+        std::cout << "  получен " << when_utc(b.received);
+        if (b.src.chain == me) std::cout << "  (перемещён из своей ветки)";
+        if (!b.state.unbacked.empty()) std::cout << "  ! " << b.state.fault;
+        std::cout << "\n";
+        free    += b.free;
+        waiting += b.waiting;
     }
-    std::cout << "total held: " << held << "h\n"
-              << "own debt in circulation: " << w.debt()
-              << "h  (issued " << w.issued << ", redeemed " << w.redeemed << ")\n";
+    std::cout << "итого свободно: " << free << "h";
+    if (waiting > 1e-9) std::cout << "  (и " << waiting << "h в офертах, ждущих ответа)";
+    std::cout << "\n  платить вручную: bc accept … --pay ЭМИТЕНТ@ВЕКСЕЛЬ=ЧАСЫ\n";
+
+    // Debt is the chain's: own paper in others' hands — by deals the sellers took.
+    double issued = 0, redeemed = 0, offered = 0, unreversed = 0;
+    for (const auto& o : L.mine) {
+        if (!o.t.accept) continue;
+        double self = 0;
+        for (const auto& p : o.t.origins)
+            if (p.issuer == me) self += p.units;
+        if (self <= 1e-9) continue;
+        const auto a = known_answer(L, o.hash, o.t);
+        if (a == records::Answer::accepted) issued += self;
+        else if (L.reversed.count(o.hash)) continue;
+        else if (a == records::Answer::none && now <= o.t.until.value_or(0)) offered += self;
+        else unreversed += self;
+    }
+    for (const auto& [h, s] : L.incoming)
+        if (known_answer(L, h, s) == records::Answer::accepted)
+            for (const auto& p : s.origins)
+                if (p.issuer == me) redeemed += p.units;
+    std::cout << "свой долг в обороте: " << issued - redeemed << "h  (выпущено " << issued
+              << ", погашено " << redeemed << ")\n";
+    if (offered > 1e-9)
+        std::cout << "своя бумага в офертах, ждущих ответа: " << offered << "h\n";
+    if (unreversed > 1e-9)
+        std::cout << "оферты отвергнуты или просрочены, сторно не записано: " << unreversed
+                  << "h — bc transfer status --via URL\n";
 
     // Emission thread (economy.md §4.3): the declared, self-attested debt level.
     const auto th = emission_thread_state(ctx);
     if (th.tip.has_value()) {
         std::cout << "emission thread: link #" << (th.next_seq - 1)
                   << "  declared debt " << th.debt << "h";
-        if (std::abs(-th.debt - w.debt()) > 1e-6)
-            std::cout << "  (differs from computed " << -w.debt()
-                      << "h — receipts pending?)";
+        const double expected = issued + offered + unreversed - redeemed;
+        if (std::abs(-th.debt - expected) > 1e-6)
+            std::cout << "  (differs from computed " << -expected
+                      << "h — answers or receipts pending?)";
         std::cout << "\n";
     } else {
         std::cout << "emission thread: empty (no self-issues yet)\n";
@@ -4482,6 +5015,12 @@ static std::vector<records::ObservedLink> observed_links(
             o.units         = rd->units;
             o.is_redemption = true;
             o.timestamp     = rd->timestamp;
+            // Квитанция на свою же сделку — сторно (records.md §11.5 v2): оферту
+            // отвергли или пропустили, своя бумага не родилась.
+            if (records::is_reversal(*rd, subject)) {
+                o.is_reversal = true;
+                o.reverses    = rd->transfer.hash;
+            }
         } else {
             return;
         }
@@ -4616,6 +5155,19 @@ static void print_footprint(Context& ctx,
     else
         std::cout << "  чужого труда не заверяла ни разу\n";
 
+    // Бумага, которой не было (economy.md §4.4): сделки и перемещения, чью чужую
+    // бумагу не покрывает ни один вексель, — подписаны ею, ничего не сдвинули.
+    if (const auto n = static_cast<int>(jnum(o, "unbacked_deals")); n > 0)
+        std::cout << "  ФЛАГ: пыталась платить бумагой, которой у неё не было: " << n
+                  << " раз(а) на " << jnum(o, "unbacked_units") << "h — такие сделки "
+                     "ничего не сдвинули\n";
+    if (const auto n = static_cast<int>(jnum(o, "false_reversals")); n > 0)
+        std::cout << "  ФЛАГ: сторно сделок, которые продавец принял: " << n
+                  << " — долг, объявленный прочь (records.md §11.5)\n";
+    if (const auto* od = jarr(o, "overdrawn"); od && !od->array.empty())
+        std::cout << "  ВНИМАНИЕ: у " << od->array.size() << " держателей её бумаги "
+                     "отрицательный остаток — так быть не должно, сообщите о сбое\n";
+
     const auto* ht = records::json::find(o, "has_turnover");
     if (!ht || !ht->boolean) {
         std::cout << "\nСЛОЙ 3 — ЗАМКНУТОСТЬ: оборота нет, судить не о чем\n";
@@ -4708,6 +5260,10 @@ static int cmd_trust(const fs::path& data_dir, int argc, char** argv) {
               << "h, максимально возвращено с пика: " << h.max_repaid
               << "h («столько доверили — вернул»)\n"
               << "  объявленный долг сейчас: " << h.outstanding << "h\n";
+    if (h.reversals > 0)
+        std::cout << "  сторно: " << h.reversals << " оферт(ы) на " << h.reversed
+                  << "h отвергнуты или просрочены — не долг и не погашение "
+                     "(records.md §11.5)\n";
 
     const auto days_ago = [](int64_t ts) {
         return (static_cast<int64_t>(std::time(nullptr)) - ts) / 86400;
@@ -4734,59 +5290,23 @@ static int cmd_trust(const fs::path& data_dir, int argc, char** argv) {
     return 0;
 }
 
-// bc transfer recv <chain>/<hash> --via URL [--leaf L]
-static int cmd_transfer_recv(const fs::path& data_dir, int argc, char** argv) {
-    const auto pos = get_positionals(argc, argv);
-    const auto via = flag_val(argc, argv, "--via");
-    if (pos.size() < 3 || via.empty()) {
-        std::cerr << "Usage: bc transfer recv <chain_hex>/<hash_hex> --via URL [--leaf L]\n";
-        return 1;
-    }
-    const Ref src = parse_ref(pos[2]);
-
-    const NodeIndex leaf = parse_leaf_index(argc, argv);
-    Context ctx(data_dir, leaf);
-
-    // Freshness (blockchain.md §6.7 rule 11, sync.md §10.3): refresh the sender's revocations
-    // before accepting value — the zones apply at acceptance time.
-    UserId sender{};
-    sender.bytes = src.chain;
-    fetch_import_revocations(ctx.storage, sender, via);
-
-    const Block block = fetch_block_from(via, src);
-    if (block.type != BlockType::DATA)
-        throw std::runtime_error("referenced block is not a DATA block");
-
-    // Refuse paper from a revoked paying branch unless the transfer block runs
-    // under the replacement key (blockchain.md §6.7: frozen/stolen purses cannot pay anew).
-    if (auto rst = ctx.validator.effective_revocation(sender, block.address.node_index)) {
-        const bool under_replacement = rst->replacement_pubkey.has_value()
-            && block_signed_by(block, *rst->replacement_pubkey);
-        if (!under_replacement)
-            throw std::runtime_error(
-                "sender's paying branch is revoked (blockchain.md §6.7) — transfer refused");
-    }
-
-    const auto rec = Codec::decode(block.payload.data(), block.payload.size());
-    const auto* t  = std::get_if<records::Transfer>(&rec);
-    if (!t) throw std::runtime_error("referenced record is not a Transfer");
-    if (t->to != ctx.user_id.bytes)
-        throw std::runtime_error("transfer is not addressed to this identity");
-    if (t->from != block.address.user_id.bytes)
-        throw std::runtime_error("transfer 'from' does not match the authoring chain");
-    // Strict equivalence (records.md §12.9): hours move to another chain only as
-    // a deal — the acceptance inside its payment (v5). The codec has already
-    // refused anything else; this names it for the person.
-    if (!t->accept)
-        throw std::runtime_error(
-            "перевод без приёмки — не оплата труда, такой не принимается (records.md §12.9)");
+// Whether the deal is ours to take (records.md §9.5): the seller — we — named
+// this payer, the price is the one the release, the resale or the return set.
+// A deal that fails is void: it is nothing to answer, its hours go nowhere.
+static void check_addressed_to_us(Context& ctx, const std::string& via,
+                                  const records::Transfer& deal) {
+    const records::Transfer* t = &deal;
     // Кому достаётся результат, решает продавец — то есть мы (records.md §9.5):
     // сделку за работу, которую мы этому плательщику не отпускали, не принимаем —
     // она ничтожна, и её часы в кошелёк не идут.
     {
         std::optional<std::array<uint8_t, 32>> customer;
+        std::optional<WorkRecord>              work;
         if (const auto w = load_record(ctx, "", t->accept->work))
-            if (const auto* wr = std::get_if<WorkRecord>(&*w)) customer = wr->customer;
+            if (const auto* wr = std::get_if<WorkRecord>(&*w)) {
+                customer = wr->customer;
+                work     = *wr;
+            }
         std::optional<records::Release>  release;
         std::optional<records::Transfer> bought;   // own purchase, bought back on its return
         if (t->accept->release)
@@ -4847,6 +5367,12 @@ static int cmd_transfer_recv(const fs::path& data_dir, int argc, char** argv) {
             if (!terms || !records::meets_terms(*t->accept, *terms))
                 throw std::runtime_error("сделка по порции не по ценнику партии — она ничего не "
                                          "завершает, часы не принимаются (records.md §9.8)");
+        } else if (!bought && work && records::is_machine_hours(*work)) {
+            // Машино-часы (records.md §9.4 v8): труда в записи нет — платят ровно
+            // записанный износ, разбивать нечего; правило то же, что у агрегатора.
+            if (!records::meets_machine_hours(*t->accept, *work))
+                throw std::runtime_error("машино-часы оплачены не по записанному износу — сделка "
+                                         "ничего не завершает (records.md §9.4)");
         } else if (!bought && t->accept->axes.empty()) {
             // Приёмки без разбивки не существует (ИР-022): одним переносом платят
             // только за перепродажу или выкуп, а это — оплата нашей работы.
@@ -4854,6 +5380,251 @@ static int cmd_transfer_recv(const fs::path& data_dir, int argc, char** argv) {
                                      "часы не принимаются (ИР-022)");
         }
     }
+}
+
+// ── Offers: bc transfer recv / refuse / inbox / status / move (economy.md §4.4) ─
+
+// The aggregator's word for a deal that moved hours (/work deals, /deal standing).
+static bool state_moved(const std::string& s) {
+    return s == "recognized" || s == "resold" || s == "repeated" || s == "contested" ||
+           s == "unsound";
+}
+
+// An own deal on this result that still stands — accepted, or an offer still
+// waiting for its answer. A refused or lapsed offer is gone: a new one replaces it.
+static std::string own_live_deal_on(Context& ctx, const Ref& work,
+                                    const std::optional<Ref>& portion) {
+    const auto   now = static_cast<int64_t>(std::time(nullptr));
+    const Ledger L   = read_ledger(ctx);
+    for (const auto& o : L.mine) {
+        if (!o.t.accept || !(o.t.accept->work == work) ||
+            (portion && !(o.t.accept->release == portion)))
+            continue;
+        const auto a = known_answer(L, o.hash, o.t);
+        if (a == records::Answer::refused) continue;
+        if (a == records::Answer::none && now > o.t.until.value_or(0)) continue;
+        std::string s = to_hex(ctx.user_id.bytes) + "/" + to_hex(o.hash);
+        if (a == records::Answer::none)
+            s += " — оферта ждёт ответа до " + when_utc(o.t.until.value_or(0));
+        return s;
+    }
+    return {};
+}
+
+// Learn the sellers' answers before a new offer (bc accept, bc transfer move).
+static void learn_answers(Context& ctx, const std::string& via, bool reverse) {
+    if (!via.empty()) refresh_offers(ctx, via, reverse);
+}
+
+// One portion of someone else's paper, checked against its bill.
+struct PaperCheck {
+    bool                  ok = false;
+    bool                  definite = false;   // a fact, not a gap: the answer is «no»
+    std::string           why;
+    double                credited = 0;       // what the bill brought
+    double                before   = 0;       // what was left of it before this spend
+    int64_t               received = 0;
+    std::optional<double> birth_debt;         // the issuer's declared debt when this paper was born
+};
+
+static records::Answer answer_from_status(const std::string& status) {
+    return status == "accepted" ? records::Answer::accepted
+         : status == "refused"  ? records::Answer::refused
+                                : records::Answer::none;
+}
+
+// Whether `holder` had portion `p` to spend in `spend` (its block at `at`): the
+// bill's block credited the paying purse, he had accepted it before spending,
+// and his spends of it, walked back along `prev`, leave enough. A spend hidden
+// from this walk only the aggregator, who sees the whole table, can catch — its
+// verdict is asked separately.
+static PaperCheck check_paper(Context& ctx, const std::string& via, const Hash32& holder,
+                              const BlockAddress& at, const Hash32& spend_hash,
+                              const records::Transfer& spend, const records::OriginQty& p,
+                              int depth = 0) {
+    PaperCheck c;
+    const auto no = [&](const std::string& why) {
+        c.definite = true;
+        c.why      = why;
+        return c;
+    };
+    if (depth > 8) {
+        c.why = "слишком длинная цепочка перемещений";
+        return c;
+    }
+    const auto sb = find_block(ctx, via, *p.src);
+    if (!sb) {
+        c.why = "векселя-источника нет у агрегатора — плательщику выгрузить его";
+        return c;
+    }
+    records::Record srec;
+    try { srec = Codec::decode(sb->payload.data(), sb->payload.size()); }
+    catch (const CodecError&) { return no("вексель-источник — не запись"); }
+    const auto* s = std::get_if<records::Transfer>(&srec);
+    if (!s || s->from != sb->address.user_id.bytes) return no("вексель-источник — не перевод");
+    c.credited = records::bill_credit(*s, p.issuer);
+    c.received = s->timestamp;
+    if (c.credited <= 1e-9) return no("в векселе-источнике нет бумаги этого эмитента");
+    if (s->to != holder) return no("вексель-источник платил не плательщику");
+    if (s->to_node != at.node_index) return no("вексель пришёл в другую ветку плательщика");
+    if (s->from == p.issuer && s->emission) c.birth_debt = -s->emission->debt_after;
+    std::optional<uint64_t> arrived;
+    if (!s->accept) {
+        // His own move between branches: its paper in turn.
+        if (s->from != holder) return no("перемещение-источник — чужое");
+        const Hash32 sh = Crypto::hash_block(*sb).bytes;
+        for (const auto& q : s->origins) {
+            if (!q.src) continue;
+            const auto inner = check_paper(ctx, via, holder, sb->address, sh, *s, q, depth + 1);
+            if (!inner.ok) {
+                c.definite = inner.definite;
+                c.why      = "перемещение-источник: " + inner.why;
+                return c;
+            }
+            if (q.issuer == p.issuer && !c.birth_debt) c.birth_debt = inner.birth_debt;
+        }
+    } else {
+        // A deal that paid him: it must have happened, and he must have accepted it.
+        const auto doc = fetch_json(via, "/deal/" + to_hex(s->from) + "/" + to_hex(p.src->hash));
+        if (!doc || !doc->is_object()) {
+            c.why = "агрегатор не знает сделку-источник";
+            return c;
+        }
+        const auto standing = jstr(doc->object, "standing");
+        if (standing == "pending") {
+            c.why = "плательщик ещё не принял сделку-источник";
+            return c;
+        }
+        if (!state_moved(standing)) return no("сделка-источник не состоялась (" + standing + ")");
+        if (const auto* r = records::json::find(doc->object, "reply"); r && r->is_object()) {
+            try {
+                const Block rb  = fetch_block_from(via, parse_ref(jstr(r->object, "ref")));
+                const auto  rec = Codec::decode(rb.payload.data(), rb.payload.size());
+                const auto* dr  = std::get_if<records::DealReply>(&rec);
+                if (!dr || !dr->accepted || rb.address.user_id.bytes != holder ||
+                    rb.address.node_index != at.node_index)
+                    return no("ответ на сделку-источник — не приём плательщика в этом кошельке");
+                arrived    = rb.address.block_index;
+                c.received = dr->timestamp;
+            } catch (const std::exception&) {
+                c.why = "ответ плательщика на сделку-источник не прочесть";
+                return c;
+            }
+        }   // none: a buyback paid with agreed paper needs no answer
+    }
+    // The bill's thread in his hands, walked back along `prev`.
+    std::vector<records::BillSpend> spends;
+    std::set<Hash32>                seen;
+    for (std::optional<records::Ref> cur = p.prev; cur;) {
+        if (cur->chain != holder || !seen.insert(cur->hash).second)
+            return no("нить векселя порвана");
+        const auto pb = find_block(ctx, via, *cur);
+        if (!pb) {
+            c.why = "прошлую трату векселя не найти — плательщику выгрузить её";
+            return c;
+        }
+        records::Record prec;
+        try { prec = Codec::decode(pb->payload.data(), pb->payload.size()); }
+        catch (const CodecError&) { return no("нить векселя порвана"); }
+        const auto*               pt = std::get_if<records::Transfer>(&prec);
+        const records::OriginQty* q  = nullptr;
+        if (pt)
+            for (const auto& x : pt->origins)
+                if (x.issuer == p.issuer && x.src && *x.src == *p.src) q = &x;
+        if (!q) return no("нить векселя порвана: прошлая трата — не о нём");
+        records::BillSpend sp{};
+        sp.hash      = cur->hash;
+        sp.node      = pb->address.node_index;
+        sp.index     = pb->address.block_index;
+        sp.timestamp = pt->timestamp;
+        sp.units     = q->units;
+        sp.prev      = q->prev;
+        sp.move      = !pt->accept;
+        if (pt->accept) {
+            sp.until = pt->until.value_or(0);
+            if (const auto d = fetch_json(via, "/deal/" + to_hex(holder) + "/" + to_hex(cur->hash));
+                d && d->is_object())
+                sp.answer = answer_from_status(jstr(d->object, "status"));
+        }
+        spends.push_back(sp);
+        cur = q->prev;
+    }
+    std::reverse(spends.begin(), spends.end());
+    records::BillSpend self{};
+    self.hash      = spend_hash;
+    self.node      = at.node_index;
+    self.index     = at.block_index;
+    self.timestamp = spend.timestamp;
+    self.units     = p.units;
+    self.prev      = p.prev;
+    self.move      = !spend.accept;
+    self.until     = spend.until.value_or(0);
+    spends.push_back(self);
+    const auto st = records::check_bill(holder, at.node_index, c.credited, arrived, spends);
+    if (!st.backed.count(spend_hash)) return no(st.fault);
+    c.before = st.remaining() + p.units;
+    c.ok     = true;
+    return c;
+}
+
+// The seller's answer, written in the purse the offer pays into.
+static void write_answer(Context& ctx, const std::string& via, const Ref& deal, bool accepted,
+                         const std::string& note) {
+    records::DealReply r{};
+    r.deal      = deal;
+    r.accepted  = accepted;
+    r.note      = note;
+    r.timestamp = static_cast<int64_t>(std::time(nullptr));
+    const Block b = append_record(ctx, Record{r});
+    if (!post_block(via, b))
+        std::cerr << "ответ не выгружен на " << via << " — покупатель его пока не увидит\n";
+}
+
+// Answer one offer addressed to this chain (economy.md §4.4): check it, show it,
+// take the answer, write it in the purse the offer pays into. Paper that is no
+// paper is refused outright; paper that cannot be checked yet gets no answer.
+// `yes` — accept without asking. 0 — answered, or nothing to answer; 1 — not.
+static int answer_offer(const fs::path& data_dir, const std::string& via, const Ref& src,
+                        bool yes) {
+    const Block block = fetch_block_from(via, src);
+    if (block.type != BlockType::DATA)
+        throw std::runtime_error("referenced block is not a DATA block");
+    const auto rec = Codec::decode(block.payload.data(), block.payload.size());
+    const auto* t  = std::get_if<records::Transfer>(&rec);
+    if (!t) throw std::runtime_error("referenced record is not a Transfer");
+    if (t->from != block.address.user_id.bytes)
+        throw std::runtime_error("transfer 'from' does not match the authoring chain");
+    // Strict equivalence (records.md §12.9): hours move to another chain only as
+    // a deal — the acceptance inside its payment (v5).
+    if (!t->accept)
+        throw std::runtime_error(
+            "перевод без приёмки — не оплата труда, такой не принимается (records.md §12.9)");
+    if (t->to != load_user_id(data_dir).bytes)
+        throw std::runtime_error("transfer is not addressed to this identity");
+    // The purse being paid answers for itself: its branch, its key (economy.md §5а).
+    if (!fs::exists(key_path(data_dir, t->to_node))) {
+        std::ostringstream os;
+        os << "оплата идёт в кошелёк ветки 0x" << std::hex << t->to_node
+           << ", а его ключа на этом устройстве нет — отвечает только он (economy.md §5а)";
+        throw std::runtime_error(os.str());
+    }
+    Context ctx(data_dir, t->to_node);
+
+    // Freshness (blockchain.md §6.7 rule 11, sync.md §10.3): refresh the sender's revocations
+    // before accepting value — the zones apply at acceptance time.
+    UserId sender{};
+    sender.bytes = src.chain;
+    fetch_import_revocations(ctx.storage, sender, via);
+    // Refuse paper from a revoked paying branch unless the transfer block runs
+    // under the replacement key (blockchain.md §6.7: frozen/stolen purses cannot pay anew).
+    if (auto rst = ctx.validator.effective_revocation(sender, block.address.node_index)) {
+        const bool under_replacement = rst->replacement_pubkey.has_value()
+            && block_signed_by(block, *rst->replacement_pubkey);
+        if (!under_replacement)
+            throw std::runtime_error(
+                "sender's paying branch is revoked (blockchain.md §6.7) — transfer refused");
+    }
+    check_addressed_to_us(ctx, via, *t);
     // Transfer v3: a self-issuing transfer must be threaded (economy.md §4.3).
     {
         double self_issued = 0;
@@ -4865,16 +5636,116 @@ static int cmd_transfer_recv(const fs::path& data_dir, int argc, char** argv) {
                 "(economy.md §4.3)");
     }
 
-    if (ctx.storage.has_external_block(block.address)) {
-        std::cerr << "already received — wallet unchanged\n";
+    const Ledger L = read_ledger(ctx);
+    if (const auto it = L.replies.find(src.hash); it != L.replies.end())
+        for (const auto& [rh, r] : it->second)
+            if (r.author == ctx.user_id.bytes) {
+                std::cout << "на эту оферту вы уже ответили: "
+                          << (r.reply.accepted ? "принята" : "отказ") << "\n";
+                return 0;
+            }
+    // A buyback paid with paper the holder agreed to when he signed the return
+    // needs no answer (records.md §9.8 v5): it stands, term or no term.
+    const bool pre = is_buyback(L, *t) && records::pre_accepted_buyback(*t);
+    const auto now = static_cast<int64_t>(std::time(nullptr));
+    if (!pre && now > t->until.value_or(0)) {
+        std::cout << "срок ответа вышел " << when_utc(t->until.value_or(0))
+                  << " — оферта мертва, принимать нечего (economy.md §4.4)\n";
+        return 1;
+    }
+
+    // Show it, checking every portion against its bill.
+    double total = 0;
+    for (const auto& o : t->origins) total += o.units;
+    const std::string ref_s = to_hex(src.chain) + "/" + to_hex(src.hash);
+    std::cout << "оферта от " << short_hex(t->from) << ": " << total << "h в "
+              << t->origins.size() << " порц.";
+    if (pre) std::cout << "; выкуп по возврату, который вы подписали, — ответа не требует";
+    else     std::cout << "; ответить до " << when_utc(t->until.value_or(0));
+    std::cout << "\n";
+    std::vector<std::string> refuse, gaps;
+    for (const auto& o : t->origins) {
+        std::cout << "  " << o.units << "h  ";
+        if (o.issuer == t->from) {
+            std::cout << "своя бумага плательщика";
+            if (t->emission)
+                std::cout << " — его объявленный долг после этой оплаты "
+                          << -t->emission->debt_after << "h";
+            std::cout << "\n";
+            continue;
+        }
+        if (o.issuer == ctx.user_id.bytes)
+            std::cout << "ваша же бумага — вернётся и погасит ваш долг";
+        else
+            std::cout << "бумага " << to_hex(o.issuer).substr(0, 12) << "…";
+        std::cout << ", вексель " << to_hex(o.src->hash).substr(0, 12) << "…";
+        const auto c = check_paper(ctx, via, t->from, block.address, src.hash, *t, o);
+        if (c.ok) {
+            std::cout << ", получен " << when_utc(c.received) << ", было свободно " << c.before
+                      << "h";
+            if (c.birth_debt) std::cout << ", долг эмитента при рождении " << *c.birth_debt << "h";
+            std::cout << "  ✓\n";
+        } else {
+            std::cout << "  ✗ " << c.why << "\n";
+            (c.definite ? refuse : gaps).push_back(c.why);
+        }
+    }
+    // The aggregator sees the whole table — a spend hidden from the walk above too.
+    if (const auto doc = fetch_json(via, "/deal/" + to_hex(t->from) + "/" + to_hex(src.hash));
+        doc && doc->is_object() && !jbool(doc->object, "backed", true)) {
+        const auto why = jstr(doc->object, "unbacked_why");
+        std::cout << "  агрегатор: бумага не обеспечена — " << why << "\n";
+        // Faults of the payer's own thread, or a bill that was never his, are
+        // facts; a source the aggregator lacks, or one still open, is a gap.
+        const bool fact = why == "трата больше остатка векселя" ||
+                          why.rfind("нить векселя порвана", 0) == 0 ||
+                          why.rfind("вексель потрачен", 0) == 0 ||
+                          why.rfind("первая трата векселя", 0) == 0 ||
+                          why == "сделка-источник платила не этому держателю" ||
+                          why == "перемещение-источник — чужое";
+        (fact ? refuse : gaps).push_back("агрегатор: " + why);
+    }
+    if (!ctx.storage.has_external_block(block.address)) ctx.storage.put_external_block(block);
+    if (!refuse.empty()) {
+        // Paper that is no paper: refused outright (economy.md §4.4).
+        std::string note = "бумага не обеспечена: ";
+        for (std::size_t i = 0; i < refuse.size(); ++i) note += (i ? "; " : "") + refuse[i];
+        write_answer(ctx, via, src, false, note);
+        std::cout << "автоматический отказ — " << note << "\n";
         return 0;
     }
-    ctx.storage.put_external_block(block);
-    append_record(ctx, Record{Copy{src}});   // on-chain acknowledgment (двусторонность)
-
-    // Own paper returned → the "+" link of the emission thread (economy.md §4.3): write
-    // the redemption receipt; the debt shrinks and the whole credit history
-    // stays readable off the thread.
+    if (!gaps.empty()) {
+        std::cout << "проверить бумагу пока нельзя — ответ не дан. Позже: bc transfer recv "
+                  << ref_s << " --via " << via << "; или отказ: bc transfer refuse " << ref_s
+                  << " --via " << via << " --note …\n";
+        return 1;
+    }
+    if (!yes && !pre) {
+        std::cout << "  кредитная история эмитентов: bc trust <цепь> --via " << via << "\n"
+                  << "Принять оплату? [y — принять / n — отказать / Enter — ответить позже] "
+                  << std::flush;
+        std::string answer;
+        if (!std::getline(std::cin, answer)) {
+            std::cout << "\nответ не дан (без терминала — флаг --yes)\n";
+            return 1;
+        }
+        if (answer == "n" || answer == "N" || answer == "н" || answer == "Н") {
+            std::cout << "Причина (можно пусто): " << std::flush;
+            std::string note;
+            std::getline(std::cin, note);
+            write_answer(ctx, via, src, false, note);
+            std::cout << "отказ записан — часы остаются у плательщика, он может предложить "
+                         "другой набор\n";
+            return 0;
+        }
+        if (answer != "y" && answer != "Y" && answer != "д" && answer != "Д") {
+            std::cout << "ответ отложен — до " << when_utc(t->until.value_or(0)) << "\n";
+            return 0;
+        }
+    }
+    // Accepted: the answer written in this purse, and — for own paper come home —
+    // the "+" link of the emission thread (economy.md §4.3).
+    write_answer(ctx, via, src, true, "");
     double returned = 0;
     for (const auto& o : t->origins)
         if (o.issuer == ctx.user_id.bytes) returned += o.units;
@@ -4886,21 +5757,208 @@ static int cmd_transfer_recv(const fs::path& data_dir, int argc, char** argv) {
         rd.link.seq        = th.next_seq;
         rd.link.prev       = th.tip;
         rd.link.debt_after = th.debt + returned;
-        rd.timestamp       = static_cast<int64_t>(std::time(nullptr));
-        append_record(ctx, Record{rd});
+        rd.timestamp       = now;
+        post_block(via, append_record(ctx, Record{rd}));
         std::cout << "redemption receipt #" << rd.link.seq << ": +" << returned
                   << "h  declared debt " << rd.link.debt_after << "h\n";
     }
-
-    double total = 0;
-    for (const auto& o : t->origins) total += o.units;
     std::cout << "received " << total << "h in " << t->origins.size()
               << " portion(s) from " << to_hex(t->from.data(), 32).substr(0, 16)
-              << "...  (credited to branch 0x" << std::hex << t->to_node
-              << std::dec << ")\n";
-    const auto w = compute_wallet(ctx);
-    std::cerr << "wallet: " << w.holdings.size() << " issuer(s) held, own debt "
-              << w.debt() << "h\n";
+              << "...  (credited to branch 0x" << std::hex << t->to_node << std::dec << ")\n";
+    return 0;
+}
+
+// bc transfer recv <chain>/<hash> --via URL [--yes]
+// bc transfer recv --all --via URL [--yes]
+static int cmd_transfer_recv(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);
+    const auto via = flag_val(argc, argv, "--via");
+    const bool all = flag_present(argc, argv, "--all");
+    const bool yes = flag_present(argc, argv, "--yes");
+    if (via.empty() || (pos.size() < 3 && !all)) {
+        std::cerr << "Usage: bc transfer recv <chain_hex>/<hash_hex> --via URL [--yes]\n"
+                     "       bc transfer recv --all --via URL [--yes]   — every offer in the inbox\n";
+        return 1;
+    }
+    if (!all) return answer_offer(data_dir, via, parse_ref(pos[2]), yes);
+    const auto doc = fetch_json(via, "/inbox/" + to_hex(load_user_id(data_dir).bytes));
+    if (!doc || !doc->is_object()) {
+        std::cerr << "агрегатор недоступен: " << via << "\n";
+        return 1;
+    }
+    int         rc = 0;
+    std::size_t n  = 0;
+    if (const auto* offers = jarr(doc->object, "offers"))
+        for (const auto& ov : offers->array) {
+            if (!ov.is_object()) continue;
+            ++n;
+            const auto ref = jstr(ov.object, "ref");
+            try {
+                rc |= answer_offer(data_dir, via, parse_ref(ref), yes);
+            } catch (const std::exception& e) {
+                std::cerr << "оферта " << ref.substr(0, 16) << "…: " << e.what() << "\n";
+                rc = 1;
+            }
+        }
+    if (n == 0) std::cout << "входящих оферт, ждущих ответа, нет\n";
+    return rc;
+}
+
+// bc transfer refuse <chain>/<hash> --via URL [--note TEXT]
+static int cmd_transfer_refuse(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);
+    const auto via = flag_val(argc, argv, "--via");
+    if (pos.size() < 3 || via.empty()) {
+        std::cerr << "Usage: bc transfer refuse <chain_hex>/<hash_hex> --via URL [--note TEXT]\n";
+        return 1;
+    }
+    const Ref   src   = parse_ref(pos[2]);
+    const Block block = fetch_block_from(via, src);
+    const auto  rec   = Codec::decode(block.payload.data(), block.payload.size());
+    const auto* t     = std::get_if<records::Transfer>(&rec);
+    if (!t || !t->accept) throw std::runtime_error("это не сделка — отвечать не на что");
+    if (t->to != load_user_id(data_dir).bytes)
+        throw std::runtime_error("transfer is not addressed to this identity");
+    if (!fs::exists(key_path(data_dir, t->to_node))) {
+        std::ostringstream os;
+        os << "оплата идёт в кошелёк ветки 0x" << std::hex << t->to_node
+           << ", а его ключа на этом устройстве нет — отвечает только он (economy.md §5а)";
+        throw std::runtime_error(os.str());
+    }
+    Context ctx(data_dir, t->to_node);
+    const Ledger L = read_ledger(ctx);
+    if (const auto it = L.replies.find(src.hash); it != L.replies.end())
+        for (const auto& [rh, r] : it->second)
+            if (r.author == ctx.user_id.bytes) {
+                std::cout << "на эту оферту вы уже ответили: "
+                          << (r.reply.accepted ? "принята" : "отказ") << "\n";
+                return 0;
+            }
+    if (static_cast<int64_t>(std::time(nullptr)) > t->until.value_or(0)) {
+        std::cout << "срок ответа уже вышел — оферта мертва и без отказа\n";
+        return 0;
+    }
+    if (!ctx.storage.has_external_block(block.address)) ctx.storage.put_external_block(block);
+    write_answer(ctx, via, src, false, flag_val(argc, argv, "--note"));
+    std::cout << "отказ записан — часы остаются у плательщика, он может предложить другой "
+                 "набор (economy.md §4.4)\n";
+    return 0;
+}
+
+// bc transfer inbox --via URL — offers addressed to this chain, waiting for its answer.
+static int cmd_transfer_inbox(const fs::path& data_dir, int argc, char** argv) {
+    const auto via = flag_val(argc, argv, "--via");
+    if (via.empty()) {
+        std::cerr << "Usage: bc transfer inbox --via URL\n";
+        return 1;
+    }
+    const auto doc = fetch_json(via, "/inbox/" + to_hex(load_user_id(data_dir).bytes));
+    if (!doc || !doc->is_object()) {
+        std::cerr << "агрегатор недоступен: " << via << "\n";
+        return 1;
+    }
+    const auto* offers = jarr(doc->object, "offers");
+    if (!offers || offers->array.empty()) {
+        std::cout << "входящих оферт, ждущих ответа, нет\n";
+        return 0;
+    }
+    std::cout << "входящие оферты, ждущие ответа (economy.md §4.4):\n";
+    for (const auto& ov : offers->array) {
+        if (!ov.is_object()) continue;
+        const auto& o = ov.object;
+        std::cout << "  " << jstr(o, "ref") << "\n    от " << jstr(o, "payer").substr(0, 16)
+                  << "…  " << jnum(o, "price") << "h";
+        if (jbool(o, "pre_accepted", false)) std::cout << "  выкуп по вашему возврату — ответа не требует";
+        else std::cout << "  ответить до " << when_utc(static_cast<int64_t>(jnum(o, "until")));
+        if (!jbool(o, "backed", true)) std::cout << "  ! бумага не обеспечена";
+        std::cout << "\n";
+    }
+    std::cout << "принять: bc transfer recv <ref> --via " << via
+              << "   отказать: bc transfer refuse <ref> --via " << via << " --note …\n";
+    return 0;
+}
+
+// bc transfer status --via URL [--leaf L] — own offers and their answers.
+static int cmd_transfer_status(const fs::path& data_dir, int argc, char** argv) {
+    const auto via = flag_val(argc, argv, "--via");
+    if (via.empty()) {
+        std::cerr << "Usage: bc transfer status --via URL [--leaf L]\n";
+        return 1;
+    }
+    Context    ctx(data_dir, parse_leaf_index(argc, argv));
+    const auto offers = refresh_offers(ctx, via, true);
+    std::cout << "ваши оферты (economy.md §4.4):\n";
+    if (offers.empty()) std::cout << "  (нет)\n";
+    for (const auto& o : offers) {
+        std::cout << "  " << to_hex(o.hash).substr(0, 12) << "…  продавцу "
+                  << to_hex(o.seller).substr(0, 12) << "…  " << o.price << "h  ";
+        if (o.status == "accepted")     std::cout << "принята";
+        else if (o.status == "refused") std::cout << "отказ" << (o.note.empty() ? "" : ": " + o.note);
+        else if (o.status == "pending") std::cout << "ждёт ответа до " << when_utc(o.until);
+        else if (o.status == "expired") std::cout << "срок вышел " << when_utc(o.until);
+        else                            std::cout << "агрегатор её не знает (выгружена? --via)";
+        if (!o.backed) std::cout << "  ! бумага не обеспечена: " << o.why;
+        std::cout << "\n";
+    }
+    if (const auto doc = fetch_json(via, "/inbox/" + to_hex(ctx.user_id.bytes));
+        doc && doc->is_object())
+        if (const auto* in = jarr(doc->object, "offers"); in && !in->array.empty())
+            std::cout << "входящих оферт ждут вашего ответа: " << in->array.size()
+                      << " — bc transfer inbox --via " << via << "\n";
+    return 0;
+}
+
+// bc transfer move --to-node N (--pay SPEC... | --all) [--leaf L] [--via URL]
+// Someone else's paper from the --leaf purse to another own branch (economy.md
+// §5а): spends its bills like a payment, needs nobody's answer. Own paper does
+// not move — it is born where it is spent.
+static int cmd_transfer_move(const fs::path& data_dir, int argc, char** argv) {
+    const auto to_s = flag_val(argc, argv, "--to-node");
+    const auto via  = flag_val(argc, argv, "--via");
+    const bool all  = flag_present(argc, argv, "--all");
+    const auto specs = parse_pay_specs(flag_all(argc, argv, "--pay"));
+    if (to_s.empty() || (!all && specs.empty()) || (all && !specs.empty())) {
+        std::cerr << "Usage: bc transfer move --to-node N (--pay ЭМИТЕНТ[@ВЕКСЕЛЬ]=ЧАСЫ ... | --all)\n"
+                     "                        [--leaf L] [--via URL]\n"
+                     "  чужая бумага из кошелька ветки --leaf в другую свою ветку N\n"
+                     "  (economy.md §5а); векселя — как в bc wallet\n";
+        return 1;
+    }
+    unsigned long long n = 0;
+    try { n = std::stoull(to_s, nullptr, 0); }
+    catch (...) { throw std::runtime_error("--to-node: неверный номер узла: " + to_s); }
+    if (n > 0xFFFF'FFFEu || !is_valid_node(static_cast<NodeIndex>(n)))
+        throw std::runtime_error("--to-node " + to_s + " — не номер узла (0..0xFFFFFFFE)");
+    const auto to_node = static_cast<NodeIndex>(n);
+    Context ctx(data_dir, parse_leaf_index(argc, argv));
+    if (to_node == ctx.leaf) throw std::runtime_error("бумага уже в этой ветке");
+
+    learn_answers(ctx, via, true);   // a refused or lapsed offer frees its bills
+    const auto   now   = static_cast<int64_t>(std::time(nullptr));
+    const auto&  me    = ctx.user_id.bytes;
+    const Ledger L     = read_ledger(ctx);
+    const auto   bills = purse_bills(L, me, ctx.leaf, now);
+    double units = 0;
+    if (all) for (const auto& b : bills) units += std::max(0.0, b.free);
+    else     for (const auto& s : specs) units += s.units;
+    if (units <= 1e-9) throw std::runtime_error("перемещать нечего — свободной чужой бумаги нет (bc wallet)");
+
+    records::Transfer t{};
+    t.from      = me;
+    t.to        = me;
+    t.to_node   = to_node;
+    t.timestamp = now;
+    t.origins   = choose_portions(bills, me, me, units, specs, true, false);
+    const Block block = append_record(ctx, Record{t});
+    std::cerr << "перемещено " << units << "h из ветки 0x" << std::hex << ctx.leaf
+              << " в ветку 0x" << to_node << std::dec << ":\n";
+    print_portions(t, to_hex(me), to_hex(me));
+    std::cout << "move ref: " << to_hex(me) << "/" << to_hex(Crypto::hash_block(block).bytes)
+              << "\n";
+    if (!via.empty()) {
+        upload_provenance(ctx, via, t);
+        upload_block(via, block);
+    }
     return 0;
 }
 
@@ -6768,6 +7826,12 @@ Labor:
                                        carried_units is derived automatically
                                        from the work's carry — never by hand
     [--pledge REF]                     the own pledge this deal closes
+    [--reply-within 3d]                the seller's term to answer: the deal is
+                                       an offer until he accepts (economy.md §4.4)
+    [--pay SPEC ...] [--no-self]       what pays, by hand: self=H, ISSUER=H,
+                                       ISSUER@BILL=H (bills as bc wallet shows);
+                                       the rest by the rule; --no-self: no own issue
+    [--dry-run]                        show the portions, sign nothing
     [--buyback-of REF]                 buy back on a pre-signed return
     [--release REF]                    the seller's release to you — see
                                        records.md §9.8; found at the aggregator
@@ -6910,11 +7974,22 @@ Key revocation (blockchain.md §6.7; warehouse — sync.md §7.2):
   revoke fetch CHAIN_HEX --via URL Pull, verify and import a chain's certificates
 
 Economy (records.md §11 — именные трудочасы, records.md §12.7):
-  wallet [--leaf N]                Branch purse (economy.md §5а: the --leaf
-                                       branch's holdings) + chain-wide debt
-  transfer recv <chain>/<hash>     Fetch an incoming deal (bc accept of your work),
-    --via URL                          store it and acknowledge on-chain (Copy);
-                                       a deal you did not address is refused
+  wallet [--leaf N] [--via URL]    Branch purse (economy.md §5а): someone else's
+                                       paper as BILLS — the blocks it came in — free
+                                       and held by offers; chain-wide debt
+  transfer inbox --via URL         Offers addressed to you, waiting for your answer
+  transfer recv <chain>/<hash>     Answer an offer (bc accept of your work): every
+    --via URL [--yes] [--all]          bill is checked — paper the payer never had
+                                       is refused at once; then accept (y) or refuse
+                                       (n). The answer is written in the purse being
+                                       paid (economy.md §4.4). --all: the whole inbox
+  transfer refuse <chain>/<hash>   Refuse an offer outright — hours stay with the
+    --via URL [--note TEXT]            payer, who may offer other paper
+  transfer status --via URL        Your offers and their answers; an offer refused
+                                       or lapsed gets its reversal (records.md §11.5)
+  transfer move --to-node N        Someone else's paper to another own branch
+    (--pay SPEC... | --all)            (economy.md §5а) — then pay from there
+    [--leaf L] [--via URL]
   pledge add --target REF          Promise labor-hours for a work/idea
     --units N [--executor UID_HEX] [--expires UNIX_TS]
   pledge revoke --pledge REF       Revoke the unsettled remainder of an own pledge
@@ -7040,11 +8115,16 @@ int main(int argc, char** argv) {
         else if (cmd == "needs"     && subcmd == "list")    return cmd_needs_list(argc, argv);
         else if (cmd == "fetch")                            return cmd_fetch(data_dir, argc, argv);
         else if (cmd == "pay" || (cmd == "transfer" && subcmd == "send")) {
-            std::cerr << "снято: часы двигаются только сделкой — приёмка и оплата одной "
-                         "записью, bc accept (records.md §9.5)\n";
+            std::cerr << "снято: часы другой цепи двигаются только сделкой — приёмка и оплата "
+                         "одной записью, bc accept (records.md §9.5); между своими ветками — "
+                         "bc transfer move (economy.md §5а)\n";
             return 1;
         }
         else if (cmd == "transfer"  && subcmd == "recv")    return cmd_transfer_recv(data_dir, argc, argv);
+        else if (cmd == "transfer"  && subcmd == "refuse")  return cmd_transfer_refuse(data_dir, argc, argv);
+        else if (cmd == "transfer"  && subcmd == "inbox")   return cmd_transfer_inbox(data_dir, argc, argv);
+        else if (cmd == "transfer"  && subcmd == "status")  return cmd_transfer_status(data_dir, argc, argv);
+        else if (cmd == "transfer"  && subcmd == "move")    return cmd_transfer_move(data_dir, argc, argv);
         else if (cmd == "pledge"    && subcmd == "add")     return cmd_pledge_add(data_dir, argc, argv);
         else if (cmd == "pledge"    && subcmd == "revoke")  return cmd_pledge_revoke(data_dir, argc, argv);
         else if (cmd == "pledge"    && subcmd == "list")    return cmd_pledge_list(data_dir, argc, argv);

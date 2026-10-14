@@ -2,6 +2,7 @@
 #include <records/goods_thread.h>
 #include "aggregator/recognition.h"
 #include "labor_thread_support.h"
+#include "settlement_support.h"
 #include "aggregator/server.h"
 
 #include <blockchain/crypto.h>
@@ -98,7 +99,21 @@ protected:
         std::filesystem::remove_all(db_path_);
     }
 
+    // Через расчёт (economy.md §4.4): срок ответа, векселя и ответ продавца —
+    // как у клиентов (settlement_support.h).
     Block add(const UserId& owner, const records::Record& written) {
+        const records::Record rec = settle_.stamp(owner.bytes, written);
+        const Block b = add_one(owner, rec);
+        if (const auto r = settle_.placed(owner.bytes, rec, Crypto::hash_block(b).bytes)) {
+            UserId seller{};
+            seller.bytes = r->first;
+            add_one(seller, r->second);
+        }
+        return b;
+    }
+    Settlement settle_;
+
+    Block add_one(const UserId& owner, const records::Record& written) {
         const records::Record rec = threads_.stamp(owner.bytes, written);
         const Block b = make_record_block(owner, next_index_++, rec);
         EXPECT_TRUE(storage_->add_block(b));
@@ -318,7 +333,21 @@ protected:
         std::filesystem::remove_all(db_path_);
     }
 
+    // Через расчёт (economy.md §4.4): срок ответа, векселя и ответ продавца —
+    // как у клиентов (settlement_support.h).
     Block add(const UserId& owner, const records::Record& written) {
+        const records::Record rec = settle_.stamp(owner.bytes, written);
+        const Block b = add_one(owner, rec);
+        if (const auto r = settle_.placed(owner.bytes, rec, Crypto::hash_block(b).bytes)) {
+            UserId seller{};
+            seller.bytes = r->first;
+            add_one(seller, r->second);
+        }
+        return b;
+    }
+    Settlement settle_;
+
+    Block add_one(const UserId& owner, const records::Record& written) {
         const records::Record rec = threads_.stamp(owner.bytes, written);
         const Block b = make_record_block(owner, next_index_++, rec);
         EXPECT_TRUE(storage_->add_block(b));
@@ -1070,6 +1099,10 @@ TEST_F(RatesViewTest, ARentPaysExactlyTheWear) {
     t.timestamp = born;
     const Block rent = add(bob_, t);
 
+    // Каждая попытка платит тем же векселем Боба — тем, что пришёл Алисе с
+    // покупкой, — и называет прошлую трату его (economy.md §4.4). Выкуп, который
+    // ничего не завершает, вексель не тратит.
+    std::optional<records::Ref> last;
     const auto buy_back = [&](double price) {
         records::Acceptance ba{};
         ba.work          = ref_to(alice_, work);
@@ -1078,10 +1111,12 @@ TEST_F(RatesViewTest, ARentPaysExactlyTheWear) {
         records::Transfer bt{};
         bt.from      = alice_.bytes;
         bt.to        = bob_.bytes;
-        bt.origins   = { {bob_.bytes, price} };                     // векселем Боба — гасит его
+        bt.origins   = { {bob_.bytes, price, ref_to(bob_, rent), last} };   // векселем Боба — гасит его
         bt.accept    = ba;
         bt.timestamp = born + 30 * kDaySec;
-        return Crypto::hash_block(add(alice_, bt)).bytes;
+        const Block b = add(alice_, bt);
+        last = ref_to(alice_, b);
+        return Crypto::hash_block(b).bytes;
     };
     const auto free_use = buy_back(100.0);                         // износ не уплачен
     const auto rent_fee = buy_back(90.0);                          // сверх износа — рента
@@ -1238,7 +1273,9 @@ TEST_F(RatesViewTest, ABuybackPaysForTheHoldersRepair) {
     records::Transfer bt{};
     bt.from      = alice_.bytes;
     bt.to        = bob_.bytes;
-    bt.origins   = { {bob_.bytes, 12.0} };
+    // Бумаги Боба у Алисы 10ч — с покупки; остальное она выпускает сама. Платить
+    // бумагой, которой нет, нельзя (economy.md §4.4).
+    bt.origins   = { {bob_.bytes, 10.0}, {alice_.bytes, 2.0} };
     bt.accept    = ba;
     bt.timestamp = kDay + 200;
     const auto back = Crypto::hash_block(add(alice_, bt)).bytes;

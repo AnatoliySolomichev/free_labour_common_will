@@ -56,6 +56,21 @@ FootprintView FootprintView::build(const AggregatorStorage& storage) {
     std::map<UserId, double>      vouched_hours;
     std::map<UserId, std::size_t> vouched_works;
 
+    // Paper she did not have (economy.md §4.4): every deal and move whose spends
+    // no bill covers, by its author — unless only a source upstream fell through.
+    std::map<UserId, std::size_t> unbacked_deals;
+    std::map<UserId, double>      unbacked_units;
+    const auto tried = [&](const UserId& author, const std::array<uint8_t, 32>& hash,
+                           const records::Transfer& t) {
+        if (!deals.unbacked.count(hash) || deals.unbacked_upstream.count(hash)) return;
+        ++unbacked_deals[author];
+        for (const auto& o : t.origins)
+            if (o.src) unbacked_units[author] += o.units;
+    };
+    for (const auto& d : deals.all)    tried(d.payer, d.hash, d.transfer);
+    for (const auto& mv : deals.moves) tried(mv.owner, mv.hash, mv.transfer);
+    std::map<UserId, std::size_t> false_reversals;
+
     for (const Hash& bh : storage.all_block_hashes()) {
         const auto block = storage.get_block_by_hash(bh);
         if (!block || block->type != BlockType::DATA) continue;
@@ -69,6 +84,14 @@ FootprintView FootprintView::build(const AggregatorStorage& storage) {
             continue;
         }
 
+        if (const auto* rd = std::get_if<records::Redemption>(&rec)) {
+            // Сторно своей сделки, которую продавец на деле принял, — долг,
+            // объявленный прочь (records.md §11.5 v2).
+            if (records::is_reversal(*rd, owner.bytes) &&
+                deals.answer(rd->transfer.hash) == records::Answer::accepted)
+                ++false_reversals[owner];
+            continue;
+        }
         if (const auto* t = std::get_if<records::Transfer>(&rec)) {
             if (t->from != owner.bytes) continue;      // spoofed sender
             if (t->accept && !deals.moves_hours(bh.bytes)) continue;   // void deal
@@ -138,13 +161,21 @@ FootprintView FootprintView::build(const AggregatorStorage& storage) {
     // Поручиться за чужой труд — тоже след: свидетеля видно и у него самого
     // (records.md §12.11), даже если он больше ничем в обороте не отметился.
     for (const auto& [chain, h] : vouched_hours) { (void)h; subjects.insert(chain); }
+    // Попытка платить бумагой, которой не было, — тоже след.
+    for (const auto& [chain, k] : unbacked_deals)  { (void)k; subjects.insert(chain); }
+    for (const auto& [chain, k] : false_reversals) { (void)k; subjects.insert(chain); }
 
     for (const UserId& subject : subjects) {
         ChainFootprint fp{};
 
         if (const auto it = paper.find(subject); it != paper.end())
             for (const auto& [holder, units] : it->second) {
-                if (units <= 1e-9 || holder == subject) continue;
+                if (holder == subject) continue;
+                if (units < -1e-9) {
+                    fp.overdrawn.push_back({holder, units});   // не прячем: так быть не должно
+                    continue;
+                }
+                if (units <= 1e-9) continue;
                 fp.holders.push_back({holder, units});
                 fp.paper_outstanding += units;
             }
@@ -179,6 +210,12 @@ FootprintView FootprintView::build(const AggregatorStorage& storage) {
             fp.vouched_hours = it->second;
         if (const auto it = vouched_works.find(subject); it != vouched_works.end())
             fp.vouched_works = it->second;
+        if (const auto it = unbacked_deals.find(subject); it != unbacked_deals.end())
+            fp.unbacked_deals = it->second;
+        if (const auto it = unbacked_units.find(subject); it != unbacked_units.end())
+            fp.unbacked_units = it->second;
+        if (const auto it = false_reversals.find(subject); it != false_reversals.end())
+            fp.false_reversals = it->second;
 
         // Layer 3: the subject's circle is everything within TWO exchange hops
         // — the same reachability the trust footprint uses elsewhere (ИР-010:

@@ -36,6 +36,7 @@ DiscoveryView DiscoveryView::build(const AggregatorStorage& storage) {
                                                     block->payload.size());
             const auto* t = std::get_if<records::Transfer>(&rec);
             if (!t || t->from != owner.bytes) continue;   // spoofed sender
+            if (t->to == owner.bytes) continue;           // own branches: no partner
             double total = 0;
             for (const auto& o : t->origins) total += o.units;
             UserId to{};
