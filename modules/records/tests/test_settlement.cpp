@@ -243,3 +243,22 @@ TEST(Bill, ASpendThatMovesNothingHoldsNothing) {
     EXPECT_EQ(st.backed.size(), 2u);
     EXPECT_DOUBLE_EQ(st.consumed, 5.0);
 }
+
+// Пошагово — то же правило: трата судится по тратам до неё, а как она кончилась
+// (держит ли часы), читатель сообщает, когда узнаёт.
+TEST(Bill, TheRuleSpendBySpendIsCheckBill) {
+    BillRun run(HOLDER, PURSE, 5.0, 2);
+    const BillSpend a = spend(0x11, 4, 3.0);
+    EXPECT_TRUE(run.judge(a));
+    BillSpend refused = a;
+    refused.answer    = Answer::refused;
+    run.settle(refused, std::nullopt);                      // отвергнута — часов не держит
+    EXPECT_DOUBLE_EQ(run.state().remaining(), 5.0);
+    const BillSpend b = spend(0x12, 6, 5.0, 0x11);
+    EXPECT_TRUE(run.judge(b));                               // весь вексель снова свободен
+    run.settle(b, std::nullopt);
+    EXPECT_DOUBLE_EQ(run.state().remaining(), 0.0);
+    EXPECT_FALSE(run.judge(spend(0x13, 8, 0.5, 0x12)));      // сверх остатка
+    EXPECT_FALSE(run.judge(spend(0x14, 9, 0.1, 0x13)));      // и всё после разрыва
+    EXPECT_EQ(run.state().unbacked.size(), 2u);
+}

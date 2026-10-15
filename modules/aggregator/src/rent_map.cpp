@@ -22,7 +22,8 @@ RentInput build_rent_input(const AggregatorStorage& storage,
         if (const auto* w = std::get_if<records::WorkRecord>(&rec)) works[bh.bytes] = *w;
     }
     // Every deal is paid exactly by construction (records.md §9.5, ИР-023).
-    const auto deals = read_deals(storage);
+    const auto  table = deals_on_table(storage);   // shared, recomputed only on new blocks
+    const auto& deals = *table;
 
     RentInput out;
     std::map<RefHash, double> axis_units, axis_hours;

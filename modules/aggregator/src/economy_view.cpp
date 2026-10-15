@@ -37,7 +37,8 @@ EconomyView EconomyView::build(const AggregatorStorage& storage, int64_t now) {
     // collect them and apply after the scan.
     std::vector<std::pair<UserId, RefHash>> revokes;
     // One work — one deal (records.md §9.5, ИР-023).
-    const auto deals = read_deals(storage);
+    const auto  table = deals_on_table(storage);   // shared, recomputed only on new blocks
+    const auto& deals = *table;
 
     // Single pass over every known block. Transfers/pledges count only when
     // the record's author field matches the chain that signed the block —

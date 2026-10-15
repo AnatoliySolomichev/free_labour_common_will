@@ -86,7 +86,8 @@ DealView DealView::build(const AggregatorStorage& storage) {
     const auto profiles = ProfileView::build(storage);
     // Which deals happened (records.md §9.5, ИР-023): a deal the seller did not
     // address is void — it neither accepts, pays nor settles a pledge.
-    const auto deals = read_deals(storage);
+    const auto  table = deals_on_table(storage);   // shared, recomputed only on new blocks
+    const auto& deals = *table;
 
     // Pass 2: everything that points at a need, plus lookup tables.
     std::map<NeedKey, std::vector<DealTaker>> takers;

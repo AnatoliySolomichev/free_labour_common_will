@@ -18,12 +18,9 @@ std::map<std::array<uint8_t, 32>, records::AxisDef> build_axis_definitions(
     // ось «danger», значило бы чьё-то решение. Слаг — подпись для людей.
     std::map<std::array<uint8_t, 32>, records::AxisDef> out;
     for (const Hash& bh : storage.all_block_hashes()) {
-        const auto block = storage.get_block_by_hash(bh);
-        if (!block || block->type != BlockType::DATA) continue;
-        records::Record rec;
-        try { rec = records::Codec::decode(block->payload.data(), block->payload.size()); }
-        catch (const records::CodecError&) { continue; }
-        if (const auto* d = std::get_if<records::AxisDef>(&rec))
+        const SeenBlock& block = seen_block(storage, bh);   // decoded once per process
+        if (!block.data) continue;
+        if (const auto* d = std::get_if<records::AxisDef>(&block.record))
             out.emplace(bh.bytes, *d);
     }
     return out;
@@ -36,7 +33,8 @@ std::vector<AxisLedgerRow> build_axis_ledger(
     using RefHash = std::array<uint8_t, 32>;
     // Every deal is paid exactly by construction — the acceptance rides inside
     // its own payment (records.md §9.5, ИР-023).
-    const auto deals = read_deals(storage);
+    const auto  table = deals_on_table(storage);   // shared, recomputed only on new blocks
+    const auto& deals = *table;
 
     struct Acc {
         double   units = 0.0, hours = 0.0;

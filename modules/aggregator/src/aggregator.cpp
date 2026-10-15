@@ -2,6 +2,7 @@
 #include "blockchain/serializer.h"
 #include "blockchain/errors.h"
 #include <lmdb.h>
+#include <atomic>
 #include <cstring>
 #include <stdexcept>
 
@@ -77,6 +78,10 @@ struct AggregatorStorage::Impl {
 
 AggregatorStorage::AggregatorStorage(std::filesystem::path db_path)
     : impl_(std::make_unique<Impl>())
+    , instance_id_([] {
+          static std::atomic<uint64_t> next{1};
+          return next++;
+      }())
 {
     std::filesystem::create_directories(db_path);
     lcheck(mdb_env_create(&impl_->env),              "mdb_env_create");

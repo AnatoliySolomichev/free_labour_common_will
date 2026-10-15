@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <mutex>
 
 namespace aggregator {
 
@@ -57,7 +58,9 @@ LotSummary summarize(const DealsOnTable& deals, const LotKey& key, double qty,
 
 } // namespace
 
-DealsOnTable read_deals(const AggregatorStorage& storage) {
+namespace {
+
+DealsOnTable compute_deals(const AggregatorStorage& storage) {
     DealsOnTable out;
     std::map<Hash32, std::size_t>                        release_at;   // release hash → index
     std::map<Hash32, std::size_t>                        deal_at;      // deal hash → index
@@ -66,12 +69,10 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
     // произволен, поэтому сравниваем по времени блока (ИР-012).
     std::map<std::pair<Hash32, UserId>, int64_t>          consent_at;
     for (const Hash& bh : storage.all_block_hashes()) {
-        const auto block = storage.get_block_by_hash(bh);
-        if (!block || block->type != BlockType::DATA) continue;
-        const UserId owner = block->address.user_id;
-        records::Record rec;
-        try { rec = records::Codec::decode(block->payload.data(), block->payload.size()); }
-        catch (const records::CodecError&) { continue; }
+        const SeenBlock* block = &seen_block(storage, bh);
+        if (!block->data) continue;
+        const UserId           owner = block->address.user_id;
+        const records::Record& rec   = block->record;
 
         if (const auto* w = std::get_if<records::WorkRecord>(&rec)) {
             out.works[bh.bytes] = WorkOnTable{owner, *w};
@@ -228,12 +229,16 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
         for (std::size_t p = 0; p < t.origins.size(); ++p)
             if (t.origins[p].src) spends_of[key_of(c, t.origins[p])].push_back({c, p});
     }
+    // Where each spend stands in its bill: carrier → portion → position.
+    std::vector<std::vector<std::size_t>> pos_in_bill(n + m);
+    for (std::size_t c = 0; c < n + m; ++c) pos_in_bill[c].resize(carrier_transfer(c).origins.size());
     for (auto& [key, list] : spends_of) {
         (void)key;
         std::sort(list.begin(), list.end(), [&](const auto& a, const auto& b) {
             const auto ia = carrier_index(a.first), ib = carrier_index(b.first);
             return ia != ib ? ia < ib : carrier_hash(a.first) < carrier_hash(b.first);
         });
+        for (std::size_t i = 0; i < list.size(); ++i) pos_in_bill[list[i].first][list[i].second] = i;
     }
 
     // Whether a deal happened — addressed, answered, backed — whether a
@@ -319,20 +324,50 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
         if (judge) sp.stands = holds(c);
         return sp;
     };
-    // The bill as it stood when spend `c` was made: its credit, and the spends
-    // before it with what each still holds.
-    const auto bill_at = [&](const BillKey& key, std::size_t c) {
-        const BillCredit credit = credit_of(key);
-        std::vector<records::BillSpend> prefix;
-        for (const auto& [sc, sp] : spends_of[key]) {
-            const bool self = sc == c;
-            prefix.push_back(spend_of(sc, sp, !self));
-            if (self) break;
+    // Each bill walked once, spend by spend (records::BillRun): a spend is judged
+    // on the spends before it, which are settled — do they hold their hours? —
+    // only as far as needed. Settling a spend asks whether its deal stands, which
+    // may walk other bills, never this one past that spend: every reference names
+    // an earlier block. A loop could not be written, and is refused if met.
+    struct Run {
+        std::optional<records::BillRun> run;
+        std::vector<char>               fit;          // per position: backed
+        std::size_t                     settled = 0;  // positions whose holding is recorded
+        bool                            opened = false, busy = false;
+        BillCredit                      credit;
+    };
+    std::map<BillKey, Run> runs;
+    const auto settle_one = [&](const BillKey& key, Run& r) {
+        const auto&       list = spends_of[key];
+        const std::size_t j    = r.settled;
+        if (r.fit[j]) {
+            std::optional<int64_t> next;
+            if (j + 1 < list.size()) next = carrier_transfer(list[j + 1].first).timestamp;
+            r.run->settle(spend_of(list[j].first, list[j].second, true), next);
         }
-        auto st = records::check_bill(std::get<0>(key), credit.purse, credit.credited,
-                                      credit.arrived, std::move(prefix));
-        if (!credit.why.empty()) st.fault = credit.why;
-        return std::make_pair(credit, st);
+        ++r.settled;
+    };
+    std::function<bool(const BillKey&, std::size_t)> fit_at =
+        [&](const BillKey& key, std::size_t pos) -> bool {
+        Run& r = runs[key];   // std::map: the reference survives inserts below
+        if (!r.run) {
+            if (r.opened) return false;               // its credit is being decided: a loop
+            r.opened = true;
+            r.credit = credit_of(key);
+            r.run.emplace(std::get<0>(key), r.credit.purse, r.credit.credited, r.credit.arrived);
+        }
+        const auto& list = spends_of[key];
+        while (r.fit.size() <= pos) {
+            const std::size_t q = r.fit.size();
+            while (r.settled < q) {
+                if (r.busy) return false;             // settling this bill asked for it again
+                r.busy = true;
+                settle_one(key, r);
+                r.busy = false;
+            }
+            r.fit.push_back(r.run->judge(spend_of(list[q].first, list[q].second, false)) ? 1 : 0);
+        }
+        return r.fit[pos] != 0;
     };
     backed = [&](std::size_t c) -> bool {
         if (back_state[c] == 0 || back_state[c] == 1) return back_state[c] == 1;
@@ -341,13 +376,16 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
         const auto& t = carrier_transfer(c);
         bool        ok = true, upstream = false;
         std::string why;
-        for (const auto& o : t.origins) {
+        for (std::size_t p = 0; p < t.origins.size(); ++p) {
+            const auto& o = t.origins[p];
             if (!o.src) continue;
-            const auto [credit, st] = bill_at(key_of(c, o), c);
-            if (st.backed.count(carrier_hash(c))) continue;
+            const BillKey key = key_of(c, o);
+            if (fit_at(key, pos_in_bill[c][p])) continue;
+            const Run& r = runs[key];
             ok       = false;
-            why      = st.fault;
-            upstream = credit.upstream;
+            why      = !r.credit.why.empty() ? r.credit.why
+                     : r.run                 ? r.run->state().fault : std::string{};
+            upstream = r.credit.upstream;
             break;
         }
         back_state[c] = ok ? 1 : 0;
@@ -474,16 +512,17 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
     // bill as it stands now, for the views.
     for (std::size_t c = 0; c < n + m; ++c) backed(c);
     for (const auto& [key, list] : spends_of) {
-        const BillCredit credit = credit_of(key);
-        std::vector<records::BillSpend> all;
-        for (const auto& [sc, sp] : list) all.push_back(spend_of(sc, sp, true));
+        if (list.empty()) continue;
+        fit_at(key, list.size() - 1);
+        Run& r = runs[key];
+        if (!r.run) continue;                         // refused as a loop
+        while (r.settled < r.fit.size()) settle_one(key, r);
         BillOnTable b;
-        b.purse    = credit.purse;
-        b.why      = credit.why;
-        b.upstream = credit.upstream;
-        b.state    = records::check_bill(std::get<0>(key), credit.purse, credit.credited,
-                                         credit.arrived, std::move(all));
-        if (!credit.why.empty()) b.state.fault = credit.why;
+        b.purse    = r.credit.purse;
+        b.why      = r.credit.why;
+        b.upstream = r.credit.upstream;
+        b.state    = r.run->state();
+        if (!r.credit.why.empty()) b.state.fault = r.credit.why;
         out.bills[key] = std::move(b);
     }
     // Purchases of goods that happened: the buyers' stock.
@@ -711,6 +750,49 @@ DealsOnTable read_deals(const AggregatorStorage& storage) {
         else                                 out.sold_whole.insert(d.accept().work.hash);
     }
     return out;
+}
+
+} // namespace
+
+const SeenBlock& seen_block(const AggregatorStorage& storage, const Hash& bh) {
+    // One memo per storage object, never cleared: entries of a std::map stay
+    // where they are on insert, so a reference handed out survives the lock.
+    static std::mutex                                       mu;
+    static std::map<uint64_t, std::map<Hash32, SeenBlock>>  memos;
+    std::lock_guard<std::mutex> lock(mu);
+    auto& memo = memos[storage.instance_id()];
+    if (const auto it = memo.find(bh.bytes); it != memo.end()) return it->second;
+    SeenBlock s;
+    if (const auto block = storage.get_block_by_hash(bh)) {
+        s.address           = block->address;
+        s.timestamp_claimed = block->timestamp_claimed;
+        if (block->type == BlockType::DATA) {
+            try {
+                s.record = records::Codec::decode(block->payload.data(), block->payload.size());
+                s.data   = true;
+            } catch (const records::CodecError&) {}
+        }
+    }
+    return memo.emplace(bh.bytes, std::move(s)).first->second;
+}
+
+std::shared_ptr<const DealsOnTable> deals_on_table(const AggregatorStorage& storage) {
+    static std::mutex                          mu;
+    static uint64_t                            cached_id    = 0;
+    static std::size_t                         cached_count = 0;
+    static std::shared_ptr<const DealsOnTable> cached;
+    std::lock_guard<std::mutex> lock(mu);   // one computes, the rest wait for it
+    const std::size_t count = storage.block_count();   // taken before: a block landing
+    if (cached && cached_id == storage.instance_id() && cached_count == count)
+        return cached;                                 // meanwhile forces the next recompute
+    cached       = std::make_shared<const DealsOnTable>(compute_deals(storage));
+    cached_id    = storage.instance_id();
+    cached_count = count;
+    return cached;
+}
+
+DealsOnTable read_deals(const AggregatorStorage& storage) {
+    return *deals_on_table(storage);
 }
 
 std::vector<LotSummary> lot_summaries(const DealsOnTable& deals,

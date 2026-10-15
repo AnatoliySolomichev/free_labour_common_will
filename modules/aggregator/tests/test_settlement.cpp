@@ -368,3 +368,47 @@ TEST_F(SettlementTableTest, AReversalOfAnAcceptedDealIsSeen) {
     ASSERT_TRUE(b.has_value());
     EXPECT_EQ(b->false_reversals, 1u);
 }
+
+// ── Один стол на состояние хранилища (ускорение, records.md §13) ─────────────
+
+// Стол пересчитывается, только когда в хранилище появились новые блоки: пока
+// их число стоит, читатели получают тот же самый стол.
+TEST_F(SettlementTableTest, TheTableIsSharedUntilABlockArrives) {
+    const Block w = job(anna_, boris_, 3.0);
+    const auto  first  = deals_on_table(*storage_);
+    const auto  second = deals_on_table(*storage_);
+    EXPECT_EQ(first.get(), second.get());                       // тот же стол
+    const Block d = put(boris_, offer(boris_, anna_, w, {{boris_.bytes, 3.0}}));
+    const auto  third = deals_on_table(*storage_);
+    EXPECT_NE(third.get(), first.get());                        // новый блок — новый стол
+    ASSERT_EQ(third->all.size(), 1u);
+    EXPECT_EQ(third->all[0].hash, h(d));
+    EXPECT_TRUE(first->all.empty());                            // старый не тронут
+}
+
+// Блок разбирается один раз: ссылка устойчива, адрес и запись — как в блоке.
+TEST_F(SettlementTableTest, ABlockIsDecodedOnce) {
+    const Block w  = job(anna_, boris_, 3.0);
+    const auto& a1 = seen_block(*storage_, Crypto::hash_block(w));
+    const auto& a2 = seen_block(*storage_, Crypto::hash_block(w));
+    EXPECT_EQ(&a1, &a2);
+    EXPECT_TRUE(a1.data);
+    EXPECT_EQ(a1.address, w.address);
+    EXPECT_TRUE(std::holds_alternative<records::WorkRecord>(a1.record));
+}
+
+// У каждого хранилища свой номер: кэш одного не достаётся другому, даже если
+// число блоков совпало.
+TEST(StorageIdentity, EveryStorageHasItsOwnInstance) {
+    const auto base = std::filesystem::temp_directory_path();
+    std::filesystem::remove_all(base / "bc_identity_a");
+    std::filesystem::remove_all(base / "bc_identity_b");
+    {
+        AggregatorStorage a(base / "bc_identity_a");
+        AggregatorStorage b(base / "bc_identity_b");
+        EXPECT_NE(a.instance_id(), b.instance_id());
+        EXPECT_NE(deals_on_table(a).get(), deals_on_table(b).get());
+    }
+    std::filesystem::remove_all(base / "bc_identity_a");
+    std::filesystem::remove_all(base / "bc_identity_b");
+}

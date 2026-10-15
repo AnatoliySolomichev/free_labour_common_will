@@ -117,4 +117,27 @@ struct BillState {
 BillState check_bill(const std::array<uint8_t, 32>& holder, uint32_t purse, double credited,
                      std::optional<uint64_t> arrived, std::vector<BillSpend> spends);
 
+// The same rule, spend by spend, for a reader who learns how each spend ended
+// only as it goes (the aggregator: whether a deal stands depends on other
+// bills). Feed the spends in branch order: judge() says whether the next one
+// is backed — on what came before it alone; settle() then records how it ended,
+// i.e. whether it holds its hours (BillSpend::stands, the answer, the term
+// against the holder's next spend of the bill). check_bill is exactly this loop.
+class BillRun {
+public:
+    BillRun(const std::array<uint8_t, 32>& holder, uint32_t purse, double credited,
+            std::optional<uint64_t> arrived);
+    bool judge(const BillSpend& s);
+    void settle(const BillSpend& s, std::optional<int64_t> next_timestamp);
+    const BillState& state() const noexcept { return st_; }
+
+private:
+    std::array<uint8_t, 32>                holder_;
+    uint32_t                               purse_;
+    std::optional<uint64_t>                arrived_;
+    std::optional<std::array<uint8_t, 32>> last_;   // the previous spend on the thread
+    bool                                   broken_ = false;
+    BillState                              st_;
+};
+
 } // namespace records

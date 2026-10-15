@@ -36,7 +36,8 @@ AttestationView AttestationView::build(const AggregatorStorage& storage) {
     // One work — one deal (records.md §9.5, ИР-023): a job paid for by five
     // chains is one job sold five times, not «приняли пять цепей». The acceptance
     // rides inside its payment, so qualification reads accepted AND paid work.
-    const auto deals = read_deals(storage);
+    const auto  table = deals_on_table(storage);   // shared, recomputed only on new blocks
+    const auto& deals = *table;
 
     std::map<std::pair<UserId, RefHash>, std::set<UserId>> witnesses;
     std::map<UserId, std::set<UserId>>                     all_witnesses;

@@ -23,7 +23,8 @@ std::map<SampleKey, WorkComposition> build_work_compositions(
         if (const auto* w = std::get_if<records::WorkRecord>(&rec)) works[bh.bytes] = *w;
     }
     // Every deal is paid exactly by construction (records.md §9.5, ИР-023).
-    const auto deals = read_deals(storage);
+    const auto  table = deals_on_table(storage);   // shared, recomputed only on new blocks
+    const auto& deals = *table;
     std::map<RefHash, const DealEntry*> deal_at;   // deal block hash → the deal
     for (const auto& d : deals.all) deal_at[d.hash] = &d;
 

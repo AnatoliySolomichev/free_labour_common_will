@@ -2390,8 +2390,20 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     std::cerr << "это оферта: часы перейдут, когда продавец примет её — до "
               << when_utc(*t.until) << " (economy.md §4.4)\n";
     if (!via.empty()) {
-        upload_provenance(ctx, via, t);   // векселя: продавцу проверить бумагу
         upload_block(via, block);
+        // Продавцу проверять бумагу по блокам (economy.md §4.4): вексель, наш приём
+        // его, наши прежние траты. Обычно они на агрегаторе с тех пор, как были
+        // написаны; если он чего-то не видит — скажет, и тогда дольём.
+        bool endorsed = false;
+        for (const auto& o : t.origins) endorsed = endorsed || o.src.has_value();
+        if (endorsed) {
+            const auto  doc    = fetch_json(via, "/deal/" + me_hex + "/" +
+                                                     to_hex(Crypto::hash_block(block).bytes));
+            const auto* backed = doc && doc->is_object()
+                                     ? records::json::find(doc->object, "backed") : nullptr;
+            if (!backed || backed->type != records::json::Value::Type::Bool || !backed->boolean)
+                upload_provenance(ctx, via, t);
+        }
     }
     return 0;
 }
@@ -5437,11 +5449,14 @@ static records::Answer answer_from_status(const std::string& status) {
 // bill's block credited the paying purse, he had accepted it before spending,
 // and his spends of it, walked back along `prev`, leave enough. A spend hidden
 // from this walk only the aggregator, who sees the whole table, can catch — its
-// verdict is asked separately.
+// verdict is asked separately. `hint` — this portion as GET /deal reported it:
+// the source's standing, the payer's answer to it, how his earlier spends ended
+// — so that one request serves the whole check; the blocks are checked here
+// all the same. Without it each is asked for on its own.
 static PaperCheck check_paper(Context& ctx, const std::string& via, const Hash32& holder,
                               const BlockAddress& at, const Hash32& spend_hash,
                               const records::Transfer& spend, const records::OriginQty& p,
-                              int depth = 0) {
+                              const records::json::Object* hint = nullptr, int depth = 0) {
     PaperCheck c;
     const auto no = [&](const std::string& why) {
         c.definite = true;
@@ -5475,7 +5490,8 @@ static PaperCheck check_paper(Context& ctx, const std::string& via, const Hash32
         const Hash32 sh = Crypto::hash_block(*sb).bytes;
         for (const auto& q : s->origins) {
             if (!q.src) continue;
-            const auto inner = check_paper(ctx, via, holder, sb->address, sh, *s, q, depth + 1);
+            const auto inner = check_paper(ctx, via, holder, sb->address, sh, *s, q, nullptr,
+                                           depth + 1);
             if (!inner.ok) {
                 c.definite = inner.definite;
                 c.why      = "перемещение-источник: " + inner.why;
@@ -5485,20 +5501,28 @@ static PaperCheck check_paper(Context& ctx, const std::string& via, const Hash32
         }
     } else {
         // A deal that paid him: it must have happened, and he must have accepted it.
-        const auto doc = fetch_json(via, "/deal/" + to_hex(s->from) + "/" + to_hex(p.src->hash));
-        if (!doc || !doc->is_object()) {
-            c.why = "агрегатор не знает сделку-источник";
-            return c;
+        std::string standing, reply_ref;
+        if (hint && records::json::find(*hint, "src_standing")) {
+            standing  = jstr(*hint, "src_standing");
+            reply_ref = jstr(*hint, "src_reply");
+        } else {
+            const auto doc = fetch_json(via, "/deal/" + to_hex(s->from) + "/" + to_hex(p.src->hash));
+            if (!doc || !doc->is_object()) {
+                c.why = "агрегатор не знает сделку-источник";
+                return c;
+            }
+            standing = jstr(doc->object, "standing");
+            if (const auto* r = records::json::find(doc->object, "reply"); r && r->is_object())
+                reply_ref = jstr(r->object, "ref");
         }
-        const auto standing = jstr(doc->object, "standing");
         if (standing == "pending") {
             c.why = "плательщик ещё не принял сделку-источник";
             return c;
         }
         if (!state_moved(standing)) return no("сделка-источник не состоялась (" + standing + ")");
-        if (const auto* r = records::json::find(doc->object, "reply"); r && r->is_object()) {
+        if (!reply_ref.empty()) {
             try {
-                const Block rb  = fetch_block_from(via, parse_ref(jstr(r->object, "ref")));
+                const Block rb  = fetch_block_from(via, parse_ref(reply_ref));
                 const auto  rec = Codec::decode(rb.payload.data(), rb.payload.size());
                 const auto* dr  = std::get_if<records::DealReply>(&rec);
                 if (!dr || !dr->accepted || rb.address.user_id.bytes != holder ||
@@ -5542,9 +5566,17 @@ static PaperCheck check_paper(Context& ctx, const std::string& via, const Hash32
         sp.move      = !pt->accept;
         if (pt->accept) {
             sp.until = pt->until.value_or(0);
-            if (const auto d = fetch_json(via, "/deal/" + to_hex(holder) + "/" + to_hex(cur->hash));
-                d && d->is_object())
+            const auto* told = hint ? records::json::find(*hint, "thread") : nullptr;
+            const auto* st   = told && told->is_object()
+                ? records::json::find(told->object, to_hex(holder) + "/" + to_hex(cur->hash))
+                : nullptr;
+            if (st && st->is_string()) {
+                sp.answer = answer_from_status(st->string);
+            } else if (const auto d = fetch_json(via, "/deal/" + to_hex(holder) + "/" +
+                                                          to_hex(cur->hash));
+                       d && d->is_object()) {
                 sp.answer = answer_from_status(jstr(d->object, "status"));
+            }
         }
         spends.push_back(sp);
         cur = q->prev;
@@ -5664,6 +5696,20 @@ static int answer_offer(const fs::path& data_dir, const std::string& via, const 
     else     std::cout << "; ответить до " << when_utc(t->until.value_or(0));
     std::cout << "\n";
     std::vector<std::string> refuse, gaps;
+    // The aggregator's view of this very offer: its verdict on the paper, and per
+    // portion what the check needs besides the blocks — one request for all.
+    const auto told = fetch_json(via, "/deal/" + to_hex(t->from) + "/" + to_hex(src.hash));
+    const auto hint_for = [&](const records::OriginQty& o) -> const records::json::Object* {
+        if (!told || !told->is_object()) return nullptr;
+        const auto* ps = jarr(told->object, "portions");
+        if (!ps) return nullptr;
+        const std::string src_s = to_hex(o.src->chain) + "/" + to_hex(o.src->hash);
+        for (const auto& pv : ps->array)
+            if (pv.is_object() && jstr(pv.object, "issuer") == to_hex(o.issuer) &&
+                jstr(pv.object, "src") == src_s)
+                return &pv.object;
+        return nullptr;
+    };
     for (const auto& o : t->origins) {
         std::cout << "  " << o.units << "h  ";
         if (o.issuer == t->from) {
@@ -5679,7 +5725,7 @@ static int answer_offer(const fs::path& data_dir, const std::string& via, const 
         else
             std::cout << "бумага " << to_hex(o.issuer).substr(0, 12) << "…";
         std::cout << ", вексель " << to_hex(o.src->hash).substr(0, 12) << "…";
-        const auto c = check_paper(ctx, via, t->from, block.address, src.hash, *t, o);
+        const auto c = check_paper(ctx, via, t->from, block.address, src.hash, *t, o, hint_for(o));
         if (c.ok) {
             std::cout << ", получен " << when_utc(c.received) << ", было свободно " << c.before
                       << "h";
@@ -5691,9 +5737,8 @@ static int answer_offer(const fs::path& data_dir, const std::string& via, const 
         }
     }
     // The aggregator sees the whole table — a spend hidden from the walk above too.
-    if (const auto doc = fetch_json(via, "/deal/" + to_hex(t->from) + "/" + to_hex(src.hash));
-        doc && doc->is_object() && !jbool(doc->object, "backed", true)) {
-        const auto why = jstr(doc->object, "unbacked_why");
+    if (told && told->is_object() && !jbool(told->object, "backed", true)) {
+        const auto why = jstr(told->object, "unbacked_why");
         std::cout << "  агрегатор: бумага не обеспечена — " << why << "\n";
         // Faults of the payer's own thread, or a bill that was never his, are
         // facts; a source the aggregator lacks, or one still open, is a gap.

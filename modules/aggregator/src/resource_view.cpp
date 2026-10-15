@@ -43,7 +43,8 @@ ResourceSplit ResourceView::build(const AggregatorStorage& storage,
     out.known  = true;
     out.keeper = chain;
 
-    const auto deals = read_deals(storage);
+    const auto  table = deals_on_table(storage);   // shared, recomputed only on new blocks
+    const auto& deals = *table;
     if (const auto a = deals.asset_records.find(tool); a != deals.asset_records.end()) {
         out.collected = a->second.collected;
         out.residual  = a->second.residual(now);

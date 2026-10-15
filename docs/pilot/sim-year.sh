@@ -23,7 +23,12 @@
 #   POP=200  MONTHS=12  MERGES_PER_MONTH=12  SEALS_PER_MONTH=6  SEED=42
 #   YEAR=2025  PORT=19300  OUT=<путь>  BUILD=<путь к build>
 #
-# Прогон ~200 человек — около 4 минут. Для отладки: POP=12 MONTHS=2 (секунды).
+# Прогон ~200 человек — около 6 минут на обычной (отладочной) сборке и около
+# 4 минут на оптимизированной; время идёт в основном на запуск процессов bc:
+#   cmake -B build-prod -G Ninja -DCMAKE_BUILD_TYPE=Release   (та же сборка,
+#   cmake --build build-prod --target bc aggregator_server    что у боевого
+#   BUILD=build-prod docs/pilot/sim-year.sh                   агрегатора)
+# Для отладки: POP=12 MONTHS=2 (секунды).
 # Один SEED — один и тот же журнал сделок (deals.tsv); ключи, хеши и исход
 # слияний у каждого прогона свои.
 #

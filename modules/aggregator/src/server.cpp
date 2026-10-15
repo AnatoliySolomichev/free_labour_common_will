@@ -1736,7 +1736,8 @@ void AggregatorServer::setup_routes() {
             return;
         }
         try {
-            const auto  deals = read_deals(storage_);
+            const auto  table = deals_on_table(storage_);
+            const auto& deals = *table;
             const auto& ch    = chain->bytes;
             const auto& wh    = hash->bytes;
             const auto  w     = deals.works.find(wh);
@@ -1905,7 +1906,8 @@ void AggregatorServer::setup_routes() {
             return;
         }
         try {
-            const auto deals = read_deals(storage_);
+            const auto  table = deals_on_table(storage_);
+            const auto& deals = *table;
             const auto now   = static_cast<int64_t>(std::time(nullptr));
             const DealEntry* d = nullptr;
             for (const auto& e : deals.all)
@@ -1921,6 +1923,11 @@ void AggregatorServer::setup_routes() {
             double paid = 0;
             for (const auto& o : t.origins) paid += o.units;
             const auto answer = deals.answer(d->hash);
+            const auto by_hash = [&](const std::array<uint8_t, 32>& h) -> const DealEntry* {
+                for (const auto& e : deals.all)
+                    if (e.hash == h) return &e;
+                return nullptr;
+            };
             std::string body =
                 "{\"ref\":\"" + to_hex(d->payer.bytes) + "/" + to_hex(d->hash) + "\""
                 + ",\"known\":true"
@@ -1963,6 +1970,35 @@ void AggregatorServer::setup_routes() {
                               + ",\"backed\":"
                               + (b->second.state.backed.count(d->hash) ? "true" : "false")
                               + ",\"fault\":\"" + json_escape(b->second.state.fault) + "\"}";
+                    // What the seller's check needs besides the blocks, in one answer:
+                    // the source — a deal and its standing, the payer's acceptance of
+                    // it — or an own move; and the payer's earlier spends of this bill
+                    // with how each ended.
+                    if (const auto* sd = by_hash(o.src->hash); sd && sd->payer.bytes == o.src->chain) {
+                        body += ",\"src_standing\":\"" + std::string(deal_standing(deals, *sd, now)) + "\"";
+                        if (const auto* r = deals.counted_reply(sd->hash))
+                            body += ",\"src_reply\":\"" + to_hex(r->seen.author) + "/" + to_hex(r->hash)
+                                  + "\"";
+                    }
+                    std::vector<std::pair<uint64_t, std::string>> thread;
+                    for (const auto& e : deals.all)
+                        if (e.payer == d->payer && e.index < d->index)
+                            for (const auto& q : e.transfer.origins)
+                                if (q.src && *q.src == *o.src && q.issuer == o.issuer)
+                                    thread.push_back({e.index, to_hex(e.payer.bytes) + "/" + to_hex(e.hash)
+                                        + "\":\"" + records::deal_status_name(records::deal_status(
+                                              e.transfer, deals.answer(e.hash), now))});
+                    for (const auto& mv : deals.moves)
+                        if (mv.owner == d->payer && mv.index < d->index)
+                            for (const auto& q : mv.transfer.origins)
+                                if (q.src && *q.src == *o.src && q.issuer == o.issuer)
+                                    thread.push_back({mv.index, to_hex(mv.owner.bytes) + "/" + to_hex(mv.hash)
+                                        + "\":\"move"});
+                    std::sort(thread.begin(), thread.end());
+                    body += ",\"thread\":{";
+                    for (std::size_t k = 0; k < thread.size(); ++k)
+                        body += std::string(k ? "," : "") + "\"" + thread[k].second + "\"";
+                    body += "}";
                 }
                 body += "}";
             }
@@ -1989,7 +2025,8 @@ void AggregatorServer::setup_routes() {
             return;
         }
         try {
-            const auto deals = read_deals(storage_);
+            const auto  table = deals_on_table(storage_);
+            const auto& deals = *table;
             const auto now   = static_cast<int64_t>(std::time(nullptr));
             std::string body = "{\"chain\":\"" + to_hex(chain->bytes) + "\",\"offers\":[";
             bool first = true;
@@ -2041,7 +2078,8 @@ void AggregatorServer::setup_routes() {
             return;
         }
         try {
-            const auto deals = read_deals(storage_);
+            const auto  table = deals_on_table(storage_);
+            const auto& deals = *table;
             UserId uid{};
             uid.bytes = chain->bytes;
             const auto t = deals.threads.find(uid);
@@ -2164,7 +2202,8 @@ void AggregatorServer::setup_routes() {
             return;
         }
         try {
-            const auto  deals = read_deals(storage_);
+            const auto  table = deals_on_table(storage_);
+            const auto& deals = *table;
             std::string body  = "{\"chain\":\"" + to_hex(chain->bytes) + "\",\"holdings\":[";
             bool first = true;
             for (const auto& d : deals.all) {

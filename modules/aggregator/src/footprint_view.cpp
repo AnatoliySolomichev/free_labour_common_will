@@ -33,7 +33,8 @@ FootprintView FootprintView::build(const AggregatorStorage& storage) {
     // One result — one counted deal (records.md §9.5, ИР-023): one job paid for
     // by two chains is not «two outsiders took the labour»; and a deal the seller
     // did not address is void — it moves no paper at all.
-    const auto deals = read_deals(storage);
+    const auto  table = deals_on_table(storage);   // shared, recomputed only on new blocks
+    const auto& deals = *table;
 
     // Пломбы — записи в ветках свидетелей (blockchain.md §7.4 v2): собираем их
     // отдельным проходом, потому что порядок блоков произволен, а сделка

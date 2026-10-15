@@ -2,6 +2,7 @@
 
 #include "blockchain/types.h"
 #include "blockchain/crypto.h"
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -67,6 +68,11 @@ public:
     std::size_t block_count() const noexcept;
     std::size_t idea_count() const noexcept;
 
+    // Unique per storage object in this process — with block_count() (blocks
+    // are only ever added) it names one state of the block table, so a reader
+    // may cache what it computed from it.
+    uint64_t instance_id() const noexcept { return instance_id_; }
+
     // Snapshot warehouse (sync.md §7.1). Values are opaque bytes.
     // put_* return false when the key already exists (first write wins).
     // Throws: StorageError on LMDB failure.
@@ -107,6 +113,7 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
+    uint64_t              instance_id_;
 };
 
 } // namespace aggregator

@@ -29,6 +29,7 @@
 
 #include <array>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -240,6 +241,24 @@ struct DealsOnTable {
 // answer) and every portion of someone else's paper is a spend its bill covers
 // (economy.md §4.4).
 DealsOnTable read_deals(const AggregatorStorage& storage);
+
+// A block of the storage as views read it, decoded once per process: blocks
+// never change, and a recompute that re-decoded every block was most of the
+// cost of the views (economy.md §4.4 made the deals table be asked for per
+// portion of a payment). The reference stays valid for the storage's lifetime.
+struct SeenBlock {
+    BlockAddress    address{};
+    Timestamp       timestamp_claimed = 0;
+    bool            data = false;   // a DATA block whose payload decodes
+    records::Record record;
+};
+const SeenBlock& seen_block(const AggregatorStorage& storage, const Hash& block_hash);
+
+// The same table, shared and computed once per state of the storage: blocks
+// are only ever added, so while their count stands still the table does too.
+// Readers ask it per request — the seller's check alone asks per portion — so
+// every view and endpoint reads it here rather than recomputing.
+std::shared_ptr<const DealsOnTable> deals_on_table(const AggregatorStorage& storage);
 
 // How a deal stands at `now`, as one word for the views: "recognized",
 // "resold", "repeated", "contested", "unsound" (hours moved), "unaddressed"

@@ -60,10 +60,57 @@ bool is_reversal(const Redemption& rd, const std::array<uint8_t, 32>& author) no
     return rd.transfer.chain == author;
 }
 
+BillRun::BillRun(const std::array<uint8_t, 32>& holder, uint32_t purse, double credited,
+                 std::optional<uint64_t> arrived)
+    : holder_(holder), purse_(purse), arrived_(arrived) {
+    st_.credited = credited;
+}
+
+bool BillRun::judge(const BillSpend& s) {
+    if (broken_) {
+        st_.unbacked.insert(s.hash);
+        return false;
+    }
+    const char* fault = nullptr;
+    if (s.node != purse_) {
+        fault = "вексель потрачен не из того кошелька, куда пришёл";
+    } else if (arrived_ && s.index <= *arrived_) {
+        fault = "вексель потрачен раньше, чем принят";
+    } else if (!last_) {
+        if (s.prev) fault = "первая трата векселя называет предыдущую, которой нет";
+    } else if (!s.prev || s.prev->chain != holder_ || s.prev->hash != *last_) {
+        fault = "нить векселя порвана: трата называет не предыдущую трату";
+    }
+    if (!fault && s.units > st_.remaining() + 1e-9)
+        fault = "трата больше остатка векселя";
+    if (fault) {
+        broken_   = true;
+        st_.fault = fault;
+        st_.unbacked.insert(s.hash);
+        return false;
+    }
+    st_.backed.insert(s.hash);
+    last_ = s.hash;
+    return true;
+}
+
+void BillRun::settle(const BillSpend& s, std::optional<int64_t> next_timestamp) {
+    if (!st_.backed.count(s.hash)) return;   // a spend past the break holds nothing
+    // An offer refused, or left unanswered past its term by the time the holder
+    // spent the bill again, held nothing: its hours are back. Nor does a spend
+    // that moves nothing at all.
+    bool dead = !s.stands;
+    if (!dead && !s.move) {
+        if (s.answer == Answer::refused)
+            dead = true;
+        else if (s.answer == Answer::none && next_timestamp && *next_timestamp > s.until)
+            dead = true;
+    }
+    if (!dead) st_.consumed += s.units;
+}
+
 BillState check_bill(const std::array<uint8_t, 32>& holder, uint32_t purse, double credited,
                      std::optional<uint64_t> arrived, std::vector<BillSpend> spends) {
-    BillState st;
-    st.credited = credited;
     std::sort(spends.begin(), spends.end(), [](const BillSpend& a, const BillSpend& b) {
         return a.index != b.index ? a.index < b.index : a.hash < b.hash;
     });
@@ -71,49 +118,14 @@ BillState check_bill(const std::array<uint8_t, 32>& holder, uint32_t purse, doub
     spends.erase(std::unique(spends.begin(), spends.end(),
                              [](const BillSpend& a, const BillSpend& b) { return a.hash == b.hash; }),
                  spends.end());
-
-    std::optional<std::array<uint8_t, 32>> last;   // the previous spend on the thread
-    bool broken = false;
+    BillRun run(holder, purse, credited, arrived);
     for (std::size_t i = 0; i < spends.size(); ++i) {
-        const BillSpend& s = spends[i];
-        if (broken) {
-            st.unbacked.insert(s.hash);
-            continue;
-        }
-        const char* fault = nullptr;
-        if (s.node != purse) {
-            fault = "вексель потрачен не из того кошелька, куда пришёл";
-        } else if (arrived && s.index <= *arrived) {
-            fault = "вексель потрачен раньше, чем принят";
-        } else if (!last) {
-            if (s.prev) fault = "первая трата векселя называет предыдущую, которой нет";
-        } else if (!s.prev || s.prev->chain != holder || s.prev->hash != *last) {
-            fault = "нить векселя порвана: трата называет не предыдущую трату";
-        }
-        if (!fault && s.units > st.remaining() + 1e-9)
-            fault = "трата больше остатка векселя";
-        if (fault) {
-            broken   = true;
-            st.fault = fault;
-            st.unbacked.insert(s.hash);
-            continue;
-        }
-        st.backed.insert(s.hash);
-        last = s.hash;
-        // An offer refused, or left unanswered past its term by the time the
-        // holder spent the bill again, held nothing: its hours are back. Nor does
-        // a spend that moves nothing at all.
-        bool dead = !s.stands;
-        if (!dead && !s.move) {
-            if (s.answer == Answer::refused)
-                dead = true;
-            else if (s.answer == Answer::none && i + 1 < spends.size() &&
-                     spends[i + 1].timestamp > s.until)
-                dead = true;
-        }
-        if (!dead) st.consumed += s.units;
+        if (!run.judge(spends[i])) continue;
+        run.settle(spends[i], i + 1 < spends.size()
+                                  ? std::optional<int64_t>(spends[i + 1].timestamp)
+                                  : std::nullopt);
     }
-    return st;
+    return run.state();
 }
 
 } // namespace records

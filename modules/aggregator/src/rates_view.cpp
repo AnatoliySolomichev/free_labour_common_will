@@ -131,27 +131,16 @@ DailyPrices build_daily_prices(
     const int64_t win_start =
         weighted ? day_start - indep->window_days * 86'400 : day_start;
 
-    // One scan: the WorkRecords on the table (for provenance resolution).
-    std::set<RefHash> work_hashes;
-    for (const Hash& bh : storage.all_block_hashes()) {
-        const auto block = storage.get_block_by_hash(bh);
-        if (!block || block->type != BlockType::DATA) continue;
-        try {
-            const auto rec = records::Codec::decode(block->payload.data(),
-                                                    block->payload.size());
-            if (std::holds_alternative<records::WorkRecord>(rec))
-                work_hashes.insert(bh.bytes);
-        } catch (const records::CodecError&) {
-        }
-    }
-
     // The window's deals whose work is on the table. Filter (Б) and the «=» of
     // records.md §12.8 hold by construction: the acceptance rides inside its own
     // payment (records.md §9.5, ИР-023), so every deal is settled exactly and is
     // never a self-deal. The payment is labor + carried cost of the means of
     // production (v2); the averaging below takes labor_units only. One work —
     // one deal: a work paid by two buyers was sold twice and moves no price.
-    const auto deals = read_deals(storage);
+    const auto  table = deals_on_table(storage);   // shared, recomputed only on new blocks
+    const auto& deals = *table;
+    // The WorkRecords on the table (for provenance resolution) are the table's
+    // own — no second scan of the storage.
     std::vector<ResolvedDeal> resolved;
     for (const auto& deal : deals.all) {
         const int64_t ts = deal.transfer.timestamp;
@@ -163,7 +152,7 @@ DailyPrices build_daily_prices(
         double named = 0.0;
         for (const auto& x : a.axes) named += x.units;
         if (a.axes.empty() || std::abs(named - a.labor_units) > 1e-6) continue;
-        if (!work_hashes.count(a.work.hash)) continue;   // the work is not on the table
+        if (!deals.works.count(a.work.hash)) continue;   // the work is not on the table
 
         ResolvedDeal rd{};
         rd.worker    = a.work.chain;
