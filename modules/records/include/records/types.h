@@ -433,13 +433,20 @@ struct AcceptanceAxis {
 // bought to `to` until `until`. The addressee then buys back on its own, and no
 // holder can stall it. Its price is nobody's to name (v6): what the holder paid
 // — less, for a rent (`wear`), the wear by the norm over the holding.
+//
+// v9 — a deposit (залог, решение участника 2026-10-15, economy.md §4.4): the
+// buyer may ask that what he pays stay frozen in the seller's purse until the
+// term, so that the buyback returns him that very paper. Only when the thing
+// goes back to the seller himself (rent, storage, repair) — he is the one who
+// holds the payment; never for carriage to a third party.
 struct Buyback {
     std::array<uint8_t, 32> to{};
-    int64_t                 until = 0;
-    bool                    wear  = false;
+    int64_t                 until   = 0;
+    bool                    wear    = false;
+    bool                    deposit = false;   // v9
 
     bool operator==(const Buyback& o) const noexcept {
-        return to == o.to && until == o.until && wear == o.wear;
+        return to == o.to && until == o.until && wear == o.wear && deposit == o.deposit;
     }
 };
 

@@ -32,7 +32,9 @@
 class Settlement {
 public:
     static constexpr uint32_t kLeaf = 0x7FFF'FFFFu;   // the fixtures' one branch per chain
-    static constexpr int64_t  kTerm = 10LL * 365 * 86'400;
+    // Far past any date the fixtures write: an answer is never later than its
+    // branch, and the fixtures date works by the calendar but deals near zero.
+    static constexpr int64_t  kTerm = 100LL * 365 * 86'400;
 
     // Hold the sellers' answers back: deals stay offers until a test answers.
     void hold_answers(bool hold = true) { hold_ = hold; }

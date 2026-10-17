@@ -15,8 +15,9 @@
 #   6.  work / accept — труд, приёмка и расчёт трудочасами одной записью; перенос стоимости
 #   7.  deal                — полный цикл сделки (берусь → найм → работа → расчёт)
 #   8.  transfer            — движение бумаги: своя эмиссия, оборот, погашение
-#   9.  wallet / rates      — кошельки, долг, сетевые ставки
-#  10.  merge / discover    — взаимное заверение, растущий граф (DAG), кеш участников
+#   9.  wallet / rates      — кошельки, долг, сетевые ставки; оферта, отказ, залог под выкуп
+#  10.  merge / discover    — взаимное заверение, растущий граф (DAG), кеш участников;
+#                             просрочка оферты, закреплённая слиянием
 #  11.  seal                — пломбы (слепые и открытые)
 #  12.  pledge / ideas top  — финансирование идей трудочасами
 #  13.  trust / chain info  — экономический след (слои 1–3, ИР-010)
@@ -494,6 +495,33 @@ say "у Ирины снова палатка — уже по остатку — 
 say "ответа Бориса выкуп не ждёт: возврат он подписал сам, а платят ему его же бумагой (records.md §9.8)"
 take boris
 
+hr "залог под выкуп: Вера продаёт Устину палатку с возвратом себе через месяц (records.md §9.8 v9)"
+say "без залога выкуп платят бумагой держателя или своей; Устин хочет назад ровно то, чем платил, — и кладёт залог"
+W_tent2=$(bcp vera work log --title "швея, 5-й разряд" --action "Палатка — вторая" --hours 3 \
+          --start "$(( NOW - 200000 ))" --output "палатка:1:шт" --axis-share "$(axis precision)=1" \
+          --via "$VIA" | after 'hash: ')
+bcp vera release "$W_tent2" --to "${CID[ustin]}" --buyback --buyback-days 30 --days 1 \
+    --via "$VIA" 2>&1 | sed 's/^/   /'
+OUT_dep="$(bcp ustin accept --work "${CID[vera]}/$W_tent2" --quality "целая" --deposit --via "$VIA" 2>&1)"
+echo "$OUT_dep" | sed 's/^/   /'
+DEP_ustin="$(printf '%s\n' "$OUT_dep" | after 'acceptance ref: ')"
+say "Вера видит залог в самой оферте и принимает её"
+bcp vera transfer recv "$DEP_ustin" --via "$VIA" --yes | sed 's/^/   /'
+say "в кошельке Веры оплата Устина — «в залоге»: до срока её тратит только выкуп;"
+say "у каждого векселя виден долг эмитента при рождении — и у бумаги, что пришла к Устину от другого"
+WAL_vera="$(bcp vera wallet --via "$VIA")"
+grep -E "в залоге|итого" <<<"$WAL_vera" | sed 's/^/     /'
+DEP_BILL="$(grep 'в залоге' <<<"$WAL_vera" | head -1 \
+            | sed -E 's/.*вексель ([0-9a-f]+)….*эмитент ([0-9a-f]+)….*/\2@\1/')"
+say "унести залог в другую свою ветку не выйдет:"
+bcp vera transfer move --to-node 0x7ffffffe --pay "$DEP_BILL=1" --via "$VIA" 2>&1 \
+    | tail -1 | sed 's/^/   /' || true
+say "Вера выкупает палатку — из залога; ответа Устина выкуп не ждёт, ему вернётся то, чем он платил"
+OUT_back="$(bcp vera accept --work "${CID[vera]}/$W_tent2" --quality "вернулась" --via "$VIA" 2>&1)"
+echo "$OUT_back" | sed 's/^/   /'
+BACK_vera="$(printf '%s\n' "$OUT_back" | after 'acceptance ref: ')"
+take ustin
+
 hr "две шкалы износа: вещь изнашивается и работой, и временем (ИР-011 v5, records.md §10.2)"
 say "Устин завёл холодильный ларь: ресурс 5000 моточасов И срок службы 60 суток"
 CHEST=$(bcp ustin tool add "Ларь холодильный" --cost 60 --life 5000 --days 60 \
@@ -684,6 +712,36 @@ merge_pair anna  galina
 hr "сырой набор участников в кеше (bc cache list — из него строятся доказательства)"
 bcp anna cache list | sed 's/^/   /' | head -18
 
+hr "просрочка оферты: насколько твёрдо она умерла (economy.md §8.14)"
+say "Фёдор возит Татьяну; она платит своей бумагой — у Фёдора вексель Татьяны на 2ч"
+W_ride=$(bcp fedor work log --title "водитель" --action "Отвёз документы в район" --hours 2 \
+         --start "$(( NOW - 30000 ))" --for "${CID[tatyana]}" --via "$VIA" | after 'hash: ')
+bcp tatyana accept --work "${CID[fedor]}/$W_ride" --quality "вовремя" \
+    --axis "$(axis pace)=2" --via "$VIA" >/dev/null 2>&1
+take fedor
+say "Фёдор платит этим векселем Раисе за урок, ответить — за 2 секунды; Раиса молчит"
+W_les=$(bcp raisa work log --title "преподаватель" --action "Урок правил дорожного движения" \
+        --hours 2 --start "$(( NOW - 25000 ))" --for "${CID[fedor]}" --via "$VIA" | after 'hash: ')
+OFF_les="$(bcp fedor accept --work "${CID[raisa]}/$W_les" --quality "понятно" \
+           --axis "$(axis knowledge)=2" --pay "${CID[tatyana]:0:12}=2" --no-self \
+           --reply-within 2s --via "$VIA" 2>/dev/null | after 'acceptance ref: ')"
+sleep 3
+say "срок вышел — вексель снова свободен; Фёдор платит им Галине за стрижку"
+W_cut=$(bcp galina work log --title "парикмахер" --action "Стрижка" --hours 1 \
+        --start "$(( NOW - 400000 ))" --for "${CID[fedor]}" --via "$VIA" | after 'hash: ')
+OFF_cut="$(bcp fedor accept --work "${CID[galina]}/$W_cut" --quality "коротко" \
+           --axis "$(axis precision)=2" --pay "${CID[tatyana]:0:12}=2" --no-self \
+           --via "$VIA" 2>/dev/null | after 'acceptance ref: ')"
+say "кошелёк Раисы за срок не уходил — просрочка «не видна»: Раиса ещё может принять задним числом"
+bcp galina transfer recv "$OFF_cut" --via "$VIA" --yes 2>&1 | sed 's/^/   /' || true
+say "Раиса пишет заглушку — якорь времени (bc block stub): кошелёк ушёл за срок без ответа, «видно агрегатору»"
+bcp raisa block stub --via "$VIA" 2>/dev/null | sed 's/^/   /'
+bcp galina transfer recv "$OFF_cut" --via "$VIA" --yes 2>&1 | grep -E "⚠|автоприём" | sed 's/^/   /' || true
+say "Раиса сливается с Петром: обе половины слияния закрепляют её кошелёк до якоря — «зафиксировано слиянием»"
+merge_pair raisa petr
+bcp galina transfer recv "$OFF_cut" --via "$VIA" --yes 2>&1 | sed 's/^/   /'
+say "особых пакетов времени не понадобилось: заглушка и обычное двустороннее слияние"
+
 # ═════════════════════════════════════════════════════════════════════════════
 act "12. Пломбы (bc seal) — «я видел это состояние»"
 hr "слепая пломба на корневой блок Анны (подтверждает существование, не содержимое)"
@@ -778,6 +836,18 @@ check "заведено 14 цепей" "$(echo "$people" | wc -w | tr -d ' ')" "
 deal_status(){ curl -s "$VIA/deal/${1%/*}/${1#*/}" | python3 -c 'import json,sys;print(json.load(sys.stdin)["status"])'; }
 check "отказ продавца — оферта не состоялась" "$(deal_status "$OFF_fence")" "refused"
 check "повторная оферта принята продавцом" "$(deal_status "$OFF_fence2")" "accepted"
+# залог под выкуп (records.md §9.8 v9): выкуп из залога не ждал ответа держателя
+deal_field(){ curl -s "$VIA/deal/${1%/*}/${1#*/}" | python3 -c "import json,sys;print(json.load(sys.stdin).get('$2'))"; }
+check "выкуп из залога — без ответа держателя" "$(deal_field "$BACK_vera" pre_accepted)" "True"
+check "палатка выкуплена" "$(deal_status "$BACK_vera")" "accepted"
+# долг эмитента при рождении (economy.md §4.4) — и у векселя, прошедшего через две руки
+if grep "в залоге" <<<"$WAL_vera" | grep -v "эмитент ${CID[ustin]:0:12}" \
+     | grep -q "долг эмитента при рождении"; then
+    echo "   ✓ долг эмитента при рождении виден у векселя, прошедшего через две руки"
+else echo "   ✗ долг при рождении у векселя через две руки не виден"; fail=1; fi
+# просрочка, закреплённая слиянием (economy.md §8.14)
+check "молчание Раисы закреплено слиянием" "$(deal_field "$OFF_les" lapse)" "witnessed"
+check "повторная трата векселя принята после закрепления" "$(deal_status "$OFF_cut")" "accepted"
 # перемещение между своими ветками: бумага в сейфе Анны
 if bcp anna wallet --leaf 0x7ffffffe | grep -q "свободно 1h"; then
     echo "   ✓ час бумаги Дмитрия в сейфе Анны (bc transfer move)"

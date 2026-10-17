@@ -18,8 +18,10 @@ DealAnswer answer_of(const Transfer& deal, const Ref& deal_ref,
     }
     if (!first) return out;
     // Past the term the offer is dead: a late word answers nothing — and a later
-    // word in the same branch cannot be earlier than the first.
-    if (!deal.until || replies[*first].reply.timestamp > *deal.until) return out;
+    // word in the same branch cannot be earlier than the first. Its time is its
+    // own date or the latest date of the branch before it, whichever is later.
+    const auto& r = replies[*first];
+    if (!deal.until || std::max(r.reply.timestamp, r.since) > *deal.until) return out;
     out.answer = replies[*first].reply.accepted ? Answer::accepted : Answer::refused;
     out.reply  = first;
     return out;
@@ -49,6 +51,31 @@ bool pre_accepted_buyback(const Transfer& deal) noexcept {
     return true;
 }
 
+bool pre_accepted_buyback(const Transfer& deal, const Ref& purchase_ref,
+                          const Transfer& purchase) noexcept {
+    const bool deposit = purchase.accept && purchase.accept->buyback &&
+                         purchase.accept->buyback->deposit;
+    if (!deposit) return pre_accepted_buyback(deal);
+    if (deal.origins.empty()) return false;
+    // The part of the payment that was the seller's own paper came home and died
+    // with his debt — no bill holds it: it goes back as his own paper again, no
+    // more than it was.
+    double own = 0.0;
+    for (const auto& o : deal.origins) {
+        if (o.issuer == deal.to || (o.src && *o.src == purchase_ref)) continue;
+        if (o.issuer != deal.from || o.src) return false;
+        own += o.units;
+    }
+    return own <= bill_credit(purchase, deal.from) + 1e-9;
+}
+
+bool deposit_frozen(const Transfer& purchase, int64_t spend_timestamp,
+                    bool bought_back) noexcept {
+    if (!purchase.accept || !purchase.accept->buyback || !purchase.accept->buyback->deposit)
+        return false;
+    return !bought_back && spend_timestamp <= purchase.accept->buyback->until;
+}
+
 double bill_credit(const Transfer& src, const std::array<uint8_t, 32>& issuer) noexcept {
     double units = 0.0;
     for (const auto& o : src.origins)
@@ -72,7 +99,9 @@ bool BillRun::judge(const BillSpend& s) {
         return false;
     }
     const char* fault = nullptr;
-    if (s.node != purse_) {
+    if (s.frozen) {
+        fault = "залог заморожен до срока возврата: первым его тратит выкуп";
+    } else if (s.node != purse_) {
         fault = "вексель потрачен не из того кошелька, куда пришёл";
     } else if (arrived_ && s.index <= *arrived_) {
         fault = "вексель потрачен раньше, чем принят";

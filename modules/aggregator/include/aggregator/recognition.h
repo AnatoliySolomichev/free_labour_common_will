@@ -27,7 +27,9 @@
 #include <records/settlement.h>
 #include <records/types.h>
 
+#include <algorithm>
 #include <array>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
@@ -67,6 +69,21 @@ struct ReplyEntry {
 
 // One bill (economy.md §4.4): whose hands, the block the paper came in, whose
 // paper. Spends by anyone but the one it came to are not spends of this bill.
+// Where the paper of a bill was born (economy.md §4.4): every hour of someone
+// else's paper goes back, hop by hop, to the self-issue it was born in, and that
+// issue's link declared the issuer's debt right after it (economy.md §4.3). A
+// bill holds what its source block collected, so its hours may be born at
+// different depths.
+struct BirthDebt {
+    std::vector<std::pair<double, double>> parts;   // (declared debt after the issue, hours), by debt
+    double unknown = 0;                              // hours whose birth is not on the table
+    double total() const noexcept {
+        double s = unknown;
+        for (const auto& p : parts) s += p.second;
+        return s;
+    }
+};
+
 using BillKey = std::tuple<std::array<uint8_t, 32>,    // holder
                            std::array<uint8_t, 32>,    // src chain
                            std::array<uint8_t, 32>,    // src block hash
@@ -175,6 +192,35 @@ struct DealsOnTable {
     std::map<std::array<uint8_t, 32>, std::string> unbacked_why;
     std::set<std::array<uint8_t, 32>> moves_backed;   // moves that stand
     std::map<BillKey, BillOnTable>    bills;
+    std::map<BillKey, BirthDebt>      births;         // every bill on the table, spent or not
+
+    // ── Witnessed time (blockchain.md §5.2, economy.md §8.14) ─────────────
+    // A merge takes the partner's last block, its hash and the merge time into
+    // a block both sides sign; so everything before that point of the partner's
+    // branch provably existed by then. The co-signature itself stays with the
+    // two sides as a seal and does not come to this table; what does is the
+    // pair: each side's half in its own chain, each taking the other's block
+    // right before it. Counted only when both halves are here — a one-sided
+    // «merge» proves nothing — and only between two chains: one's own branches
+    // merged are one hand.
+    using Branch = std::pair<UserId, uint32_t>;
+    std::map<Branch, std::vector<std::pair<uint64_t, int64_t>>> branch_time;   // index → latest claimed so far
+    std::map<Branch, std::vector<std::pair<uint64_t, int64_t>>> witnessed_at;  // index → earliest merge fixing it
+    // Unanswered offers: how surely they lapsed — the seller's purse went on past
+    // the term with no answer, and that point is fixed by a merge ("witnessed"),
+    // only seen here ("seen"), or the purse has not moved since ("none").
+    std::map<std::array<uint8_t, 32>, std::string> lapse;
+
+    // The earliest merge time that fixes block `index` of a branch; none if no
+    // merge has fixed it yet.
+    std::optional<int64_t> witnessed(const UserId& chain, uint32_t node, uint64_t index) const {
+        const auto it = witnessed_at.find({chain, node});
+        if (it == witnessed_at.end()) return std::nullopt;
+        const auto& v = it->second;   // by index, each with the minimum over itself and all later
+        const auto  at = std::lower_bound(v.begin(), v.end(), std::make_pair(index, INT64_MIN));
+        if (at == v.end()) return std::nullopt;
+        return at->second;
+    }
 
     // The seller's answer that counts for a deal (none: silent, late, or not his).
     records::Answer answer(const std::array<uint8_t, 32>& deal) const {
@@ -247,10 +293,11 @@ DealsOnTable read_deals(const AggregatorStorage& storage);
 // cost of the views (economy.md §4.4 made the deals table be asked for per
 // portion of a payment). The reference stays valid for the storage's lifetime.
 struct SeenBlock {
-    BlockAddress    address{};
-    Timestamp       timestamp_claimed = 0;
-    bool            data = false;   // a DATA block whose payload decodes
-    records::Record record;
+    BlockAddress                address{};
+    Timestamp                   timestamp_claimed = 0;
+    bool                        data = false;   // a DATA block whose payload decodes
+    records::Record             record;
+    std::optional<MergePayload> merge;          // a MERGE block: whose tip it took, and when
 };
 const SeenBlock& seen_block(const AggregatorStorage& storage, const Hash& block_hash);
 

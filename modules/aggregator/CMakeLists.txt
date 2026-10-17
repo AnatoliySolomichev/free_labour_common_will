@@ -22,6 +22,7 @@ add_library(aggregator
     src/axis_ledger.cpp
     src/own_chain.cpp
     src/recognition.cpp
+    src/branch_keys.cpp
 )
 
 target_include_directories(aggregator
@@ -72,6 +73,7 @@ add_executable(aggregator_tests
     tests/test_resource_view.cpp
     tests/test_axis_ledger.cpp
     tests/test_tls_smoke.cpp
+    tests/test_branch_keys.cpp
 )
 
 target_link_libraries(aggregator_tests PRIVATE

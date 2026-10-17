@@ -1,5 +1,6 @@
 #include "aggregator/recognition.h"
 
+#include <blockchain/serializer.h>
 #include <records/codec.h>
 
 #include <algorithm>
@@ -68,8 +69,12 @@ DealsOnTable compute_deals(const AggregatorStorage& storage) {
     // Позднее согласие цепи отменяет прежнее — порядок блоков в хранилище
     // произволен, поэтому сравниваем по времени блока (ИР-012).
     std::map<std::pair<Hash32, UserId>, int64_t>          consent_at;
+    std::vector<const SeenBlock*> merges;
     for (const Hash& bh : storage.all_block_hashes()) {
         const SeenBlock* block = &seen_block(storage, bh);
+        out.branch_time[{block->address.user_id, block->address.node_index}].push_back(
+            {block->address.block_index, block->timestamp_claimed});
+        if (block->merge) merges.push_back(block);
         if (!block->data) continue;
         const UserId           owner = block->address.user_id;
         const records::Record& rec   = block->record;
@@ -137,6 +142,60 @@ DealsOnTable compute_deals(const AggregatorStorage& storage) {
         }
     }
 
+    // Time in a branch only goes forward: each position carries the latest date
+    // claimed up to it.
+    for (auto& [branch, v] : out.branch_time) {
+        (void)branch;
+        std::sort(v.begin(), v.end());
+        for (std::size_t i = 1; i < v.size(); ++i) v[i].second = std::max(v[i].second, v[i - 1].second);
+    }
+    const auto branch_since = [&](const UserId& chain, uint32_t node, uint64_t index) -> int64_t {
+        const auto it = out.branch_time.find({chain, node});
+        if (it == out.branch_time.end()) return 0;
+        const auto& v  = it->second;
+        auto        at = std::upper_bound(v.begin(), v.end(), std::make_pair(index, INT64_MAX));
+        return at == v.begin() ? 0 : std::prev(at)->second;
+    };
+    for (auto& [deal, list] : out.replies) {
+        (void)deal;
+        for (auto& e : list)
+            e.seen.since = branch_since(UserId{e.seen.author}, e.seen.node, e.seen.index);
+    }
+    // Merges both halves of which are on the table: the partner's branch up to
+    // the block taken is fixed by the merge time (blockchain.md §5.2).
+    std::map<std::tuple<UserId, uint32_t, uint64_t>, const SeenBlock*> merge_at;
+    for (const auto* m : merges)
+        merge_at[{m->address.user_id, m->address.node_index, m->address.block_index}] = m;
+    // A block the merge names may not be here yet: seen_block does not remember
+    // a miss, and an absent block has no address.
+    const auto lies_at = [&](const Hash& h, const BlockAddress& a) {
+        return seen_block(storage, h).address == a;
+    };
+    for (const auto* m : merges) {
+        const auto& took = m->merge->partner_last_address;
+        // A merge of one's own branches is signed by one hand: it proves nothing
+        // against that hand.
+        if (took.user_id == m->address.user_id || m->address.block_index == 0) continue;
+        if (!lies_at(m->merge->partner_last_hash, took)) continue;   // the block it took is not here
+        // Each side's merge is the next block after the tip the other took
+        // (blockchain.md §6.4): the partner's half lies right after `took` and
+        // takes the block right before this one.
+        const auto half = merge_at.find({took.user_id, took.node_index, took.block_index + 1});
+        if (half == merge_at.end()) continue;                   // the partner's half is not here
+        const BlockAddress mine{m->address.user_id, m->address.node_index,
+                                m->address.block_index - 1};
+        const auto& other = *half->second->merge;
+        if (!(other.partner_last_address == mine) || !lies_at(other.partner_last_hash, mine))
+            continue;
+        out.witnessed_at[{took.user_id, took.node_index}].push_back(
+            {took.block_index, m->merge->merge_timestamp});
+    }
+    for (auto& [branch, v] : out.witnessed_at) {
+        (void)branch;
+        std::sort(v.begin(), v.end());
+        for (std::size_t i = v.size(); i-- > 1;) v[i - 1].second = std::min(v[i - 1].second, v[i].second);
+    }
+
     // Each chain's goods thread (records.md §9.4 v4): its links and its hours.
     for (const auto& [chain, works] : observed)
         out.threads[chain] = records::check_labor_thread(chain.bytes, works);
@@ -196,9 +255,53 @@ DealsOnTable compute_deals(const AggregatorStorage& storage) {
             for (const auto& e : r->second) seen.push_back(e.seen);
         const auto a = records::answer_of(d.transfer, records::Ref{d.payer.bytes, d.hash}, seen);
         out.answers[d.hash] = a;
-        const bool pre = buyback_of[i] && records::pre_accepted_buyback(d.transfer);
+        const bool pre = buyback_of[i] &&
+            records::pre_accepted_buyback(d.transfer,
+                                          records::Ref{out.all[*buyback_of[i]].payer.bytes,
+                                                       out.all[*buyback_of[i]].hash},
+                                          out.all[*buyback_of[i]].transfer);
         if (pre) out.pre_accepted.insert(d.hash);
         answered[i] = pre || a.answer == records::Answer::accepted;
+    }
+    // How surely an unanswered offer lapsed (economy.md §8.14): the point of the
+    // seller's purse past which any answer is late — its first block dated past
+    // the term, or a first answer that came late — must be on the table with
+    // the whole purse before it; fixed by a merge it cannot be undone.
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto& d = out.all[i];
+        // A refusal is the seller's own word, and answers for itself.
+        if (answered[i] || out.answers[d.hash].answer != records::Answer::none ||
+            !d.transfer.until)
+            continue;
+        const UserId seller{d.transfer.to};
+        std::optional<uint64_t> point;
+        if (const auto r = out.replies.find(d.hash); r != out.replies.end())
+            for (const auto& e : r->second)
+                if (e.seen.author == d.transfer.to && e.seen.node == d.transfer.to_node &&
+                    (!point || e.seen.index < *point))
+                    point = e.seen.index;
+        std::string level = "none";
+        if (const auto b = out.branch_time.find({seller, d.transfer.to_node});
+            b != out.branch_time.end()) {
+            const auto& v = b->second;
+            // The latest date so far only grows along the branch.
+            const auto past = std::partition_point(v.begin(), v.end(), [&](const auto& e) {
+                return e.second <= *d.transfer.until;
+            });
+            if (past != v.end() && (!point || past->first < *point)) point = past->first;
+            if (point) {
+                // The purse before the point, whole — a missing block could be the
+                // answer. Positions are unique and ascending: none is missing
+                // before the point exactly when it stands at its own position.
+                const auto at = std::lower_bound(v.begin(), v.end(),
+                                                 std::make_pair(*point, INT64_MIN));
+                if (at != v.end() && at->first == *point &&
+                    static_cast<uint64_t>(at - v.begin()) == *point)
+                    level = out.witnessed(seller, d.transfer.to_node, *point) ? "witnessed"
+                                                                              : "seen";
+            }
+        }
+        out.lapse[d.hash] = level;
     }
 
     // ── Bills (economy.md §4.4) ──────────────────────────────────────────────
@@ -322,6 +425,27 @@ DealsOnTable compute_deals(const AggregatorStorage& storage) {
             sp.until  = t.until.value_or(0);
         }
         if (judge) sp.stands = holds(c);
+        // Залог (records.md §9.8 v9): a purchase's payment lies frozen in its
+        // seller's purse until the return's term — before it the first spend of
+        // that paper is the buyback itself. Once a buyback held, it is free.
+        const auto& o = t.origins[p];
+        if (const auto h = deal_at.find(o.src->hash);
+            h != deal_at.end() && out.all[h->second].payer.bytes == o.src->chain) {
+            const auto& purchase = out.all[h->second];
+            const auto& bb       = purchase.accept().buyback;
+            if (bb && bb->deposit && carrier_author(c).bytes == purchase.transfer.to) {
+                const auto is_buyback = [&](std::size_t e) {
+                    return e < n && buyback_of[e] && *buyback_of[e] == h->second;
+                };
+                bool bought = is_buyback(c);
+                const auto& list = spends_of[key_of(c, o)];
+                for (std::size_t k = 0; k < pos_in_bill[c][p] && !bought; ++k) {
+                    const std::size_t e = list[k].first;
+                    bought = is_buyback(e) && hold_state[e] == 1 && answered[e];
+                }
+                sp.frozen = records::deposit_frozen(purchase.transfer, t.timestamp, bought);
+            }
+        }
         return sp;
     };
     // Each bill walked once, spend by spend (records::BillRun): a spend is judged
@@ -365,7 +489,11 @@ DealsOnTable compute_deals(const AggregatorStorage& storage) {
                 settle_one(key, r);
                 r.busy = false;
             }
-            r.fit.push_back(r.run->judge(spend_of(list[q].first, list[q].second, false)) ? 1 : 0);
+            if (r.busy) return false;                 // judging this spend asked for it again
+            r.busy = true;
+            const bool ok = r.run->judge(spend_of(list[q].first, list[q].second, false));
+            r.busy = false;
+            r.fit.push_back(ok ? 1 : 0);
         }
         return r.fit[pos] != 0;
     };
@@ -525,6 +653,58 @@ DealsOnTable compute_deals(const AggregatorStorage& storage) {
         if (!r.credit.why.empty()) b.state.fault = r.credit.why;
         out.bills[key] = std::move(b);
     }
+    // Where each bill's paper was born (economy.md §4.4): back along the bills
+    // to the self-issue, whose link declared the issuer's debt (economy.md §4.3).
+    // Every reference names an earlier block, so the walk ends; a loop could not
+    // be written, and is refused if met.
+    static const BirthDebt unborn{};
+    std::set<BillKey> walking;
+    std::function<const BirthDebt&(const BillKey&)> birth_of =
+        [&](const BillKey& key) -> const BirthDebt& {
+        if (const auto it = out.births.find(key); it != out.births.end()) return it->second;
+        const auto& [holder, src_chain, src_hash, issuer] = key;
+        const records::Transfer* t = nullptr;
+        if (const auto d = deal_at.find(src_hash);
+            d != deal_at.end() && out.all[d->second].payer.bytes == src_chain &&
+            out.all[d->second].transfer.to == holder)
+            t = &out.all[d->second].transfer;
+        else if (const auto mv = move_at.find(src_hash);
+                 mv != move_at.end() && out.moves[mv->second].owner.bytes == src_chain &&
+                 src_chain == holder)
+            t = &out.moves[mv->second].transfer;
+        if (!t || walking.size() > 1000 || !walking.insert(key).second) return unborn;
+        std::map<double, double> parts;
+        double unknown = 0.0;
+        for (const auto& o : t->origins) {
+            if (o.issuer != issuer) continue;
+            if (o.issuer == t->from) {                    // born in this very block
+                if (t->emission) parts[-t->emission->debt_after] += o.units;
+                else unknown += o.units;
+                continue;
+            }
+            const BirthDebt& up =
+                o.src ? birth_of(BillKey{t->from, o.src->chain, o.src->hash, issuer}) : unborn;
+            const double total = up.total();
+            if (total <= 1e-12) {
+                unknown += o.units;
+                continue;
+            }
+            for (const auto& [debt, hours] : up.parts) parts[debt] += o.units * hours / total;
+            unknown += o.units * up.unknown / total;
+        }
+        walking.erase(key);
+        BirthDebt b;
+        b.parts.assign(parts.begin(), parts.end());
+        b.unknown = unknown;
+        return out.births[key] = std::move(b);
+    };
+    for (std::size_t c = 0; c < n + m; ++c) {
+        const auto& t = carrier_transfer(c);
+        for (const auto& o : t.origins)
+            if (o.issuer != t.to)   // the receiver's own paper comes home and dies: no bill
+                birth_of(BillKey{t.to, carrier_author(c).bytes, carrier_hash(c), o.issuer});
+    }
+
     // Purchases of goods that happened: the buyers' stock.
     for (std::size_t i = 0; i < n; ++i)
         if (effective(i))
@@ -762,16 +942,24 @@ const SeenBlock& seen_block(const AggregatorStorage& storage, const Hash& bh) {
     std::lock_guard<std::mutex> lock(mu);
     auto& memo = memos[storage.instance_id()];
     if (const auto it = memo.find(bh.bytes); it != memo.end()) return it->second;
+    const auto block = storage.get_block_by_hash(bh);
+    if (!block) {
+        // Not here yet: nothing to remember — the block may still come.
+        static const SeenBlock none;
+        return none;
+    }
     SeenBlock s;
-    if (const auto block = storage.get_block_by_hash(bh)) {
-        s.address           = block->address;
-        s.timestamp_claimed = block->timestamp_claimed;
-        if (block->type == BlockType::DATA) {
-            try {
-                s.record = records::Codec::decode(block->payload.data(), block->payload.size());
-                s.data   = true;
-            } catch (const records::CodecError&) {}
-        }
+    s.address           = block->address;
+    s.timestamp_claimed = block->timestamp_claimed;
+    if (block->type == BlockType::DATA) {
+        try {
+            s.record = records::Codec::decode(block->payload.data(), block->payload.size());
+            s.data   = true;
+        } catch (const records::CodecError&) {}
+    } else if (block->type == BlockType::MERGE) {
+        try {
+            s.merge = Serializer::decode_merge_payload(block->payload.data(), block->payload.size());
+        } catch (const std::exception&) {}
     }
     return memo.emplace(bh.bytes, std::move(s)).first->second;
 }

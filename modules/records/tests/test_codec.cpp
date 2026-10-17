@@ -1444,3 +1444,20 @@ TEST(RecordsCodec, DealReplyToNothingIsRefused) {
     DealReply r{};
     EXPECT_THROW(Codec::encode(Record{r}), CodecError);
 }
+
+// Залог (records.md §9.8 v9): только когда вещь возвращается самому продавцу —
+// оплата лежит у него; при перевозке третьему лицу залога нет.
+TEST(RecordsCodec, ADepositRidesOnlyOnAReturnToTheSeller) {
+    Acceptance a = plain_acceptance(2.0);
+    Transfer   t = deal_of(a);
+    t.accept->buyback = Buyback{t.to, t.timestamp + 86400, true, true};   // аренда с залогом
+    const auto d = std::get<Transfer>(roundtrip(Record{t}));
+    ASSERT_TRUE(d.accept->buyback.has_value());
+    EXPECT_TRUE(d.accept->buyback->deposit);
+    EXPECT_TRUE(d.accept->buyback->wear);
+    EXPECT_EQ(d.accept->buyback, t.accept->buyback);
+    t.accept->buyback->wear = false;                                     // хранение с залогом
+    EXPECT_EQ(std::get<Transfer>(roundtrip(Record{t})).accept->buyback, t.accept->buyback);
+    t.accept->buyback->to = make_uid(0xC3);                              // перевозка — нет
+    EXPECT_THROW(Codec::encode(Record{t}), CodecError);
+}

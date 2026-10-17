@@ -354,11 +354,12 @@ void w_acceptance(Buf& out, const Acceptance& a) {
     if (a.like)    { w_uint(out, 7); w_ref(out, *a.like); }      // ИР-022 шаг 11
     if (a.release) { w_uint(out, 8); w_ref(out, *a.release); }   // ИР-023
     if (a.buyback) {          // ИР-023, пункт 8: 0 to, 2 until, 3 wear; key 1 (a price) retired
-        w_uint(out, 9);
-        w_map(out, 2 + (a.buyback->wear ? 1 : 0));
+        w_uint(out, 9);       // records.md §9.8 v9: 4 deposit
+        w_map(out, 2 + (a.buyback->wear ? 1 : 0) + (a.buyback->deposit ? 1 : 0));
         w_uint(out, 0); w_fixed(out, a.buyback->to);
         w_uint(out, 2); w_int64(out, a.buyback->until);
-        if (a.buyback->wear) { w_uint(out, 3); w_uint(out, 1); }
+        if (a.buyback->wear)    { w_uint(out, 3); w_uint(out, 1); }
+        if (a.buyback->deposit) { w_uint(out, 4); w_uint(out, 1); }
     }
 }
 
@@ -444,6 +445,11 @@ void check_transfer(const Transfer& t) {
             throw CodecError("Transfer: срок возврата уже прошёл");
         if (a.buyback->to == t.from)
             throw CodecError("Transfer: возврат себе ничего не возвращает");
+        // A deposit stays with the one paid — so the thing must go back to him
+        // (rent, storage, repair); carriage to a third party has none (v7).
+        if (a.buyback->deposit && a.buyback->to != t.to)
+            throw CodecError("Transfer: залог — только когда вещь возвращается самому "
+                             "продавцу: оплата лежит у него (records.md §9.8)");
     }
 }
 
@@ -1200,7 +1206,7 @@ Acceptance dec_acceptance(CborReader& r) {
             a.release = dec_ref(r);
         } else if (key == 9) {
             const uint64_t m = r.r_map();
-            if (m < 2 || m > 3) throw CodecError("Buyback: expected 2..3 fields");
+            if (m < 2 || m > 4) throw CodecError("Buyback: expected 2..4 fields");
             Buyback b{};
             expect_key(r, 0); r.r_fixed(b.to);
             const uint64_t k = r.r_uint();
@@ -1209,10 +1215,13 @@ Acceptance dec_acceptance(CborReader& r) {
                                  "(records.md §9.8)");
             if (k != 2) throw CodecError("Buyback: unknown field key");
             b.until = r.r_int();
-            if (m == 3) {
-                expect_key(r, 3);
-                if (r.r_uint() != 1) throw CodecError("Buyback: wear is written as 1");
-                b.wear = true;
+            uint64_t last_key = 2;   // wear (3), deposit (4) — each written as 1, ascending
+            for (uint64_t f = 2; f < m; ++f) {
+                const uint64_t key = r.r_uint();
+                if (key <= last_key || key > 4) throw CodecError("Buyback: unknown field key");
+                if (r.r_uint() != 1) throw CodecError("Buyback: flags are written as 1");
+                (key == 3 ? b.wear : b.deposit) = true;
+                last_key = key;
             }
             a.buyback = b;
         } else {

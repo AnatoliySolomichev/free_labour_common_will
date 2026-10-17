@@ -38,6 +38,12 @@ struct ObservedReply {
     std::array<uint8_t, 32> author{};   // the chain that wrote the block
     uint32_t                node  = 0;  // the branch it lies in
     uint64_t                index = 0;  // its position in that branch
+    // The latest time its branch claimed up to this block, the block itself
+    // included — when the reader knows the branch (0: it does not). Time in a
+    // branch only goes forward, so an answer is never earlier than the blocks
+    // before it: «accepted» dated back, written after a block dated past the
+    // term, is late all the same (economy.md §8.14).
+    int64_t                 since = 0;
 };
 
 struct DealAnswer {
@@ -47,7 +53,8 @@ struct DealAnswer {
 
 // What the seller answered to `deal` (whose block is `deal_ref`): the first
 // reply in the purse the deal pays into — the seller's chain, branch
-// `deal.to_node` — given by the deal's term. A reply by anyone else, from
+// `deal.to_node` — given by the deal's term (its own date, or the latest date
+// of its branch before it, whichever is later). A reply by anyone else, from
 // another branch, about another deal, or past the term does not count.
 DealAnswer answer_of(const Transfer& deal, const Ref& deal_ref,
                      const std::vector<ObservedReply>& replies);
@@ -65,6 +72,22 @@ const char* deal_status_name(DealStatus s) noexcept;
 // waits for his answer like any deal; refusing it blocks nothing, because the
 // addressee can always pay with own paper.
 bool pre_accepted_buyback(const Transfer& deal) noexcept;
+
+// The same for a buyback of `purchase` (whose block is `purchase_ref`): when the
+// purchase pre-signed its return with a deposit (records.md §9.8 v9), the paper
+// agreed in advance is that deposit — the very payment, frozen in the seller's
+// purse — and the holder's own paper. The addressee's own paper only as much as
+// the payment held of it: that part came home to him and died with his debt, so
+// it goes back as his own paper again — beyond that, nothing else.
+bool pre_accepted_buyback(const Transfer& deal, const Ref& purchase_ref,
+                          const Transfer& purchase) noexcept;
+
+// Whether a spend of the paper `purchase` paid, made by its seller at
+// `spend_timestamp`, breaks its deposit: before the return's term the first
+// spend of that paper must be the buyback itself; once the thing was bought back
+// (`bought_back`, the buyback itself included), or past the term, it is free.
+bool deposit_frozen(const Transfer& purchase, int64_t spend_timestamp,
+                    bool bought_back) noexcept;
 
 // ── Bills (векселя) ──────────────────────────────────────────────────────────
 
@@ -95,6 +118,9 @@ struct BillSpend {
     // deal that completes nothing (not addressed) or one whose other paper is no
     // paper moves nothing, so it holds nothing either.
     bool                    stands = true;
+    // A spend of a deposit before its term and before the buyback
+    // (deposit_frozen): the paper is not the holder's to spend yet.
+    bool                    frozen = false;
 };
 
 struct BillState {

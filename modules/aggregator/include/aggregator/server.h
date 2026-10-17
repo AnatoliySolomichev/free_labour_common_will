@@ -1,6 +1,7 @@
 #pragma once
 
 #include "aggregator.h"
+#include "branch_keys.h"
 #include "own_chain.h"
 #include <chrono>
 #include <filesystem>
@@ -93,6 +94,10 @@ private:
     std::mutex                rates_mutex_;
 
     std::filesystem::path     catalog_dir_; // empty → catalog endpoints answer 501
+
+    // Whose blocks are taken (sync.md §10.10): the keys of every branch whose
+    // path has come — rebuilt from the storage on start.
+    BranchKeys                keys_;
 
     struct Impl; // holds httplib::Server (keeps httplib out of this header)
     std::unique_ptr<Impl> impl_;

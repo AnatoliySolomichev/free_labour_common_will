@@ -162,6 +162,21 @@ std::string json_escape(const std::string& s) {
     return out;
 }
 
+// Where `units` of a bill were born (economy.md §4.4), as JSON fields: pairs
+// [the issuer's declared debt right after the issue, hours], and the hours whose
+// birth the table does not reach.
+std::string birth_json(const aggregator::BirthDebt& b, double units) {
+    const double total = b.total();
+    std::string  out   = ",\"birth\":[";
+    for (std::size_t i = 0; total > 1e-12 && i < b.parts.size(); ++i)
+        out += std::string(i ? "," : "") + "[" + std::to_string(b.parts[i].first) + ","
+             + std::to_string(units * b.parts[i].second / total) + "]";
+    out += "]";
+    const double unknown = total > 1e-12 ? units * b.unknown / total : units;
+    if (unknown > 1e-9) out += ",\"birth_unknown\":" + std::to_string(unknown);
+    return out;
+}
+
 // A list of strings as a JSON array.
 std::string json_strings(const std::vector<std::string>& v) {
     std::string out = "[";
@@ -284,6 +299,7 @@ AggregatorServer::AggregatorServer(AggregatorStorage& storage,
             std::cerr << "[aggregator] own chain unavailable: " << e.what() << "\n";
         }
     }
+    keys_.load(storage_);
     setup_routes();
 }
 
@@ -298,13 +314,33 @@ void AggregatorServer::setup_routes() {
     auto& svr = impl_->svr;
 
     // ── POST /blocks ──────────────────────────────────────────────────────────
-    // Body: raw CBOR-encoded Block.
+    // Body: raw CBOR-encoded Block. Taken only when signed by its own branch
+    // (sync.md §10.10): an unknown branch is asked for its key path first (428 —
+    // POST /keypaths/<key>, then again), a block none of its keys signed is
+    // refused (403). Readers check every block again on their own.
     svr.Post("/blocks", [&](const httplib::Request& req, httplib::Response& res) {
         try {
             const auto& body = req.body;
             Block b = Serializer::decode_block(
                 reinterpret_cast<const uint8_t*>(body.data()), body.size());
+            switch (keys_.check(b)) {
+                case BranchKeys::Verdict::unknown_branch:
+                    res.status = 428;
+                    res.set_content("{\"error\":\"no key path\",\"chain\":\""
+                                        + to_hex(b.address.user_id.bytes) + "\",\"node\":"
+                                        + std::to_string(b.address.node_index) + "}",
+                                    "application/json");
+                    return;
+                case BranchKeys::Verdict::foreign_signature:
+                    res.status = 403;
+                    res.set_content("{\"error\":\"not signed by its branch\"}",
+                                    "application/json");
+                    return;
+                case BranchKeys::Verdict::signed_by_branch:
+                    break;
+            }
             bool added = storage_.add_block(b);
+            if (added && b.type == BlockType::KEY_ROTATION) keys_.learn_rotation(b);
             res.status = 200;
             res.set_content(
                 added ? "{\"status\":\"accepted\"}" : "{\"status\":\"duplicate\"}",
@@ -638,6 +674,12 @@ void AggregatorServer::setup_routes() {
             }
             const bool stored = storage_.put_revocation_bytes(
                 chain, {req.body.begin(), req.body.end()});
+            // A certificate that checks names the replacement key the revoked
+            // branch signs with from now on (sync.md §10.10).
+            try {
+                keys_.learn_revocation(Serializer::decode_revocation_cert(
+                    reinterpret_cast<const uint8_t*>(req.body.data()), req.body.size()));
+            } catch (const std::exception&) {}
             res.set_content(stored ? "{\"status\":\"stored\"}"
                                    : "{\"status\":\"duplicate\"}",
                             "application/json");
@@ -803,10 +845,28 @@ void AggregatorServer::setup_routes() {
 
     // ── Key-path warehouse (sync.md §7.5; blockchain.md §7.5) ────────────────
     //
-    // Who stands behind a seal: the node path from a chain's root down to the
-    // key that signed it. Bytes in, bytes out — the warehouse never checks a
-    // path, the reader runs KeyPathCert::verify itself. A forged path is
-    // rejected by the reader, so lying here gains nothing.
+    // Who stands behind a signature: the node path from a chain's root down to
+    // the key that signed. A path that does not check is refused at the door
+    // (sync.md §10.10) — the aggregator learns the branch's keys from it to take
+    // its blocks; the reader still runs KeyPathCert::verify itself.
+
+    // A branch's path by its address, with every key change known — what a
+    // reader checks a block of that branch by. Before /keypaths/:key.
+    svr.Get("/keypaths/branch/:chain/:node", [&](const httplib::Request& req,
+                                                 httplib::Response& res) {
+        const auto ch = hex_to_hash(req.path_params.at("chain"));
+        if (!ch) { res.status = 400; return; }
+        NodeIndex node = 0;
+        try { node = static_cast<NodeIndex>(std::stoul(req.path_params.at("node"))); }
+        catch (...) { res.status = 400; return; }
+        UserId chain{};
+        chain.bytes = ch->bytes;
+        const auto kp = keys_.path(chain, node);
+        if (!kp) { res.status = 404; return; }
+        const auto bytes = Serializer::encode(*kp);
+        res.set_content(std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size()),
+                        "application/cbor");
+    });
 
     // Registered before /keypaths/:key — httplib matches in registration order.
     svr.Get("/keypaths/manifest", [&](const httplib::Request&, httplib::Response& res) {
@@ -837,6 +897,22 @@ void AggregatorServer::setup_routes() {
         PublicKey key{};
         key.bytes = k->bytes;
         try {
+            // Checked on arrival: a path that does not lead from a root to this
+            // key is refused.
+            try {
+                const KeyPath kp = Serializer::decode_key_path(
+                    reinterpret_cast<const uint8_t*>(req.body.data()), req.body.size());
+                KeyPathCert::verify(kp);
+                if (!(KeyPathCert::signer_key(kp) == key))
+                    throw ChainIntegrityError("path leads to another key");
+                keys_.learn_path(kp);
+            } catch (const std::exception& e) {
+                res.status = 400;
+                res.set_content(std::string("{\"error\":\"key path does not check: ")
+                                    + json_escape(e.what()) + "\"}",
+                                "application/json");
+                return;
+            }
             if (storage_.get_keypath_bytes(key).size() >= kKeyPathsPerKeyCap) {
                 res.status = 429;
                 res.set_content("{\"error\":\"key path list full\"}", "application/json");
@@ -1947,16 +2023,38 @@ void AggregatorServer::setup_routes() {
                 + ",\"backed\":" + (deals.unbacked.count(d->hash) ? "false" : "true");
             if (const auto w = deals.unbacked_why.find(d->hash); w != deals.unbacked_why.end())
                 body += ",\"unbacked_why\":\"" + json_escape(w->second) + "\"";
-            if (const auto* r = deals.counted_reply(d->hash))
+            if (const auto* r = deals.counted_reply(d->hash)) {
                 body += ",\"reply\":{\"ref\":\"" + to_hex(r->seen.author) + "/" + to_hex(r->hash)
                       + "\",\"accepted\":" + (r->seen.reply.accepted ? "true" : "false")
                       + ",\"note\":\"" + json_escape(r->seen.reply.note)
-                      + "\",\"timestamp\":" + std::to_string(r->seen.reply.timestamp) + "}";
+                      + "\",\"timestamp\":" + std::to_string(r->seen.reply.timestamp);
+                // Fixed by a merge (blockchain.md §5.2): the answer provably existed
+                // by then — no later word can replace it.
+                if (const auto w = deals.witnessed(UserId{r->seen.author}, r->seen.node,
+                                                   r->seen.index))
+                    body += ",\"witnessed\":" + std::to_string(*w);
+                body += "}";
+            }
+            // No answer: how surely the offer lapsed (economy.md §8.14).
+            if (const auto l = deals.lapse.find(d->hash); l != deals.lapse.end())
+                body += ",\"lapse\":\"" + l->second + "\"";
             body += ",\"portions\":[";
             for (std::size_t i = 0; i < t.origins.size(); ++i) {
                 const auto& o = t.origins[i];
                 body += std::string(i ? "," : "") + "{\"issuer\":\"" + to_hex(o.issuer)
                       + "\",\"units\":" + std::to_string(o.units);
+                // How deep in debt its issuer was when this paper was born — the
+                // payer's own issue: right here; someone else's: back along the bill.
+                if (o.issuer == t.from) {
+                    BirthDebt own;
+                    if (t.emission) own.parts = {{-t.emission->debt_after, o.units}};
+                    else            own.unknown = o.units;
+                    body += birth_json(own, o.units);
+                } else if (o.src) {
+                    const auto bt = deals.births.find(
+                        BillKey{d->payer.bytes, o.src->chain, o.src->hash, o.issuer});
+                    body += birth_json(bt != deals.births.end() ? bt->second : BirthDebt{}, o.units);
+                }
                 if (o.src) {
                     body += ",\"src\":\"" + to_hex(o.src->chain) + "/" + to_hex(o.src->hash) + "\"";
                     if (o.prev)
@@ -1980,14 +2078,19 @@ void AggregatorServer::setup_routes() {
                             body += ",\"src_reply\":\"" + to_hex(r->seen.author) + "/" + to_hex(r->hash)
                                   + "\"";
                     }
-                    std::vector<std::pair<uint64_t, std::string>> thread;
+                    std::vector<std::pair<uint64_t, std::string>> thread, lapses;
                     for (const auto& e : deals.all)
                         if (e.payer == d->payer && e.index < d->index)
                             for (const auto& q : e.transfer.origins)
-                                if (q.src && *q.src == *o.src && q.issuer == o.issuer)
-                                    thread.push_back({e.index, to_hex(e.payer.bytes) + "/" + to_hex(e.hash)
-                                        + "\":\"" + records::deal_status_name(records::deal_status(
-                                              e.transfer, deals.answer(e.hash), now))});
+                                if (q.src && *q.src == *o.src && q.issuer == o.issuer) {
+                                    const std::string ref = to_hex(e.payer.bytes) + "/" + to_hex(e.hash);
+                                    thread.push_back({e.index, ref + "\":\"" + records::deal_status_name(
+                                        records::deal_status(e.transfer, deals.answer(e.hash), now))});
+                                    // An earlier offer left unanswered: its hours came back
+                                    // to the payer — how surely (economy.md §8.14).
+                                    if (const auto l = deals.lapse.find(e.hash); l != deals.lapse.end())
+                                        lapses.push_back({e.index, ref + "\":\"" + l->second});
+                                }
                     for (const auto& mv : deals.moves)
                         if (mv.owner == d->payer && mv.index < d->index)
                             for (const auto& q : mv.transfer.origins)
@@ -1999,11 +2102,53 @@ void AggregatorServer::setup_routes() {
                     for (std::size_t k = 0; k < thread.size(); ++k)
                         body += std::string(k ? "," : "") + "\"" + thread[k].second + "\"";
                     body += "}";
+                    std::sort(lapses.begin(), lapses.end());
+                    body += ",\"lapse\":{";
+                    for (std::size_t k = 0; k < lapses.size(); ++k)
+                        body += std::string(k ? "," : "") + "\"" + lapses[k].second + "\"";
+                    body += "}";
                 }
                 body += "}";
             }
             body += "]}";
             res.set_content(body, "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
+                            "application/json");
+        }
+    });
+
+    // ── GET /bill/<holder>/<src chain>/<src hash>/<issuer> ───────────────────
+    // One bill (economy.md §4.4): what it brought, what is left of it, and where
+    // its paper was born — what the holder reads to choose which bill to pay with.
+    svr.Get("/bill/:holder/:chain/:hash/:issuer", [&](const httplib::Request& req,
+                                                      httplib::Response& res) {
+        const auto holder = hex_to_hash(req.path_params.at("holder"));
+        const auto chain  = hex_to_hash(req.path_params.at("chain"));
+        const auto hash   = hex_to_hash(req.path_params.at("hash"));
+        const auto issuer = hex_to_hash(req.path_params.at("issuer"));
+        if (!holder || !chain || !hash || !issuer) {
+            res.status = 400;
+            res.set_content("{\"error\":\"invalid bill\"}", "application/json");
+            return;
+        }
+        try {
+            const auto    table = deals_on_table(storage_);
+            const BillKey key{holder->bytes, chain->bytes, hash->bytes, issuer->bytes};
+            const auto    bt = table->births.find(key);
+            if (bt == table->births.end()) {
+                res.status = 404;
+                res.set_content("{\"known\":false}", "application/json");
+                return;
+            }
+            const double credited = bt->second.total();
+            const auto   b        = table->bills.find(key);
+            const double remaining = b != table->bills.end() ? b->second.state.remaining() : credited;
+            res.set_content("{\"known\":true,\"credited\":" + std::to_string(credited)
+                                + ",\"remaining\":" + std::to_string(remaining)
+                                + birth_json(bt->second, credited) + "}",
+                            "application/json");
         } catch (const std::exception& e) {
             res.status = 500;
             res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
@@ -2281,21 +2426,7 @@ void AggregatorServer::sync_with_peer(const std::string& peer_url) {
         return hashes;
     };
 
-    // 1. Pull blocks we don't have (manifest + fetch).
     int pulled = 0;
-    for (const Hash& bh : manifest_hashes("/sync/manifest")) {
-        if (storage_.has_block_hash(bh)) continue;
-
-        auto blk_res = cli.Get("/sync/block/" + to_hex(bh.bytes));
-        if (!blk_res || blk_res->status != 200) continue;
-
-        try {
-            const auto& data = blk_res->body;
-            Block b = Serializer::decode_block(
-                reinterpret_cast<const uint8_t*>(data.data()), data.size());
-            if (storage_.add_block(b)) ++pulled;
-        } catch (...) {}
-    }
 
     // 2. Pull snapshot leaves/compositions the same way (sync.md §7.1).
     // Bytes travel verbatim — the warehouse never interprets them.
@@ -2354,7 +2485,8 @@ void AggregatorServer::sync_with_peer(const std::string& peer_url) {
 
     // 4. Pull revocation certificates (sync.md §7.2): merge per-chain lists —
     // content-addressed storage dedupes; certificates are self-verifying and
-    // checked by end clients, not here.
+    // checked by end clients; one that checks here too names the replacement
+    // key of its branch (sync.md §10.10).
     for (const Hash& ch : manifest_hashes("/revocations/manifest")) {
         auto res = cli.Get("/revocations/" + to_hex(ch.bytes));
         if (!res || res->status != 200) continue;
@@ -2382,13 +2514,16 @@ void AggregatorServer::sync_with_peer(const std::string& peer_url) {
                 if (storage_.put_revocation_bytes(
                         chain, {body.begin() + pos, body.begin() + pos + len}))
                     ++gossiped;
+                keys_.learn_revocation(Serializer::decode_revocation_cert(
+                    reinterpret_cast<const uint8_t*>(body.data() + pos),
+                    static_cast<std::size_t>(len)));
             } catch (...) {}
             pos += static_cast<std::size_t>(len);
         }
     }
 
-    // 5. Pull key paths (sync.md §7.5): who stands behind a seal. Same shape —
-    // opaque bytes per signing key, verified by the reader's client, not here.
+    // 5. Pull key paths (sync.md §7.5): who stands behind a signature. Same
+    // shape — bytes per signing key; taken only when they check (sync.md §10.10).
     for (const Hash& kh : manifest_hashes("/keypaths/manifest")) {
         auto res = cli.Get("/keypaths/" + to_hex(kh.bytes));
         if (!res || res->status != 200) continue;
@@ -2413,12 +2548,40 @@ void AggregatorServer::sync_with_peer(const std::string& peer_url) {
             const long long len = head(2);
             if (len < 0 || pos + len > body.size()) break;
             try {
-                if (storage_.put_keypath_bytes(
-                        key, {body.begin() + pos, body.begin() + pos + len}))
-                    ++gossiped;
+                const KeyPath kp = Serializer::decode_key_path(
+                    reinterpret_cast<const uint8_t*>(body.data() + pos),
+                    static_cast<std::size_t>(len));
+                if (KeyPathCert::signer_key(kp) == key) {
+                    keys_.learn_path(kp);                     // throws on a path that does not check
+                    if (storage_.put_keypath_bytes(
+                            key, {body.begin() + pos, body.begin() + pos + len}))
+                        ++gossiped;
+                }
             } catch (...) {}
             pos += static_cast<std::size_t>(len);
         }
+    }
+
+    // 6. Pull blocks we don't have (manifest + fetch) — last, once the paths and
+    // revocations above have taught the branches' keys: a block is taken only
+    // when signed by its own branch (sync.md §10.10). One whose path has not
+    // come yet is left for a later round.
+    for (const Hash& bh : manifest_hashes("/sync/manifest")) {
+        if (storage_.has_block_hash(bh)) continue;
+
+        auto blk_res = cli.Get("/sync/block/" + to_hex(bh.bytes));
+        if (!blk_res || blk_res->status != 200) continue;
+
+        try {
+            const auto& data = blk_res->body;
+            Block b = Serializer::decode_block(
+                reinterpret_cast<const uint8_t*>(data.data()), data.size());
+            if (keys_.check(b) != BranchKeys::Verdict::signed_by_branch) continue;
+            if (storage_.add_block(b)) {
+                ++pulled;
+                if (b.type == BlockType::KEY_ROTATION) keys_.learn_rotation(b);
+            }
+        } catch (...) {}
     }
 
     if (pulled > 0 || gossiped > 0)

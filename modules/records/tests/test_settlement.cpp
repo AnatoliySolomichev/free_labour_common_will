@@ -262,3 +262,58 @@ TEST(Bill, TheRuleSpendBySpendIsCheckBill) {
     EXPECT_FALSE(run.judge(spend(0x14, 9, 0.1, 0x13)));      // и всё после разрыва
     EXPECT_EQ(run.state().unbacked.size(), 2u);
 }
+
+// ── Залог и время ответа ─────────────────────────────────────────────────────
+
+// Ответ не раньше блоков перед ним в ветке: «принял» задним числом после блока,
+// датированного позже срока, — поздно (economy.md §8.14).
+TEST(DealAnswer, AnAnswerIsNoEarlierThanItsBranch) {
+    const auto deal = ref(0xB1, 0x70);
+    auto late = reply(deal, true, 150, 3);
+    late.since = 250;                                          // ветка уже прошла срок
+    EXPECT_EQ(answer_of(offer(), deal, {late}).answer, Answer::none);
+    late.since = 180;
+    EXPECT_EQ(answer_of(offer(), deal, {late}).answer, Answer::accepted);
+}
+
+// Выкуп залогом: согласована сама оплата покупки и своя бумага держателя; своя
+// эмиссия адресата — уже нет.
+TEST(DealAnswer, ADepositBuybackIsPaidWithTheDeposit) {
+    Transfer purchase = offer();                               // держатель BUYER купил у SELLER
+    Acceptance a{};
+    a.buyback      = Buyback{SELLER, 900, true, true};
+    purchase.accept = a;
+    const Ref p = ref(0xB1, 0x70);
+    Transfer back{};                                           // SELLER выкупает у BUYER
+    back.from    = SELLER;
+    back.to      = BUYER;
+    back.origins = {{uid(0xC3), 2.0, p, std::nullopt}, {BUYER, 1.0, ref(0x77, 0x01), std::nullopt}};
+    EXPECT_TRUE(pre_accepted_buyback(back, p, purchase));
+    back.origins.push_back({SELLER, 1.0});                     // своя эмиссия адресата
+    EXPECT_FALSE(pre_accepted_buyback(back, p, purchase));
+    // Часть оплаты была его же бумагой — она умерла у него с долгом, залогом не
+    // стала; ею же он и возвращает, но не больше, чем её было.
+    purchase.origins.push_back({SELLER, 1.0});
+    EXPECT_TRUE(pre_accepted_buyback(back, p, purchase));
+    back.origins.back().units = 1.5;
+    EXPECT_FALSE(pre_accepted_buyback(back, p, purchase));
+    purchase.accept->buyback->deposit = false;                 // без залога — правило А
+    EXPECT_TRUE(pre_accepted_buyback(back, p, purchase) == pre_accepted_buyback(back));
+}
+
+TEST(Bill, ADepositIsFrozenUntilTheBuybackOrTheTerm) {
+    Transfer purchase = offer();
+    Acceptance a{};
+    a.buyback       = Buyback{SELLER, 900, false, true};
+    purchase.accept = a;
+    EXPECT_TRUE(deposit_frozen(purchase, 500, false));         // до срока, выкупа не было
+    EXPECT_FALSE(deposit_frozen(purchase, 500, true));         // выкуп — первым
+    EXPECT_FALSE(deposit_frozen(purchase, 901, false));        // срок прошёл
+    purchase.accept->buyback->deposit = false;
+    EXPECT_FALSE(deposit_frozen(purchase, 500, false));
+    BillSpend s = spend(0x11, 4, 1.0);
+    s.frozen = true;
+    const auto st = check_bill(HOLDER, PURSE, 5.0, 2, {s, spend(0x12, 6, 1.0, 0x11)});
+    EXPECT_EQ(st.unbacked.size(), 2u);
+    EXPECT_EQ(st.fault, "залог заморожен до срока возврата: первым его тратит выкуп");
+}
