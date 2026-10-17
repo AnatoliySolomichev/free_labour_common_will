@@ -71,6 +71,9 @@ FootprintView FootprintView::build(const AggregatorStorage& storage) {
     for (const auto& d : deals.all)    tried(d.payer, d.hash, d.transfer);
     for (const auto& mv : deals.moves) tried(mv.owner, mv.hash, mv.transfer);
     std::map<UserId, std::size_t> false_reversals;
+    std::map<UserId, std::size_t> future_blocks;
+    for (const auto& h : deals.from_future)
+        ++future_blocks[seen_block(storage, Hash{h}).address.user_id];
 
     for (const Hash& bh : storage.all_block_hashes()) {
         const auto block = storage.get_block_by_hash(bh);
@@ -165,6 +168,7 @@ FootprintView FootprintView::build(const AggregatorStorage& storage) {
     // Попытка платить бумагой, которой не было, — тоже след.
     for (const auto& [chain, k] : unbacked_deals)  { (void)k; subjects.insert(chain); }
     for (const auto& [chain, k] : false_reversals) { (void)k; subjects.insert(chain); }
+    for (const auto& [chain, k] : future_blocks)   { (void)k; subjects.insert(chain); }
 
     for (const UserId& subject : subjects) {
         ChainFootprint fp{};
@@ -217,6 +221,8 @@ FootprintView FootprintView::build(const AggregatorStorage& storage) {
             fp.unbacked_units = it->second;
         if (const auto it = false_reversals.find(subject); it != false_reversals.end())
             fp.false_reversals = it->second;
+        if (const auto it = future_blocks.find(subject); it != future_blocks.end())
+            fp.future_blocks = it->second;
 
         // Layer 3: the subject's circle is everything within TWO exchange hops
         // — the same reachability the trust footprint uses elsewhere (ИР-010:

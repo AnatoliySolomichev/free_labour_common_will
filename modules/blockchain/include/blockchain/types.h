@@ -54,6 +54,10 @@ using NodeIndex  = uint32_t;    // heap index in the node tree
 using BlockIndex = uint32_t;    // sequential index of a block in a branch
 using Timestamp  = int64_t;     // UTC seconds
 
+// How far two honest clocks may disagree (blockchain.md §9.4): a time later than
+// someone's now by more than this comes from the future.
+inline constexpr Timestamp kClockSlack = 600;
+
 // Sentinel for block_index when a branch is empty (used in BranchTipInfo)
 inline constexpr BlockIndex EMPTY_BRANCH_INDEX = static_cast<BlockIndex>(-1);
 

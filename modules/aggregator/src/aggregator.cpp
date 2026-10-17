@@ -2,8 +2,10 @@
 #include "blockchain/serializer.h"
 #include "blockchain/errors.h"
 #include <lmdb.h>
+#include <array>
 #include <atomic>
 #include <cstring>
+#include <ctime>
 #include <stdexcept>
 
 namespace aggregator {
@@ -72,6 +74,8 @@ struct AggregatorStorage::Impl {
     MDB_dbi  dbi_seal  = 0; // seals: block_hash(32)‖blake2b(bytes)(32) → seal bytes
     MDB_dbi  dbi_rev   = 0; // revocations: chain(32)‖blake2b(bytes)(32) → certificate bytes
     MDB_dbi  dbi_kpath = 0; // keypaths: signing_key(32)‖blake2b(bytes)(32) → node path bytes
+    MDB_dbi  dbi_arr   = 0; // arrivals: block_hash → first seen here (int64, little-endian)
+    MDB_dbi  dbi_cosig = 0; // cosigs:   merge block_hash → the partner's co-signature (64B)
 };
 
 // ── Constructor / Destructor ──────────────────────────────────────────────────
@@ -85,7 +89,7 @@ AggregatorStorage::AggregatorStorage(std::filesystem::path db_path)
 {
     std::filesystem::create_directories(db_path);
     lcheck(mdb_env_create(&impl_->env),              "mdb_env_create");
-    lcheck(mdb_env_set_maxdbs(impl_->env, 8),        "mdb_env_set_maxdbs");
+    lcheck(mdb_env_set_maxdbs(impl_->env, 10),       "mdb_env_set_maxdbs");
     lcheck(mdb_env_set_mapsize(impl_->env, 1u<<30),  "mdb_env_set_mapsize");
     lcheck(mdb_env_open(impl_->env, db_path.c_str(), 0, 0600), "mdb_env_open");
 
@@ -99,7 +103,9 @@ AggregatorStorage::AggregatorStorage(std::filesystem::path db_path)
         (rc = mdb_dbi_open(txn, "snap_comps",  MDB_CREATE, &impl_->dbi_comp)) != MDB_SUCCESS ||
         (rc = mdb_dbi_open(txn, "seals",       MDB_CREATE, &impl_->dbi_seal)) != MDB_SUCCESS ||
         (rc = mdb_dbi_open(txn, "revocations", MDB_CREATE, &impl_->dbi_rev))  != MDB_SUCCESS ||
-        (rc = mdb_dbi_open(txn, "keypaths",    MDB_CREATE, &impl_->dbi_kpath)) != MDB_SUCCESS) {
+        (rc = mdb_dbi_open(txn, "keypaths",    MDB_CREATE, &impl_->dbi_kpath)) != MDB_SUCCESS ||
+        (rc = mdb_dbi_open(txn, "arrivals",    MDB_CREATE, &impl_->dbi_arr))   != MDB_SUCCESS ||
+        (rc = mdb_dbi_open(txn, "cosigs",      MDB_CREATE, &impl_->dbi_cosig)) != MDB_SUCCESS) {
         mdb_txn_abort(txn);
         throw StorageError(std::string("mdb_dbi_open: ") + mdb_strerror(rc));
     }
@@ -164,6 +170,17 @@ bool AggregatorStorage::add_block(const Block& block) {
         MDB_val new_mv{enc.size(), enc.data()};
         rc = mdb_put(txn, impl_->dbi_idea, &mk_ph, &new_mv, 0);
         if (rc != MDB_SUCCESS) { mdb_txn_abort(txn); lcheck(rc, "add_block: put idea"); }
+    }
+
+    // When it came: the block existed by then, whatever time it claims.
+    {
+        const auto now = static_cast<int64_t>(std::time(nullptr));
+        std::array<uint8_t, 8> le{};
+        for (int i = 0; i < 8; ++i) le[i] = static_cast<uint8_t>(static_cast<uint64_t>(now) >> (8 * i));
+        MDB_val mv{le.size(), le.data()};
+        const int rc = mdb_put(txn, impl_->dbi_arr, &mk_bh, &mv, MDB_NOOVERWRITE);
+        if (rc != MDB_SUCCESS && rc != MDB_KEYEXIST)
+            { mdb_txn_abort(txn); lcheck(rc, "add_block: put arrival"); }
     }
 
     lcheck(mdb_txn_commit(txn), "add_block: commit");
@@ -326,6 +343,37 @@ std::optional<std::vector<uint8_t>> get_opaque(MDB_env* env, MDB_dbi dbi,
     mdb_txn_abort(txn);
     return out;
 }
+
+std::vector<Hash> all_keys(MDB_env* env, MDB_dbi dbi, const char* op);
+
+} // namespace
+
+std::optional<Timestamp> AggregatorStorage::block_arrival(const Hash& block_hash) const {
+    const auto v = get_opaque(impl_->env, impl_->dbi_arr, block_hash, "block_arrival");
+    if (!v || v->size() != 8) return std::nullopt;
+    uint64_t t = 0;
+    for (int i = 7; i >= 0; --i) t = (t << 8) | (*v)[static_cast<std::size_t>(i)];
+    return static_cast<Timestamp>(t);
+}
+
+bool AggregatorStorage::put_cosig(const Hash& block_hash, const Signature& sig) {
+    return put_opaque(impl_->env, impl_->dbi_cosig, block_hash,
+                      {sig.bytes.begin(), sig.bytes.end()}, "put_cosig");   // first write wins
+}
+
+std::optional<Signature> AggregatorStorage::get_cosig(const Hash& block_hash) const {
+    const auto v = get_opaque(impl_->env, impl_->dbi_cosig, block_hash, "get_cosig");
+    if (!v || v->size() != 64) return std::nullopt;
+    Signature s{};
+    std::copy(v->begin(), v->end(), s.bytes.begin());
+    return s;
+}
+
+std::vector<Hash> AggregatorStorage::all_cosig_hashes() const {
+    return all_keys(impl_->env, impl_->dbi_cosig, "cosig_manifest");
+}
+
+namespace {
 
 std::vector<Hash> all_keys(MDB_env* env, MDB_dbi dbi, const char* op) {
     std::vector<Hash> result;
@@ -579,6 +627,17 @@ std::size_t AggregatorStorage::block_count() const noexcept {
         if (mdb_txn_begin(impl_->env, nullptr, MDB_RDONLY, &txn) != MDB_SUCCESS) return 0;
         MDB_stat st{};
         mdb_stat(txn, impl_->dbi_blk, &st);
+        mdb_txn_abort(txn);
+        return static_cast<std::size_t>(st.ms_entries);
+    } catch (...) { return 0; }
+}
+
+std::size_t AggregatorStorage::cosig_count() const noexcept {
+    try {
+        MDB_txn* txn;
+        if (mdb_txn_begin(impl_->env, nullptr, MDB_RDONLY, &txn) != MDB_SUCCESS) return 0;
+        MDB_stat st{};
+        mdb_stat(txn, impl_->dbi_cosig, &st);
         mdb_txn_abort(txn);
         return static_cast<std::size_t>(st.ms_entries);
     } catch (...) { return 0; }

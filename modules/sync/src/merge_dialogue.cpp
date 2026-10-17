@@ -7,6 +7,7 @@
 
 namespace chainsync {
 
+using blockchain::Block;
 using blockchain::BranchTipInfo;
 using blockchain::Hash;
 using blockchain::MergeSnapshot;
@@ -22,7 +23,8 @@ using blockchain::Signature;
 //   [ uint version, uint type, bstr payload ]
 //
 //   OFFER / ACCEPT payload: [ bstr encode(BranchTipInfo), bstr encode(MergeSnapshot) ]
-//   DRAFT payload:          the 32-byte draft hash
+//   DRAFT payload:          encode(Block) — the draft itself, so that the partner
+//                           sees what it co-signs: the tip taken and the time
 //   COSIG payload:          the 64-byte co-signature
 //
 // Decoding is strict: exact array sizes, minimal-length heads, no trailing
@@ -166,6 +168,7 @@ MergeDialogue::Messages MergeDialogue::on_message(const uint8_t* data,
 void MergeDialogue::accept_partner(const std::vector<uint8_t>& payload) {
     decode_tip_snapshot(payload, partner_tip_, partner_snapshot_);
     session_.verify_partner_tip(partner_tip_);
+    session_.check_partner_time(partner_tip_, config_.merge_timestamp);   // no merging with the future
 }
 
 MergeDialogue::Messages MergeDialogue::handle_offer(const std::vector<uint8_t>& payload) {
@@ -178,7 +181,7 @@ MergeDialogue::Messages MergeDialogue::handle_offer(const std::vector<uint8_t>& 
                                        config_.validated_depth);
     state_ = State::WAIT_DRAFT;
     return {encode_tip_snapshot(MsgType::ACCEPT, own_tip_, own_snapshot_),
-            encode_fixed(MsgType::DRAFT, pending_->draft_hash)};
+            encode_envelope(MsgType::DRAFT, Serializer::encode(pending_->draft))};
 }
 
 MergeDialogue::Messages MergeDialogue::handle_accept(const std::vector<uint8_t>& payload) {
@@ -189,11 +192,15 @@ MergeDialogue::Messages MergeDialogue::handle_accept(const std::vector<uint8_t>&
                                        config_.merge_timestamp,
                                        config_.validated_depth);
     state_ = State::WAIT_DRAFT;
-    return {encode_fixed(MsgType::DRAFT, pending_->draft_hash)};
+    return {encode_envelope(MsgType::DRAFT, Serializer::encode(pending_->draft))};
 }
 
 MergeDialogue::Messages MergeDialogue::handle_draft(const std::vector<uint8_t>& payload) {
-    const Hash partner_draft = decode_fixed<Hash>(payload);
+    // Co-sign only what was read (blockchain.md §6.4): the partner's draft takes
+    // our tip, at a time that is now by our clock, over the same union.
+    const Block draft = Serializer::decode_block(payload.data(), payload.size());
+    const Hash  partner_draft = session_.check_partner_draft(
+        draft, own_tip_, partner_tip_, config_.merge_timestamp, pending_->draft);
     const Signature co_sig = session_.co_sign(partner_draft, config_.working_keypair);
     state_ = State::WAIT_COSIG;
     return {encode_fixed(MsgType::COSIG, co_sig)};

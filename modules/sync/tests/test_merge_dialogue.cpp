@@ -304,6 +304,30 @@ TEST_F(MergeDialogueTest, OfferToAnotherInitiatorFails) {
     EXPECT_TRUE(a.failed());
 }
 
+// Часы сторон разошлись больше допуска (blockchain.md §9.4): ни одна не
+// подписывает черновик другой — время в нём не «сейчас» по её часам.
+TEST_F(MergeDialogueTest, ClocksTooFarApartDoNotCoSign) {
+    alice_->append_block(0x01, 1'000LL);
+    bob_->append_block(0x02, 1'000LL);
+    MergeDialogue a = alice_->dialogue(2'000LL);
+    MergeDialogue b = bob_->dialogue(2'000LL + blockchain::kClockSlack + 1);
+    pump(a, b);
+    EXPECT_FALSE(a.done());
+    EXPECT_FALSE(b.done());
+    EXPECT_TRUE(a.failed() || b.failed());
+}
+
+// С веткой из будущего не сливаются: она ждёт, пока время её догонит.
+TEST_F(MergeDialogueTest, ABranchFromTheFutureWaits) {
+    alice_->append_block(0x01, 1'000LL);
+    bob_->append_block(0x02, 1'000'000LL);           // Боб «убежал вперёд»
+    MergeDialogue a = alice_->dialogue(2'000LL);
+    MergeDialogue b = bob_->dialogue(2'000LL);
+    pump(a, b);
+    EXPECT_TRUE(a.failed());
+    EXPECT_FALSE(a.merge_block().has_value());
+}
+
 TEST_F(MergeDialogueTest, TamperedCoSignatureFails) {
     alice_->append_block(0x01, 1'000LL);
     bob_->append_block(0x02, 1'000LL);

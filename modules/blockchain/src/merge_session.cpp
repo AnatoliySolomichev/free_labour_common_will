@@ -62,6 +62,39 @@ void MergeSession::verify_partner_tip(const BranchTipInfo& partner_tip) const {
     validator_.check_tip_against_revocations(partner_tip);
 }
 
+void MergeSession::check_partner_time(const BranchTipInfo& partner_tip, Timestamp now) const {
+    if (partner_tip.tip_block && partner_tip.tip_block->timestamp_claimed > now + kClockSlack)
+        throw TimestampError("partner tip is dated in the future — merge waits until time "
+                             "catches up (blockchain.md §9.4)");
+}
+
+Hash MergeSession::check_partner_draft(const Block& draft, const BranchTipInfo& own_tip,
+                                       const BranchTipInfo& partner_tip, Timestamp now,
+                                       const std::optional<Block>& own_draft) const {
+    const BlockAddress& tip = partner_tip.tip_address;
+    if (draft.type != BlockType::MERGE)
+        throw ChainIntegrityError("partner draft: not a MERGE block");
+    if (!(draft.address.user_id == tip.user_id) || draft.address.node_index != tip.node_index ||
+        draft.address.block_index != tip.block_index + 1 || draft.prev_hash != partner_tip.tip_hash)
+        throw ChainIntegrityError("partner draft: not the block right after the partner's tip");
+    const MergePayload mp = Serializer::decode_merge_payload(draft.payload.data(),
+                                                             draft.payload.size());
+    if (!(mp.partner_last_address == own_tip.tip_address) || mp.partner_last_hash != own_tip.tip_hash)
+        throw ChainIntegrityError("partner draft: does not take the tip we sent");
+    // The time the partner writes is the time we vouch for by co-signing.
+    if (draft.timestamp_claimed != mp.merge_timestamp ||
+        mp.merge_timestamp > now + kClockSlack || mp.merge_timestamp < now - kClockSlack)
+        throw TimestampError("partner draft: merge time is not now by our clock "
+                             "(blockchain.md §9.4)");
+    if (own_draft) {
+        const MergePayload ours = Serializer::decode_merge_payload(own_draft->payload.data(),
+                                                                   own_draft->payload.size());
+        if (ours.merkle_root != mp.merkle_root || ours.hll_hash != mp.hll_hash)
+            throw ChainIntegrityError("partner draft: commits another union of snapshots");
+    }
+    return Crypto::hash_block(draft);
+}
+
 // ── Snapshot accessor ─────────────────────────────────────────────────────────
 
 MergeSnapshot MergeSession::snapshot_for(const UserId& user_id,

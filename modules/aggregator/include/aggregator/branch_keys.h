@@ -8,6 +8,15 @@
 // signature by signature as it arrives. A filter, not a testimony: it keeps
 // what nobody of that branch signed off the table, and every reader checks each
 // block again on its own.
+//
+// Where claims conflict, the key nearer the root decides (blockchain.md §4.4,
+// решение участника 2026-10-17), never the count of key changes: a path only
+// replaces a known one by carrying it further; two diverging lines of the
+// branch's own key changes are the same rank, and only a revocation by an
+// ancestor settles them. Of several revocations of one branch the highest
+// ancestor's wins (as in Validator::effective_revocation); after the moment
+// of compromise only the replacement it named, and that key's own changes,
+// sign.
 
 #include "aggregator.h"
 
@@ -38,32 +47,49 @@ public:
     UserId learn_path(const KeyPath& kp);
 
     // A key change of a known branch (blockchain.md §6.6): taken when it is the
-    // next one, signed by the key the branch signs with now.
+    // next one, signed by the key its line signs with now — the branch's own
+    // line, or, after a compromise, the replacement's.
     void learn_rotation(const Block& b);
 
-    // A revocation certificate, checked on the spot (RevocationCert::verify):
-    // the replacement key it names joins the revoked branch.
+    // A revocation certificate, checked on the spot (RevocationCert::verify): if
+    // its author is the highest ancestor heard yet, it decides the branch — from
+    // its moment of compromise only its replacement signs (none: frozen).
     // Throws: SignatureError, ChainIntegrityError, RevocationError, SerializationError.
     void learn_revocation(const RevocationCertificate& cert);
 
     Verdict check(const Block& b) const;
+
+    // Whether one of the branch's keys signed `message` (a block hash, as a merge
+    // partner co-signs it, blockchain.md §6.4).
+    bool vouches(const UserId& chain, NodeIndex node, const Hash& message,
+                 const Signature& sig) const;
 
     // The branch's path with every key change known — what a reader checks the
     // branch's blocks by; nullopt when no path has come.
     std::optional<KeyPath> path(const UserId& chain, NodeIndex node) const;
 
 private:
-    struct Branch {
-        KeyPath                path;   // nodes root → node; key changes in order
-        std::vector<PublicKey> keys;   // every key the branch signs with
-    };
     using Key = std::pair<UserId, NodeIndex>;
+    struct Branch {
+        KeyPath                path;   // nodes root → node; the branch's own key changes in order
+        std::vector<PublicKey> own;    // its own line: the node key, then each change
+    };
+    // The revocation that decides a branch (blockchain.md §6.7): the highest
+    // author's; within one author the earliest compromise, and the latest block
+    // names the replacement.
+    struct Revocation {
+        uint32_t                 author_depth = 0;
+        BlockIndex               block        = 0;
+        Timestamp                since        = 0;
+        std::optional<PublicKey> replacement;
+        std::vector<PublicKey>   line;   // the replacement, then its own changes
+    };
 
-    void rekey(const Key& k, Branch& b);
+    std::vector<PublicKey> keys_for(const Key& k, Timestamp at) const;   // under mu_
 
-    mutable std::mutex                    mu_;
-    std::map<Key, Branch>                 branches_;
-    std::map<Key, std::vector<PublicKey>> replacements_;   // may come before the path
+    mutable std::mutex         mu_;
+    std::map<Key, Branch>      branches_;
+    std::map<Key, Revocation>  revocations_;   // may come before the path
 };
 
 } // namespace aggregator

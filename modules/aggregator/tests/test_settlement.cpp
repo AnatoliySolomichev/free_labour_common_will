@@ -14,6 +14,7 @@
 
 #include <gtest/gtest.h>
 
+#include <ctime>
 #include <filesystem>
 
 using namespace aggregator;
@@ -570,6 +571,43 @@ TEST_F(SettlementTableTest, ALapseIsAsSureAsTheSellersPurseIsFixed) {
     deals = read_deals(*storage_);
     EXPECT_EQ(deals.answer(h(d)), records::Answer::none);
     EXPECT_FALSE(deals.moves_hours(h(d)));
+}
+
+// Половина слияния с со-подписью партнёра (он прочёл черновик и нашёл время
+// «сейчас», blockchain.md §6.4) — свидетельство сама: она закрепляет и ветку
+// партнёра до взятого блока, и свою — до самой себя; встречной половины не надо.
+TEST_F(SettlementTableTest, ACoSignedHalfFixesBothBranches) {
+    const Block w = put_at(gleb_, work_for(boris_, 3.0), kLeaf, 0);
+    const Block d = put(boris_, offer(boris_, gleb_, w, {{boris_.bytes, 3.0}}, kT0 + 100,
+                                      kT0 + 300));
+    stub(gleb_, 1, kT0 + 400);
+    const Block pt = stub(petr_, 0, kT0 + 410);
+    const Block g2 = merge(gleb_, 2, pt, kT0 + 420);            // только половина Глеба
+    EXPECT_EQ(read_deals(*storage_).lapse.at(h(d)), "seen");
+    Signature cosig{};
+    cosig.bytes.fill(0x5C);                                     // проверяют её на входе
+    ASSERT_TRUE(storage_->put_cosig(Crypto::hash_block(g2), cosig));
+    const auto deals = read_deals(*storage_);
+    EXPECT_EQ(deals.witnessed(petr_, kLeaf, 0), std::optional<int64_t>(kT0 + 420));
+    EXPECT_EQ(deals.witnessed(gleb_, kLeaf, 2), std::optional<int64_t>(kT0 + 420));
+    EXPECT_EQ(deals.lapse.at(h(d)), "witnessed");
+}
+
+// Блок из будущего (blockchain.md §9.4): заявляет время позже, чем доказуемо
+// существовал, — пришёл сюда раньше или раньше закреплён слиянием.
+TEST_F(SettlementTableTest, ABlockFromTheFutureIsSeen) {
+    const auto now      = static_cast<Timestamp>(std::time(nullptr));
+    const Block ahead   = stub(gleb_, 0, now + 86'400);         // пришёл раньше, чем «написан»
+    const Block present = stub(anna_, 0, now - 100);
+    const Block pt      = stub(petr_, 0, now - 7'200);          // Пётр закрепил блок Глеба…
+    const Block g1      = stub(gleb_, 1, now - 3'600 + 86'400); // …а тот назвался днём позже
+    merge(petr_, 1, g1, now - 3'600);
+    merge(gleb_, 2, pt, now - 3'600);
+    const auto deals = read_deals(*storage_);
+    EXPECT_TRUE(deals.from_future.count(h(ahead)));
+    EXPECT_TRUE(deals.from_future.count(h(g1)));
+    EXPECT_FALSE(deals.from_future.count(h(present)));
+    EXPECT_FALSE(deals.from_future.count(h(pt)));
 }
 
 // Слияние своих веток и половина слияния ничего не закрепляют: подписанное одной

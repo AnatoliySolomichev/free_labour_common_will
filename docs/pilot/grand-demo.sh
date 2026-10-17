@@ -483,9 +483,12 @@ take irina   # до выкупа: выкуп «через месяц» — по�
 # Ирина больше ничего не пишет: её выкуп «через месяц» — последний блок её цепи.
 if command -v faketime >/dev/null; then
     say "прошло 30 дней: Ирина выкупает палатку без участия Бориса — 95 % цены; 5 % — износ, и только он"
-    FAKETIME_DONT_FAKE_MONOTONIC=1 faketime "$(date -u -d '+30 days' '+%Y-%m-%d %H:%M:%S')" \
+    say "(«прошли» они только у Ирины: её блок — из будущего, и агрегатор это видит, blockchain.md §9.4)"
+    OUT_tback="$(FAKETIME_DONT_FAKE_MONOTONIC=1 faketime "$(date -u -d '+30 days' '+%Y-%m-%d %H:%M:%S')" \
         "$BC" --data-dir "$work/irina" accept --work "${CID[irina]}/$W_tent" \
-        --quality "вернулась целой" --via "$VIA" 2>&1 | sed 's/^/   /'
+        --quality "вернулась целой" --via "$VIA" 2>&1)"
+    echo "$OUT_tback" | sed 's/^/   /'
+    TENT_BACK="$(printf '%s\n' "$OUT_tback" | after 'acceptance ref: ')"
 else
     say "faketime не установлен — Ирина выкупает сразу, износ почти нулевой"
     bcp irina accept --work "${CID[irina]}/$W_tent" --quality "вернулась целой" \
@@ -706,8 +709,21 @@ merge_pair anna  boris
 merge_pair boris vera
 merge_pair vera  dmitry
 merge_pair dmitry petr
-merge_pair petr  irina
+merge_pair petr  fedor
 merge_pair anna  galina
+
+if command -v faketime >/dev/null; then
+    hr "с веткой из будущего не сливаются (blockchain.md §9.4)"
+    say "Ирина «прожила» 30 дней раньше всех (выкуп палатки) — честный Пётр с ней не сливается,"
+    say "пока время её не догонит; со-подписант теперь читает черновик и сверяет время со своими часами"
+    bcp irina merge serve --via "$VIA" --once --timeout 4 >"$work/serve_irina.log" 2>&1 &
+    sv_irina=$!
+    sleep 0.6
+    OUT_future_merge="$(bcp petr merge run --peer "${CID[irina]}" --via "$VIA" --depth 1 \
+                        --timeout 4 2>&1 || true)"
+    grep -E "merge failed" <<<"$OUT_future_merge" | sed 's/^/   /' || true
+    wait "$sv_irina" 2>/dev/null || true
+fi
 
 hr "сырой набор участников в кеше (bc cache list — из него строятся доказательства)"
 bcp anna cache list | sed 's/^/   /' | head -18
@@ -845,6 +861,16 @@ if grep "в залоге" <<<"$WAL_vera" | grep -v "эмитент ${CID[ustin]:
      | grep -q "долг эмитента при рождении"; then
     echo "   ✓ долг эмитента при рождении виден у векселя, прошедшего через две руки"
 else echo "   ✗ долг при рождении у векселя через две руки не виден"; fail=1; fi
+# время (blockchain.md §9.4): выкуп Ирины «через 30 дней» — блок из будущего, с её веткой не сливаются
+if command -v faketime >/dev/null; then
+    check "выкуп Ирины «через 30 дней» — блок из будущего" "$(deal_field "$TENT_BACK" from_future)" "True"
+    if grep -q "dated in the future" <<<"$OUT_future_merge"; then
+        echo "   ✓ с веткой из будущего честный партнёр не сливается"
+    else echo "   ✗ слияние с веткой из будущего не остановлено"; fail=1; fi
+fi
+# со-подписи слияний лежат рядом с блоками на агрегаторе (blockchain.md §6.4)
+COSIGS="$(curl -s "$VIA/cosigs/manifest" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["hashes"]))')"
+checkn "со-подписей слияний на агрегаторе" "$COSIGS" ">= 12"
 # просрочка, закреплённая слиянием (economy.md §8.14)
 check "молчание Раисы закреплено слиянием" "$(deal_field "$OFF_les" lapse)" "witnessed"
 check "повторная трата векселя принята после закрепления" "$(deal_status "$OFF_cut")" "accepted"

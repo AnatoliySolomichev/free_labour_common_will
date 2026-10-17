@@ -67,10 +67,11 @@ public:
 
     std::size_t block_count() const noexcept;
     std::size_t idea_count() const noexcept;
+    std::size_t cosig_count() const noexcept;
 
-    // Unique per storage object in this process — with block_count() (blocks
-    // are only ever added) it names one state of the block table, so a reader
-    // may cache what it computed from it.
+    // Unique per storage object in this process — with block_count() and
+    // cosig_count() (both only ever grow) it names one state of what the table
+    // of deals reads, so a reader may cache what it computed from it.
     uint64_t instance_id() const noexcept { return instance_id_; }
 
     // Snapshot warehouse (sync.md §7.1). Values are opaque bytes.
@@ -109,6 +110,19 @@ public:
     bool put_keypath_bytes(const PublicKey& key, const std::vector<uint8_t>& bytes);
     std::vector<std::vector<uint8_t>> get_keypath_bytes(const PublicKey& key) const;
     std::vector<PublicKey> all_keypath_keys() const;
+
+    // When a block first came here (blockchain.md §9.4): it existed by then,
+    // whatever time it claims. Recorded by add_block; nullopt for blocks stored
+    // before arrivals were kept.
+    std::optional<Timestamp> block_arrival(const Hash& block_hash) const;
+
+    // The partner's co-signature of a MERGE block (blockchain.md §6.4), checked by
+    // the caller before it is put: the partner read the draft, found it taking its
+    // tip at a time that was now by its clock, and signed. One per block; false
+    // when one is there already. Throws: StorageError.
+    bool put_cosig(const Hash& block_hash, const Signature& sig);
+    std::optional<Signature> get_cosig(const Hash& block_hash) const;
+    std::vector<Hash> all_cosig_hashes() const;
 
 private:
     struct Impl;

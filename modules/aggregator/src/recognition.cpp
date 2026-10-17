@@ -69,12 +69,14 @@ DealsOnTable compute_deals(const AggregatorStorage& storage) {
     // Позднее согласие цепи отменяет прежнее — порядок блоков в хранилище
     // произволен, поэтому сравниваем по времени блока (ИР-012).
     std::map<std::pair<Hash32, UserId>, int64_t>          consent_at;
-    std::vector<const SeenBlock*> merges;
+    std::vector<std::pair<Hash32, const SeenBlock*>> merges;
+    std::vector<std::pair<Hash32, const SeenBlock*>> stamped;   // every block, for its time
     for (const Hash& bh : storage.all_block_hashes()) {
         const SeenBlock* block = &seen_block(storage, bh);
         out.branch_time[{block->address.user_id, block->address.node_index}].push_back(
             {block->address.block_index, block->timestamp_claimed});
-        if (block->merge) merges.push_back(block);
+        stamped.push_back({bh.bytes, block});
+        if (block->merge) merges.push_back({bh.bytes, block});
         if (!block->data) continue;
         const UserId           owner = block->address.user_id;
         const records::Record& rec   = block->record;
@@ -164,19 +166,32 @@ DealsOnTable compute_deals(const AggregatorStorage& storage) {
     // Merges both halves of which are on the table: the partner's branch up to
     // the block taken is fixed by the merge time (blockchain.md §5.2).
     std::map<std::tuple<UserId, uint32_t, uint64_t>, const SeenBlock*> merge_at;
-    for (const auto* m : merges)
+    for (const auto& [mh, m] : merges) {
+        (void)mh;
         merge_at[{m->address.user_id, m->address.node_index, m->address.block_index}] = m;
+    }
     // A block the merge names may not be here yet: seen_block does not remember
     // a miss, and an absent block has no address.
     const auto lies_at = [&](const Hash& h, const BlockAddress& a) {
         return seen_block(storage, h).address == a;
     };
-    for (const auto* m : merges) {
+    for (const auto& [mh, m] : merges) {
         const auto& took = m->merge->partner_last_address;
         // A merge of one's own branches is signed by one hand: it proves nothing
         // against that hand.
         if (took.user_id == m->address.user_id || m->address.block_index == 0) continue;
         if (!lies_at(m->merge->partner_last_hash, took)) continue;   // the block it took is not here
+        // The partner co-signed this very half having read it (blockchain.md §6.4;
+        // checked when it came, AggregatorStorage::put_cosig): both branches are
+        // fixed by the merge time — the partner's up to the block taken, this one
+        // up to the half itself.
+        if (storage.get_cosig(Hash{mh})) {
+            out.witnessed_at[{took.user_id, took.node_index}].push_back(
+                {took.block_index, m->merge->merge_timestamp});
+            out.witnessed_at[{m->address.user_id, m->address.node_index}].push_back(
+                {m->address.block_index, m->merge->merge_timestamp});
+            continue;
+        }
         // Each side's merge is the next block after the tip the other took
         // (blockchain.md §6.4): the partner's half lies right after `took` and
         // takes the block right before this one.
@@ -194,6 +209,17 @@ DealsOnTable compute_deals(const AggregatorStorage& storage) {
         (void)branch;
         std::sort(v.begin(), v.end());
         for (std::size_t i = v.size(); i-- > 1;) v[i - 1].second = std::min(v[i - 1].second, v[i].second);
+    }
+    // From the future (blockchain.md §9.4): a block that claims a time later than
+    // it provably existed — it came here earlier, or a merge fixed it earlier —
+    // by more than clocks may disagree.
+    for (const auto& [h, b] : stamped) {
+        int64_t existed = b->arrived > 0 ? b->arrived : INT64_MAX;
+        if (const auto w = out.witnessed(b->address.user_id, b->address.node_index,
+                                         b->address.block_index))
+            existed = std::min(existed, *w);
+        if (existed != INT64_MAX && b->timestamp_claimed > existed + kClockSlack)
+            out.from_future.insert(h);
     }
 
     // Each chain's goods thread (records.md §9.4 v4): its links and its hours.
@@ -951,6 +977,7 @@ const SeenBlock& seen_block(const AggregatorStorage& storage, const Hash& bh) {
     SeenBlock s;
     s.address           = block->address;
     s.timestamp_claimed = block->timestamp_claimed;
+    s.arrived           = storage.block_arrival(bh).value_or(0);
     if (block->type == BlockType::DATA) {
         try {
             s.record = records::Codec::decode(block->payload.data(), block->payload.size());
@@ -966,16 +993,21 @@ const SeenBlock& seen_block(const AggregatorStorage& storage, const Hash& bh) {
 
 std::shared_ptr<const DealsOnTable> deals_on_table(const AggregatorStorage& storage) {
     static std::mutex                          mu;
-    static uint64_t                            cached_id    = 0;
-    static std::size_t                         cached_count = 0;
+    static uint64_t                            cached_id     = 0;
+    static std::size_t                         cached_count  = 0;
+    static std::size_t                         cached_cosigs = 0;
     static std::shared_ptr<const DealsOnTable> cached;
     std::lock_guard<std::mutex> lock(mu);   // one computes, the rest wait for it
-    const std::size_t count = storage.block_count();   // taken before: a block landing
-    if (cached && cached_id == storage.instance_id() && cached_count == count)
-        return cached;                                 // meanwhile forces the next recompute
-    cached       = std::make_shared<const DealsOnTable>(compute_deals(storage));
-    cached_id    = storage.instance_id();
-    cached_count = count;
+    // Taken before: a block or a co-signature landing meanwhile forces the next recompute.
+    const std::size_t count  = storage.block_count();
+    const std::size_t cosigs = storage.cosig_count();
+    if (cached && cached_id == storage.instance_id() && cached_count == count &&
+        cached_cosigs == cosigs)
+        return cached;
+    cached        = std::make_shared<const DealsOnTable>(compute_deals(storage));
+    cached_id     = storage.instance_id();
+    cached_count  = count;
+    cached_cosigs = cosigs;
     return cached;
 }
 

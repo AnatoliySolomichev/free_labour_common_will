@@ -61,6 +61,14 @@ struct Chain {
     KeyPath path() const { return KeyPathCert::build(*storage, uid, kLeaf); }
 };
 
+// The block signed again by `kp`.
+Block resigned(Block b, const KeyPair& kp) {
+    b.signature = Signature::null();
+    const auto bytes = Serializer::encode(b);
+    b.signature = Crypto::sign(bytes.data(), bytes.size(), kp.sec);
+    return b;
+}
+
 // The same block, signed by someone else.
 Block forged(Block b) {
     const KeyPair stranger = Crypto::generate_keypair();
@@ -156,20 +164,90 @@ TEST(BranchKeys, AKeyChangeCarriesTheBranch) {
     EXPECT_EQ(fresh_keys.check(after), BranchKeys::Verdict::signed_by_branch);
 }
 
-// Замена из отзыва (blockchain.md §6.7): проверенный сертификат добавляет ветке
-// ключ, которым она подписывает дальше.
-TEST(BranchKeys, AReplacementJoinsTheRevokedBranch) {
+// Замена из отзыва (blockchain.md §6.7): предок, ключ которого выше, решает за
+// ветку — после момента компрометации подписывает только названная им замена,
+// а написанное старым ключом до того остаётся.
+TEST(BranchKeys, AfterTheCompromiseOnlyTheReplacementSigns) {
     Chain           a("revocation");
     BranchKeys      keys;
     keys.learn_path(a.path());
+    const KeyPair&  old         = a.keys.at(kLeaf);
+    const Block     before      = a.write(old);
     const KeyPair   replacement = Crypto::generate_keypair();
     const NodeIndex parent      = (kLeaf - 1) / 2;
     const Block     rev = a.bc->revoke_node(a.uid, kLeaf, a.now, replacement.pub, parent,
                                             a.keys.at(parent), ++a.now);
-    const Block after   = a.write(replacement);
+    const Block after  = a.write(replacement);
+    const Block stolen = resigned(after, old);               // старым ключом после компрометации
+                                                             // (своя цепь такого и не напишет)
     EXPECT_EQ(keys.check(after), BranchKeys::Verdict::foreign_signature);
+    EXPECT_EQ(keys.check(stolen), BranchKeys::Verdict::signed_by_branch);   // отзыва ещё не слышно
     keys.learn_revocation(RevocationCert::build(*a.storage, rev.address));
     EXPECT_EQ(keys.check(after), BranchKeys::Verdict::signed_by_branch);
+    EXPECT_EQ(keys.check(stolen), BranchKeys::Verdict::foreign_signature);
+    EXPECT_EQ(keys.check(before), BranchKeys::Verdict::signed_by_branch);
+}
+
+// Из двух отзывов одной ветки решает тот, чей автор ближе к корню
+// (blockchain.md §4.4) — в каком бы порядке они ни пришли.
+TEST(BranchKeys, TheHigherAncestorDecides) {
+    Chain           a("two_revocations");
+    const NodeIndex parent = (kLeaf - 1) / 2;
+    const NodeIndex grand  = (parent - 1) / 2;
+    const KeyPair   low    = Crypto::generate_keypair();
+    const KeyPair   high   = Crypto::generate_keypair();
+    const Block rev_low  = a.bc->revoke_node(a.uid, kLeaf, a.now, low.pub, parent,
+                                             a.keys.at(parent), ++a.now);
+    const Block rev_high = a.bc->revoke_node(a.uid, kLeaf, a.now, high.pub, grand,
+                                             a.keys.at(grand), ++a.now);
+    const Block by_high = a.write(high);
+    const Block by_low  = resigned(by_high, low);            // своя цепь его уже не напишет
+    for (const bool high_first : {false, true}) {
+        BranchKeys keys;
+        keys.learn_path(a.path());
+        const auto cert_low  = RevocationCert::build(*a.storage, rev_low.address);
+        const auto cert_high = RevocationCert::build(*a.storage, rev_high.address);
+        keys.learn_revocation(high_first ? cert_high : cert_low);
+        keys.learn_revocation(high_first ? cert_low : cert_high);
+        EXPECT_EQ(keys.check(by_high), BranchKeys::Verdict::signed_by_branch);
+        EXPECT_EQ(keys.check(by_low), BranchKeys::Verdict::foreign_signature);
+    }
+}
+
+// Число смен ключа ничего не решает: линия смен, что расходится с известной, —
+// развилка ветки того же ранга, сколько бы звеньев в ней ни было; её ключи не
+// подписывают, пока предок не рассудит отзывом. Продолжение известной линии —
+// новость, его берут.
+TEST(BranchKeys, ALongerDivergingLineDoesNotWin) {
+    Chain         a("fork");
+    const KeyPair k1 = Crypto::generate_keypair();
+    a.bc->rotate_key(a.uid, kLeaf, a.keys.at(kLeaf), k1, ++a.now);
+    BranchKeys keys;
+    keys.learn_path(a.path());                               // известная линия: K0 → K1
+    // Чужая линия от того же K0: K0 → K2 → K3 — на звено длиннее.
+    const KeyPath known = a.path();
+    const KeyPair k2 = Crypto::generate_keypair();
+    const KeyPair k3 = Crypto::generate_keypair();
+    Block r1 = known.rotations.front();
+    std::copy(k2.pub.bytes.begin(), k2.pub.bytes.end(), r1.payload.begin());
+    r1 = resigned(r1, a.keys.at(kLeaf));
+    Block r2 = r1;
+    r2.address.block_index += 1;
+    r2.prev_hash = Crypto::hash_block(r1);
+    std::copy(k3.pub.bytes.begin(), k3.pub.bytes.end(), r2.payload.begin());
+    r2 = resigned(r2, k2);
+    KeyPath diverging = known;
+    diverging.rotations = {r1, r2};
+    ASSERT_EQ(KeyPathCert::verify(diverging), a.uid);       // сама по себе она сходится
+    keys.learn_path(diverging);
+    EXPECT_EQ(keys.check(a.write(k3)), BranchKeys::Verdict::foreign_signature);
+    EXPECT_EQ(keys.check(a.write(k1)), BranchKeys::Verdict::signed_by_branch);
+    EXPECT_EQ(keys.path(a.uid, kLeaf)->rotations.size(), 1u);
+
+    const KeyPair k4 = Crypto::generate_keypair();           // продолжение известной — берут
+    a.bc->rotate_key(a.uid, kLeaf, k1, k4, ++a.now);
+    keys.learn_path(a.path());
+    EXPECT_EQ(keys.check(a.write(k4)), BranchKeys::Verdict::signed_by_branch);
 }
 
 // Вживую (sync.md §10.10): блок неизвестной ветки — «дайте путь» (428), путь
@@ -248,4 +326,58 @@ TEST(BranchKeys, AggregatorsPassOnlySignedBlocks) {
     }
     std::filesystem::remove_all(db_a);
     std::filesystem::remove_all(db_b);
+}
+
+// Со-подпись слияния лежит рядом с блоком на агрегаторе (blockchain.md §6.4):
+// принимается, только если её поставил ключ ветки партнёра, названного в самом
+// блоке; у блока, который не слияние, со-подписи не бывает.
+TEST(BranchKeys, ACoSignatureComesWithItsMerge) {
+    Chain a("cosig_a"), b("cosig_b");
+    const auto db = std::filesystem::temp_directory_path() / "bc_branch_keys_cosig_db";
+    std::filesystem::remove_all(db);
+    {
+        AggregatorStorage storage(db);
+        Live agg(storage, 18963);
+        for (Chain* c : {&a, &b}) {
+            const KeyPath kp = c->path();
+            ASSERT_EQ(agg.status(agg.cli.Post("/keypaths/" + hex(KeyPathCert::signer_key(kp).bytes),
+                                              cbor(kp), "application/cbor")),
+                      200);
+        }
+        const Block a0 = a.write(a.keys.at(kLeaf));
+        const Block b0 = b.write(b.keys.at(kLeaf));
+        // Половина Алисы: следующий её блок берёт блок Боба.
+        MergePayload mp{};
+        mp.partner_last_address = b0.address;
+        mp.partner_last_hash    = Crypto::hash_block(b0);
+        mp.merge_timestamp      = ++a.now;
+        Block m{};
+        m.address           = {a.uid, kLeaf, a0.address.block_index + 1};
+        m.prev_hash         = Crypto::hash_block(a0);
+        m.timestamp_claimed = mp.merge_timestamp;
+        m.type              = BlockType::MERGE;
+        m.payload           = Serializer::encode(mp);
+        m = resigned(m, a.keys.at(kLeaf));
+        for (const Block* blk : std::initializer_list<const Block*>{&a0, &b0, &m})
+            ASSERT_EQ(agg.status(agg.cli.Post("/blocks", cbor(*blk), "application/cbor")), 200);
+
+        const Hash      mh = Crypto::hash_block(m);
+        const Signature by_bob =
+            Crypto::sign(mh.bytes.data(), mh.bytes.size(), b.keys.at(kLeaf).sec);
+        const Signature by_stranger =
+            Crypto::sign(mh.bytes.data(), mh.bytes.size(), Crypto::generate_keypair().sec);
+        const auto post = [&](const Hash& h, const Signature& s) {
+            return agg.status(agg.cli.Post("/cosigs/" + hex(h.bytes),
+                                           std::string(s.bytes.begin(), s.bytes.end()),
+                                           "application/octet-stream"));
+        };
+        EXPECT_EQ(post(mh, by_stranger), 403);
+        EXPECT_EQ(post(Crypto::hash_block(a0), by_bob), 404);    // не слияние
+        EXPECT_EQ(post(mh, by_bob), 200);
+        const auto got = agg.cli.Get("/cosigs/" + hex(mh.bytes));
+        ASSERT_TRUE(got && got->status == 200);
+        EXPECT_EQ(got->body, std::string(by_bob.bytes.begin(), by_bob.bytes.end()));
+        EXPECT_TRUE(storage.get_cosig(mh).has_value());
+    }
+    std::filesystem::remove_all(db);
 }

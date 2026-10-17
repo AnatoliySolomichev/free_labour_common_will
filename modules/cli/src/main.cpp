@@ -600,6 +600,11 @@ static bool signed_by_branch(Context& ctx, const std::string& via, const Block& 
         const auto bytes    = Serializer::encode(to_verify);
         return Crypto::verify(bytes.data(), bytes.size(), b.signature, key);
     };
+    // The key nearer the root decides (blockchain.md §4.4): after the moment of
+    // compromise only the replacement the highest ancestor named signs.
+    const auto revoked = ctx.validator.effective_revocation(chain, node);
+    if (revoked && b.timestamp_claimed > revoked->compromised_since)
+        return revoked->replacement_pubkey && by(*revoked->replacement_pubkey);
     bool local = true;
     for (const NodeIndex idx : path_indices(node))
         if (!ctx.storage.has_node(chain, idx)) {
@@ -637,9 +642,7 @@ static bool signed_by_branch(Context& ctx, const std::string& via, const Block& 
                 std::copy(r.payload.begin(), r.payload.begin() + 32, key.bytes.begin());
         if (by(key)) return true;
     }
-    if (const auto rs = ctx.validator.effective_revocation(chain, node))
-        if (rs->replacement_pubkey && by(*rs->replacement_pubkey)) return true;
-    return false;
+    return revoked && revoked->replacement_pubkey && by(*revoked->replacement_pubkey);
 }
 
 // A block of someone else's chain from the aggregator — taken only signed by
@@ -3965,6 +3968,7 @@ static int cmd_merge_create(const fs::path& data_dir, int argc, char** argv) {
     session.verify_partner_tip(partner_tip);
 
     const auto     now   = static_cast<Timestamp>(std::time(nullptr));
+    session.check_partner_time(partner_tip, now);   // no merging with the future (blockchain.md §9.4)
     const auto     dep_s = flag_val(argc, argv, "--depth");
     const uint32_t validated_depth =
         dep_s.empty() ? 1u : static_cast<uint32_t>(std::stoul(dep_s));
@@ -3989,31 +3993,43 @@ static int cmd_merge_create(const fs::path& data_dir, int argc, char** argv) {
     const auto pid = to_hex(partner_tip.path.front().structural_pubkey.bytes);
     std::cerr << "Partner verified: " << pid.substr(0, 16) << "...\n";
     std::cerr << "Draft MERGE block #" << pending.draft.address.block_index << " saved.\n";
+    const auto draft_bytes = Serializer::encode(pending.draft);
     std::cout << "draft_hash: " << to_hex(pending.draft_hash.bytes) << "\n";
-    std::cerr << "(send draft_hash to partner; they run: bc merge cosign --draft <HASH>)\n";
+    std::cout << "draft: " << to_hex(draft_bytes.data(), draft_bytes.size()) << "\n";
+    std::cerr << "(send the draft to partner; they read it and run: bc merge cosign --draft <DRAFT>)\n";
     std::cerr << "Next (after receiving partner's co_sig): bc merge finalize --co-sig <SIG>\n";
     return 0;
 }
 
-// bc merge cosign --draft DRAFT_HASH_HEX [--leaf L]
-// Co-signs the partner's draft hash with own working key. Prints the signature to send back.
+// bc merge cosign --draft DRAFT_HEX [--leaf L]
+// Reads the partner's draft — the «draft:» line of their bc merge create — and
+// co-signs it with own working key only if it takes the tip we sent, at a time
+// that is now by our clock, over the same union (blockchain.md §6.4). Prints the
+// signature to send back.
 static int cmd_merge_cosign(const fs::path& data_dir, int argc, char** argv) {
     const auto draft_hex = flag_val(argc, argv, "--draft");
     if (draft_hex.empty()) {
-        std::cerr << "Usage: bc merge cosign --draft DRAFT_HASH_HEX [--leaf L]\n";
+        std::cerr << "Usage: bc merge cosign --draft DRAFT_HEX [--leaf L]\n";
         return 1;
     }
-
-    Hash draft_hash{};
-    if (!from_hex(draft_hex, draft_hash.bytes.data(), 32)) {
-        std::cerr << "Invalid --draft hex (expected 64 hex chars)\n";
+    if (draft_hex.size() == 64) {
+        std::cerr << "--draft: нужен сам черновик (строка «draft:» из bc merge create партнёра), "
+                     "а не его хеш — вслепую не подписывают (blockchain.md §6.4)\n";
         return 1;
     }
+    const auto  draft_cbor = from_hex_vec(draft_hex);
+    const Block draft      = Serializer::decode_block(draft_cbor.data(), draft_cbor.size());
 
-    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    const NodeIndex leaf  = parse_leaf_index(argc, argv);
+    const auto      state = load_merge_state(data_dir, leaf);
     Context ctx(data_dir, leaf);
     MergeSession session(ctx.storage, ctx.validator);
 
+    const auto own_tip  = Serializer::decode_tip(state.own_tip_cbor.data(), state.own_tip_cbor.size());
+    const auto peer_tip = Serializer::decode_tip(state.peer_tip_cbor.data(), state.peer_tip_cbor.size());
+    const Block own_draft = ctx.storage.get_block({ctx.user_id, leaf, state.draft_block_index});
+    const Hash  draft_hash = session.check_partner_draft(
+        draft, own_tip, peer_tip, static_cast<Timestamp>(std::time(nullptr)), own_draft);
     const Signature co_sig = session.co_sign(draft_hash, ctx.working_kp);
     std::cout << "co_signature: " << to_hex(co_sig.bytes) << "\n";
     std::cerr << "(send co_signature to partner; they run: bc merge finalize --co-sig <SIG>)\n";
@@ -4078,6 +4094,33 @@ static int cmd_merge_finalize(const fs::path& data_dir, int argc, char** argv) {
 }
 
 // ── Networked merge over the aggregator relay (sync.md §4.1) ──────────────────
+
+// The partner's co-signature of our merge block, next to the block on the
+// aggregator (blockchain.md §6.4): checked there against the partner's branch
+// keys — so the partner's path goes first if the aggregator does not know it
+// yet (a merge brought its nodes here).
+static void post_cosig(Context& ctx, const std::string& via, const Block& merge) {
+    if (!merge.co_signature) return;
+    const Hash        h = Crypto::hash_block(merge);
+    const std::string body(reinterpret_cast<const char*>(merge.co_signature->bytes.data()), 64);
+    httplib::Client   cli(via);
+    cli.set_connection_timeout(5);
+    const auto post = [&]() {
+        const auto res = cli.Post("/cosigs/" + to_hex(h.bytes), body, "application/octet-stream");
+        return res ? res->status : -1;
+    };
+    int status = post();
+    if (status == 403) {
+        const MergePayload mp = Serializer::decode_merge_payload(merge.payload.data(),
+                                                                 merge.payload.size());
+        if (publish_key_path(via, ctx.storage, mp.partner_last_address.user_id,
+                             mp.partner_last_address.node_index))
+            status = post();
+    }
+    if (status != 200)
+        std::cerr << "co-signature not stored on " << via << " — the merge stands, its "
+                     "evidence there is the pair of halves\n";
+}
 
 static void print_merge_result(const Block& blk) {
     const Hash merge_hash = Crypto::hash_block(blk);
@@ -4167,6 +4210,7 @@ static int cmd_merge_run(const fs::path& data_dir, int argc, char** argv) {
         print_merge_result(*dialogue.merge_block());
         publish_cache_via(via, cache);
         upload_block(ctx, via, *dialogue.merge_block());   // feeds discovery (sync.md §8)
+        post_cosig(ctx, via, *dialogue.merge_block());
         return 0;
     }
     if (dialogue.failed()) { std::cerr << "merge failed: " << dialogue.error() << "\n"; return 1; }
@@ -4314,6 +4358,7 @@ static int cmd_merge_serve(const fs::path& data_dir, int argc, char** argv) {
                 print_merge_result(*d.merge_block());
                 publish_cache_via(via, cache);
                 upload_block(ctx, via, *d.merge_block());   // feeds discovery (sync.md §8)
+                post_cosig(ctx, via, *d.merge_block());
                 if (once) return 0;
                 it = serving.erase(it);
             } else if (d.failed()) {
@@ -5367,6 +5412,9 @@ static void print_footprint(Context& ctx,
     if (const auto n = static_cast<int>(jnum(o, "false_reversals")); n > 0)
         std::cout << "  ФЛАГ: сторно сделок, которые продавец принял: " << n
                   << " — долг, объявленный прочь (records.md §11.5)\n";
+    if (const auto n = static_cast<int>(jnum(o, "future_blocks")); n > 0)
+        std::cout << "  ФЛАГ: блоков из будущего: " << n << " — заявляют время позже, чем "
+                     "доказуемо существовали: часы цепи шли вперёд (blockchain.md §9.4)\n";
     if (const auto* od = jarr(o, "overdrawn"); od && !od->array.empty())
         std::cout << "  ВНИМАНИЕ: у " << od->array.size() << " держателей её бумаги "
                      "отрицательный остаток — так быть не должно, сообщите о сбое\n";
@@ -5908,6 +5956,21 @@ static int answer_offer(const fs::path& data_dir, const std::string& via, const 
     // needs no answer (records.md §9.8 v5): it stands, term or no term.
     const bool pre = pre_accepted(L, *t);
     const auto now = static_cast<int64_t>(std::time(nullptr));
+    // Dated ahead of our clock (blockchain.md §9.4): the payer's clock runs ahead,
+    // and the offer's term with it. Refused with the reason — fix the clock and
+    // offer again. A buyback needs no answer: it is shown, not refused.
+    if (block.timestamp_claimed > now + kClockSlack || t->timestamp > now + kClockSlack) {
+        const auto ahead = std::max(block.timestamp_claimed, t->timestamp) - now;
+        if (!pre) {
+            const std::string note = "оферта датирована будущим — часы плательщика впереди на " +
+                                     std::to_string(ahead / 60) + " мин (blockchain.md §9.4)";
+            write_answer(ctx, via, src, false, note);
+            std::cout << "автоматический отказ — " << note << "\n";
+            return 0;
+        }
+        std::cout << "  ⚠ выкуп датирован будущим: часы держателя впереди на "
+                  << ahead / 60 << " мин (blockchain.md §9.4)\n";
+    }
     if (!pre && now > t->until.value_or(0)) {
         std::cout << "срок ответа вышел " << when_utc(t->until.value_or(0))
                   << " — оферта мертва, принимать нечего (economy.md §4.4)\n";

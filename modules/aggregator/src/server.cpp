@@ -943,6 +943,66 @@ void AggregatorServer::setup_routes() {
         res.set_content(body, "application/cbor");
     });
 
+    // ── Co-signatures of merges (blockchain.md §6.4, blockchain.md §5.2) ─────
+    //
+    // A side's MERGE block comes with the partner's co-signature over its hash:
+    // the partner read the draft and found it taking its tip at a time that was
+    // now by its clock. Checked on arrival against the partner's branch keys;
+    // the half then fixes both branches by the merge time (DealsOnTable::witnessed).
+
+    svr.Get("/cosigs/manifest", [&](const httplib::Request&, httplib::Response& res) {
+        const auto hashes = storage_.all_cosig_hashes();
+        std::string body = "{\"hashes\":[";
+        for (std::size_t i = 0; i < hashes.size(); ++i)
+            body += std::string(i ? "," : "") + "\"" + to_hex(hashes[i].bytes) + "\"";
+        body += "]}";
+        res.set_content(body, "application/json");
+    });
+
+    svr.Post("/cosigs/:hash", [&](const httplib::Request& req, httplib::Response& res) {
+        const auto bh = hex_to_hash(req.path_params.at("hash"));
+        if (!bh || req.body.size() != 64) {
+            res.status = 400;
+            res.set_content("{\"error\":\"block hash and a 64-byte signature\"}",
+                            "application/json");
+            return;
+        }
+        Signature sig{};
+        std::copy(req.body.begin(), req.body.end(), sig.bytes.begin());
+        try {
+            const auto block = storage_.get_block_by_hash(*bh);
+            if (!block || block->type != BlockType::MERGE) {
+                res.status = 404;
+                res.set_content("{\"error\":\"no such merge block here\"}", "application/json");
+                return;
+            }
+            const MergePayload mp =
+                Serializer::decode_merge_payload(block->payload.data(), block->payload.size());
+            const auto& partner = mp.partner_last_address;
+            if (!keys_.vouches(partner.user_id, partner.node_index, *bh, sig)) {
+                res.status = 403;
+                res.set_content("{\"error\":\"not signed by the partner's branch\"}",
+                                "application/json");
+                return;
+            }
+            const bool stored = storage_.put_cosig(*bh, sig);
+            res.set_content(stored ? "{\"status\":\"stored\"}" : "{\"status\":\"duplicate\"}",
+                            "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(std::string("{\"error\":\"") + json_escape(e.what()) + "\"}",
+                            "application/json");
+        }
+    });
+
+    svr.Get("/cosigs/:hash", [&](const httplib::Request& req, httplib::Response& res) {
+        const auto bh = hex_to_hash(req.path_params.at("hash"));
+        if (!bh) { res.status = 400; return; }
+        const auto sig = storage_.get_cosig(*bh);
+        if (!sig) { res.status = 404; return; }
+        res.set_content(std::string(sig->bytes.begin(), sig->bytes.end()), "application/octet-stream");
+    });
+
     // ── Economy view (records.md §13) ─────────────────────────────────────────
     //
     // Derived data, recomputed per request by scanning known blocks. Every
@@ -1390,6 +1450,7 @@ void AggregatorServer::setup_routes() {
                 + ",\"unbacked_deals\":"       + std::to_string(fp->unbacked_deals)
                 + ",\"unbacked_units\":"       + std::to_string(fp->unbacked_units)
                 + ",\"false_reversals\":"      + std::to_string(fp->false_reversals)
+                + ",\"future_blocks\":"        + std::to_string(fp->future_blocks)
                 + ",\"overdrawn\":["           + overdrawn + "]"
                 + ",\"counterparties\":"      + std::to_string(fp->counterparties)
                 + ",\"internal_turnover\":"   + std::to_string(fp->internal_turnover)
@@ -2020,14 +2081,17 @@ void AggregatorServer::setup_routes() {
                 + ",\"addressed\":"
                 + (deals.recognition.unaddressed.count(d->hash) ? "false" : "true")
                 + ",\"pre_accepted\":" + (deals.pre_accepted.count(d->hash) ? "true" : "false")
-                + ",\"backed\":" + (deals.unbacked.count(d->hash) ? "false" : "true");
+                + ",\"backed\":" + (deals.unbacked.count(d->hash) ? "false" : "true")
+                // Dated later than it provably existed (blockchain.md §9.4).
+                + ",\"from_future\":" + (deals.from_future.count(d->hash) ? "true" : "false");
             if (const auto w = deals.unbacked_why.find(d->hash); w != deals.unbacked_why.end())
                 body += ",\"unbacked_why\":\"" + json_escape(w->second) + "\"";
             if (const auto* r = deals.counted_reply(d->hash)) {
                 body += ",\"reply\":{\"ref\":\"" + to_hex(r->seen.author) + "/" + to_hex(r->hash)
                       + "\",\"accepted\":" + (r->seen.reply.accepted ? "true" : "false")
                       + ",\"note\":\"" + json_escape(r->seen.reply.note)
-                      + "\",\"timestamp\":" + std::to_string(r->seen.reply.timestamp);
+                      + "\",\"timestamp\":" + std::to_string(r->seen.reply.timestamp)
+                      + ",\"from_future\":" + (deals.from_future.count(r->hash) ? "true" : "false");
                 // Fixed by a merge (blockchain.md §5.2): the answer provably existed
                 // by then — no later word can replace it.
                 if (const auto w = deals.witnessed(UserId{r->seen.author}, r->seen.node,
@@ -2581,6 +2645,26 @@ void AggregatorServer::sync_with_peer(const std::string& peer_url) {
                 ++pulled;
                 if (b.type == BlockType::KEY_ROTATION) keys_.learn_rotation(b);
             }
+        } catch (...) {}
+    }
+
+    // 7. Pull co-signatures of merges, each checked against the partner's keys
+    // like the ones posted here; the block must have come first.
+    for (const Hash& ch : manifest_hashes("/cosigs/manifest")) {
+        if (storage_.get_cosig(ch)) continue;
+        const auto block = storage_.get_block_by_hash(ch);
+        if (!block || block->type != BlockType::MERGE) continue;
+        auto res = cli.Get("/cosigs/" + to_hex(ch.bytes));
+        if (!res || res->status != 200 || res->body.size() != 64) continue;
+        try {
+            Signature sig{};
+            std::copy(res->body.begin(), res->body.end(), sig.bytes.begin());
+            const MergePayload mp =
+                Serializer::decode_merge_payload(block->payload.data(), block->payload.size());
+            if (keys_.vouches(mp.partner_last_address.user_id,
+                              mp.partner_last_address.node_index, ch, sig) &&
+                storage_.put_cosig(ch, sig))
+                ++gossiped;
         } catch (...) {}
     }
 

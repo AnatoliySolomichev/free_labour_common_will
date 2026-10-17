@@ -28,6 +28,12 @@ public:
     // Throws: SignatureError, ChainIntegrityError, NodeNotFoundError.
     void verify_partner_tip(const BranchTipInfo& partner_tip) const;
 
+    // Step 1c: the partner's tip is not from the future (blockchain.md §9.4): a
+    // branch dated later than `now` by more than kClockSlack is not merged with —
+    // it waits until time catches up with it.
+    // Throws: TimestampError.
+    void check_partner_time(const BranchTipInfo& partner_tip, Timestamp now) const;
+
     // Current accumulated snapshot of a branch (blockchain.md §6.5.1): the stored
     // snapshot if the branch has merged before, otherwise a fresh single-leaf
     // snapshot over the current tip. Send this to the partner during a merge.
@@ -56,6 +62,15 @@ public:
     // Returns the Signature to send back to the partner.
     // Throws: CryptoError.
     Signature co_sign(const Hash& partner_draft_hash, const KeyPair& own_working_keypair);
+
+    // Step 3a: before co-signing, read the partner's draft itself (blockchain.md
+    // §6.4): a MERGE block right after the partner's tip that takes `own_tip` —
+    // the tip we sent — at a time within kClockSlack of our `now`, and, given our
+    // own draft, commits the same union of snapshots. Returns the hash to co-sign.
+    // Throws: ChainIntegrityError, TimestampError, SerializationError.
+    Hash check_partner_draft(const Block& draft, const BranchTipInfo& own_tip,
+                             const BranchTipInfo& partner_tip, Timestamp now,
+                             const std::optional<Block>& own_draft = std::nullopt) const;
 
     // Step 4: attach partner's co_signature to own pending block and finalize.
     // Verifies co_sig, stores it as a Seal (SealMode::OPEN) in the seals table,

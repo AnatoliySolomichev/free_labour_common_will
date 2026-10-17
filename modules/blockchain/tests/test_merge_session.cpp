@@ -344,3 +344,54 @@ TEST_F(MergeSessionTest, FinalizeWrongCoSigThrows) {
 
     EXPECT_THROW(alice_->ms->finalize(pending, bad_co, bob_leaf.pub), SignatureError);
 }
+
+// ── Время слияния (blockchain.md §9.4) ────────────────────────────────────────
+
+// С вершиной из будущего не сливаются: ветка ждёт, пока время её догонит.
+TEST_F(MergeSessionTest, ATipFromTheFutureIsNotMergedWith) {
+    alice_->setup_leaf();
+    KeyPair bob_leaf = bob_->setup_leaf();
+    bob_->bc->append_data_block(bob_->root_kp.pub, LEAF, {0x02}, bob_leaf, 10'000LL);
+    const BranchTipInfo bob_tip = bob_->ms->prepare_tip(bob_->root_kp.pub, LEAF);
+    EXPECT_NO_THROW(alice_->ms->check_partner_time(bob_tip, 10'000LL));
+    EXPECT_NO_THROW(alice_->ms->check_partner_time(bob_tip, 10'000LL - kClockSlack));
+    EXPECT_THROW(alice_->ms->check_partner_time(bob_tip, 10'000LL - kClockSlack - 1),
+                 TimestampError);
+}
+
+// Со-подписант читает черновик партнёра, а не только его хеш: черновик берёт
+// посланную вершину, датирован «сейчас» по своим часам и коммитит то же
+// объединение снимков. Иначе — не подписывать.
+TEST_F(MergeSessionTest, ACoSignerReadsTheDraftItSigns) {
+    KeyPair alice_leaf = alice_->setup_leaf();
+    KeyPair bob_leaf   = bob_->setup_leaf();
+    alice_->bc->append_data_block(alice_->root_kp.pub, LEAF, {0xAA}, alice_leaf, 1'000LL);
+    bob_->bc->append_data_block(bob_->root_kp.pub, LEAF, {0xBB}, bob_leaf, 1'000LL);
+    const BranchTipInfo alice_tip  = alice_->ms->prepare_tip(alice_->root_kp.pub, LEAF);
+    const BranchTipInfo bob_tip    = bob_->ms->prepare_tip(bob_->root_kp.pub, LEAF);
+    const MergeSnapshot alice_snap = alice_->ms->snapshot_for(alice_->root_kp.pub, LEAF);
+    const MergeSnapshot bob_snap   = bob_->ms->snapshot_for(bob_->root_kp.pub, LEAF);
+    const PendingMergeBlock alice_pending = alice_->ms->create_pending(
+        alice_->root_kp.pub, LEAF, bob_tip, bob_snap, alice_leaf, 2'000LL, 1u);
+    const PendingMergeBlock bob_pending = bob_->ms->create_pending(
+        bob_->root_kp.pub, LEAF, alice_tip, alice_snap, bob_leaf, 2'000LL + 300, 1u);
+
+    // Боб честен: в пределах допуска часов, берёт вершину Алисы, то же объединение.
+    EXPECT_EQ(alice_->ms->check_partner_draft(bob_pending.draft, alice_tip, bob_tip, 2'000LL,
+                                              alice_pending.draft),
+              bob_pending.draft_hash);
+    // Часы Алисы ушли на час вперёд: черновик Боба для неё — из прошлого.
+    EXPECT_THROW(alice_->ms->check_partner_draft(bob_pending.draft, alice_tip, bob_tip,
+                                                 2'000LL + 3'600),
+                 TimestampError);
+    // Черновик, который берёт не ту вершину, — не подписывать.
+    BranchTipInfo other = alice_tip;
+    other.tip_hash.bytes[0] ^= 0xFF;
+    EXPECT_THROW(alice_->ms->check_partner_draft(bob_pending.draft, other, bob_tip, 2'000LL),
+                 ChainIntegrityError);
+    // Черновик без слияния — не слияние.
+    Block data = bob_pending.draft;
+    data.type = BlockType::DATA;
+    EXPECT_THROW(alice_->ms->check_partner_draft(data, alice_tip, bob_tip, 2'000LL),
+                 ChainIntegrityError);
+}

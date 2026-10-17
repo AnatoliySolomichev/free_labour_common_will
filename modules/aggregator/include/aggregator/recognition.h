@@ -197,15 +197,20 @@ struct DealsOnTable {
     // ── Witnessed time (blockchain.md §5.2, economy.md §8.14) ─────────────
     // A merge takes the partner's last block, its hash and the merge time into
     // a block both sides sign; so everything before that point of the partner's
-    // branch provably existed by then. The co-signature itself stays with the
-    // two sides as a seal and does not come to this table; what does is the
-    // pair: each side's half in its own chain, each taking the other's block
-    // right before it. Counted only when both halves are here — a one-sided
-    // «merge» proves nothing — and only between two chains: one's own branches
-    // merged are one hand.
+    // branch provably existed by then. Evidence on this table: a half with the
+    // partner's co-signature (the partner read it and found its time to be now,
+    // blockchain.md §6.4) — it fixes both branches, the partner's up to the block
+    // taken and its own up to the half; or, without it, the pair: each side's
+    // half in its own chain, each taking the other's block right before it. A
+    // one-sided «merge» proves nothing, and one's own branches merged are one
+    // hand.
     using Branch = std::pair<UserId, uint32_t>;
     std::map<Branch, std::vector<std::pair<uint64_t, int64_t>>> branch_time;   // index → latest claimed so far
     std::map<Branch, std::vector<std::pair<uint64_t, int64_t>>> witnessed_at;  // index → earliest merge fixing it
+    // Blocks from the future (blockchain.md §9.4): each claims a time later — by
+    // more than clocks may disagree — than it provably existed: it came here
+    // earlier, or a merge fixed it earlier.
+    std::set<std::array<uint8_t, 32>> from_future;
     // Unanswered offers: how surely they lapsed — the seller's purse went on past
     // the term with no answer, and that point is fixed by a merge ("witnessed"),
     // only seen here ("seen"), or the purse has not moved since ("none").
@@ -298,6 +303,7 @@ struct SeenBlock {
     bool                        data = false;   // a DATA block whose payload decodes
     records::Record             record;
     std::optional<MergePayload> merge;          // a MERGE block: whose tip it took, and when
+    Timestamp                   arrived = 0;    // when it first came here (0: not kept then)
 };
 const SeenBlock& seen_block(const AggregatorStorage& storage, const Hash& block_hash);
 

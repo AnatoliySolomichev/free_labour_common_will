@@ -39,13 +39,16 @@ struct MergeConfig {
 //   initiator                                 responder
 //   start()      ── OFFER  {tip, snapshot} ──►  on_message
 //                ◄─ ACCEPT {tip, snapshot} ──
-//                ◄─ DRAFT  {draft_hash}    ──
-//   on_message   ── DRAFT  {draft_hash}    ──►
+//                ◄─ DRAFT  {draft block}   ──
+//   on_message   ── DRAFT  {draft block}   ──►
 //   on_message   ── COSIG  {co_signature}  ──►
 //                ◄─ COSIG  {co_signature}  ──
 //
 // Both sides exchange pre-merge snapshots, so both commit the same union root
-// (MergeSnapshot::merge is commutative). On success each side finalizes its
+// (MergeSnapshot::merge is commutative). Each side co-signs only after reading
+// the partner's draft (MergeSession::check_partner_draft): it takes the tip we
+// sent, at a time within kClockSlack of our clock, over the same union; and no
+// side merges with a tip from the future (MergeSession::check_partner_time). On success each side finalizes its
 // own MERGE block, imports the partner's path/tip and feeds the participant
 // cache (sync.md §5.2): both single-leaf records when derivable from the exchanged
 // tips, plus the composition own_root × partner_root.
