@@ -48,4 +48,14 @@ if(TEST_E2E)
     )
     set_tests_properties(e2e_social_demo PROPERTIES
         DEPENDS "bc;aggregator_server" TIMEOUT 120)
+
+    # Contests (ИР-026, contests.md): rules identified by their content hash, a
+    # round with a beacon, attempts, verdicts, the table through one's circle.
+    add_test(
+        NAME e2e_contest_demo
+        COMMAND ${CMAKE_COMMAND} -E env BUILD=${CMAKE_BINARY_DIR} PORT=19352
+                bash ${CMAKE_SOURCE_DIR}/docs/pilot/contest-demo.sh
+    )
+    set_tests_properties(e2e_contest_demo PROPERTIES
+        DEPENDS "bc;aggregator_server" TIMEOUT 120)
 endif()

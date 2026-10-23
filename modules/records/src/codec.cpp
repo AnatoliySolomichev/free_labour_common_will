@@ -199,10 +199,22 @@ void enc_consent(Buf& out, const Consent& c) {
     w_uint(out, 3); w_text(out, c.note);
 }
 
+// Предмет любого из трёх родов — по форме (records.md §8.11): блок с цепью и
+// хешем, ключ «пространство:значение», названная цепь.
+void check_subject(const Subject& s, const std::string& what) {
+    static const std::array<uint8_t, 32> zero{};
+    if (const auto* b = std::get_if<Ref>(&s); b && (b->chain == zero || b->hash == zero))
+        throw CodecError("Note: " + what + " — блок без цепи или хеша");
+    if (const auto* k = std::get_if<std::string>(&s); k && !is_external_key(*k))
+        throw CodecError("Note: " + what + " — ключ не по форме «пространство:значение» "
+                         "(records.md §8.11)");
+    if (const auto* c = std::get_if<ChainId>(&s); c && *c == zero)
+        throw CodecError("Note: " + what + " — цепь не названа");
+}
+
 // Заметка о предмете (records.md §8.11): форма — всегда, правила — у видов,
 // которые кодек знает; незнакомый вид проходит с любыми полями (ИР-026).
 void check_note(const Note& n) {
-    static const std::array<uint8_t, 32> zero{};
     const auto kind_char = [](char c) {
         return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
     };
@@ -210,29 +222,26 @@ void check_note(const Note& n) {
         !std::all_of(n.kind.begin(), n.kind.end(), kind_char))
         throw CodecError("Note: вид — строчные латинские буквы, цифры, «.», «_», «-», до 32 "
                          "знаков (records.md §8.11)");
-    const auto* block = std::get_if<Ref>(&n.about);
-    const auto* key   = std::get_if<std::string>(&n.about);
-    const auto* chain = std::get_if<ChainId>(&n.about);
-    if (block && (block->chain == zero || block->hash == zero))
-        throw CodecError("Note: у блока-предмета обязательны цепь и хеш");
-    if (key && !is_external_key(*key))
-        throw CodecError("Note: ключ внешнего объекта — «пространство:значение» (records.md §8.11)");
-    if (chain && *chain == zero)
-        throw CodecError("Note: цепь-предмет не названа");
-    if (n.re && (n.re->chain == zero || n.re->hash == zero))
-        throw CodecError("Note: у ответа обязательны цепь и хеш комментария");
+    check_subject(n.about, "предмет");
+    if (n.re) check_subject(*n.re, "второй предмет");
     // Отрезок предмета: to — только вместе с from и позже него (records.md §8.11).
     if (n.from && *n.from < 0)
         throw CodecError("Note: отрезок начинается не раньше нулевой секунды");
     if (n.to && (!n.from || *n.to <= *n.from))
         throw CodecError("Note: конец отрезка — только после его начала");
 
+    const bool block = std::holds_alternative<Ref>(n.about);
+    const bool key   = std::holds_alternative<std::string>(n.about);
+    const bool chain = std::holds_alternative<ChainId>(n.about);
+    const bool re_block = n.re && std::holds_alternative<Ref>(*n.re);
+    const bool re_chain = n.re && std::holds_alternative<ChainId>(*n.re);
     const auto no_extra = [&](bool v_allowed, bool text_allowed, bool re_allowed, bool span_allowed) {
         if (n.v && !v_allowed)            throw CodecError("Note: у вида «" + n.kind + "» нет значения v");
         if (!n.text.empty() && !text_allowed) throw CodecError("Note: у вида «" + n.kind + "» нет текста");
-        if (n.re && !re_allowed)          throw CodecError("Note: у вида «" + n.kind + "» нет ответа re");
+        if (n.re && !re_allowed)          throw CodecError("Note: у вида «" + n.kind + "» нет второго предмета");
         if (n.from && !span_allowed)      throw CodecError("Note: у вида «" + n.kind + "» нет отрезка");
     };
+    // Соцслой (social.md §4).
     if (n.kind == "react") {
         if (chain) throw CodecError("Note: реагируют на блок или внешний объект, на цепь — подписываются");
         if (!n.v || *n.v < -1 || *n.v > 1) throw CodecError("Note: реакция — −1, 0 или +1");
@@ -240,6 +249,7 @@ void check_note(const Note& n) {
     } else if (n.kind == "comment") {
         if (chain) throw CodecError("Note: комментарий — о блоке или внешнем объекте");
         if (n.text.empty()) throw CodecError("Note: комментарий без текста");
+        if (n.re && !re_block) throw CodecError("Note: отвечают на комментарий — блок");
         no_extra(false, true, true, true);
     } else if (n.kind == "retract") {
         if (!block) throw CodecError("Note: снимают комментарий — предмет его блок");
@@ -252,16 +262,39 @@ void check_note(const Note& n) {
         if (chain) throw CodecError("Note: смотрят ролик, пост, страницу или блок, а не цепь");
         if (n.v && *n.v <= 0) throw CodecError("Note: скорость просмотра — больше нуля процентов");
         no_extra(true, false, false, true);
+    // Соревнования (contests.md).
+    } else if (n.kind == "round") {
+        if (!key || std::get<std::string>(n.about).rfind("b2:", 0) != 0)
+            throw CodecError("Note: раунд — о соревновании, ключ b2: правил (contests.md §3)");
+        if (!re_block) throw CodecError("Note: у раунда второй предмет — блок правил");
+        no_extra(false, true, true, false);
+    } else if (n.kind == "attempt") {
+        if (!block) throw CodecError("Note: попытка — о раунде, предмет его блок");
+        if (!n.re || re_chain) throw CodecError("Note: у попытки второй предмет — видео: ключ или блок");
+        if (n.v && *n.v < 0) throw CodecError("Note: заявленный результат — не меньше нуля");
+        no_extra(true, true, true, true);
+    } else if (n.kind == "verdict") {
+        if (!block) throw CodecError("Note: вердикт — о попытке, предмет её блок");
+        if (!n.v || *n.v < 0) throw CodecError("Note: вердикт — засчитанный результат, не меньше нуля");
+        no_extra(true, true, false, true);
+    } else if (n.kind == "same") {
+        if (chain || !n.re || re_chain)
+            throw CodecError("Note: «тот же предмет» связывает блоки и ключи, не цепи");
+        if (subject_id(n.about) == subject_id(*n.re))
+            throw CodecError("Note: «тот же предмет» — о двух разных названиях одного предмета");
+        no_extra(false, true, true, false);
     }
 }
 
-// В списке записей блока (records.md §2) — только заметки и не комментарии:
-// на комментарий ссылаются Ref-ом его блока, а запись внутри списка так не назвать.
+// В списке записей блока (records.md §2) — только заметки, и не те, на которые
+// ссылаются по одному: комментарий, раунд, попытка. Ref называет блок, а не
+// запись внутри списка.
 void check_listable(const Record& rec) {
     const auto* n = std::get_if<Note>(&rec);
     if (!n) throw CodecError("список записей в блоке — пока только заметки (records.md §2)");
-    if (n->kind == "comment")
-        throw CodecError("комментарий — один в блоке: на него ссылаются Ref-ом блока (records.md §2)");
+    if (n->kind == "comment" || n->kind == "round" || n->kind == "attempt")
+        throw CodecError("«" + n->kind + "» — один в блоке: на него ссылаются Ref-ом блока "
+                         "(records.md §2)");
 }
 
 void w_subject(Buf& out, const Subject& s) {
@@ -281,7 +314,7 @@ void enc_note(Buf& out, const Note& n) {
     w_uint(out, 2); w_text(out, n.kind);
     if (n.v)            { w_uint(out, 3); w_int64(out, *n.v); }
     if (!n.text.empty()) { w_uint(out, 4); w_text(out, n.text); }
-    if (n.re)           { w_uint(out, 5); w_ref(out, *n.re); }
+    if (n.re)           { w_uint(out, 5); w_subject(out, *n.re); }
     if (n.from)         { w_uint(out, 6); w_int64(out, *n.from); }
     if (n.to)           { w_uint(out, 7); w_int64(out, *n.to); }
 }
@@ -1193,7 +1226,7 @@ Note dec_note_fields(CborReader& r, uint64_t field_count) {
                 n.text = r.r_text();
                 if (n.text.empty()) throw CodecError("Note: пустой текст не пишется");
                 break;
-            case 5: n.re   = dec_ref(r); break;
+            case 5: n.re   = dec_subject(r); break;
             case 6: n.from = r.r_int(); break;
             case 7: n.to   = r.r_int(); break;
             default: throw CodecError("Note: unknown field key");

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <mutex>
+#include <set>
 #include <tuple>
 
 namespace aggregator {
@@ -19,7 +20,7 @@ void by_time(std::vector<const NoteEntry*>& out) {
     });
 }
 
-std::string comment_id(const NoteEntry& e) {
+std::string note_id(const NoteEntry& e) {
     records::Ref r{};
     r.chain = e.author.bytes;
     r.hash  = e.block.bytes;
@@ -38,10 +39,11 @@ std::vector<const NoteEntry*> NotesBoard::about(const std::string& subject) cons
 
 std::vector<const NoteEntry*> NotesBoard::thread(const std::string& subject) const {
     auto out = about(subject);
+    std::set<std::string> seen;   // у заметок одного списка (records.md §2) — один блок
     const size_t root = out.size();
     for (size_t i = 0; i < root; ++i)
-        if (out[i]->note.kind == "comment")
-            for (const NoteEntry* e : about(comment_id(*out[i]))) out.push_back(e);
+        if (const auto id = note_id(*out[i]); seen.insert(id).second)
+            for (const NoteEntry* e : about(id)) out.push_back(e);
     by_time(out);
     return out;
 }

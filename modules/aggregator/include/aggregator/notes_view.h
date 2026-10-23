@@ -37,8 +37,9 @@ struct NotesBoard {
     // (в одной ветке время не убывает, blockchain.md §9.4).
     std::vector<const NoteEntry*> about(const std::string& subject) const;
 
-    // Обсуждение (social.md §7): заметки о предмете и о каждом комментарии под
-    // ним — реакции на комментарии, снятия. По времени.
+    // Обсуждение (social.md §7): заметки о предмете и о каждой заметке под ним —
+    // реакции на комментарии и снятия, вердикты на попытки раунда (contests.md §6).
+    // По времени.
     std::vector<const NoteEntry*> thread(const std::string& subject) const;
 
     // Заметки цепи, по времени; kind пустой — всех видов.

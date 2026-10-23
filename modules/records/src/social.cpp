@@ -305,6 +305,13 @@ bool from_hex32(std::string_view s, std::array<uint8_t, 32>& out) noexcept {
     return true;
 }
 
+// Объект по хешу содержимого (social.md §3.5): b2: и 64 hex BLAKE2b-256, строчными.
+std::optional<std::string> content_key(std::string_view hex) {
+    if (hex.size() != 64 || !std::all_of(hex.begin(), hex.end(), [](char c) { return hex_value(c) >= 0; }))
+        return std::nullopt;
+    return "b2:" + lowered(hex);
+}
+
 } // namespace
 
 bool is_external_key(std::string_view key) noexcept {
@@ -323,6 +330,7 @@ std::optional<std::string> external_key(std::string_view link_or_key) {
             return is_youtube_id(value) ? std::optional<std::string>("yt:" + std::string(value))
                                         : std::nullopt;
         if (*ns == "tg")  return telegram_key(segments(value));
+        if (*ns == "b2")  return content_key(value);
         if (*ns == "url") return link_key(value);
         return is_external_key(in) ? std::optional<std::string>(std::string(in)) : std::nullopt;
     }

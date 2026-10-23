@@ -30,7 +30,7 @@ UserId make_owner(uint8_t fill) {
 }
 
 records::Note note(records::Subject about, std::string kind, std::optional<int64_t> v = std::nullopt,
-                   std::string text = {}, std::optional<records::Ref> re = std::nullopt) {
+                   std::string text = {}, std::optional<records::Subject> re = std::nullopt) {
     records::Note n;
     n.about = std::move(about);
     n.kind  = std::move(kind);
@@ -173,6 +173,27 @@ TEST_F(NotesViewTest, ListBlockNotesAreIndexedOneByOne) {
     const auto about = board.about(kVideo);
     ASSERT_EQ(about.size(), 2u);                        // просмотр Веры и реакция Анны
     EXPECT_EQ(about[0]->note.to, 1800);
+}
+
+// Раунд одним ответом: попытки и вердикты к ним (contests.md §6).
+TEST_F(NotesViewTest, ThreadCarriesVerdictsOfAttempts) {
+    records::Ref rules_block{};
+    rules_block.chain = anna_.bytes;
+    rules_block.hash.fill(0x11);
+    const std::string contest = "b2:" + std::string(64, '1');
+    const Block round   = add(anna_, note(contest, "round", std::nullopt, "Октябрь", rules_block));
+    const auto  round_r = ref_to(anna_, round);
+    const Block attempt = add(boris_, note(round_r, "attempt", 20, {},
+                                           records::Subject{"b2:" + std::string(64, '2')}));
+    add(vera_, note(ref_to(boris_, attempt), "verdict", 18));
+    add(anna_, note(ref_to(boris_, attempt), "verdict", 19));
+
+    const auto board  = read_notes(*storage_);
+    const auto thread = board.thread(records::subject_id(round_r));
+    ASSERT_EQ(thread.size(), 3u);                       // попытка и два вердикта к ней
+    EXPECT_EQ(thread[0]->note.kind, "attempt");
+    EXPECT_EQ(thread[1]->note.kind, "verdict");
+    EXPECT_EQ(board.about(contest).size(), 1u);         // раунды — заметки о соревновании
 }
 
 TEST_F(NotesViewTest, BoardIsRecomputedOnlyWhenBlocksArrive) {

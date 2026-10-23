@@ -109,6 +109,13 @@ TEST(ExternalKey, KnownKeysAreBroughtToCanonicalForm) {
     EXPECT_EQ(external_key("url:youtube.com/watch?v=dQw4w9WgXcQ"), "yt:dQw4w9WgXcQ");
 }
 
+// Объект по хешу содержимого (social.md §3.5): 64 hex, строчными.
+TEST(ExternalKey, ContentKeyIsSixtyFourHexLowercase) {
+    EXPECT_EQ(external_key("b2:" + std::string(64, 'A')), "b2:" + std::string(64, 'a'));
+    EXPECT_FALSE(external_key("b2:" + std::string(63, 'a')));
+    EXPECT_FALSE(external_key("b2:" + std::string(64, 'g')));
+}
+
 // Незнакомые пространства — законны: следующие сценарии добавят свои без правки кода.
 TEST(ExternalKey, UnknownNamespacesAreTakenAsTheyAre) {
     EXPECT_EQ(external_key("gtin:4600000000000"), "gtin:4600000000000");

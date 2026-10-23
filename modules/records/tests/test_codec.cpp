@@ -187,7 +187,7 @@ TEST(RecordsCodec, ConsentRejectsEmptyTarget) {
 // ── Note (заметка о предмете, records.md §8.11) ──────────────────────────────
 
 static Note make_note(Subject about, std::string kind, std::optional<int64_t> v = std::nullopt,
-                      std::string text = {}, std::optional<Ref> re = std::nullopt) {
+                      std::string text = {}, std::optional<Subject> re = std::nullopt) {
     Note n;
     n.about = std::move(about);
     n.kind  = std::move(kind);
@@ -221,7 +221,7 @@ TEST(RecordsCodec, NoteReplyOnBlockRoundTrip) {
     EXPECT_EQ(std::get<Ref>(d.about), make_ref(0x01, 0x02));
     EXPECT_EQ(d.text, "согласен");
     ASSERT_TRUE(d.re);
-    EXPECT_EQ(*d.re, make_ref(0x03, 0x04));
+    EXPECT_EQ(std::get<Ref>(*d.re), make_ref(0x03, 0x04));
     EXPECT_FALSE(d.v);
 }
 
@@ -236,9 +236,9 @@ TEST(RecordsCodec, NoteFollowAndRetractRoundTrip) {
 
 // Мягкий слой растёт, не трогая жёсткий: незнакомый вид проходит с любыми полями.
 TEST(RecordsCodec, NoteUnknownKindPassesWithAnyFields) {
-    const auto n = make_note(make_ref(0x01, 0x02), "verdict", 18, "без рывков", make_ref(0x03, 0x04));
+    const auto n = make_note(make_ref(0x01, 0x02), "badge", 18, "без рывков", make_ref(0x03, 0x04));
     const auto d = std::get<Note>(roundtrip(n));
-    EXPECT_EQ(d.kind, "verdict");
+    EXPECT_EQ(d.kind, "badge");
     EXPECT_EQ(d.v, 18);
     EXPECT_EQ(d.text, "без рывков");
     EXPECT_TRUE(d.re);
@@ -333,6 +333,73 @@ TEST(RecordsCodec, NoteSpanRules) {
     EXPECT_NO_THROW(Codec::encode(with_span(make_note(make_ref(0x01, 0x02), "verdict", 18), 10, 65)));
 }
 
+// Второй предмет (records.md §8.11) — блок, ключ или цепь; ответ на комментарий —
+// только блок.
+TEST(RecordsCodec, NoteSecondSubjectIsAnySubject) {
+    const std::string video = "b2:" + std::string(64, 'a');
+    const auto same = std::get<Note>(roundtrip(make_note(std::string(video), "same", std::nullopt, {},
+                                                         Subject{std::string("yt:dQw4w9WgXcQ")})));
+    EXPECT_EQ(std::get<std::string>(*same.re), "yt:dQw4w9WgXcQ");
+    const auto unknown = std::get<Note>(roundtrip(make_note(make_ref(0x01, 0x02), "x.custom", std::nullopt,
+                                                            {}, Subject{make_chain(0x05)})));
+    EXPECT_EQ(std::get<ChainId>(*unknown.re), make_chain(0x05));
+    EXPECT_THROW(Codec::encode(make_note(std::string("yt:dQw4w9WgXcQ"), "comment", std::nullopt, "x",
+                                         Subject{std::string("yt:otherVideo1")})),
+                 CodecError);
+    EXPECT_THROW(Codec::encode(make_note(make_ref(0x01, 0x02), "x.custom", std::nullopt, {},
+                                         Subject{std::string("bad key")})),
+                 CodecError);
+}
+
+// ── Соревнования (contests.md) ───────────────────────────────────────────────
+
+TEST(RecordsCodec, ContestKindsRoundTrip) {
+    const std::string rules = "b2:" + std::string(64, '1');
+    const std::string video = "b2:" + std::string(64, '2');
+    const auto round = std::get<Note>(roundtrip(make_note(std::string(rules), "round", std::nullopt,
+                                                          "Октябрь", make_ref(0x01, 0x02))));
+    EXPECT_EQ(std::get<Ref>(*round.re), make_ref(0x01, 0x02));
+    auto attempt = make_note(make_ref(0x01, 0x03), "attempt", 20, "без рывков", Subject{std::string(video)});
+    attempt.from = 5;
+    attempt.to   = 70;
+    const auto a = std::get<Note>(roundtrip(attempt));
+    EXPECT_EQ(a.v, 20);
+    EXPECT_EQ(std::get<std::string>(*a.re), video);
+    EXPECT_EQ(a.to, 70);
+    const auto verdict = std::get<Note>(roundtrip(make_note(make_ref(0x02, 0x04), "verdict", 18,
+                                                            "2 без амплитуды")));
+    EXPECT_EQ(verdict.v, 18);
+}
+
+TEST(RecordsCodec, ContestKindsKeepTheirRules) {
+    const Subject rules = std::string("b2:" + std::string(64, '1'));
+    const Subject video = std::string("b2:" + std::string(64, '2'));
+    const Subject block = make_ref(0x01, 0x02);
+    // раунд: о ключе b2: правил, второй предмет — блок правил
+    EXPECT_THROW(Codec::encode(make_note(std::string("yt:dQw4w9WgXcQ"), "round", std::nullopt, {}, block)),
+                 CodecError);
+    EXPECT_THROW(Codec::encode(make_note(rules, "round")), CodecError);
+    EXPECT_THROW(Codec::encode(make_note(rules, "round", std::nullopt, {}, video)), CodecError);
+    EXPECT_THROW(Codec::encode(make_note(rules, "round", 1, {}, block)), CodecError);
+    // попытка: о блоке раунда, видео обязательно, заявлено — не меньше нуля
+    EXPECT_THROW(Codec::encode(make_note(rules, "attempt", 20, {}, video)), CodecError);
+    EXPECT_THROW(Codec::encode(make_note(block, "attempt", 20)), CodecError);
+    EXPECT_THROW(Codec::encode(make_note(block, "attempt", -1, {}, video)), CodecError);
+    EXPECT_THROW(Codec::encode(make_note(block, "attempt", 20, {}, Subject{make_chain(0x03)})), CodecError);
+    EXPECT_NO_THROW(Codec::encode(make_note(block, "attempt", std::nullopt, {}, video)));
+    // вердикт: о блоке попытки, засчитано обязательно, без второго предмета
+    EXPECT_THROW(Codec::encode(make_note(block, "verdict")), CodecError);
+    EXPECT_THROW(Codec::encode(make_note(block, "verdict", -2)), CodecError);
+    EXPECT_THROW(Codec::encode(make_note(video, "verdict", 18)), CodecError);
+    EXPECT_THROW(Codec::encode(make_note(block, "verdict", 18, {}, video)), CodecError);
+    // тот же предмет: два разных названия, не цепь
+    EXPECT_THROW(Codec::encode(make_note(video, "same")), CodecError);
+    EXPECT_THROW(Codec::encode(make_note(video, "same", std::nullopt, {}, video)), CodecError);
+    EXPECT_THROW(Codec::encode(make_note(make_chain(0x04), "same", std::nullopt, {}, video)), CodecError);
+    EXPECT_THROW(Codec::encode(make_note(video, "same", 1, {}, Subject{std::string("yt:dQw4w9WgXcQ")})),
+                 CodecError);
+}
+
 // ── Список записей в блоке (records.md §2) ───────────────────────────────────
 
 TEST(RecordsCodec, ListOfNotesRoundTrip) {
@@ -357,6 +424,19 @@ TEST(RecordsCodec, DecodeListReadsSingleRecordAndStub) {
     EXPECT_TRUE(std::holds_alternative<Consent>(single[0]));
     EXPECT_TRUE(Codec::decode_list(std::vector<uint8_t>{0x80}).empty());   // блок-заглушка
     EXPECT_TRUE(Codec::encode_list({}) == std::vector<uint8_t>{0x80});
+}
+
+// В списке — только заметки, и не те, на которые ссылаются по одному: комментарий,
+// раунд, попытка. Вердикты и «тот же предмет» — можно.
+TEST(RecordsCodec, ListRefusesWhatIsReferredToOneByOne) {
+    const Subject video = std::string("b2:" + std::string(64, '2'));
+    EXPECT_THROW(Codec::encode_list({make_note(make_ref(0x01, 0x02), "attempt", 20, {}, video)}), CodecError);
+    EXPECT_THROW(Codec::encode_list({make_note(std::string("b2:" + std::string(64, '1')), "round",
+                                               std::nullopt, {}, make_ref(0x01, 0x02))}),
+                 CodecError);
+    EXPECT_NO_THROW(Codec::encode_list({make_note(make_ref(0x01, 0x02), "verdict", 18),
+                                        make_note(video, "same", std::nullopt, {},
+                                                  Subject{std::string("yt:dQw4w9WgXcQ")})}));
 }
 
 // В списке — только заметки и не комментарии: на запись внутри списка не сослаться.

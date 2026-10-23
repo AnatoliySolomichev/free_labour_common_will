@@ -147,6 +147,7 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--improves", "--repair", "--spend", "--machine-hours", "--meter", "--no",
     "--shifts", "--pay", "--reply-within",
     "--re", "--hops", "--limit", "--from", "--speed",
+    "--claim", "--video", "--mirror", "--name", "--better", "--text-file",
 };
 
 // True when a standalone flag (no value) is present.
@@ -348,7 +349,12 @@ static std::string record_summary(const Record& rec) {
             ss << "[Note]        " << r.kind << "  " << subject_id(r.about);
             if (r.v) ss << "  v:" << (*r.v > 0 ? "+" : "") << *r.v;
             if (!r.text.empty()) ss << "  «" << r.text << "»";
-            if (r.re) ss << "  re:" << short_hex(r.re->chain) << "/" << short_hex(r.re->hash);
+            if (r.re) {
+                if (const auto* rr = std::get_if<Ref>(&*r.re))
+                    ss << "  re:" << short_hex(rr->chain) << "/" << short_hex(rr->hash);
+                else
+                    ss << "  re:" << subject_id(*r.re);
+            }
         } else if constexpr (std::is_same_v<T, records::Consent>) {
             // Согласие или отказ (ИР-012, records.md §8.10).
             ss << "[Consent]     " << (r.agreed ? "согласен" : "ПРОТИВ") << "  "
@@ -3863,7 +3869,7 @@ static NoteRow note_row(const Note& n, const ChainBytes& chain, const std::strin
     r.kind  = n.kind;
     r.v     = n.v;
     r.text  = n.text;
-    if (n.re) r.re = subject_id(Subject{*n.re});
+    if (n.re) r.re = subject_id(*n.re);
     r.from  = n.from;
     r.to    = n.to;
     return r;
@@ -4726,6 +4732,638 @@ static int cmd_social(const fs::path& data_dir, int argc, char** argv) {
     if (sub == "views")    return cmd_social_views(data_dir, argc, argv);
     if (sub == "top")      return cmd_social_top(data_dir, argc, argv);
     return social_usage();
+}
+
+// ── Соревнования (contests.md, ИР-026) ───────────────────────────────────────
+//
+// Правила — запись организатора: текст для людей и параметры; идентификатор
+// соревнования — хеш содержания правил, b2:… (contests.md §2). Раунд — заметка
+// организатора, хеш её блока — маяк в кадре (contests.md §3). Попытка — заметка
+// о раунде с видео по хешу файла (contests.md §4), вердикт — заметка о попытке
+// (contests.md §5). Таблицу раунда клиент считает сам, глазами своего круга
+// (contests.md §6).
+
+// Объект по хешу содержимого (social.md §3.5): b2: и BLAKE2b-256 байтов.
+static std::string content_key_of(const std::vector<uint8_t>& bytes) {
+    return "b2:" + to_hex(Crypto::hash(bytes.data(), bytes.size()).bytes);
+}
+
+static std::optional<std::vector<uint8_t>> read_file_bytes(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return std::nullopt;
+    return std::vector<uint8_t>(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+}
+
+static std::optional<Ref> ref_arg(const std::string& s) {
+    const auto subject = parse_subject(s);
+    if (!subject || !std::holds_alternative<Ref>(*subject)) return std::nullopt;
+    return std::get<Ref>(*subject);
+}
+
+static std::string ref_id(const Ref& r) { return subject_id(Subject{r}); }
+
+// Правила соревнования — Concept с тегом kind:contest (contests.md §2).
+struct ContestRules {
+    std::string key;           // b2:… — идентификатор соревнования
+    std::string text;          // правила для людей
+    std::string unit;          // единица результата
+    bool        more = true;   // лучше больше; better:less — лучше меньше
+    std::string title() const { return text.substr(0, text.find('\n')); }
+};
+
+static std::optional<ContestRules> as_rules(const Record& rec) {
+    const auto* c = std::get_if<Concept>(&rec);
+    if (!c || std::find(c->tags.begin(), c->tags.end(), "kind:contest") == c->tags.end())
+        return std::nullopt;
+    ContestRules r;
+    r.key  = content_key_of(Codec::encode(*c));
+    r.text = c->text;
+    for (const auto& tag : c->tags) {
+        if (tag.rfind("unit:", 0) == 0) r.unit = tag.substr(5);
+        if (tag == "better:less") r.more = false;
+    }
+    return r;
+}
+
+// Блок с правилами этого соревнования в своей цепи — без него раунд не открыть.
+static std::optional<Ref> own_rules_block(Context& ctx, const std::string& key) {
+    for (const NodeIndex node : ctx.local_branches()) {
+        std::vector<Block> blocks;
+        try { blocks = ctx.bc.get_branch(ctx.user_id, node); }
+        catch (const BlockchainError&) { continue; }
+        for (const auto& b : blocks) {
+            if (b.type != BlockType::DATA) continue;
+            try {
+                const auto rules = as_rules(Codec::decode(b.payload.data(), b.payload.size()));
+                if (rules && rules->key == key) return Ref{ctx.user_id.bytes, Crypto::hash_block(b).bytes};
+            } catch (const CodecError&) {}
+        }
+    }
+    return std::nullopt;
+}
+
+static Block append_payload(Context& ctx, const std::vector<uint8_t>& payload) {
+    return ctx.bc.append_data_block(ctx.user_id, ctx.leaf, payload, ctx.working_kp,
+                                    static_cast<Timestamp>(std::time(nullptr)));
+}
+
+// Копии видео на площадках — «тот же предмет» (contests.md §4), одним блоком.
+static int write_mirrors(Context& ctx, const std::string& video, const std::vector<std::string>& links,
+                         const std::string& via) {
+    std::vector<Record> notes;
+    for (const auto& link : links) {
+        const auto key = external_key(link);
+        if (!key) {
+            std::cerr << "не ссылка: " << link << "\n";
+            return 1;
+        }
+        Note n;
+        n.about = video;
+        n.kind  = "same";
+        n.re    = Subject{*key};
+        notes.push_back(n);
+    }
+    if (notes.empty()) return 0;
+    const auto block = append_payload(ctx, notes.size() == 1 ? Codec::encode(notes[0])
+                                                             : Codec::encode_list(notes));
+    std::cout << "копий видео: " << notes.size() << " — блок #" << block.address.block_index << "\n";
+    if (!via.empty()) upload_block(ctx, via, block);
+    return 0;
+}
+
+static int contest_usage() {
+    std::cerr << "Usage: bc contest КОМАНДА … (contests.md §7)\n"
+                 "  create ТЕКСТ --unit ЕДИНИЦА [--better more|less] [--text-file ФАЙЛ]\n"
+                 "                                    правила; печатает b2:… и ЦЕПЬ/ХЕШ правил\n"
+                 "  adopt ПРАВИЛА                     копия правил к себе — тот же b2:…\n"
+                 "  join ПРАВИЛА                      согласие с правилами\n"
+                 "  round СОРЕВНОВАНИЕ [--name ТЕКСТ]  раунд; печатает маяк\n"
+                 "  attempt РАУНД --video ФАЙЛ|b2:… [--claim N] [--from T] [--to T]\n"
+                 "          [--mirror ССЫЛКА …] [--note ТЕКСТ]\n"
+                 "  mirror ВИДЕО ССЫЛКА…              копии видео на площадках\n"
+                 "  verdict ПОПЫТКА N [--from T] [--to T] [--note ТЕКСТ]\n"
+                 "  verify ФАЙЛ ПОПЫТКА --via URL      тот ли это файл\n"
+                 "  show СОРЕВНОВАНИЕ --via URL        правила и раунды\n"
+                 "  table РАУНД --via URL [--hops 2] [--all]\n"
+                 "ПРАВИЛА, РАУНД, ПОПЫТКА — ЦЕПЬ/ХЕШ блока; СОРЕВНОВАНИЕ — b2:… или ЦЕПЬ/ХЕШ\n"
+                 "правил; пишущие команды выкладывают блок при --via\n";
+    return 1;
+}
+
+// bc contest create ТЕКСТ --unit ЕДИНИЦА [--better more|less] [--text-file ФАЙЛ]
+// [--via URL] — правила соревнования (contests.md §2).
+static int cmd_contest_create(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);   // [contest, create, ТЕКСТ…]
+    std::string text;
+    for (size_t i = 2; i < pos.size(); ++i) text += (i > 2 ? " " : "") + pos[i];
+    if (const auto file = flag_val(argc, argv, "--text-file"); !file.empty()) {
+        const auto bytes = read_file_bytes(file);
+        if (!bytes) {
+            std::cerr << "не прочитать " << file << "\n";
+            return 1;
+        }
+        text.assign(bytes->begin(), bytes->end());
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+    }
+    const auto unit   = flag_val(argc, argv, "--unit");
+    const auto better = flag_val(argc, argv, "--better", "more");
+    if (text.empty() || unit.empty()) return contest_usage();
+    if (better != "more" && better != "less") {
+        std::cerr << "--better: more (лучше больше) или less (лучше меньше)\n";
+        return 1;
+    }
+    Concept c;
+    c.text = text;
+    c.tags = {"kind:contest", "unit:" + unit, "better:" + better, "agg:median"};
+    Context    ctx(data_dir, parse_leaf_index(argc, argv));
+    const auto block = append_record(ctx, c);
+    std::cout << "соревнование " << content_key_of(Codec::encode(c)) << "\n"
+              << "  «" << text.substr(0, text.find('\n')) << "»\n"
+              << "правила: " << to_hex(ctx.user_id.bytes) << "/" << to_hex(Crypto::hash_block(block).bytes)
+              << "\n";
+    if (const auto via = flag_val(argc, argv, "--via"); !via.empty()) upload_block(ctx, via, block);
+    return 0;
+}
+
+// bc contest adopt ПРАВИЛА [--via URL] — копия правил к себе: тот же b2:…, и с
+// ней можно открывать свои раунды (contests.md §2).
+static int cmd_contest_adopt(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);   // [contest, adopt, ПРАВИЛА]
+    const auto via = flag_val(argc, argv, "--via");
+    if (pos.size() < 3) return contest_usage();
+    const auto ref = ref_arg(pos[2]);
+    if (!ref) {
+        std::cerr << "ПРАВИЛА — ЦЕПЬ/ХЕШ блока правил\n";
+        return 1;
+    }
+    Context    ctx(data_dir, parse_leaf_index(argc, argv));
+    const auto rec   = load_record(ctx, via, *ref);
+    const auto rules = rec ? as_rules(*rec) : std::nullopt;
+    if (!rules) {
+        std::cerr << "по " << ref_id(*ref).substr(0, 16) << "… правил соревнования не нашлось"
+                  << (via.empty() ? " (агрегатор — --via URL)\n" : "\n");
+        return 1;
+    }
+    if (const auto own = own_rules_block(ctx, rules->key)) {
+        std::cout << "эти правила у вас уже есть: " << ref_id(*own) << "\n";
+        return 0;
+    }
+    const auto block = append_record(ctx, std::get<Concept>(*rec));
+    std::cout << "копия правил " << rules->key << "\n  «" << rules->title() << "»\n"
+              << "правила: " << to_hex(ctx.user_id.bytes) << "/" << to_hex(Crypto::hash_block(block).bytes)
+              << "\n";
+    if (!via.empty()) upload_block(ctx, via, block);
+    return 0;
+}
+
+// bc contest join ПРАВИЛА [--via URL] — согласие с правилами (records.md §8.10):
+// в таблицу идут попытки и вердикты только согласившихся (contests.md §6).
+static int cmd_contest_join(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);   // [contest, join, ПРАВИЛА]
+    if (pos.size() < 3) return contest_usage();
+    const auto ref = ref_arg(pos[2]);
+    if (!ref) {
+        std::cerr << "ПРАВИЛА — ЦЕПЬ/ХЕШ блока правил\n";
+        return 1;
+    }
+    if (ref->chain == load_user_id(data_dir).bytes) {
+        std::cerr << "это ваши правила — подпись под ними и есть согласие (records.md §8.10)\n";
+        return 1;
+    }
+    std::cout << "согласие с правилами " << ref_id(*ref).substr(0, 16) << "…\n";
+    return cmd_write(data_dir, argc, argv, Consent{*ref, true, "правила соревнования"});
+}
+
+// bc contest round СОРЕВНОВАНИЕ [--name ТЕКСТ] [--via URL] — открыть раунд: хеш
+// блока раунда — маяк, его начало показывают в кадре (contests.md §3).
+static int cmd_contest_round(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);   // [contest, round, СОРЕВНОВАНИЕ]
+    if (pos.size() < 3) return contest_usage();
+    const auto key = external_key(pos[2]);
+    if (!key || key->rfind("b2:", 0) != 0) {
+        std::cerr << "СОРЕВНОВАНИЕ — b2:… (печатает bc contest create)\n";
+        return 1;
+    }
+    Context    ctx(data_dir, parse_leaf_index(argc, argv));
+    const auto rules = own_rules_block(ctx, *key);
+    if (!rules) {
+        std::cerr << "у вас нет этих правил — сначала копия к себе: bc contest adopt ПРАВИЛА\n";
+        return 1;
+    }
+    Note n;
+    n.about = *key;
+    n.kind  = "round";
+    n.text  = flag_val(argc, argv, "--name");
+    n.re    = Subject{*rules};
+    const auto block = append_record(ctx, n);
+    const auto hash  = to_hex(Crypto::hash_block(block).bytes);
+    std::cout << "раунд " << to_hex(ctx.user_id.bytes) << "/" << hash << "\n"
+              << "маяк: " << hash.substr(0, 6) << " — начало хеша блока раунда; его показывают в кадре\n";
+    if (const auto via = flag_val(argc, argv, "--via"); !via.empty()) upload_block(ctx, via, block);
+    return 0;
+}
+
+// Видео: файл → b2: по хешу его байтов, или готовый ключ.
+static std::optional<std::string> video_arg(const std::string& s) {
+    if (s.rfind("b2:", 0) == 0) return external_key(s);
+    const auto bytes = read_file_bytes(s);
+    if (!bytes) return std::nullopt;
+    return content_key_of(*bytes);
+}
+
+// bc contest attempt РАУНД --video ФАЙЛ|b2:… [--claim N] [--from T] [--to T]
+// [--mirror ССЫЛКА …] [--note ТЕКСТ] [--via URL] — попытка (contests.md §4).
+static int cmd_contest_attempt(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos   = get_positionals(argc, argv);   // [contest, attempt, РАУНД]
+    const auto via   = flag_val(argc, argv, "--via");
+    const auto video = video_arg(flag_val(argc, argv, "--video"));
+    if (pos.size() < 3) return contest_usage();
+    const auto round = ref_arg(pos[2]);
+    if (!round) {
+        std::cerr << "РАУНД — ЦЕПЬ/ХЕШ блока раунда (печатает bc contest round)\n";
+        return 1;
+    }
+    if (!video) {
+        std::cerr << "--video: файл видео или его ключ b2:… — без него попытки нет\n";
+        return 1;
+    }
+    Note n;
+    n.about = *round;
+    n.kind  = "attempt";
+    n.re    = Subject{*video};
+    n.text  = flag_val(argc, argv, "--note");
+    if (const auto claim = flag_val(argc, argv, "--claim"); !claim.empty()) n.v = std::stoll(claim);
+    for (const auto& [flag, slot] : {std::pair<const char*, std::optional<int64_t>*>{"--from", &n.from},
+                                     {"--to", &n.to}}) {
+        const auto s = flag_val(argc, argv, flag);
+        if (s.empty()) continue;
+        *slot = clock_arg(s);
+        if (!*slot) {
+            std::cerr << flag << ": секунды, ММ:СС или Ч:ММ:СС на шкале видео\n";
+            return 1;
+        }
+    }
+    Context    ctx(data_dir, parse_leaf_index(argc, argv));
+    const auto block = append_record(ctx, n);
+    std::cout << "попытка " << to_hex(ctx.user_id.bytes) << "/" << to_hex(Crypto::hash_block(block).bytes)
+              << "\n  видео: " << *video << "\n";
+    if (!via.empty()) upload_block(ctx, via, block);
+    return write_mirrors(ctx, *video, flag_all(argc, argv, "--mirror"), via);
+}
+
+// bc contest mirror ВИДЕО ССЫЛКА… [--via URL] — копии видео на площадках
+// (contests.md §4); записать их может кто угодно.
+static int cmd_contest_mirror(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);   // [contest, mirror, ВИДЕО, ССЫЛКА…]
+    if (pos.size() < 4) return contest_usage();
+    const auto video = video_arg(pos[2]);
+    if (!video) {
+        std::cerr << "ВИДЕО — файл или его ключ b2:…\n";
+        return 1;
+    }
+    Context ctx(data_dir, parse_leaf_index(argc, argv));
+    return write_mirrors(ctx, *video, std::vector<std::string>(pos.begin() + 3, pos.end()),
+                         flag_val(argc, argv, "--via"));
+}
+
+// bc contest verdict ПОПЫТКА N [--from T] [--to T] [--note ТЕКСТ] [--via URL] —
+// вердикт судьи: сколько засчитано (contests.md §5). Себе не судья.
+static int cmd_contest_verdict(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);   // [contest, verdict, ПОПЫТКА, N]
+    if (pos.size() < 4) return contest_usage();
+    const auto attempt = ref_arg(pos[2]);
+    if (!attempt) {
+        std::cerr << "ПОПЫТКА — ЦЕПЬ/ХЕШ блока попытки\n";
+        return 1;
+    }
+    if (attempt->chain == load_user_id(data_dir).bytes) {
+        std::cerr << "это ваша попытка — себе не судья (contests.md §5)\n";
+        return 1;
+    }
+    Note n;
+    n.about = *attempt;
+    n.kind  = "verdict";
+    n.v     = std::stoll(pos[3]);
+    n.text  = flag_val(argc, argv, "--note");
+    for (const auto& [flag, slot] : {std::pair<const char*, std::optional<int64_t>*>{"--from", &n.from},
+                                     {"--to", &n.to}}) {
+        const auto s = flag_val(argc, argv, flag);
+        if (s.empty()) continue;
+        *slot = clock_arg(s);
+        if (!*slot) {
+            std::cerr << flag << ": секунды, ММ:СС или Ч:ММ:СС на шкале видео\n";
+            return 1;
+        }
+    }
+    std::cout << "вердикт: засчитано " << *n.v << " — попытка " << ref_id(*attempt).substr(0, 16) << "…\n";
+    return cmd_write(data_dir, argc, argv, n);
+}
+
+// bc contest verify ФАЙЛ ПОПЫТКА --via URL — тот ли это файл: хеш файла против
+// видео попытки (contests.md §4).
+static int cmd_contest_verify(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);   // [contest, verify, ФАЙЛ, ПОПЫТКА]
+    const auto via = flag_val(argc, argv, "--via");
+    if (pos.size() < 4) return contest_usage();
+    const auto bytes   = read_file_bytes(pos[2]);
+    const auto attempt = ref_arg(pos[3]);
+    if (!bytes || !attempt) return contest_usage();
+    Context    ctx(data_dir, parse_leaf_index(argc, argv));
+    const auto rec  = load_record(ctx, via, *attempt);
+    const auto* n   = rec ? std::get_if<Note>(&*rec) : nullptr;
+    if (!n || n->kind != "attempt" || !n->re) {
+        std::cerr << "попытки " << ref_id(*attempt).substr(0, 16) << "… не нашлось\n";
+        return 1;
+    }
+    const auto mine = content_key_of(*bytes);
+    if (subject_id(*n->re) == mine) {
+        std::cout << "тот самый файл: " << mine << "\n";
+        return 0;
+    }
+    std::cout << "НЕ тот файл: у попытки " << subject_id(*n->re) << ", у файла " << mine << "\n";
+    return 1;
+}
+
+// Раунды соревнования, о которых знает агрегатор: раунд действителен, только
+// если правила, которые он называет, лежат в цепи того, кто его открыл, и их
+// содержание и есть это соревнование (contests.md §3).
+struct ContestRound {
+    Ref         round;
+    Ref         rules;
+    std::string name;
+};
+
+static std::optional<std::vector<ContestRound>> contest_rounds(Context& ctx, const std::string& via,
+                                                               const std::string& key) {
+    const auto rows = fetch_notes(via, "about=" + url_encode(key));
+    if (!rows) return std::nullopt;
+    std::vector<ContestRound> out;
+    std::map<std::string, bool> checked;   // блок правил → его содержание и есть key
+    for (const auto& r : *rows) {
+        if (r.kind != "round" || r.about != key) continue;
+        const auto rules = ref_arg(r.re);
+        if (!rules || rules->chain != r.chain) continue;   // правила — в цепи организатора
+        const auto id = ref_id(*rules);
+        if (!checked.count(id)) {
+            const auto rec  = load_record(ctx, via, *rules);
+            const auto real = rec ? as_rules(*rec) : std::nullopt;
+            checked[id] = real && real->key == key;
+        }
+        if (!checked[id]) continue;
+        Ref round{};
+        round.chain = r.chain;
+        if (!from_hex(r.block, round.hash.data(), 32)) continue;
+        out.push_back({round, *rules, r.text});
+    }
+    return out;
+}
+
+// bc contest show СОРЕВНОВАНИЕ --via URL — правила и раунды (contests.md §7).
+static int cmd_contest_show(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);   // [contest, show, СОРЕВНОВАНИЕ]
+    const auto via = flag_val(argc, argv, "--via");
+    if (pos.size() < 3 || via.empty()) return contest_usage();
+    Context                     ctx(data_dir, parse_leaf_index(argc, argv));
+    std::optional<ContestRules> rules;
+    std::string                 key;
+    if (const auto ref = ref_arg(pos[2])) {            // ЦЕПЬ/ХЕШ правил
+        const auto rec = load_record(ctx, via, *ref);
+        rules = rec ? as_rules(*rec) : std::nullopt;
+        if (!rules) {
+            std::cerr << "по " << ref_id(*ref).substr(0, 16) << "… правил соревнования не нашлось\n";
+            return 1;
+        }
+        key = rules->key;
+    } else if (const auto k = external_key(pos[2]); k && k->rfind("b2:", 0) == 0) {
+        key = *k;
+    } else {
+        return contest_usage();
+    }
+    const auto rounds = contest_rounds(ctx, via, key);
+    if (!rounds) {
+        std::cerr << "агрегатор не ответил: " << via << "\n";
+        return 1;
+    }
+    if (!rules && !rounds->empty()) {
+        const auto rec = load_record(ctx, via, rounds->front().rules);
+        rules = rec ? as_rules(*rec) : std::nullopt;
+    }
+    std::cout << "соревнование " << key << "\n";
+    if (rules) {
+        std::cout << "  единица: " << rules->unit << " · лучше " << (rules->more ? "больше" : "меньше")
+                  << " · итог попытки — медиана вердиктов\n";
+        std::istringstream text(rules->text);
+        std::string        line;
+        while (std::getline(text, line)) std::cout << "  │ " << line << "\n";
+    } else {
+        std::cout << "  правил не нашлось: раундов нет, а ЦЕПЬ/ХЕШ правил не назван\n";
+    }
+    std::cout << "раундов: " << rounds->size() << "\n";
+    for (const auto& r : *rounds) {
+        const auto attempts = fetch_notes(via, "about=" + url_encode(ref_id(r.round)));
+        size_t     count    = 0;
+        if (attempts)
+            for (const auto& a : *attempts) count += a.kind == "attempt" && a.about == ref_id(r.round);
+        std::cout << "  " << (r.name.empty() ? std::string("раунд") : "«" + r.name + "»") << "  маяк "
+                  << to_hex(r.round.hash).substr(0, 6) << "  · организатор " << who_short(r.round.chain)
+                  << "  · попыток " << count << "\n    " << ref_id(r.round) << "\n";
+    }
+    return 0;
+}
+
+// Своё согласие с правилами — из своих веток, даже не выложенное: блок правил →
+// согласен ли (последнее слово, records.md §8.10).
+static std::map<std::string, bool> own_consents(Context& ctx) {
+    std::map<std::string, std::pair<int64_t, bool>> last;
+    for (const NodeIndex node : ctx.local_branches()) {
+        std::vector<Block> blocks;
+        try { blocks = ctx.bc.get_branch(ctx.user_id, node); }
+        catch (const BlockchainError&) { continue; }
+        for (const auto& b : blocks) {
+            if (b.type != BlockType::DATA) continue;
+            try {
+                const auto rec = Codec::decode(b.payload.data(), b.payload.size());
+                if (const auto* c = std::get_if<Consent>(&rec)) {
+                    auto& slot = last[ref_id(c->target)];
+                    if (b.timestamp_claimed >= slot.first) slot = {b.timestamp_claimed, c->agreed};
+                }
+            } catch (const CodecError&) {}
+        }
+    }
+    std::map<std::string, bool> out;
+    for (const auto& [id, word] : last) out[id] = word.second;
+    return out;
+}
+
+// bc contest table РАУНД --via URL [--hops 2] [--all] — таблица раунда глазами
+// вашего круга (contests.md §6): судьи — ваш круг, согласные с правилами; итог
+// попытки — медиана вердиктов, сомнение — не в пользу попытки.
+static int cmd_contest_table(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);   // [contest, table, РАУНД]
+    const auto via = flag_val(argc, argv, "--via");
+    if (pos.size() < 3 || via.empty()) return contest_usage();
+    const auto round = ref_arg(pos[2]);
+    if (!round) {
+        std::cerr << "РАУНД — ЦЕПЬ/ХЕШ блока раунда\n";
+        return 1;
+    }
+    const bool all  = flag_present(argc, argv, "--all");
+    const int  hops = hops_arg(argc, argv);
+    Context    ctx(data_dir, parse_leaf_index(argc, argv));
+
+    // Раунд, его правила и соревнование (contests.md §3).
+    const auto  round_rec = load_record(ctx, via, *round);
+    const auto* rn        = round_rec ? std::get_if<Note>(&*round_rec) : nullptr;
+    if (!rn || rn->kind != "round" || !rn->re || !std::holds_alternative<Ref>(*rn->re)) {
+        std::cerr << ref_id(*round).substr(0, 16) << "… — не раунд соревнования\n";
+        return 1;
+    }
+    const auto key       = subject_id(rn->about);
+    const auto rules_ref = std::get<Ref>(*rn->re);
+    const auto rules_rec = load_record(ctx, via, rules_ref);
+    const auto rules     = rules_rec ? as_rules(*rules_rec) : std::nullopt;
+    if (rules_ref.chain != round->chain || !rules || rules->key != key) {
+        std::cerr << "раунд не по правилам, которые называет: их нет в цепи организатора "
+                     "или их содержание — другое соревнование (contests.md §3)\n";
+        return 1;
+    }
+
+    // Согласные с правилами (contests.md §6): хозяева копий правил, известных по
+    // раундам соревнования, и записавшие согласие с любой из них.
+    const auto rounds = contest_rounds(ctx, via, key);
+    if (!rounds) {
+        std::cerr << "агрегатор не ответил: " << via << "\n";
+        return 1;
+    }
+    std::set<std::string> rules_blocks{ref_id(rules_ref)};
+    for (const auto& r : *rounds) rules_blocks.insert(ref_id(r.rules));
+    std::set<ChainBytes> consented;
+    const auto           mine = own_consents(ctx);
+    for (const auto& id : rules_blocks) {
+        const auto ref = ref_arg(id);
+        consented.insert(ref->chain);                  // подпись под своими правилами — согласие
+        if (const auto own = mine.find(id); own != mine.end() && own->second) consented.insert(ctx.user_id.bytes);
+        const auto doc = fetch_json(via, "/consents/" + to_hex(ref->hash));
+        if (!doc || !doc->is_array()) {
+            std::cerr << "агрегатор не ответил: " << via << "\n";
+            return 1;
+        }
+        for (const auto& v : doc->array) {
+            if (!v.is_object()) continue;
+            const auto* agreed = records::json::find(v.object, "agreed");
+            ChainBytes  c{};
+            if ((!agreed || agreed->boolean) && from_hex(jstr(v.object, "chain"), c.data(), 32))
+                consented.insert(c);
+        }
+    }
+
+    const auto circle = build_circle(ctx, hops, via);
+    auto       rows   = fetch_notes(via, "about=" + url_encode(ref_id(*round)));
+    if (!circle || !rows) {
+        std::cerr << "агрегатор не ответил: " << via << "\n";
+        return 1;
+    }
+    // Свои попытки и вердикты — из своих веток, даже не выложенные.
+    {
+        std::set<std::pair<std::string, uint32_t>> seen;
+        std::set<std::string>                      attempts{ref_id(*round)};
+        for (const auto& r : *rows) {
+            seen.insert({r.block, r.pos});
+            if (r.kind == "attempt") attempts.insert(r.id());
+        }
+        for (const auto& r : own_notes(ctx))
+            if (attempts.count(r.about) && seen.insert({r.block, r.pos}).second) rows->push_back(r);
+    }
+
+    struct Scored {
+        const NoteRow*       attempt = nullptr;
+        std::vector<int64_t> values;        // вердикты судей, по возрастанию
+        int64_t              result = 0;    // медиана
+    };
+    std::vector<Scored> scored;
+    size_t unjudged = 0, foreign_attempts = 0, foreign_verdicts = 0;
+    for (const auto& a : *rows) {
+        if (a.kind != "attempt" || a.about != ref_id(*round) || circle->layer(a.chain) < 0) continue;
+        if (!consented.count(a.chain)) {
+            ++foreign_attempts;
+            continue;
+        }
+        // Последнее слово каждого судьи (records.md §8.11); себе не судья.
+        std::map<ChainBytes, const NoteRow*> last;
+        for (const auto& v : *rows) {
+            if (v.kind != "verdict" || v.about != a.id() || !v.v || v.chain == a.chain) continue;
+            const int l = circle->layer(v.chain);
+            if (l < 0 || (!all && l > 2)) continue;
+            if (!consented.count(v.chain)) {
+                ++foreign_verdicts;
+                continue;
+            }
+            if (auto& slot = last[v.chain]; !slot || later(v, *slot)) slot = &v;
+        }
+        if (last.empty()) {
+            ++unjudged;
+            continue;
+        }
+        Scored s;
+        s.attempt = &a;
+        for (const auto& [judge, v] : last) s.values.push_back(*v->v);
+        std::sort(s.values.begin(), s.values.end());
+        // Медиана; при чётном числе судей — та из двух средних, что хуже для
+        // спортсмена: сомнение — не в пользу попытки.
+        const size_t n = s.values.size();
+        s.result = rules->more ? s.values[(n - 1) / 2] : s.values[n / 2];
+        scored.push_back(std::move(s));
+    }
+    // Лучшая попытка каждого; при равенстве — больше судей, потом — раньше.
+    const auto better = [&](const Scored& x, const Scored& y) {
+        if (x.result != y.result) return rules->more ? x.result > y.result : x.result < y.result;
+        if (x.values.size() != y.values.size()) return x.values.size() > y.values.size();
+        return later(*y.attempt, *x.attempt);
+    };
+    std::map<ChainBytes, const Scored*> best;
+    for (const auto& s : scored)
+        if (auto& slot = best[s.attempt->chain]; !slot || better(s, *slot)) slot = &s;
+    std::vector<const Scored*> table;
+    for (const auto& [chain, s] : best) table.push_back(s);
+    std::sort(table.begin(), table.end(), [&](const Scored* x, const Scored* y) { return better(*x, *y); });
+
+    std::cout << "«" << rules->title() << "»" << (rn->text.empty() ? "" : ", раунд «" + rn->text + "»")
+              << " — маяк " << to_hex(round->hash).substr(0, 6) << "\n"
+              << "  " << rules->unit << " · лучше " << (rules->more ? "больше" : "меньше") << " · судьи — "
+              << (all ? "все согласные с правилами" : "ваш круг") << " · итог — медиана\n";
+    if (table.empty()) std::cout << "  засчитанных попыток нет\n";
+    for (size_t i = 0; i < table.size(); ++i) {
+        const auto& s = *table[i];
+        std::cout << "  " << i + 1 << ". "
+                  << (s.attempt->chain == circle->me ? std::string("вы") : who_short(s.attempt->chain))
+                  << "  засчитано " << s.result;
+        if (s.attempt->v) std::cout << " из заявленных " << *s.attempt->v;
+        std::cout << "  ·  судей " << s.values.size();
+        if (s.attempt->re.rfind("b2:", 0) != 0) std::cout << "  ·  видео без хеша файла";
+        std::cout << "\n";
+    }
+    if (unjudged)
+        std::cout << "  без вердиктов " << (all ? "" : "вашего круга ") << "— попыток: " << unjudged << "\n";
+    if (foreign_attempts || foreign_verdicts)
+        std::cout << "  без согласия с правилами — попыток: " << foreign_attempts << ", вердиктов: "
+                  << foreign_verdicts << "\n";
+    return 0;
+}
+
+static int cmd_contest(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);   // [contest, КОМАНДА, …]
+    const std::string sub = pos.size() > 1 ? pos[1] : std::string{};
+    if (sub == "create")  return cmd_contest_create(data_dir, argc, argv);
+    if (sub == "adopt")   return cmd_contest_adopt(data_dir, argc, argv);
+    if (sub == "join")    return cmd_contest_join(data_dir, argc, argv);
+    if (sub == "round")   return cmd_contest_round(data_dir, argc, argv);
+    if (sub == "attempt") return cmd_contest_attempt(data_dir, argc, argv);
+    if (sub == "mirror")  return cmd_contest_mirror(data_dir, argc, argv);
+    if (sub == "verdict") return cmd_contest_verdict(data_dir, argc, argv);
+    if (sub == "verify")  return cmd_contest_verify(data_dir, argc, argv);
+    if (sub == "show")    return cmd_contest_show(data_dir, argc, argv);
+    if (sub == "table")   return cmd_contest_table(data_dir, argc, argv);
+    return contest_usage();
 }
 
 // bc tool shares ПРЕФИКС [--via URL]
@@ -9361,6 +9999,29 @@ Merge, manual relay (blockchain.md §6.4 bilateral two-round protocol):
   ПРЕДМЕТ — ссылка, ключ или ЦЕПЬ/ХЕШ блока; пишущие команды выкладывают
   блок при --via
 
+Соревнования — правила по хешу, раунды с маяком, попытки, вердикты (contests.md):
+  contest create ТЕКСТ             Правила: текст для людей и параметры; печатает
+    --unit ЕДИНИЦА                     соревнование b2:… (хеш содержания правил)
+    [--better more|less]               и ЦЕПЬ/ХЕШ блока правил
+    [--text-file ФАЙЛ]
+  contest adopt ПРАВИЛА            Копия правил к себе: тот же b2:…, можно
+                                       открывать свои раунды
+  contest join ПРАВИЛА             Согласие с правилами: в таблицу идут попытки
+                                       и вердикты только согласившихся
+  contest round СОРЕВНОВАНИЕ       Открыть раунд; начало хеша его блока — маяк,
+    [--name ТЕКСТ]                     его показывают в кадре
+  contest attempt РАУНД            Попытка: видео — ключ по хешу файла; копии на
+    --video ФАЙЛ|b2:…                  площадках — «тот же предмет»
+    [--claim N] [--from T] [--to T]
+    [--mirror ССЫЛКА …] [--note ТЕКСТ]
+  contest mirror ВИДЕО ССЫЛКА…     Ещё копии видео — записать может кто угодно
+  contest verdict ПОПЫТКА N        Вердикт судьи: засчитано N; себе не судья
+    [--from T] [--to T] [--note ТЕКСТ]
+  contest verify ФАЙЛ ПОПЫТКА      Тот ли это файл, что в попытке
+  contest show СОРЕВНОВАНИЕ        Правила и раунды
+  contest table РАУНД --via URL    Таблица раунда: судьи — ваш круг, согласные с
+    [--hops 2] [--all]                 правилами; итог — медиана вердиктов
+
 Чей ключ стоит за пломбой (blockchain.md §7.5):
   keypath publish --via URL        Выложить путь своего ключа на склад
   keypath who KEY_HEX [--via URL]  Привести ключ к цепи: сперва по своим узлам,
@@ -9497,6 +10158,7 @@ int main(int argc, char** argv) {
         else if (cmd == "consent"   && subcmd == "add")     return cmd_consent_add(data_dir, argc, argv);
         else if (cmd == "consent"   && subcmd == "list")    return cmd_consent_list(data_dir, argc, argv);
         else if (cmd == "social")                           return cmd_social(data_dir, argc, argv);
+        else if (cmd == "contest")                          return cmd_contest(data_dir, argc, argv);
         else if (cmd == "keypath"   && subcmd == "publish") return cmd_keypath_publish(data_dir, argc, argv);
         else if (cmd == "keypath"   && subcmd == "who")     return cmd_keypath_who(data_dir, argc, argv);
         else if (cmd == "fraud"     && subcmd == "verify")  return cmd_fraud_verify(argc, argv);
