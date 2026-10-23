@@ -184,6 +184,140 @@ TEST(RecordsCodec, ConsentRejectsEmptyTarget) {
     EXPECT_THROW(Codec::encode(Consent{ make_ref(0x01, 0x00), true, "" }), CodecError);
 }
 
+// ── Note (заметка о предмете, records.md §8.11) ──────────────────────────────
+
+static Note make_note(Subject about, std::string kind, std::optional<int64_t> v = std::nullopt,
+                      std::string text = {}, std::optional<Ref> re = std::nullopt) {
+    Note n;
+    n.about = std::move(about);
+    n.kind  = std::move(kind);
+    n.v     = v;
+    n.text  = std::move(text);
+    n.re    = re;
+    return n;
+}
+
+static ChainId make_chain(uint8_t fill) {
+    ChainId c{};
+    c.fill(fill);
+    return c;
+}
+
+TEST(RecordsCodec, NoteReactOnExternalObjectRoundTrip) {
+    const auto n = make_note(std::string("yt:dQw4w9WgXcQ"), "react", -1);
+    const auto d = std::get<Note>(roundtrip(n));
+    EXPECT_EQ(std::get<std::string>(d.about), "yt:dQw4w9WgXcQ");
+    EXPECT_EQ(d.kind, "react");
+    EXPECT_EQ(d.v, -1);
+    EXPECT_TRUE(d.text.empty());
+    EXPECT_FALSE(d.re);
+}
+
+// Ответ: предмет — корень обсуждения, re — комментарий, на который отвечают.
+TEST(RecordsCodec, NoteReplyOnBlockRoundTrip) {
+    const auto n = make_note(make_ref(0x01, 0x02), "comment", std::nullopt, "согласен",
+                             make_ref(0x03, 0x04));
+    const auto d = std::get<Note>(roundtrip(n));
+    EXPECT_EQ(std::get<Ref>(d.about), make_ref(0x01, 0x02));
+    EXPECT_EQ(d.text, "согласен");
+    ASSERT_TRUE(d.re);
+    EXPECT_EQ(*d.re, make_ref(0x03, 0x04));
+    EXPECT_FALSE(d.v);
+}
+
+TEST(RecordsCodec, NoteFollowAndRetractRoundTrip) {
+    const auto f = std::get<Note>(roundtrip(make_note(make_chain(0x05), "follow", 1)));
+    EXPECT_EQ(std::get<ChainId>(f.about), make_chain(0x05));
+    EXPECT_EQ(f.v, 1);
+    const auto r = std::get<Note>(roundtrip(make_note(make_ref(0x06, 0x07), "retract")));
+    EXPECT_EQ(r.kind, "retract");
+    EXPECT_FALSE(r.v);
+}
+
+// Мягкий слой растёт, не трогая жёсткий: незнакомый вид проходит с любыми полями.
+TEST(RecordsCodec, NoteUnknownKindPassesWithAnyFields) {
+    const auto n = make_note(make_ref(0x01, 0x02), "verdict", 18, "без рывков", make_ref(0x03, 0x04));
+    const auto d = std::get<Note>(roundtrip(n));
+    EXPECT_EQ(d.kind, "verdict");
+    EXPECT_EQ(d.v, 18);
+    EXPECT_EQ(d.text, "без рывков");
+    EXPECT_TRUE(d.re);
+    const auto review = std::get<Note>(roundtrip(make_note(std::string("gtin:4600000000000"),
+                                                           "review", 4, "держит заряд")));
+    EXPECT_EQ(std::get<std::string>(review.about), "gtin:4600000000000");
+}
+
+// Необязательные ключи пишутся, только когда заданы: map(3) у снятия, map(4) у реакции.
+TEST(RecordsCodec, NoteWritesOnlyWhatIsSet) {
+    EXPECT_EQ(Codec::encode(make_note(make_ref(0x06, 0x07), "retract"))[0], 0xA3);
+    EXPECT_EQ(Codec::encode(make_note(std::string("tg:durov/42"), "react", 1))[0], 0xA4);
+    EXPECT_EQ(Codec::encode(make_note(std::string("tg:durov/42"), "comment", std::nullopt, "x"))[0], 0xA4);
+}
+
+TEST(RecordsCodec, NoteRejectsBadShape) {
+    const Subject key = std::string("yt:dQw4w9WgXcQ");
+    for (const char* kind : {"", "Like", "re act", "реакция", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
+        EXPECT_THROW(Codec::encode(make_note(key, kind, 1)), CodecError) << kind;
+    for (const char* bad : {"YT:x", "yt:", "https://youtu.be/x", "yt:a b", ":x", "verylongnamespace1:x"})
+        EXPECT_THROW(Codec::encode(make_note(std::string(bad), "react", 1)), CodecError) << bad;
+    EXPECT_THROW(Codec::encode(make_note(make_ref(0x00, 0x02), "react", 1)), CodecError);
+    EXPECT_THROW(Codec::encode(make_note(make_chain(0x00), "follow", 1)), CodecError);
+    EXPECT_THROW(Codec::encode(make_note(key, "comment", std::nullopt, "x", make_ref(0x01, 0x00))),
+                 CodecError);
+}
+
+TEST(RecordsCodec, NoteKnownKindsKeepTheirRules) {
+    const Subject key   = std::string("yt:dQw4w9WgXcQ");
+    const Subject block = make_ref(0x01, 0x02);
+    const Subject chain = make_chain(0x03);
+    // react: −1/0/+1, без текста и ответа, не на цепь
+    EXPECT_THROW(Codec::encode(make_note(key, "react", 2)), CodecError);
+    EXPECT_THROW(Codec::encode(make_note(key, "react")), CodecError);
+    EXPECT_THROW(Codec::encode(make_note(key, "react", 1, "текст")), CodecError);
+    EXPECT_THROW(Codec::encode(make_note(chain, "react", 1)), CodecError);
+    EXPECT_NO_THROW(Codec::encode(make_note(block, "react", 0)));
+    // comment: текст обязателен, без значения, не на цепь
+    EXPECT_THROW(Codec::encode(make_note(key, "comment")), CodecError);
+    EXPECT_THROW(Codec::encode(make_note(key, "comment", 1, "x")), CodecError);
+    EXPECT_THROW(Codec::encode(make_note(chain, "comment", std::nullopt, "x")), CodecError);
+    // retract: предмет — блок, больше ничего
+    EXPECT_THROW(Codec::encode(make_note(key, "retract")), CodecError);
+    EXPECT_THROW(Codec::encode(make_note(block, "retract", std::nullopt, {}, make_ref(0x04, 0x05))),
+                 CodecError);
+    // follow: на цепь, 1 или 0
+    EXPECT_THROW(Codec::encode(make_note(block, "follow", 1)), CodecError);
+    EXPECT_THROW(Codec::encode(make_note(chain, "follow", -1)), CodecError);
+    EXPECT_NO_THROW(Codec::encode(make_note(chain, "follow", 0)));
+}
+
+// То, чего кодер не пишет, декодер не принимает: пустой текст, ключи не по порядку,
+// предмет не того рода.
+TEST(RecordsCodec, NoteDecodeRejectsWhatEncoderNeverWrites) {
+    const auto text = [](const std::string& s) {
+        std::vector<uint8_t> out{static_cast<uint8_t>(0x60 + s.size())};   // короткие строки
+        out.insert(out.end(), s.begin(), s.end());
+        return out;
+    };
+    const auto build = [&](uint8_t map_head, std::vector<std::vector<uint8_t>> parts) {
+        std::vector<uint8_t> out{map_head, 0x00, 0x18, 0x47};              // {0: 0x47
+        for (const auto& p : parts) out.insert(out.end(), p.begin(), p.end());
+        return out;
+    };
+    const auto key = text("yt:dQw4w9WgXcQ");
+    // 1: ключ, 2: "comment", 4: "" — пустой текст
+    EXPECT_THROW(Codec::decode(build(0xA4, {{0x01}, key, {0x02}, text("comment"), {0x04}, text("")})),
+                 CodecError);
+    // 1: ключ, 2: "zz", 4: "x", 3: 1 — ключи не по возрастанию
+    EXPECT_THROW(Codec::decode(build(0xA5, {{0x01}, key, {0x02}, text("zz"), {0x04}, text("x"),
+                                             {0x03, 0x01}})),
+                 CodecError);
+    // 1: число вместо предмета
+    EXPECT_THROW(Codec::decode(build(0xA4, {{0x01, 0x05}, {0x02}, text("react"), {0x03, 0x01}})),
+                 CodecError);
+    // без помех то же самое читается
+    EXPECT_NO_THROW(Codec::decode(build(0xA4, {{0x01}, key, {0x02}, text("react"), {0x03, 0x01}})));
+}
+
 // ── Reaction ──────────────────────────────────────────────────────────────────
 
 TEST(RecordsCodec, ReactionPositive) {

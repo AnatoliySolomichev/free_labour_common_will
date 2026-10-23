@@ -38,4 +38,14 @@ if(TEST_E2E)
     )
     set_tests_properties(e2e_grand_demo PROPERTIES
         DEPENDS "bc;aggregator_server" TIMEOUT 360)
+
+    # The social layer (ИР-026, social.md): reactions, comments, the circle and
+    # a bot farm seen only as a number. Own port, like the other walkthroughs.
+    add_test(
+        NAME e2e_social_demo
+        COMMAND ${CMAKE_COMMAND} -E env BUILD=${CMAKE_BINARY_DIR} PORT=19342
+                bash ${CMAKE_SOURCE_DIR}/docs/pilot/social-demo.sh
+    )
+    set_tests_properties(e2e_social_demo PROPERTIES
+        DEPENDS "bc;aggregator_server" TIMEOUT 120)
 endif()

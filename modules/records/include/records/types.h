@@ -22,6 +22,7 @@ enum class RecordType : uint8_t {
     Reaction     = 0x44,
     Attest       = 0x45,   // пломба: «я видел это состояние» (blockchain.md §7)
     Consent      = 0x46,   // согласие на чужую запись: «я не против» (ИР-012)
+    Note         = 0x47,   // заметка о предмете: реакция, комментарий, подписка (records.md §8.11)
     // Labor
     // 0x50 Specialty, 0x51 Grade, 0x52 Worker — сняты (ИР-022 шаг 11): какой
     //      была работа, говорит разбивка её цены по осям, а не справочник и
@@ -184,6 +185,24 @@ struct Consent {
     Ref         target;          // с чем согласен: цепь и хеш записи
     bool        agreed = true;   // true — согласен, false — против
     std::string note;            // чем именно; может быть пустым
+};
+
+// Предмет заметки (records.md §8.11): блок любой цепи, ключ внешнего объекта
+// «пространство:значение» (social.md §3) или цепь целиком — её корневой ключ.
+using ChainId = std::array<uint8_t, 32>;
+using Subject = std::variant<Ref, std::string, ChainId>;
+
+// Заметка о предмете (records.md §8.11, ИР-026): одна запись на соцслой,
+// соревнования и отзывы о продукции. Форма жёсткая, смысл мягкий — что значит
+// заметка, говорит вид; незнакомый вид кодек пропускает с любыми полями.
+struct Note {
+    static constexpr RecordType TYPE = RecordType::Note;
+
+    Subject                about;   // о чём
+    std::string            kind;    // react | comment | retract | follow | …
+    std::optional<int64_t> v;       // react: −1/0/+1; follow: 1/0
+    std::string            text;    // comment: текст; пустой не пишется
+    std::optional<Ref>     re;      // comment: на какой комментарий это ответ
 };
 
 // ── Labor records (records.md §9) ────────────────────────────────────────────
@@ -810,7 +829,8 @@ using Record = std::variant<
     Redemption,
     WorkCloud,
     AxisDef,
-    DealReply
+    DealReply,
+    Note
 >;
 
 } // namespace records

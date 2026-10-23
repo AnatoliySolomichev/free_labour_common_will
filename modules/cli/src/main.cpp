@@ -16,6 +16,7 @@
 #include <records/goods_thread.h>
 #include <records/draft.h>
 #include <records/settlement.h>
+#include <records/social.h>
 #include <records/types.h>
 #include <sync/dialogue_channel.h>
 #include <sync/participant_cache.h>
@@ -32,6 +33,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -144,6 +146,7 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--buyback-to", "--buyback-days", "--buyback-until", "--buyback-of",
     "--improves", "--repair", "--spend", "--machine-hours", "--meter", "--no",
     "--shifts", "--pay", "--reply-within",
+    "--re", "--hops", "--limit",
 };
 
 // True when a standalone flag (no value) is present.
@@ -340,6 +343,12 @@ static std::string record_summary(const Record& rec) {
                << (r.mode == "open" ? "открытая" : "слепая") << "  "
                << short_hex(r.target.chain) << "/" << short_hex(r.target.hash);
             if (!r.note.empty()) ss << "  «" << r.note << "»";
+        } else if constexpr (std::is_same_v<T, records::Note>) {
+            // Заметка о предмете (records.md §8.11): вид, предмет, значение, текст.
+            ss << "[Note]        " << r.kind << "  " << subject_id(r.about);
+            if (r.v) ss << "  v:" << (*r.v > 0 ? "+" : "") << *r.v;
+            if (!r.text.empty()) ss << "  «" << r.text << "»";
+            if (r.re) ss << "  re:" << short_hex(r.re->chain) << "/" << short_hex(r.re->hash);
         } else if constexpr (std::is_same_v<T, records::Consent>) {
             // Согласие или отказ (ИР-012, records.md §8.10).
             ss << "[Consent]     " << (r.agreed ? "согласен" : "ПРОТИВ") << "  "
@@ -3717,6 +3726,645 @@ static int cmd_consent_list(const fs::path& data_dir, int argc, char** argv) {
     std::cout << "  [общего объекта «решение» нет: собрался ли порог — "
                  "считает читатель (ИР-012)]\n";
     return 0;
+}
+
+// ── Соцслой: заметки о предметах (social.md, records.md §8.11) ───────────────
+//
+// Реакции, комментарии и подписки пишутся в свою ветку. Картину по предмету
+// клиент собирает сам — из заметок агрегатора, деля их на свой круг и всех
+// остальных (social.md §5, social.md §6): кто спрашивает, агрегатор не знает.
+
+using ChainBytes = std::array<uint8_t, 32>;
+
+// Заметка, как её видит клиент: своя — из ветки, чужая — со слов агрегатора.
+struct NoteRow {
+    std::string            block;     // хеш блока заметки, hex
+    ChainBytes             chain{};   // автор
+    int64_t                at = 0;    // время блока
+    uint64_t               index = 0; // номер блока в ветке: порядок при равном времени
+    std::string            about;     // предмет: records::subject_id
+    std::string            kind;
+    std::optional<int64_t> v;
+    std::string            text;
+    std::string            re;        // «ЦЕПЬ/ХЕШ» комментария, на который ответ
+
+    // Сама заметка как предмет: на комментарий отвечают и реагируют по нему.
+    std::string id() const { return to_hex(chain) + "/" + block; }
+};
+
+// Позднее слово цепи отменяет прежнее (records.md §8.11): по времени блока, при
+// равном — по номеру в ветке (в одной ветке время не убывает, blockchain.md §9.4).
+static bool later(const NoteRow& a, const NoteRow& b) {
+    return std::tie(a.at, a.index, a.block) > std::tie(b.at, b.index, b.block);
+}
+
+static std::string utc_minute(int64_t at) {
+    const std::time_t t = static_cast<std::time_t>(at);
+    char buf[32];
+    std::strftime(buf, sizeof buf, "%Y-%m-%d %H:%M", std::gmtime(&t));
+    return buf;
+}
+
+static std::string who_short(const ChainBytes& c) { return short_hex(c, 4); }
+
+// Короткая подпись предмета: ключ — как есть, блок и цепь — началом hex.
+static std::string subject_label(const std::string& id) {
+    if (id.size() == 129 && id[64] == '/') return id.substr(0, 8) + "…/" + id.substr(65, 8) + "…";
+    if (id.size() == 64 && id.find(':') == std::string::npos) return id.substr(0, 8) + "…";
+    return id;
+}
+
+static fs::path social_list(const fs::path& data_dir, const char* name) {
+    return data_dir / "social" / (std::string(name) + ".txt");
+}
+
+// Цепь из строки локального списка: первое слово до «#».
+static std::optional<ChainBytes> list_line_chain(const std::string& line) {
+    std::istringstream ss(line.substr(0, line.find('#')));
+    std::string word;
+    ChainBytes  c{};
+    if (ss >> word && from_hex(word, c.data(), 32)) return c;
+    return std::nullopt;
+}
+
+// Локальный список (social.md §8): по цепи на строку, «#» — комментарий.
+static std::vector<ChainBytes> read_chain_list(const fs::path& path) {
+    std::vector<ChainBytes> out;
+    std::ifstream f(path);
+    std::string line;
+    while (std::getline(f, line))
+        if (const auto c = list_line_chain(line)) out.push_back(*c);
+    return out;
+}
+
+// Добавить или убрать цепь; false — список и так такой.
+static bool edit_chain_list(const fs::path& path, const ChainBytes& chain, bool add) {
+    const auto present = read_chain_list(path);
+    if ((std::find(present.begin(), present.end(), chain) != present.end()) == add) return false;
+    fs::create_directories(path.parent_path());
+    if (add) {
+        std::ofstream(path, std::ios::app) << to_hex(chain) << "\n";
+        return true;
+    }
+    std::vector<std::string> keep;
+    {
+        std::ifstream f(path);
+        std::string line;
+        while (std::getline(f, line))
+            if (list_line_chain(line) != chain) keep.push_back(line);
+    }
+    std::ofstream out(path, std::ios::trunc);
+    for (const auto& line : keep) out << line << "\n";
+    return true;
+}
+
+static std::optional<ChainBytes> chain_arg(const std::string& s) {
+    ChainBytes c{};
+    if (!from_hex(s, c.data(), 32)) return std::nullopt;
+    return c;
+}
+
+// ПРЕДМЕТ (social.md §8): ЦЕПЬ/ХЕШ блока, ЦЕПЬ, ключ или ссылка.
+static std::optional<Subject> subject_arg(const std::string& s) {
+    if (s.find(':') == std::string::npos)
+        if (auto hex = parse_subject(s)) return hex;
+    if (auto key = external_key(s)) return Subject{*key};
+    return std::nullopt;
+}
+
+static std::string url_encode(const std::string& s) {
+    static const char* digits = "0123456789ABCDEF";
+    std::string out;
+    for (const unsigned char c : s) {
+        const bool plain = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                           (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' || c == '~';
+        if (plain) {
+            out += static_cast<char>(c);
+        } else {
+            out += '%';
+            out += digits[c >> 4];
+            out += digits[c & 0x0f];
+        }
+    }
+    return out;
+}
+
+static NoteRow note_row(const Note& n, const ChainBytes& chain, const std::string& block,
+                        int64_t at, uint64_t index) {
+    NoteRow r;
+    r.block = block;
+    r.chain = chain;
+    r.at    = at;
+    r.index = index;
+    r.about = subject_id(n.about);
+    r.kind  = n.kind;
+    r.v     = n.v;
+    r.text  = n.text;
+    if (n.re) r.re = subject_id(Subject{*n.re});
+    return r;
+}
+
+// Свои заметки — из своих веток, без сети: выложены они или нет.
+static std::vector<NoteRow> own_notes(Context& ctx) {
+    std::vector<NoteRow> out;
+    for (const NodeIndex node : ctx.local_branches()) {
+        std::vector<Block> blocks;
+        try { blocks = ctx.bc.get_branch(ctx.user_id, node); }
+        catch (const BlockchainError&) { continue; }
+        for (const auto& b : blocks) {
+            if (b.type != BlockType::DATA) continue;
+            try {
+                const auto rec = Codec::decode(b.payload.data(), b.payload.size());
+                if (const auto* n = std::get_if<Note>(&rec))
+                    out.push_back(note_row(*n, ctx.user_id.bytes, to_hex(Crypto::hash_block(b).bytes),
+                                           b.timestamp_claimed, b.address.block_index));
+            } catch (const std::exception&) { continue; }
+        }
+    }
+    return out;
+}
+
+// Заметки со слов агрегатора (social.md §7); nullopt — не ответил.
+static std::optional<std::vector<NoteRow>> fetch_notes(const std::string& via,
+                                                       const std::string& query) {
+    const auto root = fetch_json(via, "/notes?" + query);
+    if (!root || !root->is_object()) return std::nullopt;
+    std::vector<NoteRow> out;
+    const auto* notes = jarr(root->object, "notes");
+    if (!notes) return out;
+    for (const auto& e : notes->array) {
+        if (!e.is_object()) continue;
+        NoteRow r;
+        r.block = jstr(e.object, "block");
+        if (r.block.size() != 64 || !from_hex(jstr(e.object, "chain"), r.chain.data(), 32)) continue;
+        r.at    = static_cast<int64_t>(jnum(e.object, "at"));
+        r.index = static_cast<uint64_t>(jnum(e.object, "index"));
+        r.about = jstr(e.object, "about");
+        r.kind  = jstr(e.object, "kind");
+        if (const auto* v = records::json::find(e.object, "v"); v && v->is_number())
+            r.v = static_cast<int64_t>(v->number);
+        r.text = jstr(e.object, "text");
+        r.re   = jstr(e.object, "re");
+        out.push_back(std::move(r));
+    }
+    return out;
+}
+
+// Круг (social.md §5): вы; шаг 1 — свои подписки и свой список; шаг 2 — их
+// подписки. Цепь из игнора выпадает отовсюду, её подписки не обходятся.
+struct Circle {
+    ChainBytes                        me{};
+    std::map<ChainBytes, std::string> step1;     // цепь → откуда она в круге
+    std::map<ChainBytes, ChainBytes>  step2;     // цепь → через кого
+    std::set<ChainBytes>              ignored;
+
+    // 0 — вы, 1 и 2 — шаги, 3 — вне круга, −1 — в игноре.
+    int layer(const ChainBytes& c) const {
+        if (ignored.count(c)) return -1;
+        if (c == me)          return 0;
+        if (step1.count(c))   return 1;
+        if (step2.count(c))   return 2;
+        return 3;
+    }
+};
+
+// На кого подписана цепь — по последнему слову её заметок follow.
+static std::vector<ChainBytes> follows_of(const ChainBytes& who, const std::vector<NoteRow>& rows) {
+    std::map<std::string, const NoteRow*> last;
+    for (const auto& r : rows)
+        if (r.kind == "follow" && r.chain == who && r.v)
+            if (auto& slot = last[r.about]; !slot || later(r, *slot)) slot = &r;
+    std::vector<ChainBytes> out;
+    for (const auto& [about, r] : last) {
+        ChainBytes c{};
+        if (*r->v == 1 && from_hex(about, c.data(), 32) && c != who) out.push_back(c);
+    }
+    return out;
+}
+
+// nullopt — шаг 2 нужен, а агрегатор не ответил.
+static std::optional<Circle> build_circle(Context& ctx, int hops, const std::string& via) {
+    Circle c;
+    c.me = ctx.user_id.bytes;
+    for (const auto& x : read_chain_list(social_list(ctx.data_dir, "ignore"))) c.ignored.insert(x);
+    const auto keep = [&](const ChainBytes& x) { return x != c.me && !c.ignored.count(x); };
+    for (const auto& x : follows_of(c.me, own_notes(ctx)))
+        if (keep(x)) c.step1[x] = "подписка";
+    for (const auto& x : read_chain_list(social_list(ctx.data_dir, "follow"))) {
+        if (!keep(x)) continue;
+        const bool both = c.step1.count(x) > 0;
+        c.step1[x] = both ? "подписка и свой список" : "свой список";
+    }
+    if (hops < 2) return c;
+    for (const auto& [x, why] : c.step1) {
+        const auto rows = fetch_notes(via, "by=" + to_hex(x) + "&kind=follow");
+        if (!rows) return std::nullopt;
+        for (const auto& y : follows_of(x, *rows))
+            if (keep(y) && !c.step1.count(y) && !c.step2.count(y)) c.step2[y] = x;
+    }
+    return c;
+}
+
+static int hops_arg(int argc, char** argv) {
+    const auto s = flag_val(argc, argv, "--hops", "1");
+    if (s != "1" && s != "2") throw std::runtime_error("--hops: 1 или 2 (social.md §5)");
+    return s == "2" ? 2 : 1;
+}
+
+static int social_usage() {
+    std::cerr << "Usage: bc social КОМАНДА … (social.md §8)\n"
+                 "  key ССЫЛКА…                       ключ внешнего объекта\n"
+                 "  like|dislike|unlike ПРЕДМЕТ       реакция +1 / −1 / снять\n"
+                 "  comment ПРЕДМЕТ ТЕКСТ [--re ЦЕПЬ/ХЕШ]\n"
+                 "  retract ЦЕПЬ/ХЕШ                  снять свой комментарий\n"
+                 "  follow|unfollow ЦЕПЬ [--local]    подписка: публичная или свой список\n"
+                 "  ignore|unignore ЦЕПЬ              игнор — только у вас\n"
+                 "  circle [--hops 2] [--via URL]     кто в круге\n"
+                 "  show ПРЕДМЕТ --via URL [--hops 2] [--all] [--ids]\n"
+                 "  feed --via URL [--hops 2] [--limit N]\n"
+                 "ПРЕДМЕТ — ссылка, ключ (yt:…, tg:…, url:…) или ЦЕПЬ/ХЕШ блока;\n"
+                 "пишущие команды выкладывают блок при --via\n";
+    return 1;
+}
+
+// bc social key ССЫЛКА… — по ключу на строку, в порядке входа.
+static int cmd_social_key(const std::vector<std::string>& pos) {
+    if (pos.size() < 3) return social_usage();
+    int rc = 0;
+    for (size_t i = 2; i < pos.size(); ++i) {
+        if (const auto key = external_key(pos[i])) {
+            std::cout << *key << "\n";
+        } else {
+            std::cerr << "не ссылка и не ключ: " << pos[i] << "\n";
+            rc = 1;
+        }
+    }
+    return rc;
+}
+
+// bc social like|dislike|unlike ПРЕДМЕТ — реакция +1 / −1 / снять (v = 0).
+static int cmd_social_react(const fs::path& data_dir, int argc, char** argv, int v) {
+    const auto pos = get_positionals(argc, argv);   // [social, like, ПРЕДМЕТ]
+    if (pos.size() < 3) return social_usage();
+    const auto about = subject_arg(pos[2]);
+    if (!about) {
+        std::cerr << "не предмет: " << pos[2] << " — ссылка, ключ или ЦЕПЬ/ХЕШ\n";
+        return 1;
+    }
+    if (std::holds_alternative<ChainId>(*about)) {
+        std::cerr << "на цепь не реагируют, а подписываются: bc social follow ЦЕПЬ\n";
+        return 1;
+    }
+    if (const auto* r = std::get_if<Ref>(&*about); r && r->chain == load_user_id(data_dir).bytes) {
+        std::cerr << "это ваша запись — реакция на себя не считается (records.md §8.11)\n";
+        return 1;
+    }
+    Note n;
+    n.about = *about;
+    n.kind  = "react";
+    n.v     = v;
+    std::cout << (v > 0 ? "+1  " : v < 0 ? "−1  " : "реакция снята  ")
+              << subject_label(subject_id(n.about)) << "\n";
+    return cmd_write(data_dir, argc, argv, n);
+}
+
+// bc social comment ПРЕДМЕТ ТЕКСТ [--re ЦЕПЬ/ХЕШ] — комментарий или ответ.
+static int cmd_social_comment(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);   // [social, comment, ПРЕДМЕТ, ТЕКСТ…]
+    if (pos.size() < 4) return social_usage();
+    const auto about = subject_arg(pos[2]);
+    if (!about || std::holds_alternative<ChainId>(*about)) {
+        std::cerr << "комментируют ролик, пост, страницу или блок: " << pos[2] << "\n";
+        return 1;
+    }
+    Note n;
+    n.about = *about;
+    n.kind  = "comment";
+    for (size_t i = 3; i < pos.size(); ++i) n.text += (i > 3 ? " " : "") + pos[i];
+    if (n.text.empty()) return social_usage();
+    if (const auto re = flag_val(argc, argv, "--re"); !re.empty()) {
+        const auto parent = parse_subject(re);
+        if (!parent || !std::holds_alternative<Ref>(*parent)) {
+            std::cerr << "--re: ЦЕПЬ/ХЕШ комментария, на который отвечаете\n";
+            return 1;
+        }
+        n.re = std::get<Ref>(*parent);
+    }
+    std::cout << (n.re ? "ответ  " : "комментарий  ") << subject_label(subject_id(n.about)) << "\n";
+    return cmd_write(data_dir, argc, argv, n);
+}
+
+// bc social retract ЦЕПЬ/ХЕШ — снять свой комментарий; запись остаётся в истории.
+static int cmd_social_retract(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);   // [social, retract, ЦЕПЬ/ХЕШ]
+    if (pos.size() < 3) return social_usage();
+    const auto subject = parse_subject(pos[2]);
+    if (!subject || !std::holds_alternative<Ref>(*subject)) {
+        std::cerr << "снимают свой комментарий: ЦЕПЬ/ХЕШ его блока\n";
+        return 1;
+    }
+    const Ref target = std::get<Ref>(*subject);
+    {
+        Context    ctx(data_dir, parse_leaf_index(argc, argv));
+        const auto own  = own_notes(ctx);
+        const auto hash = to_hex(target.hash);
+        const bool mine = target.chain == ctx.user_id.bytes &&
+                          std::any_of(own.begin(), own.end(), [&](const NoteRow& r) {
+                              return r.block == hash && r.kind == "comment";
+                          });
+        if (!mine) {
+            std::cerr << "в ваших ветках нет такого комментария — снять можно только свой\n";
+            return 1;
+        }
+    }
+    Note n;
+    n.about = target;
+    n.kind  = "retract";
+    std::cout << "комментарий снят: " << subject_label(pos[2])
+              << " — запись остаётся в истории, картина покажет «снят автором»\n";
+    return cmd_write(data_dir, argc, argv, n);
+}
+
+// bc social follow|unfollow ЦЕПЬ [--local] — публичная подписка или свой список.
+static int cmd_social_follow(const fs::path& data_dir, int argc, char** argv, bool on) {
+    const auto pos = get_positionals(argc, argv);   // [social, follow, ЦЕПЬ]
+    if (pos.size() < 3) return social_usage();
+    const auto chain = chain_arg(pos[2]);
+    if (!chain) {
+        std::cerr << "ждём ЦЕПЬ — 64 hex-символа\n";
+        return 1;
+    }
+    if (*chain == load_user_id(data_dir).bytes) {
+        std::cerr << "это ваша цепь — подписка на себя не считается\n";
+        return 1;
+    }
+    if (flag_present(argc, argv, "--local")) {
+        const bool changed = edit_chain_list(social_list(data_dir, "follow"), *chain, on);
+        std::cout << (on ? "в своём списке: " : "убрана из своего списка: ") << who_short(*chain)
+                  << (changed ? "" : " (и так)") << "\n";
+        return 0;
+    }
+    Note n;
+    n.about = ChainId{*chain};
+    n.kind  = "follow";
+    n.v     = on ? 1 : 0;
+    std::cout << (on ? "подписка: " : "отписка: ") << who_short(*chain) << "\n";
+    return cmd_write(data_dir, argc, argv, n);
+}
+
+// bc social ignore|unignore ЦЕПЬ — игнор только локальный (blockchain.md §6.5.6).
+static int cmd_social_ignore(const fs::path& data_dir, int argc, char** argv, bool on) {
+    const auto pos = get_positionals(argc, argv);   // [social, ignore, ЦЕПЬ]
+    if (pos.size() < 3) return social_usage();
+    const auto chain = chain_arg(pos[2]);
+    if (!chain) {
+        std::cerr << "ждём ЦЕПЬ — 64 hex-символа\n";
+        return 1;
+    }
+    const bool changed = edit_chain_list(social_list(data_dir, "ignore"), *chain, on);
+    std::cout << (on ? "в игноре: " : "из игнора убрана: ") << who_short(*chain)
+              << (changed ? "" : " (и так)") << "\n";
+    return 0;
+}
+
+// bc social circle [--hops 2] [--via URL] — кто в круге и откуда.
+static int cmd_social_circle(const fs::path& data_dir, int argc, char** argv) {
+    const int  hops = hops_arg(argc, argv);
+    const auto via  = flag_val(argc, argv, "--via");
+    if (hops > 1 && via.empty()) {
+        std::cerr << "шаг 2 — подписки ваших подписок: нужен --via URL\n";
+        return 1;
+    }
+    Context    ctx(data_dir, parse_leaf_index(argc, argv));
+    const auto circle = build_circle(ctx, hops, via);
+    if (!circle) {
+        std::cerr << "агрегатор не ответил: " << via << "\n";
+        return 1;
+    }
+    std::cout << "круг: шаг 1 — " << circle->step1.size();
+    if (hops > 1) std::cout << ", шаг 2 — " << circle->step2.size();
+    std::cout << ", в игноре — " << circle->ignored.size() << "\n";
+    std::cout << "  вы      " << who_short(circle->me) << "\n";
+    for (const auto& [c, why] : circle->step1)
+        std::cout << "  шаг 1   " << who_short(c) << "  " << why << "\n";
+    for (const auto& [c, through] : circle->step2)
+        std::cout << "  шаг 2   " << who_short(c) << "  через " << who_short(through) << "\n";
+    return 0;
+}
+
+struct ReactTally { int plus = 0, minus = 0; };
+
+static std::string tally_str(const ReactTally& t) {
+    std::string s;
+    if (t.plus)  s += "+" + std::to_string(t.plus);
+    if (t.minus) s += (s.empty() ? "−" : " −") + std::to_string(t.minus);
+    return s.empty() ? "—" : s;
+}
+
+// bc social show ПРЕДМЕТ --via URL [--hops 2] [--all] [--ids] — картина
+// предмета (social.md §6): реакции и комментарии круга, остальное — числом.
+static int cmd_social_show(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);   // [social, show, ПРЕДМЕТ]
+    const auto via = flag_val(argc, argv, "--via");
+    if (pos.size() < 3 || via.empty()) return social_usage();
+    const auto subject = subject_arg(pos[2]);
+    if (!subject) {
+        std::cerr << "не предмет: " << pos[2] << " — ссылка, ключ или ЦЕПЬ/ХЕШ\n";
+        return 1;
+    }
+    const auto id   = subject_id(*subject);
+    const bool all  = flag_present(argc, argv, "--all");
+    const bool ids  = flag_present(argc, argv, "--ids");
+    const int  hops = hops_arg(argc, argv);
+
+    Context    ctx(data_dir, parse_leaf_index(argc, argv));
+    const auto circle = build_circle(ctx, hops, via);
+    auto       rows   = fetch_notes(via, "about=" + url_encode(id));
+    if (!circle || !rows) {
+        std::cerr << "агрегатор не ответил: " << via << "\n";
+        return 1;
+    }
+    // Свои заметки — из своих веток, даже не выложенные (social.md §8).
+    {
+        std::set<std::string> seen;
+        for (const auto& r : *rows) seen.insert(r.block);
+        const auto own = own_notes(ctx);
+        std::set<std::string> thread{id};   // предмет и комментарии под ним
+        const std::vector<NoteRow>* lists[] = {&*rows, &own};
+        for (int pass = 0; pass < 2; ++pass)
+            for (const auto* list : lists)
+                for (const auto& r : *list)
+                    if (r.kind == "comment" && thread.count(r.about)) thread.insert(r.id());
+        for (const auto& r : own)
+            if (thread.count(r.about) && seen.insert(r.block).second) rows->push_back(r);
+    }
+
+    const auto layer = [&](const ChainBytes& c) { return circle->layer(c); };
+    const auto shown_layer = [&](int l) { return l >= 0 && (all || l <= 2); };
+    // Последнее слово каждой цепи о предмете; себе не реагируют (records.md §8.11).
+    const auto last_reacts = [&](const std::string& about, const std::optional<ChainBytes>& self) {
+        std::map<ChainBytes, const NoteRow*> last;
+        for (const auto& r : *rows)
+            if (r.kind == "react" && r.about == about && r.v && (!self || r.chain != *self))
+                if (auto& slot = last[r.chain]; !slot || later(r, *slot)) slot = &r;
+        return last;
+    };
+
+    std::optional<ChainBytes> owner;
+    if (const auto* r = std::get_if<Ref>(&*subject)) owner = r->chain;
+    std::array<ReactTally, 4> by_layer{};          // вы, шаг 1, шаг 2, вне круга
+    std::set<ChainBytes>      outside;
+    for (const auto& [chain, r] : last_reacts(id, owner)) {
+        const int l = layer(chain);
+        if (l < 0 || *r->v == 0) continue;
+        (*r->v > 0 ? by_layer[l].plus : by_layer[l].minus)++;
+        if (l == 3) outside.insert(chain);
+    }
+
+    // Комментарии: о предмете и комментарии о комментариях (читаются как ответы).
+    std::map<std::string, const NoteRow*> comments;
+    for (int pass = 0; pass < 2; ++pass)
+        for (const auto& r : *rows)
+            if (r.kind == "comment" && (r.about == id || comments.count(r.about)))
+                comments[r.id()] = &r;
+    std::set<std::string> retracted;   // снять может только автор
+    for (const auto& r : *rows)
+        if (r.kind == "retract")
+            if (const auto c = comments.find(r.about); c != comments.end() && c->second->chain == r.chain)
+                retracted.insert(r.about);
+    const auto parent_of = [&](const NoteRow& c) -> std::string {
+        if (!c.re.empty() && comments.count(c.re)) return c.re;
+        if (c.about != id && comments.count(c.about)) return c.about;
+        return {};
+    };
+    std::map<std::string, std::vector<const NoteRow*>> children;
+    std::vector<const NoteRow*> roots;
+    size_t shown = 0, hidden = 0;
+    for (const auto& [cid, c] : comments) {
+        if (!shown_layer(layer(c->chain))) {
+            if (layer(c->chain) == 3) ++hidden;
+            continue;
+        }
+        ++shown;
+        const auto p = parent_of(*c);
+        if (!p.empty() && shown_layer(layer(comments.at(p)->chain))) children[p].push_back(c);
+        else roots.push_back(c);
+    }
+    const auto by_time = [](std::vector<const NoteRow*>& v) {
+        std::sort(v.begin(), v.end(), [](const NoteRow* a, const NoteRow* b) { return later(*b, *a); });
+    };
+    by_time(roots);
+    for (auto& [p, list] : children) by_time(list);
+
+    const auto name = [&](const ChainBytes& c) { return c == circle->me ? std::string("вы") : who_short(c); };
+    ReactTally in_circle{};
+    for (int l = 0; l <= 2; ++l) {
+        in_circle.plus  += by_layer[l].plus;
+        in_circle.minus += by_layer[l].minus;
+    }
+    std::cout << id << "\n";
+    std::cout << "  реакции круга: " << tally_str(in_circle) << "   (вы " << tally_str(by_layer[0])
+              << " · шаг 1 " << tally_str(by_layer[1]);
+    if (hops > 1) std::cout << " · шаг 2 " << tally_str(by_layer[2]);
+    std::cout << ")\n";
+    if (by_layer[3].plus || by_layer[3].minus)
+        std::cout << "  вне круга: " << tally_str(by_layer[3]) << " от " << outside.size()
+                  << " цеп. — со слов агрегатора, в счёт не идёт\n";
+    std::cout << "  комментарии" << (all ? "" : " круга") << ": " << shown << "\n";
+
+    std::function<void(const NoteRow&, int)> print = [&](const NoteRow& c, int depth) {
+        std::cout << "    " << std::string(2 * depth, ' ') << (depth ? "└ " : "") << utc_minute(c.at)
+                  << "  " << name(c.chain);
+        if (layer(c.chain) == 3) std::cout << " [вне круга]";
+        if (retracted.count(c.id())) {
+            std::cout << "  — снят автором";
+        } else {
+            std::cout << "  «" << c.text << "»";
+            ReactTally t{};
+            for (const auto& [chain, r] : last_reacts(c.id(), c.chain)) {
+                if (!shown_layer(layer(chain)) || *r->v == 0) continue;
+                (*r->v > 0 ? t.plus : t.minus)++;
+            }
+            if (t.plus || t.minus) std::cout << "  " << tally_str(t);
+        }
+        if (depth == 0 && !parent_of(c).empty()) std::cout << "  (ответ на скрытый комментарий)";
+        std::cout << "\n";
+        if (ids) std::cout << "    " << std::string(2 * depth + (depth ? 2 : 0), ' ') << "  " << c.id() << "\n";
+        if (const auto it = children.find(c.id()); it != children.end())
+            for (const auto* child : it->second) print(*child, depth + 1);
+    };
+    for (const auto* root : roots) print(*root, 0);
+    if (!all && hidden)
+        std::cout << "  вне круга: " << hidden << " коммент. — со слов агрегатора (--all — показать)\n";
+    return 0;
+}
+
+// bc social feed --via URL [--hops 2] [--limit N] — лента круга (social.md §6).
+static int cmd_social_feed(const fs::path& data_dir, int argc, char** argv) {
+    const auto via = flag_val(argc, argv, "--via");
+    if (via.empty()) return social_usage();
+    const int    hops  = hops_arg(argc, argv);
+    const size_t limit = static_cast<size_t>(std::stoul(flag_val(argc, argv, "--limit", "20")));
+
+    Context    ctx(data_dir, parse_leaf_index(argc, argv));
+    const auto circle = build_circle(ctx, hops, via);
+    if (!circle) {
+        std::cerr << "агрегатор не ответил: " << via << "\n";
+        return 1;
+    }
+    std::vector<ChainBytes> members;
+    for (const auto& [c, why] : circle->step1) members.push_back(c);
+    for (const auto& [c, through] : circle->step2) members.push_back(c);
+
+    std::vector<NoteRow> feed;
+    for (const auto& m : members) {
+        const auto rows = fetch_notes(via, "by=" + to_hex(m));
+        if (!rows) {
+            std::cerr << "агрегатор не ответил: " << via << "\n";
+            return 1;
+        }
+        std::set<std::string> retracted;
+        for (const auto& r : *rows)
+            if (r.kind == "retract" && r.chain == m) retracted.insert(r.about);
+        for (const auto& r : *rows)
+            if (r.chain == m && ((r.kind == "react" && r.v) ||
+                                 (r.kind == "comment" && !retracted.count(r.id()))))
+                feed.push_back(r);
+    }
+    std::sort(feed.begin(), feed.end(), later);
+    if (feed.size() > limit) feed.resize(limit);
+    if (feed.empty()) std::cout << "в круге тихо\n";
+    for (const auto& r : feed) {
+        const std::string what = r.kind == "comment" ? (r.re.empty() ? "комментарий" : "ответ")
+                                 : *r.v > 0          ? "+1"
+                                 : *r.v < 0          ? "−1"
+                                                     : "снял реакцию";
+        std::cout << utc_minute(r.at) << "  " << who_short(r.chain)
+                  << (circle->layer(r.chain) == 2 ? " (шаг 2)" : "") << "  " << what << "  "
+                  << subject_label(r.about);
+        if (!r.text.empty()) std::cout << "  «" << r.text << "»";
+        std::cout << "\n";
+    }
+    return 0;
+}
+
+static int cmd_social(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);   // [social, КОМАНДА, …]
+    const std::string sub = pos.size() > 1 ? pos[1] : std::string{};
+    if (sub == "key")      return cmd_social_key(pos);
+    if (sub == "like")     return cmd_social_react(data_dir, argc, argv, +1);
+    if (sub == "dislike")  return cmd_social_react(data_dir, argc, argv, -1);
+    if (sub == "unlike")   return cmd_social_react(data_dir, argc, argv, 0);
+    if (sub == "comment")  return cmd_social_comment(data_dir, argc, argv);
+    if (sub == "retract")  return cmd_social_retract(data_dir, argc, argv);
+    if (sub == "follow")   return cmd_social_follow(data_dir, argc, argv, true);
+    if (sub == "unfollow") return cmd_social_follow(data_dir, argc, argv, false);
+    if (sub == "ignore")   return cmd_social_ignore(data_dir, argc, argv, true);
+    if (sub == "unignore") return cmd_social_ignore(data_dir, argc, argv, false);
+    if (sub == "circle")   return cmd_social_circle(data_dir, argc, argv);
+    if (sub == "show")     return cmd_social_show(data_dir, argc, argv);
+    if (sub == "feed")     return cmd_social_feed(data_dir, argc, argv);
+    return social_usage();
 }
 
 // bc tool shares ПРЕФИКС [--via URL]
@@ -8316,6 +8964,26 @@ Merge, manual relay (blockchain.md §6.4 bilateral two-round protocol):
   consent list ЦЕПЬ/ХЕШ          Кто согласен, кто против. Общего объекта
     [--via URL]                      «решение» нет — порог считает читатель
 
+Соцслой — заметки о роликах, постах, страницах, блоках и цепях (social.md):
+  social key ССЫЛКА…               Ключ внешнего объекта: yt:ID, tg:канал/пост,
+                                       url:… без меток слежки (social.md §3)
+  social like|dislike|unlike ПРЕДМЕТ  Реакция +1 / −1 / снять — последнее слово
+  social comment ПРЕДМЕТ ТЕКСТ     Комментарий; --re ЦЕПЬ/ХЕШ — ответ на
+    [--re ЦЕПЬ/ХЕШ]                    комментарий (предмет — тот же ролик)
+  social retract ЦЕПЬ/ХЕШ          Снять свой комментарий: запись остаётся в
+                                       истории, картина покажет «снят автором»
+  social follow|unfollow ЦЕПЬ      Подписка — запись в цепи; --local — только
+    [--local]                          в своём списке, без записи
+  social ignore|unignore ЦЕПЬ      Игнор — только у вас, в цепь не пишется
+  social circle [--hops 2]         Кто в круге: вы, шаг 1, шаг 2 — подписки
+                                       подписок (нужен --via)
+  social show ПРЕДМЕТ --via URL    Картина: реакции и комментарии круга, всё
+    [--hops 2] [--all] [--ids]         прочее — числом «вне круга»
+  social feed --via URL            Лента круга: свежие реакции и комментарии
+    [--hops 2] [--limit N]
+  ПРЕДМЕТ — ссылка, ключ или ЦЕПЬ/ХЕШ блока; пишущие команды выкладывают
+  блок при --via
+
 Чей ключ стоит за пломбой (blockchain.md §7.5):
   keypath publish --via URL        Выложить путь своего ключа на склад
   keypath who KEY_HEX [--via URL]  Привести ключ к цепи: сперва по своим узлам,
@@ -8451,6 +9119,7 @@ int main(int argc, char** argv) {
         else if (cmd == "tool"      && subcmd == "shares")  return cmd_tool_shares(data_dir, argc, argv);
         else if (cmd == "consent"   && subcmd == "add")     return cmd_consent_add(data_dir, argc, argv);
         else if (cmd == "consent"   && subcmd == "list")    return cmd_consent_list(data_dir, argc, argv);
+        else if (cmd == "social")                           return cmd_social(data_dir, argc, argv);
         else if (cmd == "keypath"   && subcmd == "publish") return cmd_keypath_publish(data_dir, argc, argv);
         else if (cmd == "keypath"   && subcmd == "who")     return cmd_keypath_who(data_dir, argc, argv);
         else if (cmd == "fraud"     && subcmd == "verify")  return cmd_fraud_verify(argc, argv);

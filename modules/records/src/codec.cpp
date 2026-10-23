@@ -1,5 +1,7 @@
 #include "records/codec.h"
 #include "records/acceptance.h"
+#include "records/social.h"
+#include <algorithm>
 #include <cstring>
 #include <set>
 #include <tuple>
@@ -195,6 +197,70 @@ void enc_consent(Buf& out, const Consent& c) {
     w_uint(out, 1); w_ref(out, c.target);
     w_uint(out, 2); w_uint(out, c.agreed ? 1u : 0u);
     w_uint(out, 3); w_text(out, c.note);
+}
+
+// Заметка о предмете (records.md §8.11): форма — всегда, правила — у видов,
+// которые кодек знает; незнакомый вид проходит с любыми полями (ИР-026).
+void check_note(const Note& n) {
+    static const std::array<uint8_t, 32> zero{};
+    const auto kind_char = [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+    };
+    if (n.kind.empty() || n.kind.size() > 32 ||
+        !std::all_of(n.kind.begin(), n.kind.end(), kind_char))
+        throw CodecError("Note: вид — строчные латинские буквы, цифры, «.», «_», «-», до 32 "
+                         "знаков (records.md §8.11)");
+    const auto* block = std::get_if<Ref>(&n.about);
+    const auto* key   = std::get_if<std::string>(&n.about);
+    const auto* chain = std::get_if<ChainId>(&n.about);
+    if (block && (block->chain == zero || block->hash == zero))
+        throw CodecError("Note: у блока-предмета обязательны цепь и хеш");
+    if (key && !is_external_key(*key))
+        throw CodecError("Note: ключ внешнего объекта — «пространство:значение» (records.md §8.11)");
+    if (chain && *chain == zero)
+        throw CodecError("Note: цепь-предмет не названа");
+    if (n.re && (n.re->chain == zero || n.re->hash == zero))
+        throw CodecError("Note: у ответа обязательны цепь и хеш комментария");
+
+    const auto no_extra = [&](bool v_allowed, bool text_allowed, bool re_allowed) {
+        if (n.v && !v_allowed)            throw CodecError("Note: у вида «" + n.kind + "» нет значения v");
+        if (!n.text.empty() && !text_allowed) throw CodecError("Note: у вида «" + n.kind + "» нет текста");
+        if (n.re && !re_allowed)          throw CodecError("Note: у вида «" + n.kind + "» нет ответа re");
+    };
+    if (n.kind == "react") {
+        if (chain) throw CodecError("Note: реагируют на блок или внешний объект, на цепь — подписываются");
+        if (!n.v || *n.v < -1 || *n.v > 1) throw CodecError("Note: реакция — −1, 0 или +1");
+        no_extra(true, false, false);
+    } else if (n.kind == "comment") {
+        if (chain) throw CodecError("Note: комментарий — о блоке или внешнем объекте");
+        if (n.text.empty()) throw CodecError("Note: комментарий без текста");
+        no_extra(false, true, true);
+    } else if (n.kind == "retract") {
+        if (!block) throw CodecError("Note: снимают комментарий — предмет его блок");
+        no_extra(false, false, false);
+    } else if (n.kind == "follow") {
+        if (!chain) throw CodecError("Note: подписываются на цепь");
+        if (!n.v || (*n.v != 0 && *n.v != 1)) throw CodecError("Note: подписка — 1 или 0");
+        no_extra(true, false, false);
+    }
+}
+
+void w_subject(Buf& out, const Subject& s) {
+    if (const auto* r = std::get_if<Ref>(&s))              w_ref(out, *r);
+    else if (const auto* k = std::get_if<std::string>(&s)) w_text(out, *k);
+    else                                                    w_fixed(out, std::get<ChainId>(s));
+}
+
+// Ключи 0–2 всегда; 3 (v), 4 (text), 5 (re) — только когда заданы, по возрастанию.
+void enc_note(Buf& out, const Note& n) {
+    check_note(n);
+    w_map(out, 3 + (n.v ? 1 : 0) + (n.text.empty() ? 0 : 1) + (n.re ? 1 : 0));
+    w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Note));
+    w_uint(out, 1); w_subject(out, n.about);
+    w_uint(out, 2); w_text(out, n.kind);
+    if (n.v)            { w_uint(out, 3); w_int64(out, *n.v); }
+    if (!n.text.empty()) { w_uint(out, 4); w_text(out, n.text); }
+    if (n.re)           { w_uint(out, 5); w_ref(out, *n.re); }
 }
 
 // One carry-thread link (records.md §9.4 v2, ИР-011).
@@ -867,6 +933,12 @@ public:
         return n;
     }
 
+    // Major type of the next item, without consuming it.
+    uint8_t peek_major() const {
+        need(1);
+        return data_[pos_] >> 5;
+    }
+
     // Raw payload bytes following an already-consumed head.
     void r_raw(uint8_t* out, size_t n) {
         need(n);
@@ -1068,6 +1140,40 @@ Consent dec_consent_fields(CborReader& r) {
     expect_key(r, 3); c.note   = r.r_text();
     check_consent(c);
     return c;
+}
+
+// Предмет различается типом значения: map — блок, текст — ключ, байты — цепь.
+Subject dec_subject(CborReader& r) {
+    switch (r.peek_major()) {
+        case 5: return dec_ref(r);
+        case 3: return r.r_text();
+        case 2: { ChainId c{}; r.r_fixed(c); return c; }
+        default: throw CodecError("Note: предмет — блок, ключ или цепь (records.md §8.11)");
+    }
+}
+
+Note dec_note_fields(CborReader& r, uint64_t field_count) {
+    if (field_count < 3) throw CodecError("Note: expected at least 3 fields");
+    Note n{};
+    expect_key(r, 1); n.about = dec_subject(r);
+    expect_key(r, 2); n.kind  = r.r_text();
+    uint64_t last = 2;
+    for (uint64_t i = 3; i < field_count; ++i) {
+        const uint64_t key = r.r_uint();
+        if (key <= last) throw CodecError("Note: ключи по возрастанию, без повторов");
+        last = key;
+        switch (key) {
+            case 3: n.v = r.r_int(); break;
+            case 4:
+                n.text = r.r_text();
+                if (n.text.empty()) throw CodecError("Note: пустой текст не пишется");
+                break;
+            case 5: n.re = dec_ref(r); break;
+            default: throw CodecError("Note: unknown field key");
+        }
+    }
+    check_note(n);
+    return n;
 }
 
 CarryEntry dec_carry_entry(CborReader& r) {
@@ -1599,6 +1705,7 @@ std::vector<uint8_t> Codec::encode(const Record& rec) {
         else if constexpr (std::is_same_v<T, WorkCloud>)      enc_work_cloud(out, r);
         else if constexpr (std::is_same_v<T, AxisDef>)        enc_axis_def(out, r);
         else if constexpr (std::is_same_v<T, DealReply>)      enc_deal_reply(out, r);
+        else if constexpr (std::is_same_v<T, Note>)           enc_note(out, r);
     }, rec);
     return out;
 }
@@ -1637,6 +1744,7 @@ Record Codec::decode(const uint8_t* data, size_t len) {
         case RecordType::AxisDef:
             return dec_axis_def_fields(r, field_count);
         case RecordType::DealReply:  return dec_deal_reply_fields(r, field_count);
+        case RecordType::Note:       return dec_note_fields(r, field_count);
         default:
             throw CodecError("CBOR: unknown record type discriminator");
     }

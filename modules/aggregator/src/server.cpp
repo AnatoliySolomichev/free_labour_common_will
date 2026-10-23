@@ -12,12 +12,14 @@
 #include "aggregator/axis_ledger.h"
 #include "aggregator/rent_map.h"
 #include "aggregator/cloud_view.h"
+#include "aggregator/notes_view.h"
 #include "blockchain/serializer.h"
 #include "blockchain/errors.h"
 #include <map>
 #include <set>
 #include <records/catalog.h>
 #include <records/codec.h>
+#include <records/social.h>
 #include <httplib.h>
 #include <algorithm>
 #include <ctime>
@@ -744,6 +746,58 @@ void AggregatorServer::setup_routes() {
                  + "}";
         }
         body += ']';
+        res.set_content(body, "application/json");
+    });
+
+    // ── Заметки о предметах (social.md §7) ───────────────────────────────────
+    //
+    // ?about=ПРЕДМЕТ — обсуждение: заметки о предмете и о каждом комментарии под
+    // ним; ?by=ЦЕПЬ[&kind=ВИД] — заметки цепи. Сырые: последнее слово и круг
+    // применяет клиент — агрегатор не знает, кто спрашивает (ИР-010).
+    svr.Get("/notes", [&](const httplib::Request& req, httplib::Response& res) {
+        const auto board = notes_board(storage_);
+        std::vector<const NoteEntry*> notes;
+        if (req.has_param("about")) {
+            const auto subject = records::parse_subject(req.get_param_value("about"));
+            if (!subject) {
+                res.status = 400;
+                res.set_content("{\"error\":\"about: ключ, ЦЕПЬ/ХЕШ или ЦЕПЬ\"}",
+                                "application/json");
+                return;
+            }
+            notes = board->thread(records::subject_id(*subject));
+        } else if (req.has_param("by")) {
+            const auto author = hex_to_hash(req.get_param_value("by"));   // Hash == PublicKey
+            if (!author) {
+                res.status = 400;
+                res.set_content("{\"error\":\"by: цепь, 64 hex\"}", "application/json");
+                return;
+            }
+            UserId uid{};
+            uid.bytes = author->bytes;
+            notes = board->by(uid, req.has_param("kind") ? req.get_param_value("kind") : "");
+        } else {
+            res.status = 400;
+            res.set_content("{\"error\":\"нужен about или by\"}", "application/json");
+            return;
+        }
+        std::string body = "{\"notes\":[";
+        for (size_t i = 0; i < notes.size(); ++i) {
+            const auto& e = *notes[i];
+            const auto& n = e.note;
+            if (i) body += ',';
+            body += "{\"block\":\""  + to_hex(e.block.bytes.data(), 32)
+                 + "\",\"chain\":\"" + to_hex(e.author.bytes.data(), 32)
+                 + "\",\"at\":"       + std::to_string(e.at)
+                 + ",\"index\":"       + std::to_string(e.index)
+                 + ",\"about\":\""    + json_escape(records::subject_id(n.about))
+                 + "\",\"kind\":\""  + json_escape(n.kind) + "\"";
+            if (n.v)             body += ",\"v\":" + std::to_string(*n.v);
+            if (!n.text.empty()) body += ",\"text\":\"" + json_escape(n.text) + "\"";
+            if (n.re)            body += ",\"re\":\"" + records::subject_id(records::Subject{*n.re}) + "\"";
+            body += '}';
+        }
+        body += "]}";
         res.set_content(body, "application/json");
     });
 
