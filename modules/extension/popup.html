@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>bc</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <div id="key" class="key">…</div>
+    <div id="who" class="muted"></div>
+  </header>
+
+  <p id="error" class="error" hidden></p>
+
+  <section id="product" hidden>
+    <h2>Отзывы круга</h2>
+    <div id="names" class="muted"></div>
+    <div id="summary" class="line"></div>
+    <div id="spread" class="muted"></div>
+    <ul id="reviews" class="items"></ul>
+    <form id="review-form">
+      <div id="stars" class="stars" role="radiogroup" aria-label="Звёзды"></div>
+      <textarea id="review-text" rows="2" placeholder="Отзыв — в вашу цепь"></textarea>
+      <button type="submit">Оставить отзыв</button>
+    </form>
+  </section>
+
+  <section id="social" hidden>
+    <div id="reactions" class="line"></div>
+    <div class="actions">
+      <button id="like" title="Нравится — запись в вашу цепь">👍</button>
+      <button id="dislike" title="Не нравится — запись в вашу цепь">👎</button>
+      <button id="unlike" title="Снять свою реакцию">снять</button>
+      <button id="watched" title="В журнал просмотров; в цепь — пакетом">смотрел</button>
+    </div>
+    <div id="views" class="line muted"></div>
+
+    <h2>Комментарии круга</h2>
+    <ul id="comments" class="items"></ul>
+    <p id="hidden-comments" class="muted"></p>
+    <form id="comment-form">
+      <textarea id="comment-text" rows="2" placeholder="Комментарий — в вашу цепь"></textarea>
+      <button type="submit">Отправить</button>
+    </form>
+  </section>
+
+
+  <footer>
+    <span id="status" class="muted"></span>
+    <button id="publish" class="link" title="Журнал просмотров — одним блоком">опубликовать журнал</button>
+  </footer>
+  <script src="popup.js"></script>
+</body>
+</html>

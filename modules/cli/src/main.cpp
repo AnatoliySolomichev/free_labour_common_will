@@ -148,7 +148,7 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--shifts", "--pay", "--reply-within",
     "--re", "--hops", "--limit", "--from", "--speed",
     "--claim", "--video", "--mirror", "--name", "--better", "--text-file",
-    "--stars", "--deal",
+    "--stars", "--deal", "--browser", "--profile", "--extension-id",
 };
 
 // True when a standalone flag (no value) is present.
@@ -3776,6 +3776,26 @@ static std::string utc_minute(int64_t at) {
 
 static std::string who_short(const ChainBytes& c) { return short_hex(c, 4); }
 
+// Строка JSON: кавычки, обратная косая и управляющие знаки — экранированы.
+static std::string json_esc(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (const char ch : s) {
+        const auto c = static_cast<unsigned char>(ch);
+        if (ch == '"' || ch == '\\') {
+            out += '\\';
+            out += ch;
+        } else if (c < 0x20) {
+            char buf[8];
+            std::snprintf(buf, sizeof buf, "\\u%04x", c);
+            out += buf;
+        } else {
+            out += ch;
+        }
+    }
+    return out;
+}
+
 // Короткая подпись предмета: ключ — как есть, блок и цепь — началом hex.
 static std::string subject_label(const std::string& id) {
     if (id.size() == 129 && id[64] == '/') return id.substr(0, 8) + "…/" + id.substr(65, 8) + "…";
@@ -4510,21 +4530,6 @@ static int cmd_social_show(const fs::path& data_dir, int argc, char** argv) {
     by_time(roots);
     for (auto& [p, list] : children) by_time(list);
 
-    const auto name = [&](const ChainBytes& c) { return c == circle->me ? std::string("вы") : who_short(c); };
-    ReactTally in_circle{};
-    for (int l = 0; l <= 2; ++l) {
-        in_circle.plus  += by_layer[l].plus;
-        in_circle.minus += by_layer[l].minus;
-    }
-    std::cout << id << "\n";
-    std::cout << "  реакции круга: " << tally_str(in_circle) << "   (вы " << tally_str(by_layer[0])
-              << " · шаг 1 " << tally_str(by_layer[1]);
-    if (hops > 1) std::cout << " · шаг 2 " << tally_str(by_layer[2]);
-    std::cout << ")\n";
-    if (by_layer[3].plus || by_layer[3].minus)
-        std::cout << "  вне круга: " << tally_str(by_layer[3]) << " от " << outside.size()
-                  << " цеп. — со слов агрегатора, в счёт не идёт\n";
-
     // Просмотры (social.md §6.1): кто из круга смотрел и сколько внимания — в
     // пределах суточного бюджета каждой цепи; за кругом — только число цепей.
     std::map<ChainBytes, std::vector<const NoteRow*>> viewers;
@@ -4535,6 +4540,9 @@ static int cmd_social_show(const fs::path& data_dir, int argc, char** argv) {
         if (l == 3) outside_viewers.insert(r.chain);
         else if (l >= 0) viewers[r.chain].push_back(&r);
     }
+    std::array<int, 3> per_layer{};
+    double             spent = 0;
+    bool               known = false;
     if (!viewers.empty()) {
         std::vector<NoteRow> their_views;   // все просмотры зрителей круга — для суточных итогов
         for (const auto& [chain, list] : viewers) {
@@ -4549,9 +4557,6 @@ static int cmd_social_show(const fs::path& data_dir, int argc, char** argv) {
                 if (v.kind == "view" && v.chain == chain) their_views.push_back(v);
         }
         const auto totals = day_totals(their_views);
-        std::array<int, 3> per_layer{};
-        double             spent = 0;
-        bool               known = false;
         for (const auto& [chain, list] : viewers) {
             ++per_layer[layer(chain)];
             for (const auto* v : list) {
@@ -4559,6 +4564,65 @@ static int cmd_social_show(const fs::path& data_dir, int argc, char** argv) {
                 known = known || view_seconds(*v).has_value();
             }
         }
+    }
+    // Реакции на комментарий — круга (или всех с --all); себе не реагируют.
+    const auto comment_tally = [&](const NoteRow& c) {
+        ReactTally t{};
+        for (const auto& [chain, r] : last_reacts(c.id(), c.chain)) {
+            if (!shown_layer(layer(chain)) || *r->v == 0) continue;
+            (*r->v > 0 ? t.plus : t.minus)++;
+        }
+        return t;
+    };
+
+    if (flag_present(argc, argv, "--json")) {   // для расширения браузера (extension.md §4)
+        const auto tally = [](const ReactTally& t) {
+            return "{\"plus\":" + std::to_string(t.plus) + ",\"minus\":" + std::to_string(t.minus) + "}";
+        };
+        std::string out = "{\"subject\":\"" + json_esc(id) + "\",\"reactions\":{\"me\":" + tally(by_layer[0]) +
+                          ",\"step1\":" + tally(by_layer[1]) + ",\"step2\":" + tally(by_layer[2]) +
+                          ",\"outside\":" + tally(by_layer[3]) +
+                          ",\"outside_chains\":" + std::to_string(outside.size()) + "}";
+        out += ",\"views\":{\"me\":" + std::to_string(per_layer[0]) + ",\"step1\":" + std::to_string(per_layer[1]) +
+               ",\"step2\":" + std::to_string(per_layer[2]) + ",\"attention_sec\":" +
+               std::to_string(std::llround(spent)) + ",\"known\":" + (known ? "true" : "false") +
+               ",\"outside_chains\":" + std::to_string(outside_viewers.size()) + "}";
+        out += ",\"comments\":[";
+        bool first = true;
+        std::function<void(const NoteRow&)> emit = [&](const NoteRow& c) {
+            const auto t      = comment_tally(c);
+            const auto parent = parent_of(c);
+            out += std::string(first ? "" : ",") + "{\"id\":\"" + c.id() + "\",\"chain\":\"" + to_hex(c.chain) +
+                   "\",\"layer\":" + std::to_string(layer(c.chain)) + ",\"at\":" + std::to_string(c.at) +
+                   ",\"text\":\"" + json_esc(c.text) + "\",\"retracted\":" +
+                   (retracted.count(c.id()) ? "true" : "false") +
+                   ",\"parent\":" + (parent.empty() ? std::string("null") : "\"" + parent + "\"") +
+                   ",\"plus\":" + std::to_string(t.plus) + ",\"minus\":" + std::to_string(t.minus) + "}";
+            first = false;
+            if (const auto it = children.find(c.id()); it != children.end())
+                for (const auto* child : it->second) emit(*child);
+        };
+        for (const auto* root : roots) emit(*root);
+        out += "],\"hidden_comments\":" + std::to_string(hidden) + "}";
+        std::cout << out << "\n";
+        return 0;
+    }
+
+    const auto name = [&](const ChainBytes& c) { return c == circle->me ? std::string("вы") : who_short(c); };
+    ReactTally in_circle{};
+    for (int l = 0; l <= 2; ++l) {
+        in_circle.plus  += by_layer[l].plus;
+        in_circle.minus += by_layer[l].minus;
+    }
+    std::cout << id << "\n";
+    std::cout << "  реакции круга: " << tally_str(in_circle) << "   (вы " << tally_str(by_layer[0])
+              << " · шаг 1 " << tally_str(by_layer[1]);
+    if (hops > 1) std::cout << " · шаг 2 " << tally_str(by_layer[2]);
+    std::cout << ")\n";
+    if (by_layer[3].plus || by_layer[3].minus)
+        std::cout << "  вне круга: " << tally_str(by_layer[3]) << " от " << outside.size()
+                  << " цеп. — со слов агрегатора, в счёт не идёт\n";
+    if (!viewers.empty()) {
         const auto count = [](int n) { return n ? std::to_string(n) : std::string("—"); };
         std::cout << "  смотрели в круге: " << viewers.size() << " цеп. (вы " << count(per_layer[0])
                   << " · шаг 1 " << count(per_layer[1]);
@@ -4579,11 +4643,7 @@ static int cmd_social_show(const fs::path& data_dir, int argc, char** argv) {
             std::cout << "  — снят автором";
         } else {
             std::cout << "  «" << c.text << "»";
-            ReactTally t{};
-            for (const auto& [chain, r] : last_reacts(c.id(), c.chain)) {
-                if (!shown_layer(layer(chain)) || *r->v == 0) continue;
-                (*r->v > 0 ? t.plus : t.minus)++;
-            }
+            const auto t = comment_tally(c);
             if (t.plus || t.minus) std::cout << "  " << tally_str(t);
         }
         if (depth == 0 && !parent_of(c).empty()) std::cout << "  (ответ на скрытый комментарий)";
@@ -5599,9 +5659,71 @@ static int cmd_review_show(const fs::path& data_dir, int argc, char** argv) {
         ++spread[static_cast<size_t>(*r->v)];
     }
     std::sort(stars.begin(), stars.end());
-    std::cout << "товар: " << start << "\n";
     std::vector<std::string> also(names.begin() + 1, names.end());
     std::sort(also.begin(), also.end());
+
+    // Каждый отзыв: покупка и «полезно» — реакции круга на сам отзыв (social.md §4).
+    struct Shown {
+        const NoteRow* r = nullptr;
+        std::string    purchase;   // confirmed | unconfirmed | none; пусто — товар не из системы
+        ReactTally     useful{};
+    };
+    std::vector<Shown> listed;
+    for (const auto& [who, r] : reviews) {
+        Shown sh;
+        sh.r = r;
+        if (const auto ok = confirmed(*r)) sh.purchase = *ok ? "confirmed" : "unconfirmed";
+        else if (ref_arg(r->about))        sh.purchase = "none";
+        std::map<ChainBytes, const NoteRow*> last;
+        for (const auto& [name, rows] : notes_of)
+            for (const auto& x : rows)
+                if (x.kind == "react" && x.about == r->id() && x.v && counts(x.chain) && x.chain != r->chain)
+                    if (auto& slot = last[x.chain]; !slot || later(x, *slot)) slot = &x;
+        for (const auto& [voter, x] : last)
+            if (*x->v) (*x->v > 0 ? sh.useful.plus : sh.useful.minus)++;
+        listed.push_back(sh);
+    }
+    std::sort(listed.begin(), listed.end(), [](const Shown& a, const Shown& b) { return later(*a.r, *b.r); });
+    const auto proven = static_cast<size_t>(std::count_if(listed.begin(), listed.end(),
+                                                          [](const Shown& x) { return x.purchase == "confirmed"; }));
+
+    if (flag_present(argc, argv, "--json")) {   // для расширения браузера (extension.md §4)
+        const auto chains = [](const std::vector<ChainBytes>& v) {
+            std::string out = "[";
+            for (size_t i = 0; i < v.size(); ++i) out += std::string(i ? "," : "") + "\"" + to_hex(v[i]) + "\"";
+            return out + "]";
+        };
+        std::string out = "{\"product\":\"" + json_esc(start) + "\",\"by\":\"" + (all ? "all" : "circle") +
+                          "\",\"names\":[";
+        for (size_t i = 0; i < also.size(); ++i) out += std::string(i ? "," : "") + "\"" + json_esc(also[i]) + "\"";
+        out += "],\"disputes\":[";
+        bool first = true;
+        for (const auto& [pair, d] : disputes) {
+            out += std::string(first ? "" : ",") + "{\"a\":\"" + json_esc(pair.first) + "\",\"b\":\"" +
+                   json_esc(pair.second) + "\",\"yes\":" + chains(d.yes) + ",\"no\":" + chains(d.no) + "}";
+            first = false;
+        }
+        out += "],\"reviews\":[";
+        for (size_t i = 0; i < listed.size(); ++i) {
+            const auto& [r, purchase, useful] = listed[i];
+            out += std::string(i ? "," : "") + "{\"id\":\"" + r->id() + "\",\"chain\":\"" + to_hex(r->chain) +
+                   "\",\"layer\":" + std::to_string(circle->layer(r->chain)) + ",\"at\":" + std::to_string(r->at) +
+                   ",\"stars\":" + std::to_string(*r->v) + ",\"text\":\"" + json_esc(r->text) + "\",\"name\":\"" +
+                   json_esc(r->about) + "\",\"purchase\":" +
+                   (purchase.empty() ? std::string("null") : "\"" + purchase + "\"") +
+                   ",\"plus\":" + std::to_string(useful.plus) + ",\"minus\":" + std::to_string(useful.minus) + "}";
+        }
+        out += "],\"median\":" + (stars.empty() ? std::string("null") : std::to_string(stars[(stars.size() - 1) / 2])) +
+               ",\"spread\":{";
+        for (int st = 1; st <= 5; ++st)
+            out += std::string(st > 1 ? "," : "") + "\"" + std::to_string(st) + "\":" +
+                   std::to_string(spread[static_cast<size_t>(st)]);
+        out += "},\"confirmed\":" + std::to_string(proven) + ",\"outside\":" + std::to_string(outside.size()) + "}";
+        std::cout << out << "\n";
+        return 0;
+    }
+
+    std::cout << "товар: " << start << "\n";
     if (!also.empty()) {
         std::cout << "  он же:";
         for (size_t i = 0; i < also.size(); ++i) std::cout << (i ? ", " : " ") << subject_label(also[i]);
@@ -5618,34 +5740,19 @@ static int cmd_review_show(const fs::path& data_dir, int argc, char** argv) {
     std::cout << "  отзывы " << (all ? "всех" : "круга") << ": " << stars.size();
     if (!stars.empty()) {
         std::cout << " — медиана " << stars[(stars.size() - 1) / 2] << "★  (";
-        for (int s = 5; s >= 1; --s) std::cout << s << "★ " << spread[static_cast<size_t>(s)] << (s > 1 ? " · " : "");
+        for (int st = 5; st >= 1; --st)
+            std::cout << st << "★ " << spread[static_cast<size_t>(st)] << (st > 1 ? " · " : "");
         std::cout << ")";
     }
     std::cout << "\n";
-    std::vector<const NoteRow*> listed;
-    for (const auto& [who, r] : reviews) listed.push_back(r);
-    std::sort(listed.begin(), listed.end(), [](const NoteRow* a, const NoteRow* b) { return later(*a, *b); });
-    size_t proven = 0;
-    for (const auto* r : listed) {
+    for (const auto& [r, purchase, useful] : listed) {
         std::cout << "    " << stars_str(*r->v) << "  " << utc_minute(r->at).substr(0, 10) << "  "
                   << (r->chain == circle->me ? std::string("вы") : who_short(r->chain));
         if (!r->text.empty()) std::cout << "  «" << r->text << "»";
         if (r->about != start) std::cout << "  (" << subject_label(r->about) << ")";
-        if (const auto ok = confirmed(*r)) {
-            std::cout << (*ok ? "  · покупка подтверждена" : "  · покупка не подтверждена");
-            proven += *ok;
-        } else if (ref_arg(r->about)) {
-            std::cout << "  · без сделки покупки";
-        }
-        // «Полезно» — реакции круга на сам отзыв (social.md §4).
-        ReactTally useful{};
-        std::map<ChainBytes, const NoteRow*> last;
-        for (const auto& [name, rows] : notes_of)
-            for (const auto& x : rows)
-                if (x.kind == "react" && x.about == r->id() && x.v && counts(x.chain) && x.chain != r->chain)
-                    if (auto& slot = last[x.chain]; !slot || later(x, *slot)) slot = &x;
-        for (const auto& [who, x] : last)
-            if (*x->v) (*x->v > 0 ? useful.plus : useful.minus)++;
+        if (purchase == "confirmed")   std::cout << "  · покупка подтверждена";
+        if (purchase == "unconfirmed") std::cout << "  · покупка не подтверждена";
+        if (purchase == "none")        std::cout << "  · без сделки покупки";
         if (useful.plus || useful.minus) std::cout << "  · полезно " << tally_str(useful);
         std::cout << "\n";
     }
@@ -5662,6 +5769,235 @@ static int cmd_review(const fs::path& data_dir, int argc, char** argv) {
     if (sub == "same") return cmd_review_same(data_dir, argc, argv);
     if (sub == "show") return cmd_review_show(data_dir, argc, argv);
     return review_usage();
+}
+
+// ── Расширение браузера: хост native messaging (extension.md §3) ─────────────
+//
+// Браузер запускает bc сам и говорит с ним кадрами: 4 байта длины (порядок байтов
+// машины) и JSON. Окно расширения просит действие — bc выполняет его и отвечает.
+// Подписывает bc, ключом отдельной ветки браузера (extension.md §2): украдут —
+// предок отзовёт её, не трогая основную. Расширению доступны только заметки и
+// чтение картин — белый список, как у черновика (records.md §8.8); ничего, что
+// двигает ценность (переводы, приёмки, ключи), отсюда не сделать.
+
+constexpr const char* kNativeHostName = "org.free_labour.bc";
+constexpr const char* kExtensionId    = "dmmadjknblhkhcfhjblkaikanclebljf";   // из key в manifest.json
+constexpr const char* kFirefoxAddonId = "bc@free-labour.org";
+constexpr NodeIndex   BROWSER_LEAF    = 0x8000'0000u;   // соседний с основным лист — ветка браузера
+constexpr uint32_t    kMaxFrame       = 1u << 20;       // от хоста браузер берёт не больше 1 МБ
+
+static std::optional<std::string> read_frame(std::FILE* in) {
+    uint32_t len = 0;
+    if (std::fread(&len, sizeof len, 1, in) != 1 || len > kMaxFrame) return std::nullopt;
+    std::string body(len, '\0');
+    if (len && std::fread(body.data(), 1, len, in) != len) return std::nullopt;
+    return body;
+}
+
+static void write_frame(std::FILE* out, const std::string& body) {
+    const auto len = static_cast<uint32_t>(body.size());
+    std::fwrite(&len, sizeof len, 1, out);
+    std::fwrite(body.data(), 1, body.size(), out);
+    std::fflush(out);
+}
+
+struct Captured {
+    int         rc = 1;
+    std::string out, err;
+};
+
+// Команда bc в этом же процессе; всё, что она печатает, — в ответ, а не в stdout:
+// там кадры протокола.
+static Captured run_captured(int (*fn)(const fs::path&, int, char**), const fs::path& data_dir,
+                             std::vector<std::string> args) {
+    std::vector<char*> argv;
+    for (auto& a : args) argv.push_back(a.data());
+    argv.push_back(nullptr);
+    std::ostringstream out, err;
+    auto* const old_out = std::cout.rdbuf(out.rdbuf());
+    auto* const old_err = std::cerr.rdbuf(err.rdbuf());
+    Captured c;
+    try {
+        c.rc = fn(data_dir, static_cast<int>(args.size()), argv.data());
+    } catch (const std::exception& e) {
+        err << e.what() << "\n";
+        c.rc = 1;
+    }
+    std::cout.rdbuf(old_out);
+    std::cerr.rdbuf(old_err);
+    c.out = out.str();
+    c.err = err.str();
+    return c;
+}
+
+static std::string trimmed(std::string s) {
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) s.pop_back();
+    return s;
+}
+
+// Один запрос окна расширения (extension.md §4) → ответ.
+static std::string handle_native(const fs::path& data_dir, const std::string& via,
+                                 const std::string& body) {
+    namespace js = records::json;
+    js::Value req;
+    try {
+        req = js::Reader(body).read();
+    } catch (const js::JsonError& e) {
+        return "{\"id\":0,\"ok\":false,\"error\":\"" + json_esc(std::string("не JSON: ") + e.what()) + "\"}";
+    }
+    if (!req.is_object()) return "{\"id\":0,\"ok\":false,\"error\":\"ждём объект JSON\"}";
+    const auto& o       = req.object;
+    const auto  id      = std::to_string(static_cast<int64_t>(jnum(o, "id")));
+    const auto  cmd     = jstr(o, "cmd");
+    const auto  subject = jstr(o, "subject");
+    const auto  text    = jstr(o, "text");
+    const auto  fail    = [&](const std::string& why) {
+        return "{\"id\":" + id + ",\"ok\":false,\"error\":\"" + json_esc(why) + "\"}";
+    };
+    const auto flag = [&](const char* key) {
+        const auto* v = js::find(o, key);
+        return v && v->type == js::Value::Type::Bool && v->boolean;
+    };
+
+    if (cmd == "whoami")
+        return "{\"id\":" + id + ",\"ok\":true,\"data\":{\"chain\":\"" + to_hex(load_user_id(data_dir).bytes) +
+               "\",\"via\":\"" + json_esc(via) + "\",\"leaf\":" + std::to_string(BROWSER_LEAF) + "}}";
+    if (cmd == "key") {
+        const auto key = external_key(subject);
+        if (!key) return fail("не ссылка и не ключ: " + subject);
+        return "{\"id\":" + id + ",\"ok\":true,\"data\":{\"key\":\"" + json_esc(*key) + "\"}}";
+    }
+    if (text.rfind("--", 0) == 0) return fail("текст не начинают с «--»");
+
+    // Белый список: что расширению можно, — и какой командой bc.
+    std::vector<std::string>              args{"bc", "--data-dir", data_dir.string()};
+    int (*fn)(const fs::path&, int, char**) = nullptr;
+    bool reads = false;
+    const auto leaf = std::vector<std::string>{"--leaf", std::to_string(BROWSER_LEAF), "--via", via};
+    const auto add  = [&](std::initializer_list<std::string> more) { args.insert(args.end(), more); };
+    if (cmd == "show" || cmd == "reviews") {
+        fn    = cmd == "show" ? cmd_social : cmd_review;
+        reads = true;
+        add({cmd == "show" ? "social" : "review", "show", subject, "--json", "--via", via});
+        if (jnum(o, "hops") == 2) add({"--hops", "2"});
+        if (flag("all")) add({"--all"});
+    } else if (cmd == "like" || cmd == "dislike" || cmd == "unlike" || cmd == "retract" ||
+               cmd == "follow" || cmd == "unfollow") {
+        fn = cmd_social;
+        add({"social", cmd, subject});
+    } else if (cmd == "comment") {
+        fn = cmd_social;
+        add({"social", "comment", subject, text});
+        if (const auto re = jstr(o, "re"); !re.empty()) add({"--re", re});
+    } else if (cmd == "watch") {
+        fn = cmd_social;
+        add({"social", "watch", subject});
+        for (const char* k : {"from", "to", "speed"})
+            if (const auto v = jstr(o, k); !v.empty()) add({std::string("--") + k, v});
+        if (flag("now")) add({"--now"});
+    } else if (cmd == "views.publish") {
+        fn = cmd_social;
+        add({"social", "views", "publish"});
+    } else if (cmd == "review") {
+        fn = cmd_review;
+        add({"review", "add", subject, "--stars", std::to_string(static_cast<int64_t>(jnum(o, "stars")))});
+        if (!text.empty()) add({text});
+    } else if (cmd == "same") {
+        fn = cmd_review;
+        add({"review", "same", subject, jstr(o, "other")});
+        if (flag("no")) add({"--no"});
+    } else {
+        return fail("этого расширению нельзя: «" + cmd + "» (extension.md §3)");
+    }
+    if (!reads) args.insert(args.end(), leaf.begin(), leaf.end());
+
+    const auto c = run_captured(fn, data_dir, args);
+    if (reads && c.rc == 0) return "{\"id\":" + id + ",\"ok\":true,\"data\":" + trimmed(c.out) + "}";
+    return "{\"id\":" + id + ",\"ok\":" + (c.rc == 0 ? "true" : "false") + ",\"text\":\"" +
+           json_esc(trimmed(c.out)) + "\",\"error\":\"" + json_esc(trimmed(c.err)) + "\"}";
+}
+
+// bc native-host --via URL — хост native messaging (extension.md §3). Его
+// запускает браузер, через скрипт bc native-install; руками — разве что для проверки.
+static int cmd_native_host(const fs::path& data_dir, int argc, char** argv) {
+    const auto via = flag_val(argc, argv, "--via");
+    if (via.empty()) {
+        std::cerr << "Usage: bc native-host --via URL (его запускает браузер, см. bc native-install)\n";
+        return 1;
+    }
+    while (const auto body = read_frame(stdin)) write_frame(stdout, handle_native(data_dir, via, *body));
+    return 0;
+}
+
+// bc native-install --via URL [--browser chromium|chrome|firefox|all] [--profile КАТАЛОГ]
+// [--extension-id ID] — поставить хост для расширения (extension.md §5): ветку
+// браузера, скрипт запуска рядом с данными и манифест хоста в каталог браузера.
+static int cmd_native_install(const fs::path& data_dir, int argc, char** argv) {
+    const auto via     = flag_val(argc, argv, "--via");
+    const auto browser = flag_val(argc, argv, "--browser", "all");
+    const auto profile = flag_val(argc, argv, "--profile");
+    const auto ext_id  = flag_val(argc, argv, "--extension-id", kExtensionId);
+    if (via.empty() || (browser != "all" && browser != "chromium" && browser != "chrome" && browser != "firefox")) {
+        std::cerr << "Usage: bc native-install --via URL [--browser chromium|chrome|firefox|all]\n"
+                     "                         [--profile КАТАЛОГ_ПРОФИЛЯ] [--extension-id ID]\n";
+        return 1;
+    }
+    const fs::path dir = fs::absolute(data_dir);
+    load_user_id(dir);   // личности нет — дальше делать нечего (бросит с объяснением)
+
+    // Ветка браузера (extension.md §2): соседний лист, свой ключ.
+    if (!fs::exists(key_path(dir, BROWSER_LEAF))) {
+        std::vector<std::string> args{"bc", "--data-dir", dir.string(), "branch", "init",
+                                      std::to_string(BROWSER_LEAF)};
+        const auto c = run_captured(cmd_branch_init, dir, args);
+        if (c.rc != 0) {
+            std::cerr << c.err;
+            return 1;
+        }
+        std::cout << "ветка браузера: узел " << BROWSER_LEAF << " — свой ключ, отзывает её предок\n";
+    }
+
+    const auto quote = [](const std::string& s) {
+        std::string q = "'";
+        for (const char ch : s) q += ch == '\'' ? std::string("'\\''") : std::string(1, ch);
+        return q + "'";
+    };
+    const fs::path script = dir / "native-host.sh";
+    {
+        std::ofstream f(script, std::ios::trunc);
+        f << "#!/bin/sh\n"
+             "# Хост расширения bc (extension.md §3): его запускает браузер. Пишет bc native-install.\n"
+          << "exec " << quote(fs::canonical("/proc/self/exe").string()) << " --data-dir " << quote(dir.string())
+          << " native-host --via " << quote(via) << " \"$@\"\n";
+    }
+    fs::permissions(script, fs::perms::owner_all | fs::perms::group_read | fs::perms::group_exec |
+                                fs::perms::others_read | fs::perms::others_exec);
+
+    const char*                               home = std::getenv("HOME");
+    std::vector<std::pair<fs::path, bool>>    targets;   // каталог и Firefox ли
+    const fs::path                            h    = home ? fs::path(home) : fs::path(".");
+    if (!profile.empty()) {
+        targets.push_back({fs::path(profile) / "NativeMessagingHosts", browser == "firefox"});
+    } else {
+        if (browser == "all" || browser == "chromium") targets.push_back({h / ".config/chromium/NativeMessagingHosts", false});
+        if (browser == "all" || browser == "chrome") targets.push_back({h / ".config/google-chrome/NativeMessagingHosts", false});
+        if (browser == "all" || browser == "firefox") targets.push_back({h / ".mozilla/native-messaging-hosts", true});
+    }
+    std::cout << "хост: " << script.string() << "\n";
+    for (const auto& [target, firefox] : targets) {
+        fs::create_directories(target);
+        const auto manifest = target / (std::string(kNativeHostName) + ".json");
+        std::ofstream(manifest, std::ios::trunc)
+            << "{\n  \"name\": \"" << kNativeHostName << "\",\n"
+            << "  \"description\": \"bc: заметки соцслоя, соревнований и отзывов — подпись ветки браузера\",\n"
+            << "  \"path\": \"" << json_esc(script.string()) << "\",\n  \"type\": \"stdio\",\n"
+            << (firefox ? "  \"allowed_extensions\": [\"" + std::string(kFirefoxAddonId) + "\"]\n"
+                        : "  \"allowed_origins\": [\"chrome-extension://" + ext_id + "/\"]\n")
+            << "}\n";
+        std::cout << "манифест: " << manifest.string() << "\n";
+    }
+    std::cout << "дальше: загрузите modules/extension в браузер (extension.md §5)\n";
+    return 0;
 }
 
 // bc tool shares ПРЕФИКС [--via URL]
@@ -10331,6 +10667,15 @@ Merge, manual relay (blockchain.md §6.4 bilateral two-round protocol):
   ТОВАР — ссылка магазина, штрихкод, gtin:…, "model:название", ozon:…, wb:…,
   ymarket:…, amazon:…, ali:… или ЦЕПЬ/ХЕШ записи труда
 
+Расширение браузера — окно на любой странице (extension.md):
+  native-install --via URL         Поставить хост: ветку браузера (свой ключ,
+    [--browser chromium|chrome|        отзывает предок), скрипт запуска и манифест
+     firefox|all]                      хоста в каталог браузера; дальше —
+    [--profile КАТАЛОГ]                загрузить modules/extension в браузер
+  native-host --via URL            Хост native messaging: его запускает браузер.
+                                       Расширению доступны только заметки и
+                                       картины — ничего, что двигает ценность
+
 Чей ключ стоит за пломбой (blockchain.md §7.5):
   keypath publish --via URL        Выложить путь своего ключа на склад
   keypath who KEY_HEX [--via URL]  Привести ключ к цепи: сперва по своим узлам,
@@ -10469,6 +10814,8 @@ int main(int argc, char** argv) {
         else if (cmd == "social")                           return cmd_social(data_dir, argc, argv);
         else if (cmd == "contest")                          return cmd_contest(data_dir, argc, argv);
         else if (cmd == "review")                           return cmd_review(data_dir, argc, argv);
+        else if (cmd == "native-host")                      return cmd_native_host(data_dir, argc, argv);
+        else if (cmd == "native-install")                   return cmd_native_install(data_dir, argc, argv);
         else if (cmd == "keypath"   && subcmd == "publish") return cmd_keypath_publish(data_dir, argc, argv);
         else if (cmd == "keypath"   && subcmd == "who")     return cmd_keypath_who(data_dir, argc, argv);
         else if (cmd == "fraud"     && subcmd == "verify")  return cmd_fraud_verify(argc, argv);

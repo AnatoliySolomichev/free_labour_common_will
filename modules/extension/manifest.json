@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "bc — соцслой в своей цепи",
+  "version": "0.1.0",
+  "description": "Лайки, комментарии, просмотры и отзывы — в вашей цепи, а не на площадке (ИР-026, extension.md).",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA8XB05IoWL32Lbu0N3KM/CbF86TS4XLMDpXzFF7wTUAs4x3VIHYMncjSJzW4Zu0Fs3+nRmlRaOB63pDepC0gVggjKOm/A8RWur0mZBROSn3Kpsw03w23aAjaa0D5nTahUkgQOvWDnVgrqTOHNrOTja26CYvxwS2Go08vzj415wr3tH3guLr6HAEZ+GFVxl3yb7jelOB1GFaAwZw5jGgYoS7a1JDYaxbB+iurymcXXlMNU1jQWo+5yiNL+VUo0gv0u5FBOTtDJWJYVs7oHXHLnGsMoxtFXQ/u4JcYq1QDMl5BJewDFKD08lxUhXqndbF8q2cl6KUVlfpeNBDTYAVJ3VwIDAQAB",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "bc: картина вашего круга по этой странице"
+  },
+  "permissions": ["nativeMessaging", "activeTab"],
+  "browser_specific_settings": {
+    "gecko": { "id": "bc@free-labour.org", "strict_min_version": "115.0" }
+  }
+}

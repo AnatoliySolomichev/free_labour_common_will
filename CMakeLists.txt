@@ -68,4 +68,14 @@ if(TEST_E2E)
     )
     set_tests_properties(e2e_review_demo PROPERTIES
         DEPENDS "bc;aggregator_server" TIMEOUT 120)
+
+    # Browser extension (docs/extension.md): the native messaging host protocol,
+    # and — when Node.js and Playwright are installed — the real Chromium.
+    add_test(
+        NAME e2e_extension
+        COMMAND ${CMAKE_COMMAND} -E env BUILD=${CMAKE_BINARY_DIR} PORT=19372
+                bash ${CMAKE_SOURCE_DIR}/modules/extension/tests/host-e2e.sh
+    )
+    set_tests_properties(e2e_extension PROPERTIES
+        DEPENDS "bc;aggregator_server" TIMEOUT 180)
 endif()
