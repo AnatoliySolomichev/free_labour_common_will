@@ -221,28 +221,47 @@ void check_note(const Note& n) {
         throw CodecError("Note: цепь-предмет не названа");
     if (n.re && (n.re->chain == zero || n.re->hash == zero))
         throw CodecError("Note: у ответа обязательны цепь и хеш комментария");
+    // Отрезок предмета: to — только вместе с from и позже него (records.md §8.11).
+    if (n.from && *n.from < 0)
+        throw CodecError("Note: отрезок начинается не раньше нулевой секунды");
+    if (n.to && (!n.from || *n.to <= *n.from))
+        throw CodecError("Note: конец отрезка — только после его начала");
 
-    const auto no_extra = [&](bool v_allowed, bool text_allowed, bool re_allowed) {
+    const auto no_extra = [&](bool v_allowed, bool text_allowed, bool re_allowed, bool span_allowed) {
         if (n.v && !v_allowed)            throw CodecError("Note: у вида «" + n.kind + "» нет значения v");
         if (!n.text.empty() && !text_allowed) throw CodecError("Note: у вида «" + n.kind + "» нет текста");
         if (n.re && !re_allowed)          throw CodecError("Note: у вида «" + n.kind + "» нет ответа re");
+        if (n.from && !span_allowed)      throw CodecError("Note: у вида «" + n.kind + "» нет отрезка");
     };
     if (n.kind == "react") {
         if (chain) throw CodecError("Note: реагируют на блок или внешний объект, на цепь — подписываются");
         if (!n.v || *n.v < -1 || *n.v > 1) throw CodecError("Note: реакция — −1, 0 или +1");
-        no_extra(true, false, false);
+        no_extra(true, false, false, false);
     } else if (n.kind == "comment") {
         if (chain) throw CodecError("Note: комментарий — о блоке или внешнем объекте");
         if (n.text.empty()) throw CodecError("Note: комментарий без текста");
-        no_extra(false, true, true);
+        no_extra(false, true, true, true);
     } else if (n.kind == "retract") {
         if (!block) throw CodecError("Note: снимают комментарий — предмет его блок");
-        no_extra(false, false, false);
+        no_extra(false, false, false, false);
     } else if (n.kind == "follow") {
         if (!chain) throw CodecError("Note: подписываются на цепь");
         if (!n.v || (*n.v != 0 && *n.v != 1)) throw CodecError("Note: подписка — 1 или 0");
-        no_extra(true, false, false);
+        no_extra(true, false, false, false);
+    } else if (n.kind == "view") {
+        if (chain) throw CodecError("Note: смотрят ролик, пост, страницу или блок, а не цепь");
+        if (n.v && *n.v <= 0) throw CodecError("Note: скорость просмотра — больше нуля процентов");
+        no_extra(true, false, false, true);
     }
+}
+
+// В списке записей блока (records.md §2) — только заметки и не комментарии:
+// на комментарий ссылаются Ref-ом его блока, а запись внутри списка так не назвать.
+void check_listable(const Record& rec) {
+    const auto* n = std::get_if<Note>(&rec);
+    if (!n) throw CodecError("список записей в блоке — пока только заметки (records.md §2)");
+    if (n->kind == "comment")
+        throw CodecError("комментарий — один в блоке: на него ссылаются Ref-ом блока (records.md §2)");
 }
 
 void w_subject(Buf& out, const Subject& s) {
@@ -251,16 +270,20 @@ void w_subject(Buf& out, const Subject& s) {
     else                                                    w_fixed(out, std::get<ChainId>(s));
 }
 
-// Ключи 0–2 всегда; 3 (v), 4 (text), 5 (re) — только когда заданы, по возрастанию.
+// Ключи 0–2 всегда; 3 (v), 4 (text), 5 (re), 6 (from), 7 (to) — только когда
+// заданы, по возрастанию.
 void enc_note(Buf& out, const Note& n) {
     check_note(n);
-    w_map(out, 3 + (n.v ? 1 : 0) + (n.text.empty() ? 0 : 1) + (n.re ? 1 : 0));
+    w_map(out, 3 + (n.v ? 1 : 0) + (n.text.empty() ? 0 : 1) + (n.re ? 1 : 0) +
+                   (n.from ? 1 : 0) + (n.to ? 1 : 0));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Note));
     w_uint(out, 1); w_subject(out, n.about);
     w_uint(out, 2); w_text(out, n.kind);
     if (n.v)            { w_uint(out, 3); w_int64(out, *n.v); }
     if (!n.text.empty()) { w_uint(out, 4); w_text(out, n.text); }
     if (n.re)           { w_uint(out, 5); w_ref(out, *n.re); }
+    if (n.from)         { w_uint(out, 6); w_int64(out, *n.from); }
+    if (n.to)           { w_uint(out, 7); w_int64(out, *n.to); }
 }
 
 // One carry-thread link (records.md §9.4 v2, ИР-011).
@@ -939,6 +962,8 @@ public:
         return data_[pos_] >> 5;
     }
 
+    bool at_end() const noexcept { return pos_ == size_; }
+
     // Raw payload bytes following an already-consumed head.
     void r_raw(uint8_t* out, size_t n) {
         need(n);
@@ -1168,7 +1193,9 @@ Note dec_note_fields(CborReader& r, uint64_t field_count) {
                 n.text = r.r_text();
                 if (n.text.empty()) throw CodecError("Note: пустой текст не пишется");
                 break;
-            case 5: n.re = dec_ref(r); break;
+            case 5: n.re   = dec_ref(r); break;
+            case 6: n.from = r.r_int(); break;
+            case 7: n.to   = r.r_int(); break;
             default: throw CodecError("Note: unknown field key");
         }
     }
@@ -1710,8 +1737,10 @@ std::vector<uint8_t> Codec::encode(const Record& rec) {
     return out;
 }
 
-Record Codec::decode(const uint8_t* data, size_t len) {
-    CborReader r(data, len);
+namespace {
+
+// One record — a map with key 0 = discriminator — read from where the reader stands.
+Record decode_record(CborReader& r) {
     // Field count is owned by per-type decoders; Transfer needs it to know how
     // long its optional tail is (emission, settles, accept).
     const uint64_t field_count = r.r_map();
@@ -1748,6 +1777,37 @@ Record Codec::decode(const uint8_t* data, size_t len) {
         default:
             throw CodecError("CBOR: unknown record type discriminator");
     }
+}
+
+} // namespace
+
+Record Codec::decode(const uint8_t* data, size_t len) {
+    CborReader r(data, len);
+    return decode_record(r);
+}
+
+std::vector<uint8_t> Codec::encode_list(const std::vector<Record>& recs) {
+    Buf out;
+    w_arr(out, recs.size());
+    for (const auto& rec : recs) {
+        check_listable(rec);
+        const auto one = encode(rec);
+        out.insert(out.end(), one.begin(), one.end());
+    }
+    return out;
+}
+
+std::vector<Record> Codec::decode_list(const uint8_t* data, size_t len) {
+    CborReader r(data, len);
+    if (r.peek_major() != 4) return {decode_record(r)};    // одна запись
+    const uint64_t n = r.r_arr();
+    std::vector<Record> out;
+    for (uint64_t i = 0; i < n; ++i) {
+        out.push_back(decode_record(r));
+        check_listable(out.back());
+    }
+    if (!r.at_end()) throw CodecError("CBOR: лишние байты после списка записей");
+    return out;
 }
 
 } // namespace records

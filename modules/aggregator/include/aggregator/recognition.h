@@ -302,6 +302,9 @@ struct SeenBlock {
     Timestamp                   timestamp_claimed = 0;
     bool                        data = false;   // a DATA block whose payload decodes
     records::Record             record;
+    // A DATA block carrying a list of records (records.md §2) — for now notes
+    // only; `data` stays false, so readers of single records skip it as before.
+    std::vector<records::Record> batch;
     std::optional<MergePayload> merge;          // a MERGE block: whose tip it took, and when
     Timestamp                   arrived = 0;    // when it first came here (0: not kept then)
 };

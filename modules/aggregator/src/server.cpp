@@ -790,11 +790,14 @@ void AggregatorServer::setup_routes() {
                  + "\",\"chain\":\"" + to_hex(e.author.bytes.data(), 32)
                  + "\",\"at\":"       + std::to_string(e.at)
                  + ",\"index\":"       + std::to_string(e.index)
+                 + ",\"pos\":"         + std::to_string(e.pos)
                  + ",\"about\":\""    + json_escape(records::subject_id(n.about))
                  + "\",\"kind\":\""  + json_escape(n.kind) + "\"";
             if (n.v)             body += ",\"v\":" + std::to_string(*n.v);
             if (!n.text.empty()) body += ",\"text\":\"" + json_escape(n.text) + "\"";
             if (n.re)            body += ",\"re\":\"" + records::subject_id(records::Subject{*n.re}) + "\"";
+            if (n.from)          body += ",\"from\":" + std::to_string(*n.from);
+            if (n.to)            body += ",\"to\":" + std::to_string(*n.to);
             body += '}';
         }
         body += "]}";

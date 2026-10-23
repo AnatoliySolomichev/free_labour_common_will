@@ -982,7 +982,11 @@ const SeenBlock& seen_block(const AggregatorStorage& storage, const Hash& bh) {
         try {
             s.record = records::Codec::decode(block->payload.data(), block->payload.size());
             s.data   = true;
-        } catch (const records::CodecError&) {}
+        } catch (const records::CodecError&) {
+            try {
+                s.batch = records::Codec::decode_list(block->payload.data(), block->payload.size());
+            } catch (const records::CodecError&) {}
+        }
     } else if (block->type == BlockType::MERGE) {
         try {
             s.merge = Serializer::decode_merge_payload(block->payload.data(), block->payload.size());

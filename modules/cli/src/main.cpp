@@ -146,7 +146,7 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--buyback-to", "--buyback-days", "--buyback-until", "--buyback-of",
     "--improves", "--repair", "--spend", "--machine-hours", "--meter", "--no",
     "--shifts", "--pay", "--reply-within",
-    "--re", "--hops", "--limit",
+    "--re", "--hops", "--limit", "--from", "--speed",
 };
 
 // True when a standalone flag (no value) is present.
@@ -3742,11 +3742,13 @@ struct NoteRow {
     ChainBytes             chain{};   // автор
     int64_t                at = 0;    // время блока
     uint64_t               index = 0; // номер блока в ветке: порядок при равном времени
+    uint32_t               pos = 0;   // место в списке записей блока (records.md §2)
     std::string            about;     // предмет: records::subject_id
     std::string            kind;
     std::optional<int64_t> v;
     std::string            text;
     std::string            re;        // «ЦЕПЬ/ХЕШ» комментария, на который ответ
+    std::optional<int64_t> from, to;  // отрезок предмета, секунды его шкалы
 
     // Сама заметка как предмет: на комментарий отвечают и реагируют по нему.
     std::string id() const { return to_hex(chain) + "/" + block; }
@@ -3755,7 +3757,7 @@ struct NoteRow {
 // Позднее слово цепи отменяет прежнее (records.md §8.11): по времени блока, при
 // равном — по номеру в ветке (в одной ветке время не убывает, blockchain.md §9.4).
 static bool later(const NoteRow& a, const NoteRow& b) {
-    return std::tie(a.at, a.index, a.block) > std::tie(b.at, b.index, b.block);
+    return std::tie(a.at, a.index, a.pos, a.block) > std::tie(b.at, b.index, b.pos, b.block);
 }
 
 static std::string utc_minute(int64_t at) {
@@ -3850,17 +3852,20 @@ static std::string url_encode(const std::string& s) {
 }
 
 static NoteRow note_row(const Note& n, const ChainBytes& chain, const std::string& block,
-                        int64_t at, uint64_t index) {
+                        int64_t at, uint64_t index, uint32_t pos) {
     NoteRow r;
     r.block = block;
     r.chain = chain;
     r.at    = at;
     r.index = index;
+    r.pos   = pos;
     r.about = subject_id(n.about);
     r.kind  = n.kind;
     r.v     = n.v;
     r.text  = n.text;
     if (n.re) r.re = subject_id(Subject{*n.re});
+    r.from  = n.from;
+    r.to    = n.to;
     return r;
 }
 
@@ -3874,10 +3879,13 @@ static std::vector<NoteRow> own_notes(Context& ctx) {
         for (const auto& b : blocks) {
             if (b.type != BlockType::DATA) continue;
             try {
-                const auto rec = Codec::decode(b.payload.data(), b.payload.size());
-                if (const auto* n = std::get_if<Note>(&rec))
-                    out.push_back(note_row(*n, ctx.user_id.bytes, to_hex(Crypto::hash_block(b).bytes),
-                                           b.timestamp_claimed, b.address.block_index));
+                // Запись или суточный пакет — список заметок (records.md §2).
+                const auto recs = Codec::decode_list(b.payload.data(), b.payload.size());
+                const auto hash = to_hex(Crypto::hash_block(b).bytes);
+                for (uint32_t pos = 0; pos < recs.size(); ++pos)
+                    if (const auto* n = std::get_if<Note>(&recs[pos]))
+                        out.push_back(note_row(*n, ctx.user_id.bytes, hash, b.timestamp_claimed,
+                                               b.address.block_index, pos));
             } catch (const std::exception&) { continue; }
         }
     }
@@ -3905,6 +3913,11 @@ static std::optional<std::vector<NoteRow>> fetch_notes(const std::string& via,
             r.v = static_cast<int64_t>(v->number);
         r.text = jstr(e.object, "text");
         r.re   = jstr(e.object, "re");
+        r.pos  = static_cast<uint32_t>(jnum(e.object, "pos"));
+        if (const auto* f = records::json::find(e.object, "from"); f && f->is_number())
+            r.from = static_cast<int64_t>(f->number);
+        if (const auto* t = records::json::find(e.object, "to"); t && t->is_number())
+            r.to = static_cast<int64_t>(t->number);
         out.push_back(std::move(r));
     }
     return out;
@@ -3982,6 +3995,10 @@ static int social_usage() {
                  "  circle [--hops 2] [--via URL]     кто в круге\n"
                  "  show ПРЕДМЕТ --via URL [--hops 2] [--all] [--ids]\n"
                  "  feed --via URL [--hops 2] [--limit N]\n"
+                 "  watch ПРЕДМЕТ [--from T] [--to T] [--speed X] [--now]\n"
+                 "                                    просмотр: в журнал, --now — сразу\n"
+                 "  views [publish]                   журнал; publish — суточным пакетом\n"
+                 "  top --via URL [--days 7] [--hops 2] [--limit N]\n"
                  "ПРЕДМЕТ — ссылка, ключ (yt:…, tg:…, url:…) или ЦЕПЬ/ХЕШ блока;\n"
                  "пишущие команды выкладывают блок при --via\n";
     return 1;
@@ -4152,6 +4169,236 @@ static int cmd_social_circle(const fs::path& data_dir, int argc, char** argv) {
     return 0;
 }
 
+// ── Просмотры (social.md §4.1, social.md §6.1) ───────────────────────────────
+//
+// Просмотр записывает факты: что смотрели и, по желанию, какой отрезок шкалы
+// ролика и на какой скорости. Сколько времени это заняло на деле — отрезок /
+// скорость — и сколько это весит, решает читатель; ниже — чтение по умолчанию:
+// бюджет внимания 8 часов в сутки на цепь.
+
+constexpr int64_t kAttentionPerDay = 8 * 3600;   // social.md §6.1
+
+// Время просмотра на деле: отрезок шкалы / скорость; без отрезка — неизвестно.
+static std::optional<int64_t> view_seconds(const NoteRow& v) {
+    if (!v.from || !v.to) return std::nullopt;
+    return (*v.to - *v.from) * 100 / v.v.value_or(100);
+}
+
+// Сутки цепи — по дате блока (UTC): сколько она смотрела в эти сутки.
+using ChainDay = std::pair<ChainBytes, int64_t>;
+static std::map<ChainDay, int64_t> day_totals(const std::vector<NoteRow>& views) {
+    std::map<ChainDay, int64_t> out;
+    for (const auto& v : views)
+        if (const auto t = view_seconds(v)) out[{v.chain, v.at / 86400}] += *t;
+    return out;
+}
+
+// Внимание просмотра: его время, а если цепь за сутки смотрела больше 8 часов, —
+// его доля от 8 часов: ни одна цепь не весит больше 8 часов в сутки.
+static double attention(const NoteRow& v, const std::map<ChainDay, int64_t>& totals) {
+    const auto t = view_seconds(v);
+    if (!t) return 0;
+    const auto    it  = totals.find({v.chain, v.at / 86400});
+    const int64_t day = it == totals.end() ? *t : it->second;
+    return day > kAttentionPerDay ? static_cast<double>(*t) * kAttentionPerDay / day
+                                  : static_cast<double>(*t);
+}
+
+// Свой просмотр своего блока не считается — как и реакция на себя.
+static bool own_subject(const NoteRow& v) {
+    return v.about.size() == 129 && v.about[64] == '/' && v.about.compare(0, 64, to_hex(v.chain)) == 0;
+}
+
+static std::string duration_str(double seconds) {
+    std::ostringstream ss;
+    if (seconds < 3600) ss << std::llround(seconds / 60) << " мин";
+    else ss << std::fixed << std::setprecision(1) << seconds / 3600 << " ч";
+    return ss.str();
+}
+
+// «750», «12:30», «1:02:03» → секунды шкалы ролика.
+static std::optional<int64_t> clock_arg(const std::string& s) {
+    if (s.empty()) return std::nullopt;
+    int64_t total = 0;
+    int     parts = 0;
+    std::istringstream ss(s);
+    std::string part;
+    while (std::getline(ss, part, ':')) {
+        if (part.empty() || part.size() > 9 || ++parts > 3 ||
+            !std::all_of(part.begin(), part.end(), [](char c) { return c >= '0' && c <= '9'; }))
+            return std::nullopt;
+        total = total * 60 + std::stoll(part);
+    }
+    return total;
+}
+
+static std::string clock_str(int64_t s) {
+    char buf[32];
+    if (s >= 3600)
+        std::snprintf(buf, sizeof buf, "%lld:%02lld:%02lld", static_cast<long long>(s / 3600),
+                      static_cast<long long>(s / 60 % 60), static_cast<long long>(s % 60));
+    else
+        std::snprintf(buf, sizeof buf, "%lld:%02lld", static_cast<long long>(s / 60),
+                      static_cast<long long>(s % 60));
+    return buf;
+}
+
+// «1.5», «1.5x», «3х» → проценты: 150, 300.
+static std::optional<int64_t> speed_arg(std::string s) {
+    for (const std::string tail : {"x", "х"})
+        if (s.size() > tail.size() && s.compare(s.size() - tail.size(), tail.size(), tail) == 0)
+            s.erase(s.size() - tail.size());
+    try {
+        size_t used = 0;
+        const double d = std::stod(s, &used);
+        if (used != s.size() || !(d > 0)) return std::nullopt;
+        const auto pct = std::llround(d * 100);
+        return pct > 0 ? std::optional<int64_t>(pct) : std::nullopt;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+// «  [12:30–13:10 ×1.5]» — отрезок и скорость, если названы.
+static std::string span_str(const std::optional<int64_t>& from, const std::optional<int64_t>& to,
+                            const std::optional<int64_t>& speed) {
+    std::string s;
+    if (from) s += clock_str(*from) + "–" + (to ? clock_str(*to) : std::string());
+    if (speed && *speed != 100) {
+        std::ostringstream ss;
+        ss << "×" << static_cast<double>(*speed) / 100;
+        s += (s.empty() ? "" : " ") + ss.str();
+    }
+    return s.empty() ? std::string() : "  [" + s + "]";
+}
+
+// Журнал просмотров (social.md §8): копится у себя, в цепь — пакетом
+// (bc social views publish) или сразу (watch --now).
+static fs::path views_journal(const fs::path& data_dir) { return data_dir / "social" / "views.tsv"; }
+
+static void journal_append(const fs::path& path, const Note& n) {
+    const auto num = [](const std::optional<int64_t>& v) { return v ? std::to_string(*v) : std::string(); };
+    fs::create_directories(path.parent_path());
+    std::ofstream(path, std::ios::app) << subject_id(n.about) << '\t' << num(n.from) << '\t'
+                                       << num(n.to) << '\t' << num(n.v) << '\n';
+}
+
+static std::vector<Note> journal_read(const fs::path& path) {
+    std::vector<Note> out;
+    std::ifstream f(path);
+    std::string line;
+    while (std::getline(f, line)) {
+        std::vector<std::string> cols;
+        std::istringstream ss(line);
+        std::string col;
+        while (std::getline(ss, col, '\t')) cols.push_back(col);
+        cols.resize(4);
+        const auto about = parse_subject(cols[0]);
+        if (!about) continue;
+        const auto num = [](const std::string& s) {
+            return s.empty() ? std::optional<int64_t>() : std::optional<int64_t>(std::stoll(s));
+        };
+        Note n;
+        n.about = *about;
+        n.kind  = "view";
+        n.from  = num(cols[1]);
+        n.to    = num(cols[2]);
+        n.v     = num(cols[3]);
+        out.push_back(std::move(n));
+    }
+    return out;
+}
+
+// bc social watch ПРЕДМЕТ [--from T] [--to T] [--speed X] [--now] [--via URL] —
+// просмотр: в журнал, а с --now — сразу в цепь (social.md §4.1).
+static int cmd_social_watch(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);   // [social, watch, ПРЕДМЕТ]
+    if (pos.size() < 3) return social_usage();
+    const auto about = subject_arg(pos[2]);
+    if (!about) {
+        std::cerr << "не предмет: " << pos[2] << " — ссылка, ключ или ЦЕПЬ/ХЕШ\n";
+        return 1;
+    }
+    if (std::holds_alternative<ChainId>(*about)) {
+        std::cerr << "смотрят ролик, пост, страницу или блок, а не цепь\n";
+        return 1;
+    }
+    if (const auto* r = std::get_if<Ref>(&*about); r && r->chain == load_user_id(data_dir).bytes) {
+        std::cerr << "это ваша запись — свой просмотр не считается\n";
+        return 1;
+    }
+    Note n;
+    n.about = *about;
+    n.kind  = "view";
+    for (const auto& [flag, slot] : {std::pair<const char*, std::optional<int64_t>*>{"--from", &n.from},
+                                     {"--to", &n.to}}) {
+        const auto s = flag_val(argc, argv, flag);
+        if (s.empty()) continue;
+        *slot = clock_arg(s);
+        if (!*slot) {
+            std::cerr << flag << ": секунды, ММ:СС или Ч:ММ:СС — место на шкале ролика\n";
+            return 1;
+        }
+    }
+    if (const auto s = flag_val(argc, argv, "--speed"); !s.empty()) {
+        n.v = speed_arg(s);
+        if (!n.v) {
+            std::cerr << "--speed: скорость, например 1, 1.5 или 3x\n";
+            return 1;
+        }
+    }
+    try {
+        Codec::encode(n);   // отрезок проверяем сейчас, а не при публикации пакета
+    } catch (const CodecError& e) {
+        std::cerr << e.what() << "\n";
+        return 1;
+    }
+    const auto label = subject_label(subject_id(n.about)) + span_str(n.from, n.to, n.v);
+    if (flag_present(argc, argv, "--now")) {
+        std::cout << "просмотр — сразу в цепь: " << label << "\n";
+        return cmd_write(data_dir, argc, argv, n);
+    }
+    journal_append(views_journal(data_dir), n);
+    std::cout << "в журнале: " << label << " — всего " << journal_read(views_journal(data_dir)).size()
+              << "; в цепь — bc social views publish\n";
+    return 0;
+}
+
+// bc social views [publish [--via URL]] — журнал просмотров; publish пишет его
+// одним блоком — суточным пакетом, списком заметок (records.md §2) — и очищает.
+static int cmd_social_views(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos   = get_positionals(argc, argv);   // [social, views, publish?]
+    const auto path  = views_journal(data_dir);
+    const auto notes = journal_read(path);
+    if (pos.size() < 3) {
+        if (notes.empty()) {
+            std::cout << "журнал просмотров пуст\n";
+            return 0;
+        }
+        std::cout << "в журнале " << notes.size() << " просм. — в цепь: bc social views publish\n";
+        for (const auto& n : notes)
+            std::cout << "  " << subject_label(subject_id(n.about)) << span_str(n.from, n.to, n.v) << "\n";
+        return 0;
+    }
+    if (pos[2] != "publish") return social_usage();
+    if (notes.empty()) {
+        std::cout << "журнал пуст — публиковать нечего\n";
+        return 0;
+    }
+    const std::vector<Record> recs(notes.begin(), notes.end());
+    const auto payload = recs.size() == 1 ? Codec::encode(recs[0]) : Codec::encode_list(recs);
+    Context    ctx(data_dir, parse_leaf_index(argc, argv));
+    const auto block = ctx.bc.append_data_block(ctx.user_id, ctx.leaf, payload, ctx.working_kp,
+                                                static_cast<Timestamp>(std::time(nullptr)));
+    // Пакет уже в цепи — журнал пуст сразу, до выгрузки: сбой сети не опубликует его дважды.
+    std::ofstream(path, std::ios::trunc);
+    std::cout << "суточный пакет: " << notes.size() << " просм. одним блоком #"
+              << block.address.block_index << "  hash: " << to_hex(Crypto::hash_block(block).bytes)
+              << "\n";
+    if (const auto via = flag_val(argc, argv, "--via"); !via.empty()) upload_block(ctx, via, block);
+    return 0;
+}
+
 struct ReactTally { int plus = 0, minus = 0; };
 
 static std::string tally_str(const ReactTally& t) {
@@ -4186,8 +4433,8 @@ static int cmd_social_show(const fs::path& data_dir, int argc, char** argv) {
     }
     // Свои заметки — из своих веток, даже не выложенные (social.md §8).
     {
-        std::set<std::string> seen;
-        for (const auto& r : *rows) seen.insert(r.block);
+        std::set<std::pair<std::string, uint32_t>> seen;   // блок и место в его списке
+        for (const auto& r : *rows) seen.insert({r.block, r.pos});
         const auto own = own_notes(ctx);
         std::set<std::string> thread{id};   // предмет и комментарии под ним
         const std::vector<NoteRow>* lists[] = {&*rows, &own};
@@ -4196,7 +4443,7 @@ static int cmd_social_show(const fs::path& data_dir, int argc, char** argv) {
                 for (const auto& r : *list)
                     if (r.kind == "comment" && thread.count(r.about)) thread.insert(r.id());
         for (const auto& r : own)
-            if (thread.count(r.about) && seen.insert(r.block).second) rows->push_back(r);
+            if (thread.count(r.about) && seen.insert({r.block, r.pos}).second) rows->push_back(r);
     }
 
     const auto layer = [&](const ChainBytes& c) { return circle->layer(c); };
@@ -4269,6 +4516,51 @@ static int cmd_social_show(const fs::path& data_dir, int argc, char** argv) {
     std::cout << ")\n";
     if (by_layer[3].plus || by_layer[3].minus)
         std::cout << "  вне круга: " << tally_str(by_layer[3]) << " от " << outside.size()
+                  << " цеп. — со слов агрегатора, в счёт не идёт\n";
+
+    // Просмотры (social.md §6.1): кто из круга смотрел и сколько внимания — в
+    // пределах суточного бюджета каждой цепи; за кругом — только число цепей.
+    std::map<ChainBytes, std::vector<const NoteRow*>> viewers;
+    std::set<ChainBytes>                              outside_viewers;
+    for (const auto& r : *rows) {
+        if (r.kind != "view" || r.about != id || (owner && r.chain == *owner)) continue;
+        const int l = layer(r.chain);
+        if (l == 3) outside_viewers.insert(r.chain);
+        else if (l >= 0) viewers[r.chain].push_back(&r);
+    }
+    if (!viewers.empty()) {
+        std::vector<NoteRow> their_views;   // все просмотры зрителей круга — для суточных итогов
+        for (const auto& [chain, list] : viewers) {
+            const auto views = chain == circle->me
+                ? std::optional<std::vector<NoteRow>>(own_notes(ctx))
+                : fetch_notes(via, "by=" + to_hex(chain) + "&kind=view");
+            if (!views) {
+                std::cerr << "агрегатор не ответил: " << via << "\n";
+                return 1;
+            }
+            for (const auto& v : *views)
+                if (v.kind == "view" && v.chain == chain) their_views.push_back(v);
+        }
+        const auto totals = day_totals(their_views);
+        std::array<int, 3> per_layer{};
+        double             spent = 0;
+        bool               known = false;
+        for (const auto& [chain, list] : viewers) {
+            ++per_layer[layer(chain)];
+            for (const auto* v : list) {
+                spent += attention(*v, totals);
+                known = known || view_seconds(*v).has_value();
+            }
+        }
+        const auto count = [](int n) { return n ? std::to_string(n) : std::string("—"); };
+        std::cout << "  смотрели в круге: " << viewers.size() << " цеп. (вы " << count(per_layer[0])
+                  << " · шаг 1 " << count(per_layer[1]);
+        if (hops > 1) std::cout << " · шаг 2 " << count(per_layer[2]);
+        std::cout << "), " << (known ? "внимание " + duration_str(spent) : "длительность не указана")
+                  << "\n";
+    }
+    if (!outside_viewers.empty())
+        std::cout << "  смотрели вне круга: " << outside_viewers.size()
                   << " цеп. — со слов агрегатора, в счёт не идёт\n";
     std::cout << "  комментарии" << (all ? "" : " круга") << ": " << shown << "\n";
 
@@ -4348,6 +4640,72 @@ static int cmd_social_feed(const fs::path& data_dir, int argc, char** argv) {
     return 0;
 }
 
+// bc social top --via URL [--days 7] [--hops 2] [--limit N] — что круг смотрел:
+// сколько цепей и сколько внимания, не больше 8 часов в сутки на цепь (social.md §6.2).
+static int cmd_social_top(const fs::path& data_dir, int argc, char** argv) {
+    const auto via = flag_val(argc, argv, "--via");
+    if (via.empty()) return social_usage();
+    const int     hops  = hops_arg(argc, argv);
+    const int64_t days  = std::stoll(flag_val(argc, argv, "--days", "7"));
+    const size_t  limit = static_cast<size_t>(std::stoul(flag_val(argc, argv, "--limit", "10")));
+    if (days <= 0) throw std::runtime_error("--days: больше нуля");
+
+    Context    ctx(data_dir, parse_leaf_index(argc, argv));
+    const auto circle = build_circle(ctx, hops, via);
+    if (!circle) {
+        std::cerr << "агрегатор не ответил: " << via << "\n";
+        return 1;
+    }
+    std::vector<ChainBytes> members;
+    for (const auto& [c, why] : circle->step1) members.push_back(c);
+    for (const auto& [c, through] : circle->step2) members.push_back(c);
+    std::vector<NoteRow> views;
+    for (const auto& m : members) {
+        const auto rows = fetch_notes(via, "by=" + to_hex(m) + "&kind=view");
+        if (!rows) {
+            std::cerr << "агрегатор не ответил: " << via << "\n";
+            return 1;
+        }
+        for (const auto& r : *rows)
+            if (r.chain == m && r.kind == "view" && !own_subject(r)) views.push_back(r);
+    }
+    const auto    totals = day_totals(views);
+    const int64_t since  = static_cast<int64_t>(std::time(nullptr)) - days * 86400;
+    struct Watched {
+        double               attention = 0;
+        bool                 known     = false;   // хоть у одного просмотра назван отрезок
+        std::set<ChainBytes> chains;
+    };
+    std::map<std::string, Watched> by_subject;
+    for (const auto& v : views) {
+        if (v.at < since) continue;
+        auto& w = by_subject[v.about];
+        w.attention += attention(v, totals);
+        w.known = w.known || view_seconds(v).has_value();
+        w.chains.insert(v.chain);
+    }
+    std::vector<std::pair<std::string, Watched>> ranked(by_subject.begin(), by_subject.end());
+    // Сперва — сколько цепей круга смотрели, потом — сколько внимания: один
+    // человек со стримами фоном весит не больше 8 часов в сутки, но и этого
+    // хватило бы перекрыть ролик, который посмотрели трое (social.md §6.2).
+    std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {
+        if (a.second.chains.size() != b.second.chains.size())
+            return a.second.chains.size() > b.second.chains.size();
+        if (a.second.attention != b.second.attention) return a.second.attention > b.second.attention;
+        return a.first < b.first;
+    });
+    if (ranked.size() > limit) ranked.resize(limit);
+    std::cout << "что смотрел круг за " << days << " дн.: сколько цепей и сколько внимания "
+                 "(не больше 8 ч в сутки на цепь)\n";
+    if (ranked.empty()) std::cout << "  ничего\n";
+    for (size_t i = 0; i < ranked.size(); ++i)
+        std::cout << "  " << i + 1 << ". " << subject_label(ranked[i].first) << "  "
+                  << (ranked[i].second.known ? duration_str(ranked[i].second.attention)
+                                             : std::string("время не указано"))
+                  << "  ·  " << ranked[i].second.chains.size() << " цеп.\n";
+    return 0;
+}
+
 static int cmd_social(const fs::path& data_dir, int argc, char** argv) {
     const auto pos = get_positionals(argc, argv);   // [social, КОМАНДА, …]
     const std::string sub = pos.size() > 1 ? pos[1] : std::string{};
@@ -4364,6 +4722,9 @@ static int cmd_social(const fs::path& data_dir, int argc, char** argv) {
     if (sub == "circle")   return cmd_social_circle(data_dir, argc, argv);
     if (sub == "show")     return cmd_social_show(data_dir, argc, argv);
     if (sub == "feed")     return cmd_social_feed(data_dir, argc, argv);
+    if (sub == "watch")    return cmd_social_watch(data_dir, argc, argv);
+    if (sub == "views")    return cmd_social_views(data_dir, argc, argv);
+    if (sub == "top")      return cmd_social_top(data_dir, argc, argv);
     return social_usage();
 }
 
@@ -8257,16 +8618,23 @@ static int cmd_list(const fs::path& data_dir, int argc, char** argv) {
         }
 
         std::string summary;
+        std::vector<Record> batch;   // список записей в блоке (records.md §2)
         try {
             const auto rec = Codec::decode(block.payload.data(), block.payload.size());
             summary = record_summary(rec);
         } catch (const CodecError& e) {
-            summary = "[unknown payload: " + std::string(e.what()) + "]";
+            try {
+                batch   = Codec::decode_list(block.payload.data(), block.payload.size());
+                summary = "[список: " + std::to_string(batch.size()) + " зап.]";
+            } catch (const CodecError&) {
+                summary = "[unknown payload: " + std::string(e.what()) + "]";
+            }
         }
 
         std::cout << "#" << block.address.block_index
                   << "  " << summary
                   << "  hash:" << hash_str << "\n";
+        for (const auto& rec : batch) std::cout << "      " << record_summary(rec) << "\n";
     }
     return 0;
 }
@@ -8981,6 +9349,15 @@ Merge, manual relay (blockchain.md §6.4 bilateral two-round protocol):
     [--hops 2] [--all] [--ids]         прочее — числом «вне круга»
   social feed --via URL            Лента круга: свежие реакции и комментарии
     [--hops 2] [--limit N]
+  social watch ПРЕДМЕТ             Просмотр: в журнал у себя; --now — сразу в
+    [--from T] [--to T]                цепь. Отрезок шкалы ролика (секунды, ММ:СС,
+    [--speed X] [--now]                Ч:ММ:СС) и скорость — по желанию: время на
+                                       деле = отрезок / скорость
+  social views [publish]           Журнал просмотров; publish — одним блоком,
+    [--via URL]                        суточным пакетом (records.md §2)
+  social top --via URL             Что круг смотрел больше всего: внимание, не
+    [--days 7] [--hops 2]              больше 8 ч в сутки на цепь (social.md §6.1)
+    [--limit N]
   ПРЕДМЕТ — ссылка, ключ или ЦЕПЬ/ХЕШ блока; пишущие команды выкладывают
   блок при --via
 

@@ -290,6 +290,92 @@ TEST(RecordsCodec, NoteKnownKindsKeepTheirRules) {
     EXPECT_NO_THROW(Codec::encode(make_note(chain, "follow", 0)));
 }
 
+// Просмотр (social.md §4.1): что смотрели, по желанию — отрезок шкалы ролика и
+// скорость в процентах; время, потраченное на деле, читатель считает сам.
+TEST(RecordsCodec, NoteViewWithSpanAndSpeedRoundTrip) {
+    auto n  = make_note(std::string("yt:dQw4w9WgXcQ"), "view", 300);
+    n.from  = 0;
+    n.to    = 1800;
+    const auto d = std::get<Note>(roundtrip(n));
+    EXPECT_EQ(d.kind, "view");
+    EXPECT_EQ(d.v, 300);
+    EXPECT_EQ(d.from, 0);
+    EXPECT_EQ(d.to, 1800);
+    // и без всего: «смотрел», остальное неизвестно
+    const auto bare = std::get<Note>(roundtrip(make_note(std::string("tg:durov/42"), "view")));
+    EXPECT_FALSE(bare.v);
+    EXPECT_FALSE(bare.from);
+}
+
+TEST(RecordsCodec, NoteSpanRules) {
+    const Subject key = std::string("yt:dQw4w9WgXcQ");
+    const auto with_span = [](Note n, std::optional<int64_t> from, std::optional<int64_t> to) {
+        n.from = from;
+        n.to   = to;
+        return n;
+    };
+    const auto view = make_note(key, "view");
+    EXPECT_THROW(Codec::encode(with_span(view, std::nullopt, 10)), CodecError);   // конец без начала
+    EXPECT_THROW(Codec::encode(with_span(view, 10, 10)), CodecError);             // пустой отрезок
+    EXPECT_THROW(Codec::encode(with_span(view, -1, 10)), CodecError);
+    EXPECT_NO_THROW(Codec::encode(with_span(view, 750, std::nullopt)));           // «с 12:30»
+    // комментарий о моменте ролика — законен; реакции и подписке отрезок ни к чему
+    EXPECT_NO_THROW(Codec::encode(with_span(make_note(key, "comment", std::nullopt, "вот тут"),
+                                            750, 790)));
+    EXPECT_THROW(Codec::encode(with_span(make_note(key, "react", 1), 750, 790)), CodecError);
+    EXPECT_THROW(Codec::encode(with_span(make_note(make_chain(0x01), "follow", 1), 0, 1)),
+                 CodecError);
+    // просмотр: не цепь, скорость больше нуля, без текста и ответа
+    EXPECT_THROW(Codec::encode(make_note(make_chain(0x01), "view")), CodecError);
+    EXPECT_THROW(Codec::encode(make_note(key, "view", 0)), CodecError);
+    EXPECT_THROW(Codec::encode(make_note(key, "view", std::nullopt, "текст")), CodecError);
+    // незнакомому виду отрезок тоже можно
+    EXPECT_NO_THROW(Codec::encode(with_span(make_note(make_ref(0x01, 0x02), "verdict", 18), 10, 65)));
+}
+
+// ── Список записей в блоке (records.md §2) ───────────────────────────────────
+
+TEST(RecordsCodec, ListOfNotesRoundTrip) {
+    std::vector<Record> day;
+    for (const char* key : {"yt:dQw4w9WgXcQ", "tg:durov/42", "url:example.com/a"})
+        day.push_back(make_note(std::string(key), "view"));
+    day.push_back(make_note(std::string("yt:dQw4w9WgXcQ"), "react", 1));
+    const auto bytes = Codec::encode_list(day);
+    EXPECT_EQ(bytes[0], 0x84);                          // CBOR-массив из четырёх
+    const auto back = Codec::decode_list(bytes);
+    ASSERT_EQ(back.size(), 4u);
+    EXPECT_EQ(std::get<std::string>(std::get<Note>(back[1]).about), "tg:durov/42");
+    EXPECT_EQ(std::get<Note>(back[3]).kind, "react");
+    // Читатель одиночных записей такой блок не разбирает — и пропускает, как раньше.
+    EXPECT_THROW(Codec::decode(bytes), CodecError);
+}
+
+TEST(RecordsCodec, DecodeListReadsSingleRecordAndStub) {
+    const auto one = Codec::encode(Consent{ make_ref(0x01, 0x02), true, "" });
+    const auto single = Codec::decode_list(one);
+    ASSERT_EQ(single.size(), 1u);
+    EXPECT_TRUE(std::holds_alternative<Consent>(single[0]));
+    EXPECT_TRUE(Codec::decode_list(std::vector<uint8_t>{0x80}).empty());   // блок-заглушка
+    EXPECT_TRUE(Codec::encode_list({}) == std::vector<uint8_t>{0x80});
+}
+
+// В списке — только заметки и не комментарии: на запись внутри списка не сослаться.
+TEST(RecordsCodec, ListTakesOnlyNotesThatNobodyRefersTo) {
+    const Record comment = make_note(std::string("yt:dQw4w9WgXcQ"), "comment", std::nullopt, "x");
+    const Record consent = Consent{ make_ref(0x01, 0x02), true, "" };
+    EXPECT_THROW(Codec::encode_list({comment}), CodecError);
+    EXPECT_THROW(Codec::encode_list({consent}), CodecError);
+    for (const auto& rec : {comment, consent}) {
+        std::vector<uint8_t> bytes{0x81};                // список из одной записи, собранный вручную
+        const auto one = Codec::encode(rec);
+        bytes.insert(bytes.end(), one.begin(), one.end());
+        EXPECT_THROW(Codec::decode_list(bytes), CodecError);
+    }
+    auto bytes = Codec::encode_list({make_note(std::string("tg:durov/42"), "view")});
+    bytes.push_back(0x00);                               // хвост после списка
+    EXPECT_THROW(Codec::decode_list(bytes), CodecError);
+}
+
 // То, чего кодер не пишет, декодер не принимает: пустой текст, ключи не по порядку,
 // предмет не того рода.
 TEST(RecordsCodec, NoteDecodeRejectsWhatEncoderNeverWrites) {

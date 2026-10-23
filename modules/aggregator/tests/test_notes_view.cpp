@@ -75,12 +75,22 @@ protected:
     }
 
     Block add_at(const UserId& owner, const records::Record& rec, Timestamp at) {
+        return add_payload(owner, records::Codec::encode(rec), at);
+    }
+
+    // Блок со списком записей (records.md §2) — суточный пакет просмотров.
+    Block add_list(const UserId& owner, const std::vector<records::Record>& recs) {
+        return add_payload(owner, records::Codec::encode_list(recs),
+                           static_cast<Timestamp>(next_index_) * 1000LL);
+    }
+
+    Block add_payload(const UserId& owner, std::vector<uint8_t> payload, Timestamp at) {
         Block b{};
         b.address           = {owner, 0x7FFF'FFFFu, next_index_++};
         b.prev_hash         = Hash::zero();
         b.timestamp_claimed = at;
         b.type              = BlockType::DATA;
-        b.payload           = records::Codec::encode(rec);
+        b.payload           = std::move(payload);
         b.signature         = Signature::null();
         const auto    bytes = Serializer::encode(b);
         const KeyPair kp    = Crypto::generate_keypair();
@@ -144,6 +154,27 @@ TEST_F(NotesViewTest, SameSecondNotesKeepTheirBranchOrder) {
     EXPECT_EQ(about.back()->note.v, -1);                // последнее слово — последний блок
 }
 
+// Суточный пакет: каждая заметка списка — своя запись индекса, со своим местом.
+TEST_F(NotesViewTest, ListBlockNotesAreIndexedOneByOne) {
+    auto seg = note(kVideo, "view", 300);   // 3x
+    seg.from = 0;
+    seg.to   = 1800;
+    const Block day = add_list(vera_, {seg, note(std::string("tg:durov/42"), "view")});
+    add(anna_, note(kVideo, "react", 1));
+
+    const auto board = read_notes(*storage_);
+    EXPECT_EQ(board.notes.size(), 3u);
+    const auto views = board.by(vera_, "view");
+    ASSERT_EQ(views.size(), 2u);
+    EXPECT_EQ(views[0]->pos, 0u);
+    EXPECT_EQ(views[1]->pos, 1u);
+    EXPECT_EQ(views[0]->block, views[1]->block);        // один блок на двоих
+    EXPECT_EQ(views[0]->block, Crypto::hash_block(day));
+    const auto about = board.about(kVideo);
+    ASSERT_EQ(about.size(), 2u);                        // просмотр Веры и реакция Анны
+    EXPECT_EQ(about[0]->note.to, 1800);
+}
+
 TEST_F(NotesViewTest, BoardIsRecomputedOnlyWhenBlocksArrive) {
     add(anna_, note(kVideo, "react", 1));
     const auto first = notes_board(*storage_);
@@ -158,6 +189,10 @@ TEST_F(NotesViewTest, NotesEndpointServesThreadAndAuthor) {
     const Block c = add(boris_, note(kVideo, "comment", std::nullopt, "кавычки \" и\nперевод"));
     add(anna_, note(ref_to(boris_, c), "react", 1));
     add(vera_, note(records::ChainId{anna_.bytes}, "follow", 1));
+    auto seg = note(kVideo, "view", 150);
+    seg.from = 60;
+    seg.to   = 360;
+    add_list(vera_, {seg, note(std::string("tg:durov/42"), "view")});
 
     const uint16_t port = 18796;
     AggregatorServer server(*storage_, port, {}, std::chrono::seconds(3600));
@@ -184,6 +219,9 @@ TEST_F(NotesViewTest, NotesEndpointServesThreadAndAuthor) {
     EXPECT_NE(thread->body.find("\"v\":1"), std::string::npos);
     EXPECT_NE(thread->body.find("\"index\":" + std::to_string(c.address.block_index)),
               std::string::npos);
+    EXPECT_NE(thread->body.find("\"kind\":\"view\",\"v\":150,\"from\":60,\"to\":360"),
+              std::string::npos) << thread->body;
+    EXPECT_NE(thread->body.find("\"pos\":0"), std::string::npos);
     ASSERT_TRUE(follows && follows->status == 200);
     EXPECT_NE(follows->body.find("\"kind\":\"follow\""), std::string::npos);
     EXPECT_EQ(follows->body.find("\"kind\":\"comment\""), std::string::npos);

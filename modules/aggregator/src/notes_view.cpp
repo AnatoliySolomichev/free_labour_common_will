@@ -14,7 +14,8 @@ namespace {
 
 void by_time(std::vector<const NoteEntry*>& out) {
     std::sort(out.begin(), out.end(), [](const NoteEntry* a, const NoteEntry* b) {
-        return std::tie(a->at, a->index, a->block.bytes) < std::tie(b->at, b->index, b->block.bytes);
+        return std::tie(a->at, a->index, a->pos, a->block.bytes) <
+               std::tie(b->at, b->index, b->pos, b->block.bytes);
     });
 }
 
@@ -56,16 +57,21 @@ std::vector<const NoteEntry*> NotesBoard::by(const UserId& author, const std::st
 
 NotesBoard read_notes(const AggregatorStorage& storage) {
     NotesBoard out;
-    for (const Hash& bh : storage.all_block_hashes()) {
-        const SeenBlock& block = seen_block(storage, bh);
-        if (!block.data) continue;
-        const auto* note = std::get_if<records::Note>(&block.record);
-        if (!note) continue;
+    const auto take = [&](const Hash& bh, const SeenBlock& block, uint32_t pos,
+                          const records::Record& rec) {
+        const auto* note = std::get_if<records::Note>(&rec);
+        if (!note) return;
         const size_t i = out.notes.size();
         out.notes.push_back(NoteEntry{bh, block.address.user_id, block.timestamp_claimed,
-                                      block.address.block_index, *note});
+                                      block.address.block_index, pos, *note});
         out.by_subject[records::subject_id(note->about)].push_back(i);
         out.by_author[block.address.user_id].push_back(i);
+    };
+    for (const Hash& bh : storage.all_block_hashes()) {
+        const SeenBlock& block = seen_block(storage, bh);
+        if (block.data) take(bh, block, 0, block.record);
+        for (uint32_t pos = 0; pos < block.batch.size(); ++pos)   // суточный пакет и т. п.
+            take(bh, block, pos, block.batch[pos]);
     }
     return out;
 }

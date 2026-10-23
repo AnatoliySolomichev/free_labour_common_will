@@ -24,6 +24,7 @@ struct NoteEntry {
     UserId        author{};   // чья заметка — говорит адрес блока
     Timestamp     at = 0;     // время блока
     BlockIndex    index = 0;  // номер блока в ветке: порядок при равном времени
+    uint32_t      pos   = 0;  // место в списке записей блока (records.md §2); одна — 0
     records::Note note;
 };
 

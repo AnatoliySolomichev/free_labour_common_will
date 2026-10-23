@@ -199,10 +199,12 @@ struct Note {
     static constexpr RecordType TYPE = RecordType::Note;
 
     Subject                about;   // о чём
-    std::string            kind;    // react | comment | retract | follow | …
-    std::optional<int64_t> v;       // react: −1/0/+1; follow: 1/0
+    std::string            kind;    // react | comment | retract | follow | view | …
+    std::optional<int64_t> v;       // react: −1/0/+1; follow: 1/0; view: скорость, %
     std::string            text;    // comment: текст; пустой не пишется
     std::optional<Ref>     re;      // comment: на какой комментарий это ответ
+    std::optional<int64_t> from;    // отрезок предмета — с какой секунды его шкалы
+    std::optional<int64_t> to;      //   (ролик: 750–790), по какую; to — только с from
 };
 
 // ── Labor records (records.md §9) ────────────────────────────────────────────

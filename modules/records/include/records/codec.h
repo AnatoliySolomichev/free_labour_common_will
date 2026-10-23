@@ -32,6 +32,22 @@ public:
     static Record decode(const std::vector<uint8_t>& data) {
         return decode(data.data(), data.size());
     }
+
+    // Блок со списком записей (records.md §2): CBOR-массив записей. Пока — только
+    // заметки и не комментарии: на запись внутри списка не сослаться Ref-ом.
+    // Пустой список — блок-заглушка (blockchain.md §5.4).
+    // Throws: CodecError
+    static std::vector<uint8_t> encode_list(const std::vector<Record>& recs);
+
+    // Payload блока целиком: одна запись — список из одной, CBOR-массив — его
+    // записи по порядку, пустой массив — ни одной. decode() на массиве по-прежнему
+    // отказывает: читатели одиночных записей такие блоки пропускают.
+    // Throws: CodecError
+    static std::vector<Record> decode_list(const uint8_t* data, size_t len);
+
+    static std::vector<Record> decode_list(const std::vector<uint8_t>& data) {
+        return decode_list(data.data(), data.size());
+    }
 };
 
 } // namespace records
