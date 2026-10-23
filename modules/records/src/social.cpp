@@ -202,6 +202,145 @@ std::optional<std::string> query_param(std::string_view query, std::string_view 
     return std::nullopt;
 }
 
+// ── Товары (social.md §3.6) ───────────────────────────────────────────────────
+
+// GS1: последняя цифра — контрольная; веса 3, 1, 3, … справа налево без неё.
+bool gtin_check_ok(std::string_view d) noexcept {
+    int sum = 0;
+    for (std::size_t i = 0; i + 1 < d.size(); ++i)
+        sum += (d[d.size() - 2 - i] - '0') * (i % 2 == 0 ? 3 : 1);
+    return (10 - sum % 10) % 10 == d.back() - '0';
+}
+
+// Штрихкод: EAN-8, UPC-A, EAN-13, GTIN-14 — к 14 цифрам, с проверкой контрольной.
+std::optional<std::string> gtin_key(std::string_view digits) {
+    const auto n = digits.size();
+    if (!all_digits(digits) || (n != 8 && n != 12 && n != 13 && n != 14) || !gtin_check_ok(digits))
+        return std::nullopt;
+    return "gtin:" + std::string(14 - n, '0') + std::string(digits);
+}
+
+// Название модели: латиница и кириллица — строчными, «ё» — «е», всё, что не буква
+// и не цифра, — один «-» между словами; другие письменности — как есть.
+std::optional<std::string> model_key(std::string_view name) {
+    std::string out;
+    bool        gap = false;
+    const auto  put = [&](const std::string& piece) {
+        if (gap && !out.empty()) out += '-';
+        gap = false;
+        out += piece;
+    };
+    for (std::size_t i = 0; i < name.size(); ++i) {
+        const auto c = static_cast<unsigned char>(name[i]);
+        if (c < 0x80) {
+            if (is_alpha(static_cast<char>(c)) || is_digit(static_cast<char>(c)))
+                put(std::string(1, to_lower(static_cast<char>(c))));
+            else
+                gap = true;
+            continue;
+        }
+        const std::size_t len = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
+        if (len == 1 || i + len > name.size()) return std::nullopt;   // не UTF-8
+        std::string ch(name.substr(i, len));
+        // Знаки, а не буквы: U+0080–U+00BF («», ©, неразрывный пробел) и общая
+        // пунктуация U+2000–U+207F (тире, кавычки, многоточие) — граница слов.
+        const auto c2 = static_cast<unsigned char>(ch[1]);
+        if ((len == 2 && c == 0xC2) || (len == 3 && c == 0xE2 && (c2 == 0x80 || c2 == 0x81))) {
+            gap = true;
+            i += len - 1;
+            continue;
+        }
+        if (len == 2 && c == 0xD0) {
+            if (c2 >= 0x90 && c2 <= 0x9F) {                 // А–П → а–п
+                ch[1] = static_cast<char>(c2 + 0x20);
+            } else if (c2 >= 0xA0 && c2 <= 0xAF) {          // Р–Я → р–я
+                ch = {static_cast<char>(0xD1), static_cast<char>(c2 - 0x20)};
+            } else if (c2 == 0x81) {                        // Ё → е
+                ch = {static_cast<char>(0xD0), static_cast<char>(0xB5)};
+            }
+        } else if (len == 2 && c == 0xD1 && c2 == 0x91) {
+            ch = {static_cast<char>(0xD0), static_cast<char>(0xB5)};   // ё → е
+        }
+        put(ch);
+        i += len - 1;
+    }
+    if (out.empty()) return std::nullopt;
+    return "model:" + out;
+}
+
+bool is_asin(std::string_view s) noexcept {
+    return s.size() == 10 &&
+           std::all_of(s.begin(), s.end(), [](char c) { return is_alpha(c) || is_digit(c); });
+}
+
+std::string uppered(std::string_view s) {
+    std::string out(s);
+    std::transform(out.begin(), out.end(), out.begin(), to_upper);
+    return out;
+}
+
+// Цифры после последнего «-»: «powerbank-xiaomi-123456» → «123456».
+std::string_view tail_digits(std::string_view seg) {
+    const auto dash = seg.rfind('-');
+    return dash == std::string_view::npos ? seg : seg.substr(dash + 1);
+}
+
+bool ends_with(std::string_view s, std::string_view tail) noexcept {
+    return s.size() >= tail.size() && s.substr(s.size() - tail.size()) == tail;
+}
+
+// Ссылка магазина → ключ товара; nullopt — не страница товара этого магазина.
+std::optional<std::string> shop_key(const std::string& host, const std::vector<std::string>& segs) {
+    const auto first = [&](std::string_view name) { return !segs.empty() && segs[0] == name; };
+    if (host == "ozon.ru" || host == "ozon.kz" || host == "ozon.by" || host == "ozon.com") {
+        if (first("product") && segs.size() >= 2 && all_digits(tail_digits(segs[1])))
+            return "ozon:" + std::string(tail_digits(segs[1]));
+        return std::nullopt;
+    }
+    if (host == "wildberries.ru" || host == "wildberries.by" || host == "wildberries.kz" || host == "wb.ru") {
+        if (first("catalog") && segs.size() >= 2 && all_digits(segs[1])) return "wb:" + segs[1];
+        return std::nullopt;
+    }
+    if (host == "market.yandex.ru" || host == "market.yandex.kz" || host == "market.yandex.by") {
+        if (!segs.empty() && (segs[0] == "product" || segs[0].rfind("product--", 0) == 0) &&
+            segs.size() >= 2 && all_digits(segs[1]))
+            return "ymarket:" + segs[1];
+        if (first("card") && segs.size() >= 3 && all_digits(segs[2])) return "ymarket:card/" + segs[2];
+        return std::nullopt;
+    }
+    const std::string bare = host.rfind("smile.", 0) == 0 ? host.substr(6) : host;
+    if (bare == "amazon.com" || bare.rfind("amazon.", 0) == 0) {
+        for (std::size_t i = 0; i + 1 < segs.size(); ++i)
+            if (segs[i] == "dp" && is_asin(segs[i + 1])) return "amazon:" + uppered(segs[i + 1]);
+        for (std::size_t i = 0; i + 2 < segs.size(); ++i)
+            if (segs[i] == "gp" && (segs[i + 1] == "product" || segs[i + 1] == "aw") ) {
+                const auto& id = segs[i + 1] == "aw" && i + 3 < segs.size() ? segs[i + 3] : segs[i + 2];
+                if (is_asin(id)) return "amazon:" + uppered(id);
+            }
+        return std::nullopt;
+    }
+    if (host == "aliexpress.com" || host == "aliexpress.ru" || host == "aliexpress.us" ||
+        ends_with(host, ".aliexpress.com") || ends_with(host, ".aliexpress.ru")) {
+        if (first("item") && segs.size() >= 2) {
+            const std::string_view id = ends_with(segs[1], ".html")
+                ? std::string_view(segs[1]).substr(0, segs[1].size() - 5) : std::string_view(segs[1]);
+            if (all_digits(id)) return "ali:" + std::string(id);
+        }
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+// Готовый ключ магазина — по форме его номера.
+std::optional<std::string> shop_key_form(std::string_view ns, std::string_view value) {
+    if ((ns == "ozon" || ns == "wb" || ns == "ali") && all_digits(value))
+        return std::string(ns) + ":" + std::string(value);
+    if (ns == "ymarket" && (all_digits(value) || (value.rfind("card/", 0) == 0 && all_digits(value.substr(5)))))
+        return "ymarket:" + std::string(value);
+    if (ns == "amazon" && is_asin(value)) return "amazon:" + uppered(value);
+    return std::nullopt;
+}
+
 struct LinkParts {
     std::string host;    // строчными, без завершающей точки
     std::string port;    // пусто — порт по умолчанию
@@ -281,6 +420,7 @@ std::optional<std::string> link_key(std::string_view link) {
         if (auto k = telegram_key(segs)) return k;
         return url_key("t.me", {}, p->path, p->query, {});
     }
+    if (auto k = shop_key(host, segs)) return k;
     return url_key(host, p->port, p->path, p->query, {});
 }
 
@@ -324,8 +464,13 @@ bool is_external_key(std::string_view key) noexcept {
 std::optional<std::string> external_key(std::string_view link_or_key) {
     const auto in = trim(link_or_key);
     if (in.empty()) return std::nullopt;
+    if (all_digits(in)) return gtin_key(in);   // голый штрихкод
     if (const auto ns = key_namespace(in)) {
         const auto value = in.substr(ns->size() + 1);
+        if (*ns == "gtin")  return gtin_key(value);
+        if (*ns == "model") return model_key(value);
+        if (*ns == "ozon" || *ns == "wb" || *ns == "ymarket" || *ns == "amazon" || *ns == "ali")
+            return shop_key_form(*ns, value);
         if (*ns == "yt")
             return is_youtube_id(value) ? std::optional<std::string>("yt:" + std::string(value))
                                         : std::nullopt;

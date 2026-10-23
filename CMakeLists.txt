@@ -58,4 +58,14 @@ if(TEST_E2E)
     )
     set_tests_properties(e2e_contest_demo PROPERTIES
         DEPENDS "bc;aggregator_server" TIMEOUT 120)
+
+    # Product reviews (ИР-026, reviews.md): product keys, "the same product"
+    # claims through one's circle, verified purchases of goods made in-system.
+    add_test(
+        NAME e2e_review_demo
+        COMMAND ${CMAKE_COMMAND} -E env BUILD=${CMAKE_BINARY_DIR} PORT=19362
+                bash ${CMAKE_SOURCE_DIR}/docs/pilot/review-demo.sh
+    )
+    set_tests_properties(e2e_review_demo PROPERTIES
+        DEPENDS "bc;aggregator_server" TIMEOUT 120)
 endif()

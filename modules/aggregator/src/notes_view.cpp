@@ -44,6 +44,9 @@ std::vector<const NoteEntry*> NotesBoard::thread(const std::string& subject) con
     for (size_t i = 0; i < root; ++i)
         if (const auto id = note_id(*out[i]); seen.insert(id).second)
             for (const NoteEntry* e : about(id)) out.push_back(e);
+    if (const auto it = by_second.find(subject); it != by_second.end())
+        for (const size_t i : it->second)
+            if (notes[i].note.kind == "same") out.push_back(&notes[i]);
     by_time(out);
     return out;
 }
@@ -67,6 +70,7 @@ NotesBoard read_notes(const AggregatorStorage& storage) {
         out.notes.push_back(NoteEntry{bh, block.address.user_id, block.timestamp_claimed,
                                       block.address.block_index, pos, *note});
         out.by_subject[records::subject_id(note->about)].push_back(i);
+        if (note->re) out.by_second[records::subject_id(*note->re)].push_back(i);
         out.by_author[block.address.user_id].push_back(i);
     };
     for (const Hash& bh : storage.all_block_hashes()) {

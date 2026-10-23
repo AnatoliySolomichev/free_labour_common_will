@@ -396,8 +396,36 @@ TEST(RecordsCodec, ContestKindsKeepTheirRules) {
     EXPECT_THROW(Codec::encode(make_note(video, "same")), CodecError);
     EXPECT_THROW(Codec::encode(make_note(video, "same", std::nullopt, {}, video)), CodecError);
     EXPECT_THROW(Codec::encode(make_note(make_chain(0x04), "same", std::nullopt, {}, video)), CodecError);
-    EXPECT_THROW(Codec::encode(make_note(video, "same", 1, {}, Subject{std::string("yt:dQw4w9WgXcQ")})),
+    EXPECT_THROW(Codec::encode(make_note(video, "same", 3, {}, Subject{std::string("yt:dQw4w9WgXcQ")})),
                  CodecError);
+}
+
+// ── Отзывы о продукции (reviews.md) ──────────────────────────────────────────
+
+TEST(RecordsCodec, ReviewRoundTripAndRules) {
+    const Subject product = std::string("gtin:04600000000008");
+    const auto r = std::get<Note>(roundtrip(make_note(product, "review", 4, "держит заряд")));
+    EXPECT_EQ(r.v, 4);
+    EXPECT_EQ(r.text, "держит заряд");
+    // товар из системы — со своей сделкой покупки
+    const auto bought = std::get<Note>(roundtrip(make_note(make_ref(0x01, 0x02), "review", 5, {},
+                                                           Subject{make_ref(0x03, 0x04)})));
+    EXPECT_EQ(std::get<Ref>(*bought.re), make_ref(0x03, 0x04));
+    EXPECT_THROW(Codec::encode(make_note(product, "review")), CodecError);             // без звёзд
+    EXPECT_THROW(Codec::encode(make_note(product, "review", 0)), CodecError);
+    EXPECT_THROW(Codec::encode(make_note(product, "review", 6)), CodecError);
+    EXPECT_THROW(Codec::encode(make_note(make_chain(0x01), "review", 3)), CodecError);
+    EXPECT_THROW(Codec::encode(make_note(product, "review", 3, {}, Subject{std::string("ozon:1")})),
+                 CodecError);                                                          // сделка — блок
+}
+
+// «Тот же предмет»: 1 — тот же (по умолчанию), 0 — не тот же; другого не бывает.
+TEST(RecordsCodec, SameSaysYesOrNo) {
+    const Subject a = std::string("ozon:123456");
+    const Subject b = std::string("gtin:04600000000008");
+    EXPECT_EQ(std::get<Note>(roundtrip(make_note(a, "same", 0, {}, b))).v, 0);
+    EXPECT_NO_THROW(Codec::encode(make_note(a, "same", 1, {}, b)));
+    EXPECT_THROW(Codec::encode(make_note(a, "same", 2, {}, b)), CodecError);
 }
 
 // ── Список записей в блоке (records.md §2) ───────────────────────────────────

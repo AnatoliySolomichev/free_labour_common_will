@@ -196,6 +196,25 @@ TEST_F(NotesViewTest, ThreadCarriesVerdictsOfAttempts) {
     EXPECT_EQ(board.about(contest).size(), 1u);         // раунды — заметки о соревновании
 }
 
+// «Тот же предмет» видно с обеих сторон: связь симметрична (reviews.md §3).
+TEST_F(NotesViewTest, SameClaimIsSeenFromBothSides) {
+    const std::string gtin = "gtin:04600000000008";
+    add(boris_, note(std::string("ozon:123456"), "same", std::nullopt, {}, records::Subject{gtin}));
+    add(vera_,  note(gtin, "review", 4, "держит заряд"));
+    records::Ref round{};
+    round.chain = anna_.bytes;
+    round.hash.fill(0x22);
+    const std::string video = "b2:" + std::string(64, '3');
+    add(boris_, note(round, "attempt", 20, {}, records::Subject{video}));
+
+    const auto board = read_notes(*storage_);
+    const auto from_gtin = board.thread(gtin);
+    ASSERT_EQ(from_gtin.size(), 2u);                    // отзыв и заявление, где штрихкод — второй
+    EXPECT_EQ(from_gtin[0]->note.kind, "same");
+    EXPECT_EQ(board.thread("ozon:123456").size(), 1u);  // заявление о нём самом
+    EXPECT_TRUE(board.thread(video).empty());           // с обратной стороны — только «тот же»
+}
+
 TEST_F(NotesViewTest, BoardIsRecomputedOnlyWhenBlocksArrive) {
     add(anna_, note(kVideo, "react", 1));
     const auto first = notes_board(*storage_);

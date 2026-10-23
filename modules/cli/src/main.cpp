@@ -148,6 +148,7 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--shifts", "--pay", "--reply-within",
     "--re", "--hops", "--limit", "--from", "--speed",
     "--claim", "--video", "--mirror", "--name", "--better", "--text-file",
+    "--stars", "--deal",
 };
 
 // True when a standalone flag (no value) is present.
@@ -5366,6 +5367,303 @@ static int cmd_contest(const fs::path& data_dir, int argc, char** argv) {
     return contest_usage();
 }
 
+// ── Отзывы о продукции (reviews.md, ИР-026) ──────────────────────────────────
+//
+// Отзыв — заметка о товаре в своей цепи: звёзды и текст (reviews.md §2). У товара
+// много названий — штрихкод, модель, ссылки магазинов, — их связывают заявления
+// «тот же предмет»; картина товара собирает отзывы со всех названий по
+// заявлениям вашего круга (reviews.md §3). У товара, сделанного в системе, отзыв
+// ссылается на свою сделку покупки, и клиент её проверяет (reviews.md §4).
+
+// Своя сделка покупки товара из системы: перевод, принявший эту работу, —
+// последний по времени; nullopt — не покупали.
+static std::optional<Ref> own_purchase(Context& ctx, const Ref& work) {
+    std::optional<Ref> found;
+    int64_t            at = 0;
+    for (const NodeIndex node : ctx.local_branches()) {
+        std::vector<Block> blocks;
+        try { blocks = ctx.bc.get_branch(ctx.user_id, node); }
+        catch (const BlockchainError&) { continue; }
+        for (const auto& b : blocks) {
+            if (b.type != BlockType::DATA) continue;
+            try {
+                const auto rec = Codec::decode(b.payload.data(), b.payload.size());
+                const auto* t  = std::get_if<Transfer>(&rec);
+                if (t && t->accept && t->accept->work == work && t->from == ctx.user_id.bytes &&
+                    (!found || b.timestamp_claimed >= at)) {
+                    found = Ref{ctx.user_id.bytes, Crypto::hash_block(b).bytes};
+                    at    = b.timestamp_claimed;
+                }
+            } catch (const CodecError&) {}
+        }
+    }
+    return found;
+}
+
+static std::string stars_str(int64_t v) {
+    std::string s;
+    for (int64_t i = 1; i <= 5; ++i) s += i <= v ? "★" : "☆";
+    return s;
+}
+
+static int review_usage() {
+    std::cerr << "Usage: bc review КОМАНДА … (reviews.md §6)\n"
+                 "  add ТОВАР --stars N [ТЕКСТ] [--deal ЦЕПЬ/ХЕШ]\n"
+                 "                                    отзыв; у товара из системы сделку покупки\n"
+                 "                                    клиент находит в ваших ветках сам\n"
+                 "  same ТОВАР ТОВАР [--no]           «это тот же товар» / «не тот же»\n"
+                 "  show ТОВАР --via URL [--hops 2] [--all]\n"
+                 "ТОВАР — ссылка магазина, штрихкод, gtin:…, \"model:название\", ozon:…, wb:…,\n"
+                 "ymarket:…, amazon:…, ali:… или ЦЕПЬ/ХЕШ записи труда (товар из системы);\n"
+                 "пишущие команды выкладывают блок при --via\n";
+    return 1;
+}
+
+// bc review add ТОВАР --stars N [ТЕКСТ…] [--deal ЦЕПЬ/ХЕШ] [--via URL] — отзыв
+// (reviews.md §2). Правка — новый отзыв: действует последнее слово.
+static int cmd_review_add(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);   // [review, add, ТОВАР, ТЕКСТ…]
+    if (pos.size() < 3) return review_usage();
+    const auto product = subject_arg(pos[2]);
+    if (!product || std::holds_alternative<ChainId>(*product)) {
+        std::cerr << "не товар: " << pos[2] << " — ссылка, штрихкод, ключ или ЦЕПЬ/ХЕШ записи труда\n";
+        return 1;
+    }
+    const auto stars = flag_val(argc, argv, "--stars");
+    Note n;
+    n.about = *product;
+    n.kind  = "review";
+    try { n.v = std::stoll(stars); } catch (const std::exception&) {}
+    if (!n.v || *n.v < 1 || *n.v > 5) {
+        std::cerr << "--stars: от 1 до 5\n";
+        return 1;
+    }
+    for (size_t i = 3; i < pos.size(); ++i) n.text += (i > 3 ? " " : "") + pos[i];
+    {
+        Context ctx(data_dir, parse_leaf_index(argc, argv));
+        if (const auto* work = std::get_if<Ref>(&*product)) {
+            if (work->chain == ctx.user_id.bytes) {
+                std::cerr << "это ваш товар — отзыв о себе не считается (reviews.md §2)\n";
+                return 1;
+            }
+            if (const auto deal = flag_val(argc, argv, "--deal"); !deal.empty()) {
+                const auto ref = ref_arg(deal);
+                if (!ref || ref->chain != ctx.user_id.bytes) {
+                    std::cerr << "--deal: ЦЕПЬ/ХЕШ своей сделки покупки\n";
+                    return 1;
+                }
+                n.re = Subject{*ref};
+            } else if (const auto bought = own_purchase(ctx, *work)) {
+                n.re = Subject{*bought};
+            } else {
+                std::cerr << "  сделки покупки в ваших ветках нет — отзыв без подтверждения покупки\n";
+            }
+        }
+    }
+    std::cout << "отзыв " << stars_str(*n.v) << "  " << subject_label(subject_id(n.about))
+              << (n.re ? "  — со сделкой покупки" : "") << "\n";
+    return cmd_write(data_dir, argc, argv, n);
+}
+
+// bc review same ТОВАР ТОВАР [--no] [--via URL] — «это тот же товар»; --no — «не
+// тот же»: снять своё или оспорить чужое (reviews.md §3).
+static int cmd_review_same(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);   // [review, same, ТОВАР, ТОВАР]
+    if (pos.size() < 4) return review_usage();
+    const auto a = subject_arg(pos[2]);
+    const auto b = subject_arg(pos[3]);
+    if (!a || !b || std::holds_alternative<ChainId>(*a) || std::holds_alternative<ChainId>(*b)) {
+        std::cerr << "ТОВАР — ссылка, штрихкод, ключ или ЦЕПЬ/ХЕШ записи труда\n";
+        return 1;
+    }
+    if (subject_id(*a) == subject_id(*b)) {
+        std::cerr << "это одно и то же название: " << subject_id(*a) << "\n";
+        return 1;
+    }
+    Note n;
+    n.about = *a;
+    n.kind  = "same";
+    n.re    = *b;
+    n.v     = flag_present(argc, argv, "--no") ? 0 : 1;
+    std::cout << subject_label(subject_id(*a)) << (*n.v ? "  =  " : "  ≠  ") << subject_label(subject_id(*b))
+              << "\n";
+    return cmd_write(data_dir, argc, argv, n);
+}
+
+// bc review show ТОВАР --via URL [--hops 2] [--all] — картина товара глазами
+// вашего круга (reviews.md §5).
+static int cmd_review_show(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);   // [review, show, ТОВАР]
+    const auto via = flag_val(argc, argv, "--via");
+    if (pos.size() < 3 || via.empty()) return review_usage();
+    const auto product = subject_arg(pos[2]);
+    if (!product || std::holds_alternative<ChainId>(*product)) {
+        std::cerr << "не товар: " << pos[2] << "\n";
+        return 1;
+    }
+    const bool all  = flag_present(argc, argv, "--all");
+    const int  hops = hops_arg(argc, argv);
+    Context    ctx(data_dir, parse_leaf_index(argc, argv));
+    const auto circle = build_circle(ctx, hops, via);
+    if (!circle) {
+        std::cerr << "агрегатор не ответил: " << via << "\n";
+        return 1;
+    }
+    const auto counts = [&](const ChainBytes& c) {   // чьё слово идёт в картину
+        const int l = circle->layer(c);
+        return l >= 0 && (all || l <= 2);
+    };
+    const auto own = own_notes(ctx);
+
+    // Все названия товара — по заявлениям «тот же» вас и круга (reviews.md §3):
+    // ваше слово решает; в круге «тот же» без «не тот же» — склейка; и то и
+    // другое — разногласие, не склейка.
+    constexpr size_t kMaxNames = 64;
+    const auto start = subject_id(*product);
+    std::vector<std::string>                    names{start};
+    std::map<std::string, std::vector<NoteRow>> notes_of;   // название → его заметки
+    struct Dispute { std::vector<ChainBytes> yes, no; };
+    std::map<std::pair<std::string, std::string>, Dispute> disputes;
+    for (size_t i = 0; i < names.size() && i < kMaxNames; ++i) {
+        const std::string name = names[i];   // копия: names растёт в этом же цикле
+        auto rows = fetch_notes(via, "about=" + url_encode(name));
+        if (!rows) {
+            std::cerr << "агрегатор не ответил: " << via << "\n";
+            return 1;
+        }
+        std::set<std::pair<std::string, uint32_t>> seen;
+        for (const auto& r : *rows) seen.insert({r.block, r.pos});
+        for (const auto& r : own)   // своё — из своих веток, даже не выложенное
+            if ((r.about == name || (r.kind == "same" && r.re == name)) && seen.insert({r.block, r.pos}).second)
+                rows->push_back(r);
+        // Последнее слово каждого о каждой паре названий с этим.
+        std::map<std::string, std::map<ChainBytes, const NoteRow*>> words;   // другое название → кто
+        for (const auto& r : *rows) {
+            if (r.kind != "same" || r.re.empty() || !counts(r.chain)) continue;
+            const auto other = r.about == name ? r.re : r.re == name ? r.about : std::string();
+            if (other.empty()) continue;
+            if (auto& slot = words[other][r.chain]; !slot || later(r, *slot)) slot = &r;
+        }
+        for (const auto& [other, by] : words) {
+            Dispute d;
+            std::optional<bool> mine;
+            for (const auto& [who, r] : by) {
+                const bool yes = r->v.value_or(1) == 1;
+                (yes ? d.yes : d.no).push_back(who);
+                if (who == circle->me) mine = yes;
+            }
+            const bool merged = mine ? *mine : (!d.yes.empty() && d.no.empty());
+            if (!mine && !d.yes.empty() && !d.no.empty())
+                disputes[std::minmax(name, other)] = d;
+            if (merged && std::find(names.begin(), names.end(), other) == names.end())
+                names.push_back(other);
+        }
+        notes_of[name] = std::move(*rows);
+    }
+
+    // Отзывы — последнее слово каждого автора о товаре под любым его названием.
+    std::map<ChainBytes, const NoteRow*> reviews;
+    std::set<ChainBytes>                 outside;
+    for (const auto& [name, rows] : notes_of)
+        for (const auto& r : rows) {
+            if (r.kind != "review" || r.about != name || !r.v) continue;
+            if (r.about.size() == 129 && r.about.compare(0, 64, to_hex(r.chain)) == 0) continue;   // свой товар
+            if (!counts(r.chain)) {
+                if (circle->layer(r.chain) == 3) outside.insert(r.chain);
+                continue;
+            }
+            if (auto& slot = reviews[r.chain]; !slot || later(r, *slot)) slot = &r;
+        }
+
+    // Покупка подтверждена (reviews.md §4): сделка — в цепи автора, принимает
+    // именно эту работу, и по ней ушли часы.
+    const auto confirmed = [&](const NoteRow& r) -> std::optional<bool> {
+        const auto deal = ref_arg(r.re);
+        const auto work = ref_arg(r.about);
+        if (!deal || !work) return std::nullopt;   // не товар из системы — подтверждать нечего
+        if (deal->chain != r.chain) return false;
+        const auto  rec = load_record(ctx, via, *deal);
+        const auto* t   = rec ? std::get_if<Transfer>(&*rec) : nullptr;
+        if (!t || !t->accept || t->accept->work != *work || t->from != r.chain) return false;
+        const auto doc = fetch_json(via, "/deal/" + to_hex(deal->chain) + "/" + to_hex(deal->hash));
+        const auto standing = doc && doc->is_object() ? jstr(doc->object, "standing") : std::string();
+        return standing == "recognized" || standing == "resold" || standing == "repeated" ||
+               standing == "contested" || standing == "unsound";
+    };
+
+    // Сводка: число, медиана (при чётном — меньшая из двух средних), раскладка.
+    std::vector<int64_t> stars;
+    std::array<int, 6>   spread{};
+    for (const auto& [who, r] : reviews) {
+        stars.push_back(*r->v);
+        ++spread[static_cast<size_t>(*r->v)];
+    }
+    std::sort(stars.begin(), stars.end());
+    std::cout << "товар: " << start << "\n";
+    std::vector<std::string> also(names.begin() + 1, names.end());
+    std::sort(also.begin(), also.end());
+    if (!also.empty()) {
+        std::cout << "  он же:";
+        for (size_t i = 0; i < also.size(); ++i) std::cout << (i ? ", " : " ") << subject_label(also[i]);
+        std::cout << "   (по заявлениям " << (all ? "всех" : "вашего круга") << ")\n";
+    }
+    for (const auto& [pair, d] : disputes) {
+        std::cout << "  разногласие: " << subject_label(pair.first) << " и " << subject_label(pair.second)
+                  << " — «тот же» у";
+        for (const auto& c : d.yes) std::cout << " " << who_short(c);
+        std::cout << ", «не тот же» у";
+        for (const auto& c : d.no) std::cout << " " << who_short(c);
+        std::cout << " — не склеены\n";
+    }
+    std::cout << "  отзывы " << (all ? "всех" : "круга") << ": " << stars.size();
+    if (!stars.empty()) {
+        std::cout << " — медиана " << stars[(stars.size() - 1) / 2] << "★  (";
+        for (int s = 5; s >= 1; --s) std::cout << s << "★ " << spread[static_cast<size_t>(s)] << (s > 1 ? " · " : "");
+        std::cout << ")";
+    }
+    std::cout << "\n";
+    std::vector<const NoteRow*> listed;
+    for (const auto& [who, r] : reviews) listed.push_back(r);
+    std::sort(listed.begin(), listed.end(), [](const NoteRow* a, const NoteRow* b) { return later(*a, *b); });
+    size_t proven = 0;
+    for (const auto* r : listed) {
+        std::cout << "    " << stars_str(*r->v) << "  " << utc_minute(r->at).substr(0, 10) << "  "
+                  << (r->chain == circle->me ? std::string("вы") : who_short(r->chain));
+        if (!r->text.empty()) std::cout << "  «" << r->text << "»";
+        if (r->about != start) std::cout << "  (" << subject_label(r->about) << ")";
+        if (const auto ok = confirmed(*r)) {
+            std::cout << (*ok ? "  · покупка подтверждена" : "  · покупка не подтверждена");
+            proven += *ok;
+        } else if (ref_arg(r->about)) {
+            std::cout << "  · без сделки покупки";
+        }
+        // «Полезно» — реакции круга на сам отзыв (social.md §4).
+        ReactTally useful{};
+        std::map<ChainBytes, const NoteRow*> last;
+        for (const auto& [name, rows] : notes_of)
+            for (const auto& x : rows)
+                if (x.kind == "react" && x.about == r->id() && x.v && counts(x.chain) && x.chain != r->chain)
+                    if (auto& slot = last[x.chain]; !slot || later(x, *slot)) slot = &x;
+        for (const auto& [who, x] : last)
+            if (*x->v) (*x->v > 0 ? useful.plus : useful.minus)++;
+        if (useful.plus || useful.minus) std::cout << "  · полезно " << tally_str(useful);
+        std::cout << "\n";
+    }
+    if (proven) std::cout << "  покупка подтверждена: " << proven << " из " << listed.size() << "\n";
+    if (!all && !outside.empty())
+        std::cout << "  вне круга: " << outside.size() << " отзыв. — со слов агрегатора, в счёт не идёт\n";
+    return 0;
+}
+
+static int cmd_review(const fs::path& data_dir, int argc, char** argv) {
+    const auto pos = get_positionals(argc, argv);   // [review, КОМАНДА, …]
+    const std::string sub = pos.size() > 1 ? pos[1] : std::string{};
+    if (sub == "add")  return cmd_review_add(data_dir, argc, argv);
+    if (sub == "same") return cmd_review_same(data_dir, argc, argv);
+    if (sub == "show") return cmd_review_show(data_dir, argc, argv);
+    return review_usage();
+}
+
 // bc tool shares ПРЕФИКС [--via URL]
 // Кому сколько ресурса вещи принадлежит (ИР-013): доля — не дробь, а
 // купленная порция ресурса. Считает агрегатор по сырым записям; число
@@ -10022,6 +10320,17 @@ Merge, manual relay (blockchain.md §6.4 bilateral two-round protocol):
   contest table РАУНД --via URL    Таблица раунда: судьи — ваш круг, согласные с
     [--hops 2] [--all]                 правилами; итог — медиана вердиктов
 
+Отзывы о продукции — по штрихкоду, модели, ссылкам магазинов (reviews.md):
+  review add ТОВАР --stars N       Отзыв: 1–5 звёзд и текст; правка — новый отзыв.
+    [ТЕКСТ] [--deal ЦЕПЬ/ХЕШ]          У товара из системы сделку покупки клиент
+                                       находит в ваших ветках сам
+  review same ТОВАР ТОВАР [--no]   «Это тот же товар» / «не тот же»: так ссылки
+                                       магазинов, штрихкод и модель сходятся
+  review show ТОВАР --via URL      Картина товара: все его названия по заявлениям
+    [--hops 2] [--all]                 круга, отзывы круга, подтверждённые покупки
+  ТОВАР — ссылка магазина, штрихкод, gtin:…, "model:название", ozon:…, wb:…,
+  ymarket:…, amazon:…, ali:… или ЦЕПЬ/ХЕШ записи труда
+
 Чей ключ стоит за пломбой (blockchain.md §7.5):
   keypath publish --via URL        Выложить путь своего ключа на склад
   keypath who KEY_HEX [--via URL]  Привести ключ к цепи: сперва по своим узлам,
@@ -10159,6 +10468,7 @@ int main(int argc, char** argv) {
         else if (cmd == "consent"   && subcmd == "list")    return cmd_consent_list(data_dir, argc, argv);
         else if (cmd == "social")                           return cmd_social(data_dir, argc, argv);
         else if (cmd == "contest")                          return cmd_contest(data_dir, argc, argv);
+        else if (cmd == "review")                           return cmd_review(data_dir, argc, argv);
         else if (cmd == "keypath"   && subcmd == "publish") return cmd_keypath_publish(data_dir, argc, argv);
         else if (cmd == "keypath"   && subcmd == "who")     return cmd_keypath_who(data_dir, argc, argv);
         else if (cmd == "fraud"     && subcmd == "verify")  return cmd_fraud_verify(argc, argv);

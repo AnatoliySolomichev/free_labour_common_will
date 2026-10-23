@@ -116,10 +116,61 @@ TEST(ExternalKey, ContentKeyIsSixtyFourHexLowercase) {
     EXPECT_FALSE(external_key("b2:" + std::string(64, 'g')));
 }
 
+// ── Товары (social.md §3.6) ──────────────────────────────────────────────────
+
+// Штрихкод любой длины — к 14 цифрам; контрольная цифра проверяется.
+TEST(ExternalKey, BarcodeToFourteenDigitsWithCheckDigit) {
+    EXPECT_EQ(external_key("gtin:4006381333931"), "gtin:04006381333931");   // EAN-13
+    EXPECT_EQ(external_key("gtin:036000291452"), "gtin:00036000291452");    // UPC-A
+    EXPECT_EQ(external_key("gtin:73513537"), "gtin:00000073513537");        // EAN-8
+    EXPECT_EQ(external_key("4600000000008"), "gtin:04600000000008");        // голый штрихкод
+    EXPECT_FALSE(external_key("gtin:4600000000009"));                       // не та контрольная
+    EXPECT_FALSE(external_key("4600000000009"));
+    EXPECT_FALSE(external_key("gtin:12345"));
+}
+
+TEST(ExternalKey, ModelNameIsFolded) {
+    EXPECT_EQ(external_key("model:Apple iPhone 15 Pro (256 GB)"), "model:apple-iphone-15-pro-256-gb");
+    EXPECT_EQ(external_key("model:  Xiaomi  Power-Bank 20000 "), "model:xiaomi-power-bank-20000");
+    EXPECT_EQ(external_key("model:Табурет «Ёжик»"), "model:табурет-ежик");
+    EXPECT_EQ(external_key("model:ТАБУРЕТ ЁЖИК"), external_key("model:табурет ежик"));
+    EXPECT_FALSE(external_key("model:  — !"));
+}
+
+TEST(ExternalKey, ShopLinksToProductKeys) {
+    EXPECT_EQ(external_key("https://www.ozon.ru/product/power-bank-xiaomi-20000-123456789/?sh=x"),
+              "ozon:123456789");
+    EXPECT_EQ(external_key("ozon.ru/product/123456789/"), "ozon:123456789");
+    EXPECT_EQ(external_key("https://www.wildberries.ru/catalog/654321/detail.aspx?targetUrl=GP"),
+              "wb:654321");
+    EXPECT_EQ(external_key("https://market.yandex.ru/product--power-bank/1779337045?sku=1"),
+              "ymarket:1779337045");
+    EXPECT_EQ(external_key("https://market.yandex.ru/card/power-bank/103276459821"),
+              "ymarket:card/103276459821");
+    EXPECT_EQ(external_key("https://www.amazon.com/Anker-PowerCore/dp/b0194wdvhi/ref=sr_1_3"),
+              "amazon:B0194WDVHI");
+    EXPECT_EQ(external_key("https://www.amazon.de/gp/product/B0194WDVHI"), "amazon:B0194WDVHI");
+    EXPECT_EQ(external_key("https://www.amazon.co.uk/gp/aw/d/B0194WDVHI"), "amazon:B0194WDVHI");
+    EXPECT_EQ(external_key("https://aliexpress.ru/item/1005001234567890.html?spm=a2g0o"),
+              "ali:1005001234567890");
+    EXPECT_EQ(external_key("https://m.aliexpress.com/item/1005001234567890.html"),
+              "ali:1005001234567890");
+    // не страница товара — общим правилом
+    EXPECT_EQ(external_key("https://www.ozon.ru/category/powerbanks/"), "url:ozon.ru/category/powerbanks");
+}
+
+TEST(ExternalKey, ProductKeysGivenAsKeysAreChecked) {
+    EXPECT_EQ(external_key("ozon:123456789"), "ozon:123456789");
+    EXPECT_FALSE(external_key("ozon:12a"));
+    EXPECT_EQ(external_key("amazon:b0194wdvhi"), "amazon:B0194WDVHI");
+    EXPECT_FALSE(external_key("amazon:B0194"));
+    EXPECT_EQ(external_key("ymarket:card/103276459821"), "ymarket:card/103276459821");
+}
+
 // Незнакомые пространства — законны: следующие сценарии добавят свои без правки кода.
 TEST(ExternalKey, UnknownNamespacesAreTakenAsTheyAre) {
-    EXPECT_EQ(external_key("gtin:4600000000000"), "gtin:4600000000000");
-    EXPECT_FALSE(external_key("gtin:46 00"));
+    EXPECT_EQ(external_key("isbn:9785171182606"), "isbn:9785171182606");
+    EXPECT_FALSE(external_key("isbn:978 5"));
 }
 
 TEST(ExternalKey, KeyFormIsChecked) {

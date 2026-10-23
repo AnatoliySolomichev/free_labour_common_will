@@ -282,7 +282,15 @@ void check_note(const Note& n) {
             throw CodecError("Note: «тот же предмет» связывает блоки и ключи, не цепи");
         if (subject_id(n.about) == subject_id(*n.re))
             throw CodecError("Note: «тот же предмет» — о двух разных названиях одного предмета");
-        no_extra(false, true, true, false);
+        if (n.v && *n.v != 0 && *n.v != 1)
+            throw CodecError("Note: «тот же предмет» — 1 (тот же) или 0 (не тот же)");
+        no_extra(true, true, true, false);
+    // Отзывы о продукции (reviews.md).
+    } else if (n.kind == "review") {
+        if (chain) throw CodecError("Note: отзыв — о товаре: блок или ключ, не цепь");
+        if (!n.v || *n.v < 1 || *n.v > 5) throw CodecError("Note: отзыв — от 1 до 5 звёзд");
+        if (n.re && !re_block) throw CodecError("Note: у отзыва второй предмет — своя сделка покупки, блок");
+        no_extra(true, true, true, false);
     }
 }
 

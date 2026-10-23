@@ -31,6 +31,7 @@ struct NoteEntry {
 struct NotesBoard {
     std::vector<NoteEntry>                     notes;        // в порядке хранилища
     std::map<std::string, std::vector<size_t>> by_subject;   // records::subject_id → индексы
+    std::map<std::string, std::vector<size_t>> by_second;    // второй предмет (re) → индексы
     std::map<UserId, std::vector<size_t>>      by_author;
 
     // Заметки о предмете, по времени; при равном — по номеру блока в ветке
@@ -38,8 +39,9 @@ struct NotesBoard {
     std::vector<const NoteEntry*> about(const std::string& subject) const;
 
     // Обсуждение (social.md §7): заметки о предмете и о каждой заметке под ним —
-    // реакции на комментарии и снятия, вердикты на попытки раунда (contests.md §6).
-    // По времени.
+    // реакции на комментарии и снятия, вердикты на попытки раунда (contests.md §6),
+    // — и заявления «тот же предмет», где он назван вторым: связь симметрична
+    // (reviews.md §3). По времени.
     std::vector<const NoteEntry*> thread(const std::string& subject) const;
 
     // Заметки цепи, по времени; kind пустой — всех видов.
