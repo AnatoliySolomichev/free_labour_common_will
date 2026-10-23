@@ -15,10 +15,45 @@ let stars = 0;      // выбранные звёзды отзыва
 
 const $ = (id) => document.getElementById(id);
 
-// Запрос к bc через native messaging; отказ bc — исключение с его словами.
+// Слова браузера о хосте — на язык человека.
+function explain(why) {
+  if (/not found/i.test(why)) return 'хост bc не установлен: bc native-install (extension.md §5)';
+  if (/forbidden/i.test(why)) return 'хост bc не пускает это расширение: другой идентификатор? (extension.md §5)';
+  if (/exited/i.test(why)) return 'bc завершился, не ответив; если bc в контейнере — запущен ли он? (extension.md §5.1)';
+  return why;
+}
+
+// Канал к bc — один на всё время окна (extension.md §3): когда bc в контейнере,
+// каждый его запуск — это docker exec (extension.md §5.1).
+let port = null;
+const waiting = new Map();   // id запроса → кому отдать ответ
+
+function channel() {
+  if (port) return port;
+  port = api.runtime.connectNative(HOST);
+  port.onMessage.addListener((reply) => {
+    const done = waiting.get(reply?.id);
+    if (done) {
+      waiting.delete(reply.id);
+      done(reply);
+    }
+  });
+  port.onDisconnect.addListener((p) => {
+    const why = explain(p?.error?.message ?? api.runtime.lastError?.message ?? 'bc закрыл канал');
+    port = null;
+    for (const done of waiting.values()) done({ ok: false, error: why });
+    waiting.clear();
+  });
+  return port;
+}
+
+// Запрос к bc; отказ bc — исключение с его словами.
 async function ask(cmd, fields = {}) {
-  const reply = await api.runtime.sendNativeMessage(HOST, { id: ++seq, cmd, ...fields });
-  if (!reply) throw new Error('bc не ответил');
+  const id = ++seq;
+  const reply = await new Promise((resolve) => {
+    waiting.set(id, resolve);
+    channel().postMessage({ id, cmd, ...fields });
+  });
   if (!reply.ok) throw new Error(reply.error || reply.text || 'bc отказал');
   return reply;
 }

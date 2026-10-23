@@ -5,7 +5,10 @@
 машины и JSON. Проверяет чтение картин, запись заметок в ветку браузера и
 отказ во всём, чего нет в белом списке.
 
-Запуск: host_test.py BC КАТАЛОГ_ДАННЫХ URL_АГРЕГАТОРА
+Запуск: host_test.py BC КАТАЛОГ_ДАННЫХ URL_АГРЕГАТОРА [МАНИФЕСТ_ХОСТА]
+
+С манифестом хост запускается, как его запускает браузер: скриптом из `path`
+манифеста — так проверяется и установка (extension.md §5.1).
 """
 import json
 import struct
@@ -15,6 +18,7 @@ import sys
 VIDEO = "https://youtu.be/dQw4w9WgXcQ?t=30"
 SHOP = "https://www.ozon.ru/product/power-bank-xiaomi-20000-123456789/"
 BROWSER_LEAF = 2147483648
+ORIGIN = "chrome-extension://dmmadjknblhkhcfhjblkaikanclebljf/"   # из key в manifest.json
 
 failed = 0
 
@@ -30,9 +34,14 @@ def check(what, fact, want):
 
 def main():
     bc, data, via = sys.argv[1:4]
-    host = subprocess.Popen(
-        [bc, "--data-dir", data, "native-host", "--via", via, "chrome-extension://test/"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    command = [bc, "--data-dir", data, "native-host", "--via", via, ORIGIN]
+    if len(sys.argv) > 4:
+        with open(sys.argv[4], encoding="utf-8") as f:
+            manifest = json.load(f)
+        check("манифест: имя хоста и чьё расширение", (manifest["name"], manifest["allowed_origins"]),
+              ("org.free_labour.bc", [ORIGIN]))
+        command = [manifest["path"], ORIGIN]
+    host = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     next_id = iter(range(1, 1000))
 
     def frame(body):

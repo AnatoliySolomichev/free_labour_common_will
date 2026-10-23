@@ -374,3 +374,12 @@ build/modules/cli/bc native-install --via URL_АГРЕГАТОРА      # хос
 modules/extension/tests/host-e2e.sh                          # проверка: протокол и Chromium
 ```
 
+Браузер на хосте, а `bc` в контейнере (так идёт разработка) — хост ставится сценарием для хоста (`extension.md §5.1`):
+
+```
+# в контейнере:
+build/modules/cli/bc native-install --via URL_АГРЕГАТОРА --docker КОНТЕЙНЕР > build/install-host.sh
+# на хосте, в каталоге проекта (КОНТЕЙНЕР — имя из docker ps):
+sh build/install-host.sh
+```
+

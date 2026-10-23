@@ -148,7 +148,7 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--shifts", "--pay", "--reply-within",
     "--re", "--hops", "--limit", "--from", "--speed",
     "--claim", "--video", "--mirror", "--name", "--better", "--text-file",
-    "--stars", "--deal", "--browser", "--profile", "--extension-id",
+    "--stars", "--deal", "--browser", "--profile", "--extension-id", "--docker",
 };
 
 // True when a standalone flag (no value) is present.
@@ -5929,21 +5929,119 @@ static int cmd_native_host(const fs::path& data_dir, int argc, char** argv) {
     return 0;
 }
 
+static std::string sh_quote(const std::string& s) {
+    std::string q = "'";
+    for (const char ch : s) q += ch == '\'' ? std::string("'\\''") : std::string(1, ch);
+    return q + "'";
+}
+
+// Каталог манифестов хоста (extension.md §5): в доме — путь от $HOME, в своём
+// профиле браузера — как дан.
+struct HostDir {
+    std::string dir;
+    bool        in_home = true;
+    bool        firefox = false;
+};
+
+static std::vector<HostDir> host_dirs(const std::string& browser, const std::string& profile) {
+    if (!profile.empty()) return {{profile + "/NativeMessagingHosts", false, browser == "firefox"}};
+    std::vector<HostDir> out;
+    if (browser == "all" || browser == "chromium") out.push_back({".config/chromium/NativeMessagingHosts"});
+    if (browser == "all" || browser == "chrome") out.push_back({".config/google-chrome/NativeMessagingHosts"});
+    if (browser == "all" || browser == "firefox") out.push_back({".mozilla/native-messaging-hosts", true, true});
+    return out;
+}
+
+// Манифест хоста; path_json — путь к скрипту запуска, уже строкой JSON.
+static std::string host_manifest(const std::string& path_json, bool firefox, const std::string& ext_id) {
+    return std::string("{\n  \"name\": \"") + kNativeHostName + "\",\n"
+           "  \"description\": \"bc: заметки соцслоя, соревнований и отзывов — подпись ветки браузера\",\n"
+           "  \"path\": \"" + path_json + "\",\n  \"type\": \"stdio\",\n" +
+           (firefox ? std::string("  \"allowed_extensions\": [\"") + kFirefoxAddonId + "\"]\n"
+                    : "  \"allowed_origins\": [\"chrome-extension://" + ext_id + "/\"]\n") +
+           "}\n";
+}
+
+// Сценарий для хоста (extension.md §5.1): браузер — на хосте, bc — в контейнере.
+// Пути хоста ($HOME) отсюда не видны, поэтому bc отдаёт не файлы, а сценарий: он
+// пишет скрипт запуска с docker exec и манифесты, а потом проверяет, что bc в
+// контейнере отвечает, — тем же путём, каким пойдёт браузер.
+static std::string docker_installer(const std::string& container, const std::string& launch,
+                                    const std::vector<HostDir>& dirs, const std::string& ext_id) {
+    std::ostringstream s;
+    s << R"SH(#!/bin/sh
+# Хост расширения bc для браузера на этом компьютере, а bc — в контейнере
+# (extension.md §5.1). Написал bc native-install --docker; запускать на хосте.
+set -eu
+container=)SH" << sh_quote(container) << R"SH(
+command -v docker >/dev/null 2>&1 ||
+    { echo "нет docker — запускайте на хосте, где браузер (extension.md §5.1)" >&2; exit 1; }
+docker container inspect "$container" >/dev/null 2>&1 ||
+    { echo "не вижу контейнер «$container»: имена — в docker ps -a" >&2; exit 1; }
+
+dir="${XDG_DATA_HOME:-$HOME/.local/share}/bc"
+host="$dir/native-host.sh"
+mkdir -p "$dir"
+{
+    cat <<'EOF'
+#!/bin/sh
+# Хост расширения bc (extension.md §3): его запускает браузер, а bc — в контейнере.
+# Написал install-host.sh от bc native-install --docker (extension.md §5.1).
+PATH="$PATH:/usr/local/bin:/usr/bin:/bin"
+EOF
+    [ -z "${DOCKER_HOST:-}" ] || printf "export DOCKER_HOST='%s'\n" "$DOCKER_HOST"
+    cat <<'EOF'
+)SH" << launch << R"SH(
+EOF
+} >"$host"
+chmod 755 "$host"
+echo "хост: $host"
+path=$(printf '%s' "$host" | sed 's/\\/\\\\/g; s/"/\\"/g')
+)SH";
+    for (const auto& d : dirs)
+        s << "\nd=" << (d.in_home ? "\"$HOME\"/" : "") << sh_quote(d.dir) << "\n"
+          << "mkdir -p \"$d\"\n"
+          << "cat >\"$d/" << kNativeHostName << ".json\" <<EOF\n"
+          << host_manifest("$path", d.firefox, ext_id) << "EOF\n"
+          << "echo \"манифест: $d/" << kNativeHostName << ".json\"\n";
+    s << R"SH(
+# Проверка: кадр whoami (23 байта) — тем же путём, что у браузера.
+if printf '\027\000\000\000{"id":1,"cmd":"whoami"}' | "$host" 2>/dev/null | tail -c +5 | grep -q '"ok":true'; then
+    echo "проверка: bc в контейнере отвечает"
+else
+    echo "проверка: bc в контейнере не ответил — контейнер запущен? docker без sudo? (extension.md §5.1)" >&2
+    exit 1
+fi
+echo "дальше: загрузите modules/extension в браузер (extension.md §5)"
+)SH";
+    return s.str();
+}
+
 // bc native-install --via URL [--browser chromium|chrome|firefox|all] [--profile КАТАЛОГ]
-// [--extension-id ID] — поставить хост для расширения (extension.md §5): ветку
-// браузера, скрипт запуска рядом с данными и манифест хоста в каталог браузера.
+// [--extension-id ID] [--docker КОНТЕЙНЕР] — поставить хост для расширения
+// (extension.md §5): ветку браузера, скрипт запуска рядом с данными и манифест
+// хоста в каталог браузера. С --docker браузер — на хосте, а bc — здесь, в
+// контейнере: вместо установки — сценарий для хоста в stdout (extension.md §5.1).
 static int cmd_native_install(const fs::path& data_dir, int argc, char** argv) {
-    const auto via     = flag_val(argc, argv, "--via");
-    const auto browser = flag_val(argc, argv, "--browser", "all");
-    const auto profile = flag_val(argc, argv, "--profile");
-    const auto ext_id  = flag_val(argc, argv, "--extension-id", kExtensionId);
+    const auto via       = flag_val(argc, argv, "--via");
+    const auto browser   = flag_val(argc, argv, "--browser", "all");
+    const auto profile   = flag_val(argc, argv, "--profile");
+    const auto ext_id    = flag_val(argc, argv, "--extension-id", kExtensionId);
+    const auto container = flag_val(argc, argv, "--docker");
     if (via.empty() || (browser != "all" && browser != "chromium" && browser != "chrome" && browser != "firefox")) {
         std::cerr << "Usage: bc native-install --via URL [--browser chromium|chrome|firefox|all]\n"
-                     "                         [--profile КАТАЛОГ_ПРОФИЛЯ] [--extension-id ID]\n";
+                     "                         [--profile КАТАЛОГ_ПРОФИЛЯ] [--extension-id ID]\n"
+                     "                         [--docker КОНТЕЙНЕР]\n";
+        return 1;
+    }
+    // Идентификатор Chrome — 32 буквы a–p; в манифест он идёт как есть.
+    if (ext_id.size() != 32 || !std::all_of(ext_id.begin(), ext_id.end(), [](char c) { return c >= 'a' && c <= 'p'; })) {
+        std::cerr << "идентификатор расширения Chrome — 32 буквы a–p, а не «" << ext_id << "»\n";
         return 1;
     }
     const fs::path dir = fs::absolute(data_dir);
     load_user_id(dir);   // личности нет — дальше делать нечего (бросит с объяснением)
+    std::ostream& say = container.empty() ? std::cout : std::cerr;   // с --docker stdout — сценарию
 
     // Ветка браузера (extension.md §2): соседний лист, свой ключ.
     if (!fs::exists(key_path(dir, BROWSER_LEAF))) {
@@ -5954,46 +6052,36 @@ static int cmd_native_install(const fs::path& data_dir, int argc, char** argv) {
             std::cerr << c.err;
             return 1;
         }
-        std::cout << "ветка браузера: узел " << BROWSER_LEAF << " — свой ключ, отзывает её предок\n";
+        say << "ветка браузера: узел " << BROWSER_LEAF << " — свой ключ, отзывает её предок\n";
     }
 
-    const auto quote = [](const std::string& s) {
-        std::string q = "'";
-        for (const char ch : s) q += ch == '\'' ? std::string("'\\''") : std::string(1, ch);
-        return q + "'";
-    };
-    const fs::path script = dir / "native-host.sh";
-    {
-        std::ofstream f(script, std::ios::trunc);
-        f << "#!/bin/sh\n"
-             "# Хост расширения bc (extension.md §3): его запускает браузер. Пишет bc native-install.\n"
-          << "exec " << quote(fs::canonical("/proc/self/exe").string()) << " --data-dir " << quote(dir.string())
-          << " native-host --via " << quote(via) << " \"$@\"\n";
+    const auto launch = sh_quote(fs::canonical("/proc/self/exe").string()) + " --data-dir " + sh_quote(dir.string()) +
+                        " native-host --via " + sh_quote(via) + " \"$@\"";
+    const auto dirs = host_dirs(browser, profile);
+    if (!container.empty()) {
+        std::cout << docker_installer(container, "exec docker exec -i " + sh_quote(container) + " " + launch, dirs,
+                                      ext_id);
+        std::cerr << "сценарий для хоста — в stdout; на хосте, где браузер: … > install-host.sh, затем\n"
+                     "sh install-host.sh (extension.md §5.1)\n";
+        return 0;
     }
+
+    const fs::path script = dir / "native-host.sh";
+    std::ofstream(script, std::ios::trunc)
+        << "#!/bin/sh\n"
+           "# Хост расширения bc (extension.md §3): его запускает браузер. Пишет bc native-install.\n"
+        << "exec " << launch << "\n";
     fs::permissions(script, fs::perms::owner_all | fs::perms::group_read | fs::perms::group_exec |
                                 fs::perms::others_read | fs::perms::others_exec);
 
-    const char*                               home = std::getenv("HOME");
-    std::vector<std::pair<fs::path, bool>>    targets;   // каталог и Firefox ли
-    const fs::path                            h    = home ? fs::path(home) : fs::path(".");
-    if (!profile.empty()) {
-        targets.push_back({fs::path(profile) / "NativeMessagingHosts", browser == "firefox"});
-    } else {
-        if (browser == "all" || browser == "chromium") targets.push_back({h / ".config/chromium/NativeMessagingHosts", false});
-        if (browser == "all" || browser == "chrome") targets.push_back({h / ".config/google-chrome/NativeMessagingHosts", false});
-        if (browser == "all" || browser == "firefox") targets.push_back({h / ".mozilla/native-messaging-hosts", true});
-    }
+    const char*    home = std::getenv("HOME");
+    const fs::path h    = home ? fs::path(home) : fs::path(".");
     std::cout << "хост: " << script.string() << "\n";
-    for (const auto& [target, firefox] : targets) {
+    for (const auto& d : dirs) {
+        const fs::path target = d.in_home ? h / d.dir : fs::path(d.dir);
         fs::create_directories(target);
         const auto manifest = target / (std::string(kNativeHostName) + ".json");
-        std::ofstream(manifest, std::ios::trunc)
-            << "{\n  \"name\": \"" << kNativeHostName << "\",\n"
-            << "  \"description\": \"bc: заметки соцслоя, соревнований и отзывов — подпись ветки браузера\",\n"
-            << "  \"path\": \"" << json_esc(script.string()) << "\",\n  \"type\": \"stdio\",\n"
-            << (firefox ? "  \"allowed_extensions\": [\"" + std::string(kFirefoxAddonId) + "\"]\n"
-                        : "  \"allowed_origins\": [\"chrome-extension://" + ext_id + "/\"]\n")
-            << "}\n";
+        std::ofstream(manifest, std::ios::trunc) << host_manifest(json_esc(script.string()), d.firefox, ext_id);
         std::cout << "манифест: " << manifest.string() << "\n";
     }
     std::cout << "дальше: загрузите modules/extension в браузер (extension.md §5)\n";
@@ -10672,6 +10760,9 @@ Merge, manual relay (blockchain.md §6.4 bilateral two-round protocol):
     [--browser chromium|chrome|        отзывает предок), скрипт запуска и манифест
      firefox|all]                      хоста в каталог браузера; дальше —
     [--profile КАТАЛОГ]                загрузить modules/extension в браузер
+    [--docker КОНТЕЙНЕР]               Браузер на хосте, а bc в контейнере:
+                                       вместо установки — сценарий для хоста
+                                       в stdout (extension.md §5.1)
   native-host --via URL            Хост native messaging: его запускает браузер.
                                        Расширению доступны только заметки и
                                        картины — ничего, что двигает ценность
