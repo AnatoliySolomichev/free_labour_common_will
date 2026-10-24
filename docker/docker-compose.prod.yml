@@ -3,7 +3,18 @@
 # The build tree lives in the mounted repo (build-prod/), so container
 # restarts recompile incrementally and start in seconds.
 #
-#   docker compose -f docker-compose.prod.yml up -d --build
+#   docker compose -f docker-compose.prod.yml up -d --build    # first start
+#
+# Updating the code needs no new image: sync the sources, rebuild inside the
+# running container, then restart it — seconds of downtime:
+#
+#   docker exec docker-aggregator-prod-1 cmake --build build-prod -t aggregator_server -j2
+#   docker compose -f docker-compose.prod.yml restart aggregator-prod
+#
+# Rebuild the image (--build) only when the build dependencies change:
+# docker/Dockerfile is shared with the dev container and also carries the
+# browsers for the extension checks (Playwright, Firefox) — gigabytes the
+# aggregator does not need.
 services:
   aggregator-prod:
     build:
