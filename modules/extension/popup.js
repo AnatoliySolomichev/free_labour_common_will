@@ -15,11 +15,19 @@ let stars = 0;      // выбранные звёзды отзыва
 
 const $ = (id) => document.getElementById(id);
 
-// Слова браузера о хосте — на язык человека.
+// Слова браузера о хосте — на язык человека. Chromium и Firefox говорят о
+// хосте по-разному (extension.md §5).
 function explain(why) {
+  // Chromium о выходе хоста пишет «Native host has exited», Firefox молчит.
+  if (!why || /exited/i.test(why)) return 'bc завершился, не ответив; если bc в контейнере — запущен ли он? (extension.md §5.1)';
   if (/not found/i.test(why)) return 'хост bc не установлен: bc native-install (extension.md §5)';
   if (/forbidden/i.test(why)) return 'хост bc не пускает это расширение: другой идентификатор? (extension.md §5)';
-  if (/exited/i.test(why)) return 'bc завершился, не ответив; если bc в контейнере — запущен ли он? (extension.md §5.1)';
+  // Firefox: «хоста нет» и «хост не пускает» — одной фразой.
+  if (/no such native application/i.test(why)) {
+    return 'хост bc не установлен или не пускает это расширение: bc native-install (extension.md §5)';
+  }
+  // Firefox: скрипта запуска из манифеста нет или он не исполняемый.
+  if (/unexpected error/i.test(why)) return 'хост bc не запускается: скрипт запуска на месте? bc native-install (extension.md §5)';
   return why;
 }
 
@@ -39,7 +47,7 @@ function channel() {
     }
   });
   port.onDisconnect.addListener((p) => {
-    const why = explain(p?.error?.message ?? api.runtime.lastError?.message ?? 'bc закрыл канал');
+    const why = explain(p?.error?.message ?? api.runtime.lastError?.message);
     port = null;
     for (const done of waiting.values()) done({ ok: false, error: why });
     waiting.clear();

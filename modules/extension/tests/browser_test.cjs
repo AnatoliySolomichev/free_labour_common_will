@@ -1,5 +1,6 @@
 // Расширение bc в настоящем Chromium (extension.md §6): окно на странице ролика
-// и товара — лайк, комментарий, отзыв — через хост native messaging в bc.
+// и товара — лайк, комментарий, отзыв — через хост native messaging в bc; и
+// слова окна, когда с хостом что-то не так.
 //
 // Запуск (обычно из host-e2e.sh):
 //   node browser_test.cjs КАТАЛОГ_РАСШИРЕНИЯ ПРОФИЛЬ BC КАТАЛОГ_ДАННЫХ URL_АГРЕГАТОРА
@@ -7,6 +8,7 @@
 
 const { chromium } = require('playwright');
 const { execFileSync } = require('child_process');
+const fs = require('fs');
 const path = require('path');
 
 const [extDir, profile, bc, data] = process.argv.slice(2);
@@ -34,6 +36,33 @@ function check(what, fact, want) {
   console.log(`   ${ok ? '✓' : '✗'} ${what}` +
               (ok ? '' : `: получили «${JSON.stringify(fact)}», ждали «${JSON.stringify(want)}»`));
   if (!ok) failed = 1;
+}
+
+// Слова окна, когда с хостом что-то не так (extension.md §5). Манифест хоста на
+// время подменяем: браузер читает его при каждом подключении.
+async function hostErrors(page, popup) {
+  const manifest = path.join(profile, 'NativeMessagingHosts', 'org.free_labour.bc.json');
+  const original = fs.readFileSync(manifest, 'utf8');
+  const dead = path.join(profile, 'dead-host.sh');
+  fs.writeFileSync(dead, "#!/bin/sh\necho 'Error response from daemon: container dev-1 is not running' >&2\nexit 1\n");
+  fs.chmodSync(dead, 0o755);
+  const errorWith = async (changes) => {
+    if (changes === null) fs.rmSync(manifest);
+    else fs.writeFileSync(manifest, JSON.stringify({ ...JSON.parse(original), ...changes }));
+    await page.goto(popup('https://example.org/'));
+    await page.waitForSelector('#error:not([hidden])', { timeout: 20000 });
+    return page.textContent('#error');
+  };
+  try {
+    check('нет манифеста — «не установлен»', (await errorWith(null)).startsWith('хост bc не установлен:'), true);
+    check('манифест для чужого расширения — «не пускает»',
+          (await errorWith({ allowed_origins: ['chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/'] }))
+            .startsWith('хост bc не пускает это расширение'), true);
+    check('bc вышел, не ответив, — «завершился»',
+          (await errorWith({ path: dead })).startsWith('bc завершился, не ответив'), true);
+  } finally {
+    fs.writeFileSync(manifest, original);
+  }
 }
 
 (async () => {
@@ -74,6 +103,8 @@ function check(what, fact, want) {
     check('отзыв в картине товара', (await page.textContent('#summary')).startsWith('отзывов: 1 · медиана 4★'),
           true);
     if (process.env.SHOT) await page.screenshot({ path: `${process.env.SHOT}-shop.png`, fullPage: true });
+
+    await hostErrors(page, popup);
   } finally {
     await context.close();
   }

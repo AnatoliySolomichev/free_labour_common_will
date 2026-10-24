@@ -12,6 +12,7 @@ add_subdirectory(modules/records)
 add_subdirectory(modules/sync)
 add_subdirectory(modules/cli)
 add_subdirectory(modules/aggregator)
+add_subdirectory(modules/extension)
 
 # End-to-end smoke test: the live "bread with oven and flour" demo, run against
 # a real aggregator over HTTP. Doubles as the human-readable demo (docs/pilot).
@@ -70,7 +71,8 @@ if(TEST_E2E)
         DEPENDS "bc;aggregator_server" TIMEOUT 120)
 
     # Browser extension (docs/extension.md): the native messaging host protocol,
-    # and — when Node.js and Playwright are installed — the real Chromium.
+    # and — when Node.js and Playwright are installed — the real Chromium; with
+    # Firefox and geckodriver, the real Firefox with bc.xpi installed unsigned.
     add_test(
         NAME e2e_extension
         COMMAND ${CMAKE_COMMAND} -E env BUILD=${CMAKE_BINARY_DIR} PORT=19372

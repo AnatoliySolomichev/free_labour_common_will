@@ -5,10 +5,11 @@
 машины и JSON. Проверяет чтение картин, запись заметок в ветку браузера и
 отказ во всём, чего нет в белом списке.
 
-Запуск: host_test.py BC КАТАЛОГ_ДАННЫХ URL_АГРЕГАТОРА [МАНИФЕСТ_ХОСТА]
+Запуск: host_test.py BC КАТАЛОГ_ДАННЫХ URL_АГРЕГАТОРА [МАНИФЕСТ_ХОСТА…]
 
-С манифестом хост запускается, как его запускает браузер: скриптом из `path`
-манифеста — так проверяется и установка (extension.md §5.1).
+С манифестами хост запускается, как его запускает браузер: скриптом из `path`
+последнего манифеста и с аргументами того браузера, чей это манифест, — так
+проверяется и установка (extension.md §5.1).
 """
 import json
 import struct
@@ -19,6 +20,7 @@ VIDEO = "https://youtu.be/dQw4w9WgXcQ?t=30"
 SHOP = "https://www.ozon.ru/product/power-bank-xiaomi-20000-123456789/"
 BROWSER_LEAF = 2147483648
 ORIGIN = "chrome-extension://dmmadjknblhkhcfhjblkaikanclebljf/"   # из key в manifest.json
+ADDON_ID = "bc@free-labour.org"                                     # browser_specific_settings там же
 
 failed = 0
 
@@ -35,12 +37,19 @@ def check(what, fact, want):
 def main():
     bc, data, via = sys.argv[1:4]
     command = [bc, "--data-dir", data, "native-host", "--via", via, ORIGIN]
-    if len(sys.argv) > 4:
-        with open(sys.argv[4], encoding="utf-8") as f:
+    # Chromium даёт хосту происхождение расширения, Firefox — путь к манифесту и
+    # идентификатор расширения.
+    for path in sys.argv[4:]:
+        with open(path, encoding="utf-8") as f:
             manifest = json.load(f)
-        check("манифест: имя хоста и чьё расширение", (manifest["name"], manifest["allowed_origins"]),
-              ("org.free_labour.bc", [ORIGIN]))
-        command = [manifest["path"], ORIGIN]
+        if "allowed_extensions" in manifest:
+            check("манифест Firefox: имя хоста и чьё расширение", (manifest["name"], manifest["allowed_extensions"]),
+                  ("org.free_labour.bc", [ADDON_ID]))
+            command = [manifest["path"], path, ADDON_ID]
+        else:
+            check("манифест Chromium: имя хоста и чьё расширение", (manifest["name"], manifest["allowed_origins"]),
+                  ("org.free_labour.bc", [ORIGIN]))
+            command = [manifest["path"], ORIGIN]
     host = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     next_id = iter(range(1, 1000))
 

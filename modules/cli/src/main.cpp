@@ -5936,7 +5936,8 @@ static std::string sh_quote(const std::string& s) {
 }
 
 // Каталог манифестов хоста (extension.md §5): в доме — путь от $HOME, в своём
-// профиле браузера — как дан.
+// профиле Chromium — как дан. У Firefox каталога в профиле нет: он ищет манифест
+// только в ~/.mozilla.
 struct HostDir {
     std::string dir;
     bool        in_home = true;
@@ -5944,7 +5945,7 @@ struct HostDir {
 };
 
 static std::vector<HostDir> host_dirs(const std::string& browser, const std::string& profile) {
-    if (!profile.empty()) return {{profile + "/NativeMessagingHosts", false, browser == "firefox"}};
+    if (!profile.empty()) return {{profile + "/NativeMessagingHosts", false}};
     std::vector<HostDir> out;
     if (browser == "all" || browser == "chromium") out.push_back({".config/chromium/NativeMessagingHosts"});
     if (browser == "all" || browser == "chrome") out.push_back({".config/google-chrome/NativeMessagingHosts"});
@@ -6012,7 +6013,8 @@ else
     echo "проверка: bc в контейнере не ответил — контейнер запущен? docker без sudo? (extension.md §5.1)" >&2
     exit 1
 fi
-echo "дальше: загрузите modules/extension в браузер (extension.md §5)"
+echo "дальше: загрузите расширение в браузер — Chromium: modules/extension,"
+echo "Firefox: build/modules/extension/bc.xpi (extension.md §5)"
 )SH";
     return s.str();
 }
@@ -6032,6 +6034,11 @@ static int cmd_native_install(const fs::path& data_dir, int argc, char** argv) {
         std::cerr << "Usage: bc native-install --via URL [--browser chromium|chrome|firefox|all]\n"
                      "                         [--profile КАТАЛОГ_ПРОФИЛЯ] [--extension-id ID]\n"
                      "                         [--docker КОНТЕЙНЕР]\n";
+        return 1;
+    }
+    if (!profile.empty() && browser == "firefox") {
+        std::cerr << "у Firefox манифест хоста не в профиле, а в ~/.mozilla/native-messaging-hosts:\n"
+                     "--profile — только для Chromium и Chrome (extension.md §5)\n";
         return 1;
     }
     // Идентификатор Chrome — 32 буквы a–p; в манифест он идёт как есть.
@@ -6084,7 +6091,8 @@ static int cmd_native_install(const fs::path& data_dir, int argc, char** argv) {
         std::ofstream(manifest, std::ios::trunc) << host_manifest(json_esc(script.string()), d.firefox, ext_id);
         std::cout << "манифест: " << manifest.string() << "\n";
     }
-    std::cout << "дальше: загрузите modules/extension в браузер (extension.md §5)\n";
+    std::cout << "дальше: загрузите расширение в браузер — Chromium: modules/extension,\n"
+                 "Firefox: build/modules/extension/bc.xpi (extension.md §5)\n";
     return 0;
 }
 
@@ -10759,7 +10767,8 @@ Merge, manual relay (blockchain.md §6.4 bilateral two-round protocol):
   native-install --via URL         Поставить хост: ветку браузера (свой ключ,
     [--browser chromium|chrome|        отзывает предок), скрипт запуска и манифест
      firefox|all]                      хоста в каталог браузера; дальше —
-    [--profile КАТАЛОГ]                загрузить modules/extension в браузер
+                                       загрузить расширение (extension.md §5)
+    [--profile КАТАЛОГ]                Свой профиль Chromium или Chrome
     [--docker КОНТЕЙНЕР]               Браузер на хосте, а bc в контейнере:
                                        вместо установки — сценарий для хоста
                                        в stdout (extension.md §5.1)
