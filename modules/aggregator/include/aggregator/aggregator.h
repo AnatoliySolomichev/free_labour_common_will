@@ -127,6 +127,10 @@ public:
     // before arrivals were kept.
     std::optional<Timestamp> block_arrival(const Hash& block_hash) const;
 
+    // Note that a block came here now — a revocation certificate's block, which
+    // comes to the warehouse, not to add_block (blockchain.md §11.10). First write wins.
+    void note_arrival(const Hash& block_hash);
+
     // The partner's co-signature of a MERGE block (blockchain.md §6.4), checked by
     // the caller before it is put: the partner read the draft, found it taking its
     // tip at a time that was now by its clock, and signed. One per block; false

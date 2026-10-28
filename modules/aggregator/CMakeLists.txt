@@ -23,6 +23,7 @@ add_library(aggregator
     src/own_chain.cpp
     src/recognition.cpp
     src/branch_keys.cpp
+    src/finality.cpp
     src/notes_view.cpp
 )
 
@@ -75,6 +76,7 @@ add_executable(aggregator_tests
     tests/test_axis_ledger.cpp
     tests/test_tls_smoke.cpp
     tests/test_branch_keys.cpp
+    tests/test_finality.cpp
     tests/test_notes_view.cpp
 )
 

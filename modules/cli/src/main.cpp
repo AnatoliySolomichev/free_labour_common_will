@@ -145,7 +145,7 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--material", "--unit", "--qty",
     "--buyback-to", "--buyback-days", "--buyback-until", "--buyback-of",
     "--improves", "--repair", "--spend", "--machine-hours", "--meter", "--no",
-    "--shifts", "--pay", "--reply-within",
+    "--shifts", "--pay", "--reply-within", "--final-after",
     "--re", "--hops", "--limit", "--from", "--speed",
     "--claim", "--video", "--mirror", "--name", "--better", "--text-file",
     "--stars", "--deal", "--browser", "--profile", "--extension-id", "--docker",
@@ -1601,6 +1601,8 @@ static std::vector<records::OriginQty> pay_from_purse(
     Context& ctx, const std::array<uint8_t, 32>& to, double units, int argc, char** argv,
     const std::optional<records::Ref>& buyback_of);
 static int64_t     reply_term(int argc, char** argv, int64_t now);
+static int64_t     parse_duration(const std::string& s);
+static std::string duration_str(double seconds);
 static std::string when_utc(int64_t ts);
 static void        upload_provenance(Context& ctx, const std::string& via,
                                      const records::Transfer& t);
@@ -2114,6 +2116,9 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
                      "                            (default: found at the aggregator)\n"
                      "  оплата — оферта: продавец отвечает к сроку (economy.md §4.4)\n"
                      "    [--reply-within 3d]     срок ответа продавца: 45m, 2h, 3d (по умолчанию 3d)\n"
+                     "    [--final-after 1d]      окно окончательности после ответа продавца:\n"
+                     "                            отзыв вашего ключа в это окно, не включивший\n"
+                     "                            оферту в вашу линию, её отменит (blockchain.md §11.10)\n"
                      "    [--pay SPEC]...         чем платить — вручную, остальное по правилу:\n"
                      "                              self=ЧАСЫ            своя эмиссия\n"
                      "                              ЭМИТЕНТ=ЧАСЫ         бумага эмитента, старшие векселя\n"
@@ -2508,6 +2513,10 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     t.timestamp = now;   // the same moment the addressing was checked against
     // v6 (economy.md §4.4): an offer until the seller accepts it by this term.
     t.until     = reply_term(argc, argv, now);
+    // v7 (blockchain.md §11.10): the finality window this buyer offers — the seller
+    // accepts it by answering.
+    if (const auto fa = flag_val(argc, argv, "--final-after"); !fa.empty())
+        t.final_after = parse_duration(fa);
     // Transfer v4 (records.md §11.1): which own promise this deal closes.
     const auto pledge_s = flag_val(argc, argv, "--pledge");
     if (!pledge_s.empty()) t.settles = parse_ref(pledge_s);
@@ -2553,6 +2562,10 @@ static int cmd_accept(const fs::path& data_dir, int argc, char** argv) {
     else
         std::cerr << "это оферта: часы перейдут, когда продавец примет её — до "
                   << when_utc(*t.until) << " (economy.md §4.4)\n";
+    if (t.final_after)
+        std::cerr << "окно окончательности " << duration_str(static_cast<double>(*t.final_after))
+                  << " после ответа продавца: отзыв вашего ключа в это окно, не включивший "
+                     "оферту в вашу линию, отменит сделку (blockchain.md §11.10)\n";
     if (!via.empty()) {
         upload_block(ctx, via, block);
         // Продавцу проверять бумагу по блокам (economy.md §4.4): вексель, наш приём
@@ -8431,6 +8444,11 @@ static int answer_offer(const fs::path& data_dir, const std::string& via, const 
     if (pre) std::cout << "; выкуп по возврату, который вы подписали, — ответа не требует";
     else     std::cout << "; ответить до " << when_utc(t->until.value_or(0));
     std::cout << "\n";
+    if (t->final_after)
+        std::cout << "  окно окончательности " << duration_str(static_cast<double>(*t->final_after))
+                  << " после вашего ответа: если за это время придёт отзыв ключа покупателя, "
+                     "не включивший оферту в его линию, сделка отменится. Отдавайте товар после "
+                     "окна (blockchain.md §11.10; GET /deal — finality)\n";
     if (const auto& bb = t->accept->buyback; bb && bb->deposit)
         std::cout << "  покупатель кладёт оплату залогом под возврат вам до " << when_utc(bb->until)
                   << ": до срока её первым тратит выкуп — и он ответа покупателя не ждёт "
@@ -10679,7 +10697,11 @@ Labor:
                                        from the work's carry — never by hand
     [--pledge REF]                     the own pledge this deal closes
     [--reply-within 3d]                the seller's term to answer: the deal is
-                                       an offer until he accepts (economy.md §4.4)
+                                       an offer until it is accepted (economy.md §4.4)
+    [--final-after 1d]                 finality window after the seller's answer:
+                                       a revocation of your key within it that
+                                       leaves the offer off your line voids the
+                                       deal (blockchain.md §11.10)
     [--pay SPEC ...] [--no-self]       what pays, by hand: self=H, ISSUER=H,
                                        ISSUER@BILL=H (bills as bc wallet shows);
                                        the rest by the rule; --no-self: no own issue

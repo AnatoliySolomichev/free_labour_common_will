@@ -645,6 +645,11 @@ struct Transfer {
     // v6: the seller answers by this time, or the deal did not happen. Required
     // on a deal, absent on a move between own branches — nobody to answer.
     std::optional<int64_t>    until;
+    // v7: the finality window the buyer offers and the seller accepts by
+    // answering (blockchain.md §11.10): seconds from the seller's answer, by the
+    // seller's clock; a revocation of the buyer's key that came within it and
+    // left this deal off the owner's line voids the deal. Absent — final at once.
+    std::optional<int64_t>    final_after;
 };
 
 // Issuer's receipt for own paper returned by a payer's Transfer — the "+" link

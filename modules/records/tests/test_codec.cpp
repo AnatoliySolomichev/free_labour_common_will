@@ -825,6 +825,35 @@ TEST(RecordsCodec, TransferTailRoundtripsInEveryCombination) {
     }
 }
 
+// v7 (blockchain.md §11.10): окно окончательности — договорное, только у сделки.
+TEST(RecordsCodec, TransferFinalityWindowRoundtripsAndOnlyOnADeal) {
+    Transfer t = deal_of(plain_acceptance(3.0));
+    t.final_after = 86400;                                      // сутки после ответа продавца
+    const auto d = std::get<Transfer>(roundtrip(Record{t}));
+    ASSERT_TRUE(d.final_after.has_value());
+    EXPECT_EQ(*d.final_after, 86400);
+
+    Transfer all = t;                                           // и со всем хвостом сразу
+    all.settles  = make_ref(0x55, 0x66);
+    const auto bytes = Codec::encode(Record{all});
+    EXPECT_EQ(bytes[0], 0xAA);                                  // map(10)
+    EXPECT_EQ(*std::get<Transfer>(Codec::decode(bytes)).final_after, 86400);
+
+    Transfer zero = t;
+    zero.final_after = 0;
+    EXPECT_THROW(Codec::encode(Record{zero}), CodecError);
+    Transfer too_long = t;
+    too_long.final_after = 400LL * 24 * 3600;
+    EXPECT_THROW(Codec::encode(Record{too_long}), CodecError);
+
+    Transfer move{};                                            // у перемещения окна нет
+    move.from = move.to = t.from;
+    move.to_node     = 7;
+    move.timestamp   = 100;
+    move.final_after = 60;
+    EXPECT_THROW(Codec::encode(Record{move}), CodecError);
+}
+
 TEST(RecordsCodec, PledgeRoundtripWithAndWithoutOptionals) {
     Pledge full{};
     full.target    = make_ref(0x33, 0x44);

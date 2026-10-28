@@ -530,6 +530,9 @@ void check_transfer(const Transfer& t) {
         if (t.until)
             throw CodecError("Transfer: у перемещения между своими ветками нет срока "
                              "ответа — отвечать некому");
+        if (t.final_after)
+            throw CodecError("Transfer: у перемещения между своими ветками нет окна "
+                             "окончательности — сделки нет");
         return;
     }
     const Acceptance& a = *t.accept;
@@ -541,6 +544,10 @@ void check_transfer(const Transfer& t) {
                          "(records.md §11.1 v6)");
     if (*t.until <= t.timestamp)
         throw CodecError("Transfer: срок ответа продавца уже прошёл");
+    // v7: the finality window — positive, at most a year (blockchain.md §11.10).
+    if (t.final_after && (*t.final_after <= 0 || *t.final_after > 366LL * 24 * 3600))
+        throw CodecError("Transfer: окно окончательности — от секунды до года "
+                         "(blockchain.md §11.10)");
     if (a.release && a.release->chain != t.to)
         throw CodecError("Transfer: отпуск лежит в цепи продавца — to ≠ цепь отпуска "
                          "(records.md §9.8)");
@@ -753,7 +760,7 @@ void enc_transfer(Buf& out, const Transfer& t) {
     // the optional tail: emission link (7–9), settled pledge (10), accept (11).
     check_transfer(t);
     w_map(out, 6 + (t.emission ? 3 : 0) + (t.settles ? 1 : 0) + (t.accept ? 1 : 0)
-                 + (t.until ? 1 : 0));
+                 + (t.until ? 1 : 0) + (t.final_after ? 1 : 0));
     w_uint(out, 0); w_uint(out, static_cast<uint8_t>(RecordType::Transfer));
     w_uint(out, 1); w_fixed(out, t.from);
     w_uint(out, 2); w_fixed(out, t.to);
@@ -777,6 +784,7 @@ void enc_transfer(Buf& out, const Transfer& t) {
     if (t.settles) { w_uint(out, 10); w_ref(out, *t.settles); }
     if (t.accept)  { w_uint(out, 11); w_acceptance(out, *t.accept); }
     if (t.until)   { w_uint(out, 12); w_int64(out, *t.until); }       // v6
+    if (t.final_after) { w_uint(out, 13); w_int64(out, *t.final_after); }   // v7
 }
 
 // The seller's answer to a deal (records.md §11.13).
@@ -1469,11 +1477,11 @@ Tool dec_tool_fields(CborReader& r, uint64_t field_count) {
 
 Transfer dec_transfer_fields(CborReader& r, uint64_t field_count) {
     // v5 (ИР-023): 6 required fields, then an optional ascending tail — emission
-    // link (7–9, all three), settled pledge (10), accept (11), and since v6 the
-    // seller's term (12). Key 5 — the retired `reason` — is refused like any
-    // unknown key.
-    if (field_count < 6 || field_count > 12)
-        throw CodecError("Transfer: expected 6..12 fields");
+    // link (7–9, all three), settled pledge (10), accept (11), since v6 the
+    // seller's term (12), since v7 the finality window (13). Key 5 — the
+    // retired `reason` — is refused like any unknown key.
+    if (field_count < 6 || field_count > 13)
+        throw CodecError("Transfer: expected 6..13 fields");
     Transfer t{};
     expect_key(r, 1); r.r_fixed(t.from);
     expect_key(r, 2); r.r_fixed(t.to);
@@ -1531,6 +1539,10 @@ Transfer dec_transfer_fields(CborReader& r, uint64_t field_count) {
             t.until = r.r_int();
             read += 1;
             last  = 12;
+        } else if (key == 13) {
+            t.final_after = r.r_int();
+            read += 1;
+            last  = 13;
         } else {
             throw CodecError("Transfer: unknown field key");
         }

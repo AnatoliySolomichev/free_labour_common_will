@@ -409,6 +409,15 @@ std::optional<Timestamp> AggregatorStorage::block_arrival(const Hash& block_hash
     return static_cast<Timestamp>(t);
 }
 
+void AggregatorStorage::note_arrival(const Hash& block_hash) {
+    const auto now = static_cast<int64_t>(std::time(nullptr));
+    std::vector<uint8_t> le(8);
+    for (int i = 0; i < 8; ++i)
+        le[static_cast<std::size_t>(i)] =
+            static_cast<uint8_t>(static_cast<uint64_t>(now) >> (8 * i));
+    put_opaque(impl_->env, impl_->dbi_arr, block_hash, le, "note_arrival");
+}
+
 bool AggregatorStorage::put_cosig(const Hash& block_hash, const Signature& sig) {
     return put_opaque(impl_->env, impl_->dbi_cosig, block_hash,
                       {sig.bytes.begin(), sig.bytes.end()}, "put_cosig");   // first write wins

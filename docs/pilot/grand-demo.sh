@@ -828,9 +828,10 @@ sleep 1   # в одну секунду заглушки совпали бы ба
 bcp oleg  block stub --via "$VIA" >/dev/null
 FORKS_oleg="$(curl -s "$VIA/forks/${CID[oleg]}")"
 say "$FORKS_oleg"
-hr "Олег принимает работу Петра — оферта на его линии"
+hr "Олег принимает работу Петра — оферта на его линии, с окном окончательности в сутки"
 bcp oleg fetch "${CID[petr]}/$WORK_petr_oleg" --via "$VIA" >/dev/null
-PAY_oleg="$(bcp oleg accept --work "${CID[petr]}/$WORK_petr_oleg" --quality "справка выдана" --coef 1.0 --axis-share "$(axis responsibility)=0.5" --axis-share "$(axis knowledge)=0.5" --via "$VIA" 2>&1)"
+PAY_oleg="$(bcp oleg accept --work "${CID[petr]}/$WORK_petr_oleg" --quality "справка выдана" --coef 1.0 --axis-share "$(axis responsibility)=0.5" --axis-share "$(axis knowledge)=0.5" --final-after 1d --via "$VIA" 2>&1)"
+printf '%s\n' "$PAY_oleg" | grep "окно" | sed 's/^/   /'
 ACC_oleg="$(printf '%s' "$PAY_oleg" | after 'acceptance ref: ')"
 hr "Пётр не принимает оплату из раздвоенной ветки — сделка ждёт (blockchain.md §6.7, правило 13)"
 OUT_frozen="$(bcp petr transfer recv "$ACC_oleg" --via "$VIA" --yes 2>&1 || true)"
@@ -931,6 +932,8 @@ if bcp oleg revoke status --node 2147483647 | grep -q "owner's line: blocks"; th
 if grep -qiE "error|refused|раздвоена|отказ" <<<"$OUT_line"; then
     echo "   ✗ оферта с линии хозяина не принята: $OUT_line"; fail=1
 else echo "   ✓ оферта с линии хозяина принята после отзыва"; fi
+check "сделка Олега с окном — ждёт конца окна, отзыв её не отменил" \
+      "$(deal_field "$ACC_oleg" finality)" "pending"
 if grep -q "revoked key" <<<"$OUT_thief"; then
     echo "   ✓ блок вора старым ключом после отзыва агрегатор отверг"
 else echo "   ✗ блок вора не отвергнут: $OUT_thief"; fail=1; fi

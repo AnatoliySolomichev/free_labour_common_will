@@ -3,6 +3,7 @@
 #include "aggregator/deal_view.h"
 #include "aggregator/discovery_view.h"
 #include "aggregator/economy_view.h"
+#include "aggregator/finality.h"
 #include "aggregator/footprint_view.h"
 #include "aggregator/recognition.h"
 #include "aggregator/resource_view.h"
@@ -689,10 +690,13 @@ void AggregatorServer::setup_routes() {
             const bool stored = storage_.put_revocation_bytes(
                 chain, {req.body.begin(), req.body.end()});
             // A certificate that checks names the replacement key the revoked
-            // branch signs with from now on (sync.md §10.10).
+            // branch signs with from now on (sync.md §10.10); when it came here
+            // decides the deals whose window it falls into (blockchain.md §11.10).
             try {
-                keys_.learn_revocation(Serializer::decode_revocation_cert(
-                    reinterpret_cast<const uint8_t*>(req.body.data()), req.body.size()));
+                const auto cert = Serializer::decode_revocation_cert(
+                    reinterpret_cast<const uint8_t*>(req.body.data()), req.body.size());
+                keys_.learn_revocation(cert);
+                storage_.note_arrival(Crypto::hash_block(cert.block));
             } catch (const std::exception&) {}
             res.set_content(stored ? "{\"status\":\"stored\"}"
                                    : "{\"status\":\"duplicate\"}",
@@ -2188,6 +2192,22 @@ void AggregatorServer::setup_routes() {
                                                    r->seen.index))
                     body += ",\"witnessed\":" + std::to_string(*w);
                 body += "}";
+                // The finality window the seller accepted (blockchain.md §11.10).
+                if (t.final_after && r->seen.reply.accepted) {
+                    Hash offer_hash{};
+                    offer_hash.bytes = d->hash;
+                    if (const auto offer = storage_.get_block_by_hash(offer_hash)) {
+                        const auto f = deal_finality(storage_, *offer, r->seen.reply.timestamp,
+                                                     *t.final_after, now);
+                        body += ",\"final_after\":" + std::to_string(*t.final_after)
+                              + ",\"final_at\":" + std::to_string(f.final_at)
+                              + ",\"finality\":\"" + finality_name(f.state) + "\"";
+                        if (f.revoked_at)
+                            body += ",\"revoked_at\":" + std::to_string(*f.revoked_at);
+                    }
+                }
+            } else if (t.final_after) {
+                body += ",\"final_after\":" + std::to_string(*t.final_after);
             }
             // No answer: how surely the offer lapsed (economy.md §8.14).
             if (const auto l = deals.lapse.find(d->hash); l != deals.lapse.end())
@@ -2668,9 +2688,11 @@ void AggregatorServer::sync_with_peer(const std::string& peer_url) {
                 if (storage_.put_revocation_bytes(
                         chain, {body.begin() + pos, body.begin() + pos + len}))
                     ++gossiped;
-                keys_.learn_revocation(Serializer::decode_revocation_cert(
+                const auto cert = Serializer::decode_revocation_cert(
                     reinterpret_cast<const uint8_t*>(body.data() + pos),
-                    static_cast<std::size_t>(len)));
+                    static_cast<std::size_t>(len));
+                keys_.learn_revocation(cert);
+                storage_.note_arrival(Crypto::hash_block(cert.block));
             } catch (...) {}
             pos += static_cast<std::size_t>(len);
         }
