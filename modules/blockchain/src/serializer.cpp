@@ -125,13 +125,21 @@ void enc_merge_payload(Buf& out, const MergePayload& mp) {
 }
 
 void enc_revocation_payload(Buf& out, const RevocationPayload& rp) {
-    // Map of 3 fields (emergency stop) or 4 (with replacement) — blockchain.md §6.7.
-    w_map(out, rp.replacement_pubkey.has_value() ? 4 : 3);
+    // Map of 3 fields (emergency stop), plus the replacement (key 3) and the
+    // last valid block (key 4) when given — blockchain.md §6.7.
+    w_map(out, 3 + (rp.replacement_pubkey.has_value() ? 1 : 0)
+                 + (rp.last_good.has_value() ? 1 : 0));
     w_uint(out, 0); w_uint(out, rp.revoked_node_index);
     w_uint(out, 1); w_fixed(out, rp.revoked_pubkey.bytes);
     w_uint(out, 2); w_int64(out, rp.compromised_since);
     if (rp.replacement_pubkey.has_value()) {
         w_uint(out, 3); w_fixed(out, rp.replacement_pubkey->bytes);
+    }
+    if (rp.last_good.has_value()) {
+        w_uint(out, 4);
+        w_arr(out, 2);
+        w_uint(out, rp.last_good->index);
+        w_fixed(out, rp.last_good->hash.bytes);
     }
 }
 
@@ -384,16 +392,33 @@ MergePayload dec_merge_payload(CborReader& r) {
 
 RevocationPayload dec_revocation_payload(CborReader& r) {
     const uint64_t n = r.r_map();
-    if (n != 3 && n != 4)
-        throw SerializationError("RevocationPayload: expected 3 or 4 fields");
+    if (n < 3 || n > 5)
+        throw SerializationError("RevocationPayload: expected 3 to 5 fields");
     RevocationPayload rp{};
     expect_key(r, 0); rp.revoked_node_index = static_cast<NodeIndex>(r.r_uint());
     expect_key(r, 1); r.r_fixed(rp.revoked_pubkey.bytes);
     expect_key(r, 2); rp.compromised_since = r.r_int();
-    if (n == 4) {
-        PublicKey repl{};
-        expect_key(r, 3); r.r_fixed(repl.bytes);
-        rp.replacement_pubkey = repl;
+    // Optional fields, each at most once, in ascending key order.
+    uint64_t prev_key = 2;
+    for (uint64_t i = 3; i < n; ++i) {
+        const uint64_t key = r.r_uint();
+        if (key <= prev_key)
+            throw SerializationError("CBOR: unexpected map key (non-canonical or wrong schema)");
+        prev_key = key;
+        if (key == 3) {
+            PublicKey repl{};
+            r.r_fixed(repl.bytes);
+            rp.replacement_pubkey = repl;
+        } else if (key == 4) {
+            if (r.r_arr() != 2)
+                throw SerializationError("RevocationPayload: last_good expects [index, hash]");
+            LastGood last{};
+            last.index = static_cast<BlockIndex>(r.r_uint());
+            r.r_fixed(last.hash.bytes);
+            rp.last_good = last;
+        } else {
+            throw SerializationError("RevocationPayload: unknown field");
+        }
     }
     return rp;
 }

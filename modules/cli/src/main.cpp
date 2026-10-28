@@ -139,7 +139,7 @@ static const std::set<std::string> VALUE_FLAGS = {
     "--reason", "--peer", "--via", "--timeout",
     "--to", "--units", "--origin", "--pledge", "--executor", "--expires",
     "--acceptance", "--coef", "--k", "--with", "--to-node",
-    "--node", "--ancestor", "--since", "--out", "--cert", "--hex",
+    "--node", "--ancestor", "--since", "--out", "--cert", "--hex", "--last-good",
     "--skill", "--need", "--search",
     "--tool", "--cost", "--life", "--days", "--serial", "--desc", "--note", "--paid",
     "--material", "--unit", "--qty",
@@ -10192,16 +10192,19 @@ static bool post_revocation_cert(const std::string& via, const UserId& chain,
     return res && res->status == 200;
 }
 
-// bc revoke create --node N [--ancestor A] [--since UNIX_TS] [--replace] [--out FILE]
+// bc revoke create --node N [--ancestor A] [--since UNIX_TS] [--replace]
+//                   [--last-good HASH|tip] [--out FILE]
 // Writes a REVOCATION block into the ancestor's branch (default radius: parent)
 // and emits a self-verifying certificate. --replace generates a fresh key and
 // assigns it (the "second block" of the stop-then-replace flow when a stop
-// revocation already exists).
+// revocation already exists). --last-good names the owner's last valid block
+// of the revoked branch (blockchain.md §6.7 rule 12): a block hash, or `tip` — the
+// branch tip in this storage.
 static int cmd_revoke_create(const fs::path& data_dir, int argc, char** argv) {
     const auto node_s = flag_val(argc, argv, "--node");
     if (node_s.empty()) {
         std::cerr << "Usage: bc revoke create --node N [--ancestor A] "
-                     "[--since UNIX_TS] [--replace] [--out FILE]\n";
+                     "[--since UNIX_TS] [--replace] [--last-good HASH|tip] [--out FILE]\n";
         return 1;
     }
     const auto revoked = static_cast<NodeIndex>(std::stoull(node_s, nullptr, 0));
@@ -10231,8 +10234,23 @@ static int cmd_revoke_create(const fs::path& data_dir, int argc, char** argv) {
         replacement = fresh->pub;
     }
 
+    std::optional<Hash> last_good;
+    if (const auto lg = flag_val(argc, argv, "--last-good"); !lg.empty()) {
+        if (lg == "tip") {
+            if (!storage.branch_tip_index(uid, revoked).has_value())
+                throw std::runtime_error("--last-good tip: branch " + node_s
+                                         + " has no blocks here");
+            last_good = bc.branch_tip_hash(uid, revoked);
+        } else {
+            Hash h{};
+            if (!from_hex(lg, h.bytes.data(), h.bytes.size()))
+                throw std::runtime_error("--last-good: expected a 64-hex block hash or `tip`");
+            last_good = h;
+        }
+    }
+
     const Block b = bc.revoke_node(uid, revoked, since, replacement,
-                                   ancestor, ancestor_kp, now);
+                                   ancestor, ancestor_kp, now, last_good);
 
     if (fresh.has_value()) {
         // The compromised key file steps aside; the branch continues fresh.
@@ -10248,6 +10266,9 @@ static int cmd_revoke_create(const fs::path& data_dir, int argc, char** argv) {
               << (replacement.has_value() ? "  — replacement assigned"
                                           : "  — emergency stop (branch frozen)")
               << "\n";
+    if (last_good.has_value())
+        std::cout << "owner's line ends at " << to_hex(last_good->bytes.data(), 32)
+                  << " (blockchain.md §6.7 rule 12)\n";
 
     const auto cert  = RevocationCert::build(storage, b.address);
     const auto bytes = Serializer::encode(cert);
@@ -10406,6 +10427,10 @@ static int cmd_revoke_verify(int argc, char** argv) {
                       ? short_hex(rp.replacement_pubkey->bytes)
                       : std::string("no (emergency stop — branch frozen)"))
               << "\n";
+    if (rp.last_good.has_value())
+        std::cout << "line:     owner's last valid block #" << rp.last_good->index << " "
+                  << to_hex(rp.last_good->hash.bytes.data(), rp.last_good->hash.bytes.size())
+                  << " (blockchain.md §6.7 rule 12)\n";
     return 0;
 }
 
@@ -10435,15 +10460,24 @@ static int cmd_revoke_status(const fs::path& data_dir, int argc, char** argv) {
         if (st.revocation->replacement_pubkey.has_value())
             std::cout << "  replacement: "
                       << short_hex(st.revocation->replacement_pubkey->bytes) << "\n";
+        if (st.line_end.has_value())
+            std::cout << "  owner's line: blocks #0..#" << *st.line_end
+                      << " (blockchain.md §6.7 rule 12)\n";
+        else if (st.revocation->last_good.has_value())
+            std::cout << "  owner's line: last valid block #"
+                      << st.revocation->last_good->index << " "
+                      << short_hex(st.revocation->last_good->hash.bytes)
+                      << " is not in this storage — zones by time\n";
     }
-    size_t clean = 0, suspect = 0, invalid = 0;
+    size_t clean = 0, suspect = 0, invalid = 0, outside = 0;
     for (auto s : st.blocks) {
-        if      (s == BlockRevocationStatus::CLEAN)   ++clean;
-        else if (s == BlockRevocationStatus::SUSPECT) ++suspect;
-        else                                          ++invalid;
+        if      (s == BlockRevocationStatus::CLEAN)        ++clean;
+        else if (s == BlockRevocationStatus::SUSPECT)      ++suspect;
+        else if (s == BlockRevocationStatus::OUTSIDE_LINE) ++outside;
+        else                                               ++invalid;
     }
     std::cout << "  blocks: " << st.blocks.size() << " (clean " << clean
-              << ", suspect " << suspect
+              << ", suspect " << suspect << ", outside-line " << outside
               << ", invalid-after-replacement " << invalid << ")\n";
     if (validator.node_invalidated_by_revocation(uid, node))
         std::cout << "  node itself is invalidated by an ancestor's revocation "
@@ -10795,8 +10829,10 @@ Key revocation (blockchain.md §6.7; warehouse — sync.md §7.2):
   revoke create --node N           Revoke a branch key from an ancestor's branch
     [--ancestor A] [--since TS]        (default ancestor: parent). --replace
     [--replace] [--out FILE]           generates and assigns a fresh key; emits
-    [--via URL]                        a self-verifying certificate (CBOR);
-                                       --via publishes it to the warehouse
+    [--last-good HASH|tip]             a self-verifying certificate (CBOR);
+    [--via URL]                        --via publishes it to the warehouse;
+                                       --last-good names the owner's last valid
+                                       block (tip = this storage's branch tip)
   revoke verify (--cert FILE | --hex HEX)  Check a certificate autonomously
   revoke status --node N           Effective revocation + per-block zones
   revoke publish --via URL         Push certificates to the warehouse

@@ -384,3 +384,49 @@ TEST(Serializer, RevocationPayloadDeterministic) {
     with_repl.replacement_pubkey = repl;
     EXPECT_LT(Serializer::encode(rp).size(), Serializer::encode(with_repl).size());
 }
+
+TEST(Serializer, RevocationPayloadRoundTripLastGood) {
+    RevocationPayload rp{};
+    rp.revoked_node_index = 7;
+    rp.revoked_pubkey.bytes.fill(0x44);
+    rp.compromised_since  = 1'000LL;
+    LastGood last{12, {}};
+    last.hash.bytes.fill(0x55);
+    rp.last_good = last; // stop with the owner's line, no replacement yet
+
+    auto enc = Serializer::encode(rp);
+    auto d   = Serializer::decode_revocation_payload(enc.data(), enc.size());
+    EXPECT_FALSE(d.replacement_pubkey.has_value());
+    ASSERT_TRUE(d.last_good.has_value());
+    EXPECT_EQ(*d.last_good, last);
+
+    PublicKey repl{};
+    repl.bytes.fill(0x66);
+    rp.replacement_pubkey = repl;
+    enc = Serializer::encode(rp);
+    d   = Serializer::decode_revocation_payload(enc.data(), enc.size());
+    ASSERT_TRUE(d.replacement_pubkey.has_value());
+    EXPECT_EQ(*d.replacement_pubkey, repl);
+    ASSERT_TRUE(d.last_good.has_value());
+    EXPECT_EQ(*d.last_good, last);
+}
+
+TEST(Serializer, RevocationPayloadRejectsUnknownAndRepeatedKeys) {
+    RevocationPayload rp{};
+    rp.revoked_node_index = 7;
+    rp.revoked_pubkey.bytes.fill(0x44);
+    rp.compromised_since  = 1'000LL;
+    rp.last_good = LastGood{};
+    auto enc = Serializer::encode(rp);
+    // The optional key sits right after the 3 fixed fields: 0xA4 map, then
+    // key 4 at offset 1 + (1 + 1) + (1 + 2 + 32) + (1 + 3) = 42.
+    ASSERT_EQ(enc[0], 0xA4);
+    ASSERT_EQ(enc[42], 0x04);
+    auto bad = enc;
+    bad[42] = 0x05;                  // unknown field
+    EXPECT_THROW(Serializer::decode_revocation_payload(bad.data(), bad.size()),
+                 SerializationError);
+    bad[42] = 0x02;                  // not ascending
+    EXPECT_THROW(Serializer::decode_revocation_payload(bad.data(), bad.size()),
+                 SerializationError);
+}

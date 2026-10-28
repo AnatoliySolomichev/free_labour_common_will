@@ -96,10 +96,12 @@ public:
     // replacement_pubkey == nullopt is the emergency stop; a replacement may be
     // assigned later by a second REVOCATION (blockchain.md §6.7 rule 3, "последнее слово").
     // revoked_pubkey is filled from the revoked branch's current effective
-    // working key (node key + KEY_ROTATION history).
+    // working key (node key + KEY_ROTATION history, or the replacement in force).
+    // last_good names the owner's last valid block of the revoked branch
+    // (blockchain.md §6.7 rule 12) — it must be a block of that branch in this storage.
     // Throws: CryptoError, StorageError, NodeNotFoundError,
     //         RevocationError (not an ancestor / root / self),
-    //         InvalidArgumentError (ancestor keypair mismatch).
+    //         InvalidArgumentError (ancestor keypair mismatch, unknown last_good).
     Block revoke_node(
         const UserId&                   user_id,
         NodeIndex                       revoked_node_index,
@@ -107,7 +109,8 @@ public:
         const std::optional<PublicKey>& replacement_pubkey,
         NodeIndex                       ancestor_index,
         const KeyPair&                  ancestor_keypair,
-        Timestamp                       timestamp
+        Timestamp                       timestamp,
+        const std::optional<Hash>&      last_good = std::nullopt
     );
 
     // Current effective working key of a branch: the node's working_pubkey,

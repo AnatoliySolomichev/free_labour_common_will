@@ -213,7 +213,8 @@ Block Blockchain::revoke_node(
     const std::optional<PublicKey>& replacement_pubkey,
     NodeIndex                       ancestor_index,
     const KeyPair&                  ancestor_keypair,
-    Timestamp                       timestamp)
+    Timestamp                       timestamp,
+    const std::optional<Hash>&      last_good)
 {
     if (revoked_node_index == 0)
         throw RevocationError("root cannot be revoked — it has no ancestor (blockchain.md §11.5)");
@@ -225,11 +226,25 @@ Block Blockchain::revoke_node(
 
     // The exact key being revoked: the currently authorized key of the revoked
     // branch (rotation lineage or an earlier replacement); for a frozen branch —
-    // the last key of its lineage.
+    // the lineage tip of the epoch it froze in.
     auto target_st = validator_.branch_revocation_status(user_id, revoked_node_index);
     PublicKey revoked_key = target_st.next_key.has_value()
         ? *target_st.next_key
-        : effective_working_pubkey(user_id, revoked_node_index);
+        : target_st.current_key;
+
+    // The owner names the line from their own copy of the branch (blockchain.md §6.7
+    // rule 12): the last valid block must be one of its blocks.
+    std::optional<LastGood> line;
+    if (last_good.has_value()) {
+        if (auto tip = storage_.branch_tip_index(user_id, revoked_node_index); tip.has_value())
+            for (BlockIndex i = 0; i <= *tip && !line.has_value(); ++i)
+                if (Crypto::hash_block(storage_.get_block({user_id, revoked_node_index, i}))
+                    == *last_good)
+                    line = LastGood{i, *last_good};
+        if (!line.has_value())
+            throw InvalidArgumentError(
+                "revoke_node: last_good is not a block of the revoked branch in this storage");
+    }
 
     // The author branch itself must be writable with this keypair (it may have
     // been replaced by its own revocation — then only the replacement signs).
@@ -249,6 +264,7 @@ Block Blockchain::revoke_node(
     rp.revoked_pubkey     = revoked_key;
     rp.compromised_since  = compromised_since;
     rp.replacement_pubkey = replacement_pubkey;
+    rp.last_good          = line;
 
     Block b = build_signed_block(
         {user_id, ancestor_index, idx}, prev_hash, timestamp,

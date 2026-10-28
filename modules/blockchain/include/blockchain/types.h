@@ -199,6 +199,18 @@ struct KeyRotationPayload {
 
 // Key revocation (blockchain.md §6.7). Lives in a branch of a strict ancestor of the revoked
 // node; signed by that ancestor branch's working key (priority gradient blockchain.md §4.4).
+// The owner's last valid block of a revoked branch (blockchain.md §6.7 rule 12): the
+// index tells any verifier how long the owner's line is, the hash — which
+// block ends it.
+struct LastGood {
+    BlockIndex index;
+    Hash       hash;
+
+    bool operator==(const LastGood& o) const noexcept {
+        return index == o.index && hash == o.hash;
+    }
+};
+
 struct RevocationPayload {
     NodeIndex                revoked_node_index;
     PublicKey                revoked_pubkey;     // the exact key being revoked
@@ -206,6 +218,10 @@ struct RevocationPayload {
     // absent = emergency stop; a replacement may be assigned later by a second
     // REVOCATION block (blockchain.md §6.7 rule 3)
     std::optional<PublicKey> replacement_pubkey;
+    // The owner's last valid block of the revoked branch: the prev_hash line
+    // ending here is the owner's, the rest of the revoked key is not
+    // (blockchain.md §6.7 rule 12). Absent — zones by time (rule 5).
+    std::optional<LastGood>  last_good;
 };
 
 // ── Seal ──────────────────────────────────────────────────────────────────────

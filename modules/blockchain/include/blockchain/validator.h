@@ -8,9 +8,12 @@ namespace blockchain {
 // found in its ancestors' branches (blockchain.md §6.7): the highest ancestor wins (blockchain.md §4.4);
 // within the winning branch, the earliest compromised_since applies and the
 // latest block has the last word on replacement ("stop now, replace later").
+// A summary over all revoked keys of the node; the branch walk
+// (branch_revocation_status) reads the records key by key.
 struct RevocationState {
     Timestamp                compromised_since;
     std::optional<PublicKey> replacement_pubkey; // nullopt = branch is frozen
+    std::optional<LastGood>  last_good;          // the latest named last valid block (rule 12)
     BlockAddress             latest;             // block that had the last word
 };
 
@@ -21,14 +24,16 @@ enum class BranchRevocationState : uint8_t {
     REPLACED,  // revoked with a replacement key
 };
 
-// Per-block classification relative to the revocation zones (blockchain.md §6.7 rules 5, 9).
-// Structure ≠ weight: SUSPECT blocks are structurally valid — bilateral records
-// in that zone legally stand, one-sided ones lose weight; the economic layer
-// (wallet, merge acceptance) applies that split.
+// Per-block classification relative to the revocation zones (blockchain.md §6.7 rules 5, 9, 12).
+// Structure ≠ weight: SUSPECT and OUTSIDE_LINE blocks are structurally valid —
+// the economic layer (wallet, merge acceptance) weighs them by record kind.
+// Keys come in epochs: the node key with its rotations, then each replacement
+// with its own; a revocation of any key of an epoch covers the whole epoch.
 enum class BlockRevocationStatus : uint8_t {
     CLEAN,
     SUSPECT,                    // signed by the revoked key after compromised_since
     INVALID_AFTER_REPLACEMENT,  // signed by the old key after the replacement took over
+    OUTSIDE_LINE,               // signed by the revoked key past the owner's last valid block
 };
 
 struct BranchRevocationStatus {
@@ -39,6 +44,12 @@ struct BranchRevocationStatus {
     // ACTIVE, the replacement (or its rotated successor) for REPLACED,
     // nullopt for FROZEN.
     std::optional<PublicKey>            next_key;
+    // Lineage tip of the latest key epoch the branch reached — the key a new
+    // revocation names when no other key is authorized yet.
+    PublicKey                           current_key{};
+    // Index of the owner's last valid block of the latest revoked epoch, when
+    // a revocation named it and the block is in the branch (rule 12).
+    std::optional<BlockIndex>           line_end;
 };
 
 // Verify a block's signature against a candidate key (canonical CBOR bytes
@@ -93,9 +104,13 @@ public:
         const UserId& user_id, NodeIndex node_index) const;
 
     // Classify a branch and each of its blocks against the effective revocation
-    // (blockchain.md §6.7 rules 5, 9, 11). Throws: NodeNotFoundError, BlockNotFoundError,
-    // SignatureError (block signed by neither the key lineage nor the
-    // replacement — structurally broken branch).
+    // (blockchain.md §6.7 rules 5, 9, 11, 12): follows the key epochs — the
+    // first block of a replacement switches the key, over replacements revoked
+    // before any use; within a revoked epoch the owner's line (up to the named
+    // last valid block) is CLEAN and the rest OUTSIDE_LINE, or, with no line
+    // named, the zones go by time. Throws: NodeNotFoundError, BlockNotFoundError,
+    // SignatureError (block signed by none of the branch keys — structurally
+    // broken branch).
     BranchRevocationStatus branch_revocation_status(
         const UserId& user_id, NodeIndex node_index) const;
 
@@ -137,6 +152,17 @@ private:
     // by block index.
     std::vector<std::pair<BlockAddress, RevocationPayload>> collect_revocations(
         const UserId& user_id, NodeIndex target) const;
+
+    // The records of the winning (highest) ancestor, in its branch order.
+    std::vector<std::pair<BlockAddress, RevocationPayload>> winning_records(
+        const UserId& user_id, NodeIndex target) const;
+
+    // blockchain.md §6.7 rules 10, 12: does a record of an author that is itself under
+    // revocation count? Stored author branch — only if the record is CLEAN in
+    // it (the author's own line); an imported certificate without the branch —
+    // by time, or when signed by the author's replacement.
+    bool author_record_counts(const Block& record, bool own_branch,
+                              const RevocationState& author_state) const;
 
     const IStorage& storage_;
 };

@@ -214,11 +214,18 @@ struct KeyRotationPayload {
 ### 5.7. Payload REVOCATION-блока
 
 ```cpp
+// Блок REVOCATION лежит в ветке предка (blockchain.md §6.7).
+struct LastGood {
+    BlockIndex index;                // номер последнего верного блока
+    Hash       hash;                 // его отпечаток
+};
+
 struct RevocationPayload {
-    NodeIndex revoked_node_index;    // отзываемый узел
-    Timestamp compromised_since;    // с какого момента считать блоки недействительными
-    PublicKey replacement_pubkey;   // новый публичный ключ (для информирования)
-    // [OPEN blockchain.md §11.1] размещение этого блока в дереве — открытый вопрос
+    NodeIndex                revoked_node_index; // отзываемый узел
+    PublicKey                revoked_pubkey;     // отзываемый ключ
+    Timestamp                compromised_since;  // заявленный момент компрометации
+    std::optional<PublicKey> replacement_pubkey; // нет — стоп-кран
+    std::optional<LastGood>  last_good;          // линия хозяина (правило 12)
 };
 ```
 
@@ -692,18 +699,21 @@ public:
         Timestamp      timestamp
     );
 
-    // Отзыв скомпрометированного узла (blockchain.md §6.7).
-    // parent_keypair — ключ родительского узла (node_index−1)/2.
-    // [OPEN blockchain.md §11.1] размещение REVOCATION-блока в дереве не определено в MVP;
-    // текущая реализация добавляет его в служебную ветку родительского узла.
-    // Бросает: CryptoError, StorageError, NodeNotFoundError
+    // Отзыв ключа узла записью в ветке предка (blockchain.md §6.7): по умолчанию —
+    // родителя, выше — по желанию. replacement_pubkey нет — стоп-кран;
+    // last_good — отпечаток последнего верного блока отзываемой ветки,
+    // он обязан быть в этом хранилище (правило 12).
+    // Бросает: CryptoError, StorageError, NodeNotFoundError, RevocationError,
+    //          InvalidArgumentError
     Block revoke_node(
-        const UserId&  user_id,
-        NodeIndex      revoked_node_index,
-        Timestamp      compromised_since,
-        const PublicKey& replacement_pubkey,
-        const KeyPair& parent_keypair,
-        Timestamp      timestamp
+        const UserId&                   user_id,
+        NodeIndex                       revoked_node_index,
+        Timestamp                       compromised_since,
+        const std::optional<PublicKey>& replacement_pubkey,
+        NodeIndex                       ancestor_index,
+        const KeyPair&                  ancestor_keypair,
+        Timestamp                       timestamp,
+        const std::optional<Hash>&      last_good = std::nullopt
     );
 
     // ─── Чтение ───────────────────────────────────────────────────────────

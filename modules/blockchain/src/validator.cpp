@@ -2,6 +2,7 @@
 #include "blockchain/crypto.h"
 #include "blockchain/serializer.h"
 #include "blockchain/errors.h"
+#include <algorithm>
 #include <limits>
 
 namespace blockchain {
@@ -64,107 +65,179 @@ void Validator::validate_branch(const UserId& user_id, NodeIndex leaf_index) con
     auto tip_opt = storage_.branch_tip_index(user_id, leaf_index);
     if (!tip_opt.has_value()) return; // empty branch is valid
 
-    // First block references the hash of the leaf node.
-    Hash prev_hash     = Crypto::hash_node(leaf);
-    PublicKey work_key = leaf.working_pubkey;
-    Timestamp prev_ts  = std::numeric_limits<Timestamp>::min();
+    // Signatures follow the key epochs: the lineage, then each replacement from
+    // its first use (blockchain.md §6.7 rules 3/9) — the walk attributes every
+    // block or throws SignatureError.
+    const auto st = branch_revocation_status(user_id, leaf_index);
 
-    // A replacement assigned by revocation (blockchain.md §6.7 rules 3/9) may take over the
-    // branch at first use; after the switch the old lineage may not sign.
-    auto rev = effective_revocation(user_id, leaf_index);
-    bool switched = false;
+    // First block references the hash of the leaf node.
+    Hash prev_hash    = Crypto::hash_node(leaf);
+    Timestamp prev_ts = std::numeric_limits<Timestamp>::min();
 
     for (BlockIndex i = 0; i <= *tip_opt; ++i) {
         Block b = storage_.get_block({user_id, leaf_index, i});
 
-        try {
-            validate_block(b, prev_hash, work_key); // checks prev_hash + signature
-        } catch (const SignatureError&) {
-            if (switched || !rev.has_value() || !rev->replacement_pubkey.has_value())
-                throw;
-            // blockchain.md §6.7 rule 9: first use of the replacement switches the key.
-            validate_block(b, prev_hash, *rev->replacement_pubkey);
-            work_key = *rev->replacement_pubkey;
-            switched = true;
-        }
-
+        if (b.prev_hash != prev_hash)
+            throw ChainIntegrityError("block prev_hash does not match expected value");
+        if (st.blocks[i] == BlockRevocationStatus::INVALID_AFTER_REPLACEMENT)
+            throw SignatureError("block signed by a key the replacement took over from "
+                                 "(blockchain.md §6.7 rule 9)");
         if (b.timestamp_claimed < prev_ts)
             throw TimestampError("block timestamp is not monotonically non-decreasing");
-
-        // KEY_ROTATION: payload carries the new working pubkey (32 raw bytes).
-        if (b.type == BlockType::KEY_ROTATION && b.payload.size() >= 32)
-            std::copy(b.payload.begin(), b.payload.begin() + 32, work_key.bytes.begin());
 
         prev_hash = Crypto::hash_block(b);
         prev_ts   = b.timestamp_claimed;
     }
 }
 
+namespace {
+
+using Records = std::vector<std::pair<BlockAddress, RevocationPayload>>;
+
+bool has_key(const std::vector<PublicKey>& keys, const PublicKey& k) {
+    return std::find(keys.begin(), keys.end(), k) != keys.end();
+}
+
+// The revocation of one key epoch, merged over the records that name any key
+// of the epoch (blockchain.md §6.7 rules 3, 12): the earliest compromise, the latest
+// word on the replacement, the latest named last valid block.
+struct EpochRevocation {
+    bool                     any   = false;
+    Timestamp                since = std::numeric_limits<Timestamp>::max();
+    std::optional<PublicKey> replacement;
+    std::optional<LastGood>  last_good;
+};
+
+EpochRevocation epoch_revocation(const Records& records, const std::vector<PublicKey>& keys) {
+    EpochRevocation er;
+    for (const auto& [addr, rp] : records) {
+        (void)addr;
+        if (!has_key(keys, rp.revoked_pubkey)) continue;
+        er.any         = true;
+        er.since       = std::min(er.since, rp.compromised_since);
+        er.replacement = rp.replacement_pubkey; // the last word
+        if (rp.last_good.has_value()) er.last_good = rp.last_good;
+    }
+    return er;
+}
+
+// Where the replacement chain of a revoked epoch leads: its replacement, or —
+// when that one was revoked in turn before any use — that one's replacement,
+// and so on. `accepts` picks the first key on the chain it agrees to; with an
+// always-false `accepts` the chain is followed to its end. nullopt — the chain
+// ends frozen (a revoked key without a replacement) or found nothing.
+template <typename Accepts>
+std::optional<PublicKey> follow_replacements(const Records& records,
+                                             const EpochRevocation& from,
+                                             Accepts accepts) {
+    if (!from.any || !from.replacement.has_value()) return std::nullopt;
+    std::vector<PublicKey> passed;
+    PublicKey cand = *from.replacement;
+    for (;;) {
+        if (accepts(cand)) return cand;
+        const EpochRevocation next = epoch_revocation(records, {cand});
+        if (!next.any) return cand;                  // the chain's live end
+        passed.push_back(cand);
+        if (!next.replacement.has_value() || has_key(passed, *next.replacement))
+            return std::nullopt;                     // frozen (or a cycle)
+        cand = *next.replacement;
+    }
+}
+
+} // namespace
+
 BranchRevocationStatus Validator::branch_revocation_status(
     const UserId& user_id, NodeIndex node_index) const {
     BranchRevocationStatus out{};
+    const Records records = winning_records(user_id, node_index);
     out.revocation = effective_revocation(user_id, node_index);
 
+    // Pass 1: attribute every block to a key epoch (blockchain.md §6.7 rules 3, 9).
     Node node = storage_.get_node(user_id, node_index);
-    PublicKey lineage = node.working_pubkey; // pre-replacement rotation lineage
-    PublicKey current = lineage;             // authorized key after the switch
-    bool switched = false;
-    const bool has_repl =
-        out.revocation.has_value() && out.revocation->replacement_pubkey.has_value();
+    std::vector<std::vector<PublicKey>> epochs{{node.working_pubkey}};
+    std::vector<PublicKey> retired;          // keys of the epochs left behind
+    PublicKey current = node.working_pubkey; // lineage tip of the current epoch
+
+    struct Seen { size_t epoch; bool old_key; Timestamp ts; Hash hash; };
+    std::vector<Seen> seen;
 
     auto tip_opt = storage_.branch_tip_index(user_id, node_index);
     if (tip_opt.has_value()) {
-        out.blocks.reserve(*tip_opt + 1);
+        seen.reserve(*tip_opt + 1);
         for (BlockIndex i = 0; i <= *tip_opt; ++i) {
             Block b = storage_.get_block({user_id, node_index, i});
-
-            if (!switched) {
-                if (block_signed_by(b, lineage)) {
-                    const bool suspect = out.revocation.has_value()
-                        && b.timestamp_claimed > out.revocation->compromised_since;
-                    out.blocks.push_back(suspect ? BlockRevocationStatus::SUSPECT
-                                                 : BlockRevocationStatus::CLEAN);
-                    if (b.type == BlockType::KEY_ROTATION && b.payload.size() >= 32)
-                        std::copy(b.payload.begin(), b.payload.begin() + 32,
-                                  lineage.bytes.begin());
-                } else if (has_repl && block_signed_by(b, *out.revocation->replacement_pubkey)) {
-                    switched = true;
-                    current  = *out.revocation->replacement_pubkey;
-                    out.blocks.push_back(BlockRevocationStatus::CLEAN);
-                    if (b.type == BlockType::KEY_ROTATION && b.payload.size() >= 32)
-                        std::copy(b.payload.begin(), b.payload.begin() + 32,
-                                  current.bytes.begin());
+            bool old_key = false;
+            if (!block_signed_by(b, current)) {
+                // The first use of a replacement switches the key (rule 9) —
+                // possibly over replacements revoked before any use.
+                const auto next = follow_replacements(
+                    records, epoch_revocation(records, epochs.back()),
+                    [&](const PublicKey& k) { return block_signed_by(b, k); });
+                if (next.has_value() && block_signed_by(b, *next)) {
+                    retired.insert(retired.end(), epochs.back().begin(), epochs.back().end());
+                    epochs.push_back({*next});
+                    current = *next;
+                } else if (std::any_of(retired.begin(), retired.end(),
+                               [&](const PublicKey& k) { return block_signed_by(b, k); })) {
+                    old_key = true; // an old key resurfacing after the switch
                 } else {
-                    throw SignatureError("block signed by neither the key lineage "
-                                         "nor the replacement");
-                }
-            } else {
-                if (block_signed_by(b, current)) {
-                    out.blocks.push_back(BlockRevocationStatus::CLEAN);
-                    if (b.type == BlockType::KEY_ROTATION && b.payload.size() >= 32)
-                        std::copy(b.payload.begin(), b.payload.begin() + 32,
-                                  current.bytes.begin());
-                } else if (block_signed_by(b, lineage)) {
-                    // blockchain.md §6.7 rule 9: the old key resurfacing after the switch.
-                    out.blocks.push_back(BlockRevocationStatus::INVALID_AFTER_REPLACEMENT);
-                    // do not follow its rotations
-                } else {
-                    throw SignatureError("block signed by neither the replacement "
-                                         "lineage nor the old key");
+                    throw SignatureError("block signed by none of the branch keys "
+                                         "(lineage, replacements)");
                 }
             }
+            if (!old_key && b.type == BlockType::KEY_ROTATION && b.payload.size() >= 32) {
+                std::copy(b.payload.begin(), b.payload.begin() + 32, current.bytes.begin());
+                epochs.back().push_back(current);
+            }
+            seen.push_back({epochs.size() - 1, old_key, b.timestamp_claimed,
+                            Crypto::hash_block(b)});
         }
     }
 
+    // Pass 2: classify. A revoked epoch with a named last valid block present
+    // in the branch splits by the line (rule 12); without one — by time (rule 5).
+    std::vector<EpochRevocation>           revs;
+    std::vector<std::optional<BlockIndex>> line_end;
+    for (const auto& keys : epochs) {
+        revs.push_back(epoch_revocation(records, keys));
+        std::optional<BlockIndex> end;
+        if (const auto& lg = revs.back().last_good;
+            lg.has_value() && lg->index < seen.size() && seen[lg->index].hash == lg->hash)
+            end = lg->index;
+        line_end.push_back(end);
+        if (revs.back().any && end.has_value()) out.line_end = end;
+    }
+    out.blocks.reserve(seen.size());
+    for (BlockIndex i = 0; i < seen.size(); ++i) {
+        const Seen&            s  = seen[i];
+        const EpochRevocation& er = revs[s.epoch];
+        if (s.old_key)
+            out.blocks.push_back(BlockRevocationStatus::INVALID_AFTER_REPLACEMENT);
+        else if (!er.any)
+            out.blocks.push_back(BlockRevocationStatus::CLEAN);
+        else if (line_end[s.epoch].has_value())
+            out.blocks.push_back(i <= *line_end[s.epoch] ? BlockRevocationStatus::CLEAN
+                                                         : BlockRevocationStatus::OUTSIDE_LINE);
+        else
+            out.blocks.push_back(s.ts > er.since ? BlockRevocationStatus::SUSPECT
+                                                 : BlockRevocationStatus::CLEAN);
+    }
+
+    out.current_key = current;
     if (!out.revocation.has_value()) {
         out.state    = BranchRevocationState::ACTIVE;
-        out.next_key = lineage;
-    } else if (!has_repl) {
-        out.state    = BranchRevocationState::FROZEN;
-        out.next_key = std::nullopt;
+        out.next_key = current;
+    } else if (!revs.back().any) {
+        // The epoch in force was never revoked: a replacement took over, or the
+        // records name keys this branch has not shown yet.
+        out.state    = epochs.size() > 1 ? BranchRevocationState::REPLACED
+                                         : BranchRevocationState::ACTIVE;
+        out.next_key = current;
     } else {
-        out.state    = BranchRevocationState::REPLACED;
-        out.next_key = switched ? current : *out.revocation->replacement_pubkey;
+        out.next_key = follow_replacements(records, revs.back(),
+                                           [](const PublicKey&) { return false; });
+        out.state    = out.next_key.has_value() ? BranchRevocationState::REPLACED
+                                                : BranchRevocationState::FROZEN;
     }
     return out;
 }
@@ -196,7 +269,8 @@ Validator::collect_revocations(const UserId& user_id, NodeIndex target) const {
         // Own chains live in `blocks`; partners' revocations arrive as imported
         // certificates and live in `external_blocks` (blockchain.md §6.7 rule 8).
         Block b;
-        if      (storage_.has_block(addr))          b = storage_.get_block(addr);
+        const bool own = storage_.has_block(addr);
+        if      (own)                               b = storage_.get_block(addr);
         else if (storage_.has_external_block(addr)) b = storage_.get_external_block(addr);
         else continue;
         if (b.type != BlockType::REVOCATION) continue;
@@ -208,18 +282,12 @@ Validator::collect_revocations(const UserId& user_id, NodeIndex target) const {
 
         // blockchain.md §6.7 rule 10: a record from an author that was itself under revocation
         // at writing time does not count — a revocation is a one-sided action and
-        // loses weight in the suspect zone. Recursion is finite: authors are
-        // strictly shallower, the root is unrevocable. Post-replacement records
-        // (signed by the author's replacement key) count; records signed by a
-        // rotated successor of the replacement are not recognized here — MVP
-        // simplification.
+        // loses weight in the suspect zone, or off the author's line (rule 12).
+        // Recursion is finite: authors are strictly shallower, the root is
+        // unrevocable.
         auto author_state = effective_revocation(user_id, addr.node_index);
-        if (author_state.has_value()) {
-            const bool by_replacement = author_state->replacement_pubkey.has_value()
-                && block_signed_by(b, *author_state->replacement_pubkey);
-            if (!by_replacement && b.timestamp_claimed > author_state->compromised_since)
-                continue;
-        }
+        if (author_state.has_value() && !author_record_counts(b, own, *author_state))
+            continue;
 
         found.emplace_back(b.address, std::move(rp));
     }
@@ -282,21 +350,53 @@ void Validator::validate_revocation(const Block& block) const {
         throw RevocationError("revoked_pubkey does not match any key of the revoked node");
 }
 
-std::optional<RevocationState> Validator::effective_revocation(
-    const UserId& user_id, NodeIndex node_index) const {
-    auto found = collect_revocations(user_id, node_index);
-    if (found.empty()) return std::nullopt;
+bool Validator::author_record_counts(const Block& record, bool own_branch,
+                                     const RevocationState& author_state) const {
+    if (own_branch) {
+        // The author's branch is ours: its walk places the record on the
+        // owner's side of the author's own revocation, or not.
+        try {
+            const auto st = branch_revocation_status(record.address.user_id,
+                                                     record.address.node_index);
+            return record.address.block_index < st.blocks.size()
+                && st.blocks[record.address.block_index] == BlockRevocationStatus::CLEAN;
+        } catch (const std::exception&) {
+            // a broken author branch — judge by time below
+        }
+    }
+    // An imported certificate comes without the author's branch: by time, or
+    // signed by the author's replacement (a rotated successor of the
+    // replacement is not recognized here — MVP simplification).
+    const bool by_replacement = author_state.replacement_pubkey.has_value()
+        && block_signed_by(record, *author_state.replacement_pubkey);
+    return by_replacement || record.timestamp_claimed <= author_state.compromised_since;
+}
+
+std::vector<std::pair<BlockAddress, RevocationPayload>>
+Validator::winning_records(const UserId& user_id, NodeIndex target) const {
+    auto found = collect_revocations(user_id, target);
+    if (found.empty()) return found;
 
     // Highest ancestor wins (blockchain.md §4.4): collect_revocations returns ancestors in
     // root→parent order, so the winning branch is the node_index of found[0].
     const NodeIndex winner = found[0].first.node_index;
+    found.erase(std::remove_if(found.begin(), found.end(),
+                               [&](const auto& r) { return r.first.node_index != winner; }),
+                found.end());
+    return found;
+}
+
+std::optional<RevocationState> Validator::effective_revocation(
+    const UserId& user_id, NodeIndex node_index) const {
+    const auto found = winning_records(user_id, node_index);
+    if (found.empty()) return std::nullopt;
 
     RevocationState st{};
     st.compromised_since = std::numeric_limits<Timestamp>::max();
     for (const auto& [addr, rp] : found) {
-        if (addr.node_index != winner) continue;
         st.compromised_since   = std::min(st.compromised_since, rp.compromised_since);
         st.replacement_pubkey  = rp.replacement_pubkey; // last block has the last word
+        if (rp.last_good.has_value()) st.last_good = rp.last_good;
         st.latest              = addr;
     }
     return st;
