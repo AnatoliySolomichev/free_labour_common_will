@@ -7039,6 +7039,10 @@ struct PurseBill {
     // buyback spends it.
     bool                    deposit = false;
     std::optional<int64_t>  frozen_until;
+    // The paying deal's finality window (blockchain.md §11.10): until it ends the bill
+    // is held — frozen_until says till when; the aggregator's word after it.
+    std::optional<int64_t>  final_at;
+    std::string             finality;     // "pending" | "final" | "voided" | "frozen", if asked
 };
 
 static std::vector<PurseBill> purse_bills(const Ledger& L, const Hash32& me, uint32_t purse,
@@ -7079,6 +7083,12 @@ static std::vector<PurseBill> purse_bills(const Ledger& L, const Hash32& me, uin
             b.received = received;
             b.deposit  = deposit;
             if (deposit && !bought && now <= bb->until) b.frozen_until = bb->until;
+            // The deal's finality window runs from our answer: held till it ends.
+            if (s.final_after && a.reply) {
+                b.final_at = received + *s.final_after;
+                if (now < *b.final_at)
+                    b.frozen_until = std::max(b.frozen_until.value_or(0), *b.final_at);
+            }
             out.push_back(b);
         }
     }
@@ -7189,6 +7199,8 @@ static std::vector<PaySpec> parse_pay_specs(const std::vector<std::string>& args
 // issuer's bills) named by hand gives exactly what was named: the rest never
 // comes from it. With `self_ok` false (a move between own branches) own paper
 // does not move at all.
+static std::optional<std::string> held_paper_why(const std::string& via, const records::Ref& src);
+static void apply_finality(std::vector<PurseBill>& bills, const std::string& via, int64_t now);
 static std::vector<records::OriginQty> choose_portions(const std::vector<PurseBill>& bills,
                                                        const Hash32& me, const Hash32& to,
                                                        double units,
@@ -7219,17 +7231,23 @@ static std::vector<records::OriginQty> choose_portions(const std::vector<PurseBi
         std::vector<std::size_t> match;
         std::set<std::string>    distinct;
         std::optional<int64_t>   frozen;   // a deposit matched: it waits for the buyback
+        bool                     frozen_window = false;   // or the deal's finality window
         for (std::size_t i = 0; i < bills.size(); ++i)
             if (to_hex(bills[i].issuer).rfind(s.issuer, 0) == 0 &&
                 (s.bill.empty() || to_hex(bills[i].src.hash).rfind(s.bill, 0) == 0)) {
                 if (bills[i].frozen_until) {
-                    frozen = bills[i].frozen_until;
+                    frozen        = bills[i].frozen_until;
+                    frozen_window = bills[i].final_at && !bills[i].deposit;
                     continue;
                 }
                 match.push_back(i);
                 distinct.insert(to_hex(bills[i].issuer) + to_hex(bills[i].src.hash));
             }
         const std::string name = s.issuer + (s.bill.empty() ? "" : "@" + s.bill);
+        if (match.empty() && frozen && frozen_window)
+            throw std::runtime_error("--pay: " + name + " — в окне окончательности сделки до " +
+                                     when_utc(*frozen) + ": до конца окна вексель не тратится "
+                                     "(blockchain.md §11.10)");
         if (match.empty() && frozen)
             throw std::runtime_error("--pay: " + name + " — залог под выкуп до " +
                                      when_utc(*frozen) + ": до срока его тратит только выкуп "
@@ -7570,10 +7588,53 @@ static std::vector<records::OriginQty> pay_from_purse(
                                    }),
                     bills.end());
         for (auto& b : bills)   // the buyback is what the deposit waits for
-            if (b.src == *buyback_of) b.frozen_until.reset();
+            if (b.src == *buyback_of) {
+                b.frozen_until.reset();
+                if (b.final_at && now < *b.final_at) b.frozen_until = b.final_at;   // the window
+            }
     }
+    apply_finality(bills, flag_val(argc, argv, "--via"), now);
     return choose_portions(bills, ctx.user_id.bytes, to, units, specs,
                            flag_present(argc, argv, "--no-self"));
+}
+
+// Paper from a deal still within its finality window — or voided by a
+// revocation within it, or frozen by a fork — is held (blockchain.md §11.10): it
+// moves on only once that deal is final. The aggregator's word; none — no
+// objection.
+static std::optional<std::string> held_paper_why(const std::string& via, const records::Ref& src) {
+    if (via.empty()) return std::nullopt;
+    const auto doc = fetch_json(via, "/deal/" + to_hex(src.chain) + "/" + to_hex(src.hash));
+    if (!doc || !doc->is_object()) return std::nullopt;
+    const auto f = jstr(doc->object, "finality");
+    if (f.empty() || f == "final") return std::nullopt;
+    if (f == "voided")
+        return std::string("сделка-источник векселя отменена отзывом ключа её покупателя "
+                           "(blockchain.md §11.10)");
+    if (f == "frozen")
+        return std::string("сделка-источник векселя заморожена развилкой ветки её покупателя "
+                           "(blockchain.md §6.7, правило 13)");
+    return "вексель ещё в окне окончательности сделки-источника — до " +
+           when_utc(static_cast<int64_t>(jnum(doc->object, "final_at"))) +
+           " (blockchain.md §11.10)";
+}
+
+// What the aggregator says of the bills whose deals had a window
+// (blockchain.md §11.10): voided — no paper at all; frozen by a fork — still held.
+static void apply_finality(std::vector<PurseBill>& bills, const std::string& via, int64_t now) {
+    if (via.empty()) return;
+    for (auto& b : bills) {
+        if (!b.final_at) continue;
+        const auto doc = fetch_json(via, "/deal/" + to_hex(b.src.chain) + "/" + to_hex(b.src.hash));
+        if (!doc || !doc->is_object()) continue;
+        b.finality = jstr(doc->object, "finality");
+        if (b.finality == "voided") {
+            b.free = 0;
+            b.frozen_until.reset();
+        } else if (b.finality == "frozen") {
+            b.frozen_until = std::max(b.frozen_until.value_or(0), now + 1);
+        }
+    }
 }
 
 // The seller's term for a new offer: --reply-within, or the default.
@@ -7598,21 +7659,36 @@ static int cmd_wallet(const fs::path& data_dir, int argc, char** argv) {
     const auto   now = static_cast<int64_t>(std::time(nullptr));
     const auto&  me  = ctx.user_id.bytes;
     const Ledger L   = read_ledger(ctx);
-    const auto   bills = purse_bills(L, me, ctx.leaf, now);
+    auto         bills = purse_bills(L, me, ctx.leaf, now);
+    apply_finality(bills, via, now);
 
     std::cout << "кошелёк ветки 0x" << std::hex << ctx.leaf << std::dec
               << " — чужая бумага по векселям (economy.md §4.4):\n";
-    double free = 0, waiting = 0, frozen = 0;
+    double free = 0, waiting = 0, frozen = 0, held = 0;
     if (bills.empty()) std::cout << "  (нет)\n";
     for (const auto& b : bills) {
-        if (b.free <= 1e-9 && b.waiting <= 1e-9) continue;
+        const bool voided = b.finality == "voided";
+        if (b.free <= 1e-9 && b.waiting <= 1e-9 && !voided) continue;
+        // Held by the deal's finality window or by a fork (blockchain.md §11.10).
+        const bool windowed = b.frozen_until && b.final_at && !b.deposit;
         std::cout << "  вексель " << to_hex(b.src.hash).substr(0, 12) << "…  эмитент "
                   << to_hex(b.issuer).substr(0, 12) << "…  "
-                  << (b.frozen_until ? "в залоге " : "свободно ") << b.free << "h";
+                  << (voided ? "отменён " : windowed ? "в окне " : b.frozen_until ? "в залоге "
+                                                                          : "свободно ")
+                  << b.free << "h";
         if (b.waiting > 1e-9) std::cout << "  (ещё " << b.waiting << "h держат оферты)";
         std::cout << "  получен " << when_utc(b.received);
         if (b.src.chain == me) std::cout << "  (перемещён из своей ветки)";
-        if (b.frozen_until)
+        if (voided)
+            std::cout << "  [сделка отменена: отзыв ключа покупателя пришёл в окно и не включил "
+                         "её в линию хозяина — бумаги нет (blockchain.md §11.10)]";
+        else if (windowed && b.finality == "frozen")
+            std::cout << "  [ветка покупателя раздвоена — вексель ждёт, пока предок назовёт "
+                         "линию (blockchain.md §6.7, правило 13)]";
+        else if (windowed)
+            std::cout << "  [окно окончательности сделки до " << when_utc(*b.final_at)
+                      << ": до конца окна вексель не тратится (blockchain.md §11.10)]";
+        else if (b.frozen_until)
             std::cout << "  [залог под выкуп до " << when_utc(*b.frozen_until)
                       << ": до срока его тратит только выкуп]";
         // Where its paper was born (economy.md §4.4): the aggregator walks the bill
@@ -7630,12 +7706,13 @@ static int cmd_wallet(const fs::path& data_dir, int argc, char** argv) {
         if (born) std::cout << "  долг эмитента при рождении " << *born;
         if (!b.state.unbacked.empty()) std::cout << "  ! " << b.state.fault;
         std::cout << "\n";
-        (b.frozen_until ? frozen : free) += b.free;
+        (windowed ? held : b.frozen_until ? frozen : free) += b.free;
         waiting += b.waiting;
     }
     std::cout << "итого свободно: " << free << "h";
     if (waiting > 1e-9) std::cout << "  (и " << waiting << "h в офертах, ждущих ответа)";
     if (frozen > 1e-9) std::cout << "  (и " << frozen << "h в залоге под выкуп)";
+    if (held > 1e-9) std::cout << "  (и " << held << "h в окне окончательности сделок)";
     std::cout << "\n  платить вручную: bc accept … --pay ЭМИТЕНТ@ВЕКСЕЛЬ=ЧАСЫ\n";
 
     // Debt is the chain's: own paper in others' hands — by deals the sellers took.
@@ -8485,7 +8562,9 @@ static int answer_offer(const fs::path& data_dir, const std::string& via, const 
             std::cout << "бумага " << to_hex(o.issuer).substr(0, 12) << "…";
         std::cout << ", вексель " << to_hex(o.src->hash).substr(0, 12) << "…";
         const auto c = check_paper(ctx, via, t->from, block.address, src.hash, *t, o, hint_for(o));
-        if (c.ok) {
+        // Paper of a deal not yet final moves on only after it (blockchain.md §11.10).
+        const auto held = c.ok ? held_paper_why(via, *o.src) : std::nullopt;
+        if (c.ok && !held) {
             std::cout << ", получен " << when_utc(c.received) << ", было свободно " << c.before
                       << "h";
             // The aggregator walks every bill back to its issue; without it — only
@@ -8505,8 +8584,9 @@ static int answer_offer(const fs::path& data_dir, const std::string& via, const 
                 doubts.push_back(l);
             }
         } else {
-            std::cout << "  ✗ " << c.why << "\n";
-            (c.definite ? refuse : gaps).push_back(c.why);
+            const std::string why = held ? *held : c.why;
+            std::cout << "  ✗ " << why << "\n";
+            (held || c.definite ? refuse : gaps).push_back(why);
         }
     }
     // The aggregator sees the whole table — a spend hidden from the walk above too.

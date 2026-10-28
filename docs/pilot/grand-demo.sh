@@ -849,6 +849,9 @@ bcp anna revoke fetch "${CID[oleg]}" --via "$VIA" 2>&1 | sed 's/^/   /' | head -
 hr "оферта Олега на его линии — теперь Пётр её принимает (blockchain.md §6.7, правило 12)"
 OUT_line="$(bcp petr transfer recv "$ACC_oleg" --via "$VIA" --yes 2>&1 || true)"
 printf '%s\n' "$OUT_line" | sed 's/^/   /'
+hr "бумага из сделки с окном — в кошельке Петра придержана до конца окна (blockchain.md §11.10)"
+WAL_petr="$(bcp petr wallet --via "$VIA")"
+printf '%s\n' "$WAL_petr" | grep -E "окна|окончательности" | sed 's/^/   /'
 hr "вор пишет старым ключом после отзыва — агрегатор не берёт"
 OUT_thief="$(bcp thief block stub --via "$VIA" 2>&1 || true)"
 printf '%s\n' "$OUT_thief" | sed 's/^/   /'
@@ -934,6 +937,9 @@ if grep -qiE "error|refused|раздвоена|отказ" <<<"$OUT_line"; then
 else echo "   ✓ оферта с линии хозяина принята после отзыва"; fi
 check "сделка Олега с окном — ждёт конца окна, отзыв её не отменил" \
       "$(deal_field "$ACC_oleg" finality)" "pending"
+if grep -q "в окне окончательности" <<<"$WAL_petr"; then
+    echo "   ✓ бумага из сделки с окном придержана в кошельке Петра"
+else echo "   ✗ бумага из сделки с окном не придержана"; fail=1; fi
 if grep -q "revoked key" <<<"$OUT_thief"; then
     echo "   ✓ блок вора старым ключом после отзыва агрегатор отверг"
 else echo "   ✗ блок вора не отвергнут: $OUT_thief"; fail=1; fi
