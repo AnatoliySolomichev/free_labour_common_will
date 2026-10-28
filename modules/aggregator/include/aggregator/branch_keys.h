@@ -14,9 +14,13 @@
 // replaces a known one by carrying it further; two diverging lines of the
 // branch's own key changes are the same rank, and only a revocation by an
 // ancestor settles them. Of several revocations of one branch the highest
-// ancestor's wins (as in Validator::effective_revocation); after the moment
-// of compromise only the replacement it named, and that key's own changes,
-// sign.
+// ancestor's wins (as in Validator::effective_revocation). The branch's keys
+// come in epochs (blockchain.md §6.7 rule 9): its own line, then each replacement a
+// revocation named, with that key's own changes. A key of a revoked epoch
+// signs only up to the moment of compromise — or, past it, the owner's line
+// up to the last valid block the revocation named (rule 12): the owner's late
+// uploads come in, the thief's do not. The author-validity filter of rule 10
+// is the readers' job — the aggregator takes every named replacement.
 
 #include "aggregator.h"
 
@@ -37,6 +41,7 @@ public:
         signed_by_branch,   // one of the branch's keys signed it
         unknown_branch,     // no key path of this branch has come yet
         foreign_signature,  // none of the branch's keys signed it
+        revoked_key,        // a revoked key signed it past its compromise and the owner's line
     };
 
     // Everything the storage already holds: key paths, key changes, revocations.
@@ -53,7 +58,8 @@ public:
 
     // A revocation certificate, checked on the spot (RevocationCert::verify): if
     // its author is the highest ancestor heard yet, it decides the branch — from
-    // its moment of compromise only its replacement signs (none: frozen).
+    // its moment of compromise the revoked epoch signs only the owner's line it
+    // named, and its replacement opens the next epoch (none: frozen).
     // Throws: SignatureError, ChainIntegrityError, RevocationError, SerializationError.
     void learn_revocation(const RevocationCertificate& cert);
 
@@ -74,18 +80,26 @@ private:
         KeyPath                path;   // nodes root → node; the branch's own key changes in order
         std::vector<PublicKey> own;    // its own line: the node key, then each change
     };
-    // The revocation that decides a branch (blockchain.md §6.7): the highest
-    // author's; within one author the earliest compromise, and the latest block
-    // names the replacement.
-    struct Revocation {
-        uint32_t                 author_depth = 0;
-        BlockIndex               block        = 0;
-        Timestamp                since        = 0;
+    // One record of the deciding author (blockchain.md §6.7), in its branch order.
+    struct Record {
+        BlockIndex               block = 0;
+        PublicKey                revoked{};
+        Timestamp                since = 0;
         std::optional<PublicKey> replacement;
-        std::vector<PublicKey>   line;   // the replacement, then its own changes
+        std::optional<LastGood>  last_good;
+    };
+    // The revocations that decide a branch: the highest author's records, and
+    // the replacement lines they opened — each replacement, then its own changes.
+    struct Revocation {
+        uint32_t                            author_depth = 0;
+        std::vector<Record>                 records;
+        std::vector<std::vector<PublicKey>> lines;
     };
 
-    std::vector<PublicKey> keys_for(const Key& k, Timestamp at) const;   // under mu_
+    // Whether a block a key of `epoch` signed may come in: the epoch is not
+    // revoked, or the block is before the compromise, or on the owner's line.
+    static bool admits(const std::vector<Record>& records,
+                       const std::vector<PublicKey>& epoch, const Block& b);
 
     mutable std::mutex         mu_;
     std::map<Key, Branch>      branches_;

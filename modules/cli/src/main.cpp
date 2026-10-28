@@ -472,6 +472,26 @@ struct Context {
     }
 };
 
+// ── Forks (blockchain.md §6.7 rule 13) ───────────────────────────────────────────────────
+
+// Nodes of the chain whose branches hold a fork on the aggregator — two blocks
+// at one address, both signed by the branch (GET /forks/<chain>). nullopt —
+// the aggregator did not answer: no objection, freshness is the caller's
+// policy (as for revocations, sync.md §10.3).
+static std::optional<std::set<NodeIndex>> fetch_forked_nodes(const UserId& chain,
+                                                             const std::string& via) {
+    httplib::Client cli(via);
+    cli.set_connection_timeout(5);
+    const auto res = cli.Get("/forks/" + to_hex(chain.bytes));
+    if (!res || res->status != 200) return std::nullopt;
+    std::set<NodeIndex> nodes;
+    const std::string  key  = "\"node\":";
+    const std::string& body = res->body;
+    for (auto pos = body.find(key); pos != std::string::npos; pos = body.find(key, pos + 1))
+        nodes.insert(static_cast<NodeIndex>(std::stoull(body.substr(pos + key.size()))));
+    return nodes;
+}
+
 // ── Revocation freshness (blockchain.md §6.7 rule 11; sync.md §10.3) ──────────
 
 struct RevFetchResult {
@@ -598,6 +618,28 @@ static Block fetch_block_from(const std::string& via, const Ref& src) {
     return block;
 }
 
+// Whether `b` lies on the owner's line a revocation named (blockchain.md §6.7 rule 12):
+// walk prev_hash back from the last valid block, block by block from the
+// aggregator, down to b's index. Nothing to walk with — not on the line.
+static bool on_owner_line(const Block& b, const LastGood& line, const std::string& via) {
+    if (b.address.block_index > line.index) return false;
+    Hash at = line.hash;
+    for (BlockIndex i = line.index; i > b.address.block_index; --i) {
+        if (via.empty()) return false;
+        Ref ref{};
+        ref.chain = b.address.user_id.bytes;
+        ref.hash  = at.bytes;
+        try {
+            const Block step = fetch_block_from(via, ref);
+            if (step.address.node_index != b.address.node_index ||
+                step.address.block_index != i)
+                return false;
+            at = step.prev_hash;
+        } catch (const std::exception&) { return false; }
+    }
+    return at == Crypto::hash_block(b);
+}
+
 // ── Чьей ветки блок (sync.md §10.10) ─────────────────────────────────────────
 //
 // Блок чужой цепи с агрегатора берём, только если он подписан своей веткой:
@@ -617,10 +659,13 @@ static bool signed_by_branch(Context& ctx, const std::string& via, const Block& 
         return Crypto::verify(bytes.data(), bytes.size(), b.signature, key);
     };
     // The key nearer the root decides (blockchain.md §4.4): after the moment of
-    // compromise only the replacement the highest ancestor named signs.
+    // compromise only the replacement the highest ancestor named signs — and
+    // the old key, on the owner's line it named (blockchain.md §6.7 rule 12).
     const auto revoked = ctx.validator.effective_revocation(chain, node);
-    if (revoked && b.timestamp_claimed > revoked->compromised_since)
-        return revoked->replacement_pubkey && by(*revoked->replacement_pubkey);
+    if (revoked && b.timestamp_claimed > revoked->compromised_since) {
+        if (revoked->replacement_pubkey && by(*revoked->replacement_pubkey)) return true;
+        if (!revoked->last_good || !on_owner_line(b, *revoked->last_good, via)) return false;
+    }
     bool local = true;
     for (const NodeIndex idx : path_indices(node))
         if (!ctx.storage.has_node(chain, idx)) {
@@ -7243,13 +7288,15 @@ static std::optional<Block> find_block(Context& ctx, const std::string& via, con
 // and asks once for the branch's key path: it is published from the nodes this
 // device holds — its own, or a partner's that a merge brought — and the block
 // goes again.
-static int send_block(Context& ctx, const std::string& via, const Block& block) {
+static int send_block(Context& ctx, const std::string& via, const Block& block,
+                      std::string* answer = nullptr) {
     httplib::Client cli(via);  // scheme-aware: plain host:port, http:// or https://
     cli.set_connection_timeout(5);
     const auto        cbor = Serializer::encode(block);
     const std::string body(reinterpret_cast<const char*>(cbor.data()), cbor.size());
     const auto post = [&]() {
         const auto res = cli.Post("/blocks", body, "application/cbor");
+        if (res && answer) *answer = res->body;
         return res ? res->status : -1;
     };
     int status = post();
@@ -7326,9 +7373,16 @@ static void attach_emission_link(Context& ctx, records::Transfer& t) {
 
 // Best-effort upload so the receiver can fetch the block from the aggregator.
 static void upload_block(Context& ctx, const std::string& via, const Block& block) {
-    const int status = send_block(ctx, via, block);
-    if (status == 200)
+    std::string answer;
+    const int status = send_block(ctx, via, block, &answer);
+    if (status == 200 && answer.find("\"fork\"") != std::string::npos)
+        std::cerr << "Uploaded to " << via << " — another block already holds this "
+                     "address: the branch is forked (blockchain.md §6.7 rule 13)\n";
+    else if (status == 200)
         std::cerr << "Uploaded to " << via << "\n";
+    else if (status == 403 && answer.find("revoked key") != std::string::npos)
+        std::cerr << "upload to " << via << " refused: signed by a revoked key past its "
+                     "compromise and the owner's line (blockchain.md §6.7)\n";
     else if (status == 403)
         std::cerr << "upload to " << via << " refused: the block is not signed by its "
                      "branch's key (sync.md §10.10)\n";
@@ -8302,12 +8356,26 @@ static int answer_offer(const fs::path& data_dir, const std::string& via, const 
                                  "(sync.md §10.10)");
     // Refuse paper from a revoked paying branch unless the transfer block runs
     // under the replacement key (blockchain.md §6.7: frozen/stolen purses cannot pay anew).
+    // An offer on the owner's line the revocation named is the owner's (rule 12).
     if (auto rst = ctx.validator.effective_revocation(sender, block.address.node_index)) {
         const bool under_replacement = rst->replacement_pubkey.has_value()
             && block_signed_by(block, *rst->replacement_pubkey);
-        if (!under_replacement)
+        const bool on_line = rst->last_good.has_value()
+            && on_owner_line(block, *rst->last_good, via);
+        if (!under_replacement && !on_line)
             throw std::runtime_error(
                 "sender's paying branch is revoked (blockchain.md §6.7) — transfer refused");
+    }
+    // A fork of the paying branch is evidence of a stolen key: its deals wait
+    // until an ancestor names the owner's line (blockchain.md §6.7 rule 13).
+    if (const auto forked = fetch_forked_nodes(sender, via);
+        forked.has_value() && forked->count(block.address.node_index) > 0) {
+        const auto rst = ctx.validator.effective_revocation(sender, block.address.node_index);
+        if (!rst.has_value() || !rst->last_good.has_value())
+            throw std::runtime_error(
+                "ветка плательщика раздвоена: на агрегаторе два блока с одним номером. "
+                "Сделки с ней ждут, пока предок не назовёт линию хозяина "
+                "(blockchain.md §6.7, правило 13)");
     }
     check_addressed_to_us(ctx, via, *t);
     // Transfer v3: a self-issuing transfer must be threaded (economy.md §4.3).

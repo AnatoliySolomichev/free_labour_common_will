@@ -184,8 +184,104 @@ TEST(BranchKeys, AfterTheCompromiseOnlyTheReplacementSigns) {
     EXPECT_EQ(keys.check(stolen), BranchKeys::Verdict::signed_by_branch);   // отзыва ещё не слышно
     keys.learn_revocation(RevocationCert::build(*a.storage, rev.address));
     EXPECT_EQ(keys.check(after), BranchKeys::Verdict::signed_by_branch);
-    EXPECT_EQ(keys.check(stolen), BranchKeys::Verdict::foreign_signature);
+    EXPECT_EQ(keys.check(stolen), BranchKeys::Verdict::revoked_key);
     EXPECT_EQ(keys.check(before), BranchKeys::Verdict::signed_by_branch);
+}
+
+// Повторная кража (blockchain.md §6.7 правило 9): украли и замену. Ключи ветки идут
+// эпохами — блоки первой замены до её компрометации остаются, после — нет,
+// дальше подписывает вторая замена.
+TEST(BranchKeys, ASecondTheftKeepsTheFirstReplacementsBlocks) {
+    Chain           a("second_theft");
+    const NodeIndex parent = (kLeaf - 1) / 2;
+    const KeyPair   k1     = Crypto::generate_keypair();
+    const Block     r1     = a.bc->revoke_node(a.uid, kLeaf, a.now, k1.pub, parent,
+                                               a.keys.at(parent), ++a.now);
+    const Block by_k1      = a.write(k1);
+    const KeyPair k2       = Crypto::generate_keypair();
+    const Block r2         = a.bc->revoke_node(a.uid, kLeaf, a.now, k2.pub, parent,
+                                               a.keys.at(parent), ++a.now);
+    const Block by_k2      = a.write(k2);
+    const Block stolen_k1  = resigned(by_k2, k1);            // вор с K1 после компрометации
+
+    BranchKeys keys;
+    keys.learn_path(a.path());
+    keys.learn_revocation(RevocationCert::build(*a.storage, r1.address));
+    keys.learn_revocation(RevocationCert::build(*a.storage, r2.address));
+    EXPECT_EQ(keys.check(by_k1), BranchKeys::Verdict::signed_by_branch);
+    EXPECT_EQ(keys.check(by_k2), BranchKeys::Verdict::signed_by_branch);
+    EXPECT_EQ(keys.check(stolen_k1), BranchKeys::Verdict::revoked_key);
+}
+
+// Граница по блоку (blockchain.md §6.7 правило 12): свои блоки хозяин выложил поздно, уже
+// после отзыва, — они на его линии и проходят; блок отозванного ключа за
+// названной границей — нет.
+TEST(BranchKeys, TheOwnersLateBlocksOnTheNamedLineComeIn) {
+    Chain           a("late_line");
+    const NodeIndex parent = (kLeaf - 1) / 2;
+    const KeyPair&  old    = a.keys.at(kLeaf);
+    const Block     b0     = a.write(old);
+    const Block     b1     = a.write(old);
+    const Block     b2     = a.write(old);
+    const KeyPair   k1     = Crypto::generate_keypair();
+    const Block     rev    = a.bc->revoke_node(a.uid, kLeaf, 1, k1.pub, parent, a.keys.at(parent),
+                                               ++a.now, Crypto::hash_block(b1));
+
+    BranchKeys keys;
+    keys.learn_path(a.path());
+    keys.learn_revocation(RevocationCert::build(*a.storage, rev.address));
+    EXPECT_EQ(keys.check(b0), BranchKeys::Verdict::signed_by_branch);
+    EXPECT_EQ(keys.check(b1), BranchKeys::Verdict::signed_by_branch);
+    EXPECT_EQ(keys.check(b2), BranchKeys::Verdict::revoked_key);
+}
+
+// Развилка (blockchain.md §6.7 правило 13): второй блок на занятом адресе агрегатор не
+// теряет — первый остаётся на месте, соперник лежит в стороне по отпечатку и
+// виден в GET /forks/<цепь>; его смена ключа не выучивается.
+TEST(BranchKeys, AForkIsKeptAsEvidence) {
+    Chain a("fork");
+    const auto db = std::filesystem::temp_directory_path() / "bc_branch_keys_fork_db";
+    std::filesystem::remove_all(db);
+    const KeyPair& kp    = a.keys.at(kLeaf);
+    const Block    first = a.write(kp);
+    Block rival          = first;                            // тот же адрес, другое содержимое
+    rival.payload        = {0x81, 0x01};
+    rival                = resigned(rival, kp);
+    {
+        AggregatorStorage storage(db);
+        Live          agg(storage, 18969);
+        const KeyPath path = a.path();
+        ASSERT_EQ(agg.status(agg.cli.Post("/keypaths/" + hex(KeyPathCert::signer_key(path).bytes),
+                                          cbor(path), "application/cbor")),
+                  200);
+        auto res = agg.cli.Post("/blocks", cbor(first), "application/cbor");
+        ASSERT_TRUE(res && res->status == 200);
+        EXPECT_NE(res->body.find("accepted"), std::string::npos);
+        res = agg.cli.Post("/blocks", cbor(rival), "application/cbor");
+        ASSERT_TRUE(res && res->status == 200);
+        EXPECT_NE(res->body.find("\"fork\""), std::string::npos);
+        res = agg.cli.Post("/blocks", cbor(rival), "application/cbor");
+        ASSERT_TRUE(res && res->status == 200);
+        EXPECT_NE(res->body.find("duplicate"), std::string::npos);
+
+        const auto forks = storage.forks(a.uid);
+        ASSERT_EQ(forks.size(), 1u);
+        EXPECT_EQ(forks[0].address, first.address);
+        EXPECT_EQ(forks[0].kept, Crypto::hash_block(first));
+        EXPECT_EQ(forks[0].rival, Crypto::hash_block(rival));
+        const auto by_hash = storage.get_block_by_hash(Crypto::hash_block(rival));
+        ASSERT_TRUE(by_hash.has_value());
+        EXPECT_EQ(by_hash->payload, rival.payload);
+        const auto in_place = storage.get_block(first.address);
+        ASSERT_TRUE(in_place.has_value());
+        EXPECT_EQ(in_place->payload, first.payload);
+
+        const auto got = agg.cli.Get("/forks/" + hex(a.uid.bytes));
+        ASSERT_TRUE(got && got->status == 200);
+        EXPECT_NE(got->body.find("\"node\":" + std::to_string(kLeaf)), std::string::npos);
+        EXPECT_NE(got->body.find(hex(Crypto::hash_block(rival).bytes)), std::string::npos);
+    }
+    std::filesystem::remove_all(db);
 }
 
 // Из двух отзывов одной ветки решает тот, чей автор ближе к корню

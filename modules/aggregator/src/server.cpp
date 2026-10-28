@@ -338,15 +338,27 @@ void AggregatorServer::setup_routes() {
                     res.set_content("{\"error\":\"not signed by its branch\"}",
                                     "application/json");
                     return;
+                case BranchKeys::Verdict::revoked_key:
+                    res.status = 403;
+                    res.set_content("{\"error\":\"signed by a revoked key past its compromise "
+                                    "and the owner's line (blockchain.md §6.7)\"}",
+                                    "application/json");
+                    return;
                 case BranchKeys::Verdict::signed_by_branch:
                     break;
             }
+            // Another block already at this address: a fork of the branch,
+            // kept as evidence (blockchain.md §6.7 rule 13) — its key change is not learned.
+            const auto in_place  = storage_.get_block(b.address);
+            const bool contested = in_place.has_value()
+                && !(Crypto::hash_block(*in_place) == Crypto::hash_block(b));
             bool added = storage_.add_block(b);
-            if (added && b.type == BlockType::KEY_ROTATION) keys_.learn_rotation(b);
+            if (added && !contested && b.type == BlockType::KEY_ROTATION) keys_.learn_rotation(b);
             res.status = 200;
-            res.set_content(
-                added ? "{\"status\":\"accepted\"}" : "{\"status\":\"duplicate\"}",
-                "application/json");
+            res.set_content(!added   ? "{\"status\":\"duplicate\"}"
+                            : contested ? "{\"status\":\"fork\"}"
+                                        : "{\"status\":\"accepted\"}",
+                            "application/json");
         } catch (const SerializationError& e) {
             res.status = 400;
             res.set_content(std::string("{\"error\":\"") + e.what() + "\"}", "application/json");
@@ -690,6 +702,27 @@ void AggregatorServer::setup_routes() {
             res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
                             "application/json");
         }
+    });
+
+    // ── GET /forks/:chain ─────────────────────────────────────────────────────
+    // Forks of the chain's branches (blockchain.md §6.7 rule 13): addresses holding two
+    // blocks. A bilateral act with a forked branch waits until an ancestor
+    // names the owner's line; the rival is served by GET /sync/block/<hash>.
+    svr.Get("/forks/:chain", [&](const httplib::Request& req, httplib::Response& res) {
+        auto ch = hex_to_hash(req.path_params.at("chain"));
+        if (!ch) { res.status = 400; return; }
+        UserId chain{};
+        chain.bytes = ch->bytes;
+        std::string body = "{\"forks\":[";
+        const auto forks = storage_.forks(chain);
+        for (std::size_t i = 0; i < forks.size(); ++i)
+            body += std::string(i ? "," : "") + "{\"node\":"
+                  + std::to_string(forks[i].address.node_index) + ",\"index\":"
+                  + std::to_string(forks[i].address.block_index) + ",\"kept\":\""
+                  + to_hex(forks[i].kept.bytes) + "\",\"rival\":\""
+                  + to_hex(forks[i].rival.bytes) + "\"}";
+        body += "]}";
+        res.set_content(body, "application/json");
     });
 
     svr.Get("/revocations/:chain", [&](const httplib::Request& req, httplib::Response& res) {

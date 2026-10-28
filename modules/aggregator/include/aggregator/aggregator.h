@@ -54,9 +54,20 @@ public:
     bool has_block_hash(const Hash& block_hash) const noexcept;
     bool has_block(const BlockAddress& address) const noexcept;
 
-    // Returns nullopt if not found.
+    // Returns nullopt if not found. By hash — a fork's rival too.
     std::optional<Block> get_block(const BlockAddress& address) const;
     std::optional<Block> get_block_by_hash(const Hash& block_hash) const;
+
+    // Forks of a chain's branches (blockchain.md §6.7 rule 13): two blocks at one
+    // address. The one that came first stays in place, the rival is kept by
+    // its hash — add_block takes it and returns true. Readers decide which is
+    // the owner's; an ancestor's revocation names the line.
+    struct Fork {
+        BlockAddress address;
+        Hash         kept;    // the block in place
+        Hash         rival;   // the one that came later
+    };
+    std::vector<Fork> forks(const UserId& chain) const;
 
     // All known block hashes (used to build sync manifest).
     std::vector<Hash> all_block_hashes() const;

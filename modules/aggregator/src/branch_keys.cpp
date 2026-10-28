@@ -5,6 +5,7 @@
 #include <blockchain/serializer.h>
 
 #include <algorithm>
+#include <limits>
 
 namespace aggregator {
 
@@ -33,15 +34,21 @@ std::vector<PublicKey> own_line(const KeyPath& kp) {
 
 } // namespace
 
-std::vector<PublicKey> BranchKeys::keys_for(const Key& k, Timestamp at) const {
-    std::vector<PublicKey> keys;
-    const auto rev = revocations_.find(k);
-    // After the compromise only the line the higher key named signs.
-    if (rev != revocations_.end() && at > rev->second.since) return rev->second.line;
-    if (const auto it = branches_.find(k); it != branches_.end()) keys = it->second.own;
-    if (rev != revocations_.end())
-        keys.insert(keys.end(), rev->second.line.begin(), rev->second.line.end());
-    return keys;
+bool BranchKeys::admits(const std::vector<Record>& records,
+                        const std::vector<PublicKey>& epoch, const Block& b) {
+    bool                    revoked = false;
+    Timestamp               since   = std::numeric_limits<Timestamp>::max();
+    std::optional<LastGood> line;
+    for (const Record& r : records) {
+        if (std::find(epoch.begin(), epoch.end(), r.revoked) == epoch.end()) continue;
+        revoked = true;
+        since   = std::min(since, r.since);
+        if (r.last_good.has_value()) line = r.last_good;   // the latest word on the line
+    }
+    if (!revoked || b.timestamp_claimed <= since) return true;
+    // The owner's line: up to its last valid block — that very block at its end.
+    if (!line.has_value() || b.address.block_index > line->index) return false;
+    return b.address.block_index < line->index || Crypto::hash_block(b) == line->hash;
 }
 
 UserId BranchKeys::learn_path(const KeyPath& kp) {
@@ -73,13 +80,13 @@ void BranchKeys::learn_rotation(const Block& b) {
     PublicKey next{};
     std::copy(b.payload.begin(), b.payload.begin() + 32, next.bytes.begin());
     std::lock_guard<std::mutex> lock(mu_);
-    // After the compromise the replacement's line goes on, not the branch's own.
-    if (const auto rev = revocations_.find(k);
-        rev != revocations_.end() && b.timestamp_claimed > rev->second.since) {
-        auto& line = rev->second.line;
-        if (!line.empty() && signed_by(b, line.back())) line.push_back(next);
-        return;
-    }
+    // A replacement's own key change carries that replacement's line on.
+    if (const auto rev = revocations_.find(k); rev != revocations_.end())
+        for (auto& line : rev->second.lines)
+            if (signed_by(b, line.back())) {
+                if (std::find(line.begin(), line.end(), next) == line.end()) line.push_back(next);
+                return;
+            }
     const auto it = branches_.find(k);
     if (it == branches_.end()) return;
     auto& br = it->second;
@@ -93,43 +100,54 @@ void BranchKeys::learn_rotation(const Block& b) {
 
 void BranchKeys::learn_revocation(const RevocationCertificate& cert) {
     RevocationCert::verify(cert);   // throws on a certificate that does not check
-    const auto p = RevocationCert::payload(cert);
-    const Key  k{cert.block.address.user_id, p.revoked_node_index};
-    Revocation r;
-    r.author_depth = node_depth(cert.block.address.node_index);
-    r.block        = cert.block.address.block_index;
-    r.since        = p.compromised_since;
-    r.replacement  = p.replacement_pubkey;
+    const auto     p     = RevocationCert::payload(cert);
+    const Key      k{cert.block.address.user_id, p.revoked_node_index};
+    const uint32_t depth = node_depth(cert.block.address.node_index);
+    const Record   rec{cert.block.address.block_index, p.revoked_pubkey, p.compromised_since,
+                       p.replacement_pubkey, p.last_good};
     std::lock_guard<std::mutex> lock(mu_);
-    auto [it, fresh] = revocations_.try_emplace(k, r);
+    auto [it, fresh] = revocations_.try_emplace(k);
     auto& cur = it->second;
-    if (!fresh) {
-        if (r.author_depth > cur.author_depth) return;      // a lower ancestor: the higher one decided
-        if (r.author_depth < cur.author_depth) {
-            cur = r;                                         // the higher ancestor decides
-        } else {
-            cur.since = std::min(cur.since, r.since);        // the same author: the earliest compromise
-            if (r.block > cur.block) {                       // and its latest word on the replacement
-                cur.block       = r.block;
-                cur.replacement = r.replacement;
-                cur.line.clear();
-            }
-        }
+    if (!fresh && depth > cur.author_depth) return;          // a lower ancestor: the higher one decided
+    if (fresh || depth < cur.author_depth) {                 // the higher ancestor decides anew
+        cur              = Revocation{};
+        cur.author_depth = depth;
     }
-    if (cur.line.empty() && cur.replacement) cur.line.push_back(*cur.replacement);
+    // The same author: every record, in its block order — the earliest
+    // compromise, the latest word on the replacement and on the line.
+    const auto pos = std::find_if(cur.records.begin(), cur.records.end(),
+                                  [&](const Record& r) { return r.block >= rec.block; });
+    if (pos != cur.records.end() && pos->block == rec.block) return;   // known already
+    cur.records.insert(pos, rec);
+    if (rec.replacement.has_value() &&
+        std::none_of(cur.lines.begin(), cur.lines.end(),
+                     [&](const auto& l) { return l.front() == *rec.replacement; }))
+        cur.lines.push_back({*rec.replacement});
 }
 
 BranchKeys::Verdict BranchKeys::check(const Block& b) const {
-    std::vector<PublicKey> keys;
+    std::vector<std::vector<PublicKey>> epochs;   // the own line, then each replacement line
+    std::vector<Record>                 records;
     {
         std::lock_guard<std::mutex> lock(mu_);
-        const Key k{b.address.user_id, b.address.node_index};
-        if (!branches_.count(k) && !revocations_.count(k)) return Verdict::unknown_branch;
-        keys = keys_for(k, b.timestamp_claimed);
+        const Key  k{b.address.user_id, b.address.node_index};
+        const auto br  = branches_.find(k);
+        const auto rev = revocations_.find(k);
+        if (br == branches_.end() && rev == revocations_.end()) return Verdict::unknown_branch;
+        if (br != branches_.end()) epochs.push_back(br->second.own);
+        if (rev != revocations_.end()) {
+            epochs.insert(epochs.end(), rev->second.lines.begin(), rev->second.lines.end());
+            records = rev->second.records;
+        }
     }
-    for (const auto& key : keys)
-        if (signed_by(b, key)) return Verdict::signed_by_branch;
-    return Verdict::foreign_signature;
+    bool revoked = false;
+    for (const auto& epoch : epochs)
+        for (const auto& key : epoch)
+            if (signed_by(b, key)) {
+                if (admits(records, epoch, b)) return Verdict::signed_by_branch;
+                revoked = true;
+            }
+    return revoked ? Verdict::revoked_key : Verdict::foreign_signature;
 }
 
 bool BranchKeys::vouches(const UserId& chain, NodeIndex node, const Hash& message,
@@ -140,7 +158,7 @@ bool BranchKeys::vouches(const UserId& chain, NodeIndex node, const Hash& messag
         const Key k{chain, node};
         if (const auto it = branches_.find(k); it != branches_.end()) keys = it->second.own;
         if (const auto rev = revocations_.find(k); rev != revocations_.end())
-            keys.insert(keys.end(), rev->second.line.begin(), rev->second.line.end());
+            for (const auto& line : rev->second.lines) keys.insert(keys.end(), line.begin(), line.end());
     }
     for (const auto& key : keys)
         if (Crypto::verify(message.bytes.data(), message.bytes.size(), sig, key)) return true;

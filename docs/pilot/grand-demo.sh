@@ -815,16 +815,42 @@ hr "реакция на работу (+100) от врача Петра (bc react
 bcp petr react "$WORK_anna" --value 100 --chain "${CID[anna]}" --via "$VIA" 2>&1 | sed 's/^/   /' | head -3
 
 # ═════════════════════════════════════════════════════════════════════════════
-act "16. Компрометация ключа: отзыв и замена (bc revoke)"
-say "У Олега украли рабочий ключ глубокой ветки. Ключ-предок (холоднее) его отзывает."
-hr "отзыв со стоп-краном и заменой + самопроверяемый сертификат (bc revoke create)"
-bcp oleg revoke create --node 2147483647 --replace --out "$work/oleg.cert" --via "$VIA" | sed 's/^/   /'
+act "16. Компрометация ключа: развилка, отзыв с линией хозяина, замена (bc revoke)"
+say "Пётр провёл Олегу профосмотр для справки; приёмка Олега — его оферта Петру."
+# своё время работы: у Петра часы сегодня уже заняты (records.md §9.4)
+WORK_petr_oleg=$(bcp petr work log --title "врач" --action "профосмотр для справки" --hours 1 \
+                 --start $(( $(date +%s) - 2*86400 )) --for "${CID[oleg]}" --via "$VIA" | after 'hash: ')
+say "У Олега украли рабочий ключ глубокой ветки: вор унёс копию устройства."
+cp -a "$work/oleg" "$work/thief"
+hr "вор и Олег пишут каждый свой блок под одним номером — развилка (GET /forks)"
+bcp thief block stub --via "$VIA" >/dev/null
+sleep 1   # в одну секунду заглушки совпали бы байт в байт: подпись Ed25519 детерминирована
+bcp oleg  block stub --via "$VIA" >/dev/null
+FORKS_oleg="$(curl -s "$VIA/forks/${CID[oleg]}")"
+say "$FORKS_oleg"
+hr "Олег принимает работу Петра — оферта на его линии"
+bcp oleg fetch "${CID[petr]}/$WORK_petr_oleg" --via "$VIA" >/dev/null
+PAY_oleg="$(bcp oleg accept --work "${CID[petr]}/$WORK_petr_oleg" --quality "справка выдана" --coef 1.0 --axis-share "$(axis responsibility)=0.5" --axis-share "$(axis knowledge)=0.5" --via "$VIA" 2>&1)"
+ACC_oleg="$(printf '%s' "$PAY_oleg" | after 'acceptance ref: ')"
+hr "Пётр не принимает оплату из раздвоенной ветки — сделка ждёт (blockchain.md §6.7, правило 13)"
+OUT_frozen="$(bcp petr transfer recv "$ACC_oleg" --via "$VIA" --yes 2>&1 || true)"
+printf '%s\n' "$OUT_frozen" | sed 's/^/   /'
+hr "предок отзывает ключ и называет последний верный блок Олега (bc revoke create --last-good tip)"
+say "под подозрением с прошлого часа: ключ увели раньше, чем появилась развилка"
+bcp oleg revoke create --node 2147483647 --replace --last-good tip --since $(( $(date +%s) - 3600 )) \
+    --out "$work/oleg.cert" --via "$VIA" | sed 's/^/   /'
 hr "сертификат проверяется автономно кем угодно (bc revoke verify)"
 bcp anna revoke verify --cert "$work/oleg.cert" | sed 's/^/   /'
 hr "статус ветки и зоны блоков (bc revoke status)"
 bcp oleg revoke status --node 2147483647 | sed 's/^/   /'
 hr "другой человек тянет сертификаты Олега со склада (bc revoke fetch)"
 bcp anna revoke fetch "${CID[oleg]}" --via "$VIA" 2>&1 | sed 's/^/   /' | head -4 || true
+hr "оферта Олега на его линии — теперь Пётр её принимает (blockchain.md §6.7, правило 12)"
+OUT_line="$(bcp petr transfer recv "$ACC_oleg" --via "$VIA" --yes 2>&1 || true)"
+printf '%s\n' "$OUT_line" | sed 's/^/   /'
+hr "вор пишет старым ключом после отзыва — агрегатор не берёт"
+OUT_thief="$(bcp thief block stub --via "$VIA" 2>&1 || true)"
+printf '%s\n' "$OUT_thief" | sed 's/^/   /'
 
 # ═════════════════════════════════════════════════════════════════════════════
 act "17. Инструменты обвинений и ветки на любых узлах"
@@ -894,6 +920,20 @@ checkn "бумага Дмитрия частично вернулась к не�
 # отзыв ключа сработал
 if bcp oleg revoke status --node 2147483647 | grep -q "REPLACED"; then
     echo "   ✓ ветка Олега помечена REPLACED после отзыва"; else echo "   ✗ отзыв не отражён"; fail=1; fi
+# развилка, заморозка и линия хозяина (blockchain.md §6.7, правила 12–13)
+if grep -q '"node":2147483647' <<<"$FORKS_oleg"; then
+    echo "   ✓ развилка ветки Олега видна на агрегаторе"; else echo "   ✗ развилки не видно"; fail=1; fi
+if grep -q "раздвоена" <<<"$OUT_frozen"; then
+    echo "   ✓ оплата из раздвоенной ветки ждёт, пока предок назовёт линию"
+else echo "   ✗ раздвоенную ветку не заморозили: $OUT_frozen"; fail=1; fi
+if bcp oleg revoke status --node 2147483647 | grep -q "owner's line: blocks"; then
+    echo "   ✓ отзыв назвал линию хозяина"; else echo "   ✗ линии хозяина в отзыве нет"; fail=1; fi
+if grep -qiE "error|refused|раздвоена|отказ" <<<"$OUT_line"; then
+    echo "   ✗ оферта с линии хозяина не принята: $OUT_line"; fail=1
+else echo "   ✓ оферта с линии хозяина принята после отзыва"; fi
+if grep -q "revoked key" <<<"$OUT_thief"; then
+    echo "   ✓ блок вора старым ключом после отзыва агрегатор отверг"
+else echo "   ✗ блок вора не отвергнут: $OUT_thief"; fail=1; fi
 # повторная сделка по той же работе обязана отклониться (один результат — одна сделка)
 if bcp dmitry accept --work "${CID[anna]}/$WORK_anna" --quality "ещё раз" --coef 1.0 --axis-share "$(axis physical)=1.0" --via "$VIA" >/dev/null 2>&1; then
     echo "   ✗ повторная сделка прошла, а должна была отклониться"; fail=1

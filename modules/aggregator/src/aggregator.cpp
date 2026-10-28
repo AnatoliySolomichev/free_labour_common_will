@@ -76,6 +76,7 @@ struct AggregatorStorage::Impl {
     MDB_dbi  dbi_kpath = 0; // keypaths: signing_key(32)‖blake2b(bytes)(32) → node path bytes
     MDB_dbi  dbi_arr   = 0; // arrivals: block_hash → first seen here (int64, little-endian)
     MDB_dbi  dbi_cosig = 0; // cosigs:   merge block_hash → the partner's co-signature (64B)
+    MDB_dbi  dbi_fork  = 0; // forks:    block_hash → CBOR(Block), a rival at a taken address
 };
 
 // ── Constructor / Destructor ──────────────────────────────────────────────────
@@ -89,7 +90,7 @@ AggregatorStorage::AggregatorStorage(std::filesystem::path db_path)
 {
     std::filesystem::create_directories(db_path);
     lcheck(mdb_env_create(&impl_->env),              "mdb_env_create");
-    lcheck(mdb_env_set_maxdbs(impl_->env, 10),       "mdb_env_set_maxdbs");
+    lcheck(mdb_env_set_maxdbs(impl_->env, 11),       "mdb_env_set_maxdbs");
     lcheck(mdb_env_set_mapsize(impl_->env, 1u<<30),  "mdb_env_set_mapsize");
     lcheck(mdb_env_open(impl_->env, db_path.c_str(), 0, 0600), "mdb_env_open");
 
@@ -105,7 +106,8 @@ AggregatorStorage::AggregatorStorage(std::filesystem::path db_path)
         (rc = mdb_dbi_open(txn, "revocations", MDB_CREATE, &impl_->dbi_rev))  != MDB_SUCCESS ||
         (rc = mdb_dbi_open(txn, "keypaths",    MDB_CREATE, &impl_->dbi_kpath)) != MDB_SUCCESS ||
         (rc = mdb_dbi_open(txn, "arrivals",    MDB_CREATE, &impl_->dbi_arr))   != MDB_SUCCESS ||
-        (rc = mdb_dbi_open(txn, "cosigs",      MDB_CREATE, &impl_->dbi_cosig)) != MDB_SUCCESS) {
+        (rc = mdb_dbi_open(txn, "cosigs",      MDB_CREATE, &impl_->dbi_cosig)) != MDB_SUCCESS ||
+        (rc = mdb_dbi_open(txn, "forks",       MDB_CREATE, &impl_->dbi_fork))  != MDB_SUCCESS) {
         mdb_txn_abort(txn);
         throw StorageError(std::string("mdb_dbi_open: ") + mdb_strerror(rc));
     }
@@ -140,11 +142,29 @@ bool AggregatorStorage::add_block(const Block& block) {
         if (rc != MDB_NOTFOUND) { mdb_txn_abort(txn); lcheck(rc, "add_block: hash check"); }
     }
 
-    // Write block.
+    // Write block. A different block at a taken address is a fork of the
+    // branch — evidence of a stolen key (blockchain.md §6.7 rule 13): the first stays in
+    // place, the rival is kept aside by its hash, out of the indexes.
     {
         MDB_val mv{cbor.size(), cbor.data()};
         int rc = mdb_put(txn, impl_->dbi_blk, &mk_bk, &mv, MDB_NOOVERWRITE);
-        if (rc != MDB_SUCCESS && rc != MDB_KEYEXIST)
+        if (rc == MDB_KEYEXIST) {
+            MDB_val fv{cbor.size(), cbor.data()};
+            rc = mdb_put(txn, impl_->dbi_fork, &mk_bh, &fv, MDB_NOOVERWRITE);
+            if (rc == MDB_KEYEXIST) { mdb_txn_abort(txn); return false; } // known rival
+            if (rc != MDB_SUCCESS) { mdb_txn_abort(txn); lcheck(rc, "add_block: put fork"); }
+            const auto now = static_cast<int64_t>(std::time(nullptr));
+            std::array<uint8_t, 8> le{};
+            for (int i = 0; i < 8; ++i)
+                le[i] = static_cast<uint8_t>(static_cast<uint64_t>(now) >> (8 * i));
+            MDB_val av{le.size(), le.data()};
+            rc = mdb_put(txn, impl_->dbi_arr, &mk_bh, &av, MDB_NOOVERWRITE);
+            if (rc != MDB_SUCCESS && rc != MDB_KEYEXIST)
+                { mdb_txn_abort(txn); lcheck(rc, "add_block: put fork arrival"); }
+            lcheck(mdb_txn_commit(txn), "add_block: fork commit");
+            return true;
+        }
+        if (rc != MDB_SUCCESS)
             { mdb_txn_abort(txn); lcheck(rc, "add_block: put block"); }
     }
 
@@ -234,11 +254,44 @@ std::optional<Block> AggregatorStorage::get_block_by_hash(const Hash& bh) const 
     MDB_txn* txn;
     lcheck(mdb_txn_begin(impl_->env, nullptr, MDB_RDONLY, &txn), "get_by_hash: begin");
     int rc = mdb_get(txn, impl_->dbi_hash, &mk, &mv);
-    if (rc == MDB_NOTFOUND) { mdb_txn_abort(txn); return std::nullopt; }
+    if (rc == MDB_NOTFOUND) {
+        // Not in place — perhaps a fork's rival, kept aside.
+        rc = mdb_get(txn, impl_->dbi_fork, &mk, &mv);
+        if (rc == MDB_NOTFOUND) { mdb_txn_abort(txn); return std::nullopt; }
+        if (rc != MDB_SUCCESS)  { mdb_txn_abort(txn); lcheck(rc, "get_by_hash: fork lookup"); }
+        Block rival = Serializer::decode_block(static_cast<const uint8_t*>(mv.mv_data), mv.mv_size);
+        mdb_txn_abort(txn);
+        return rival;
+    }
     if (rc != MDB_SUCCESS)  { mdb_txn_abort(txn); lcheck(rc, "get_by_hash: hash lookup"); }
     BlockAddress addr = block_key_to_address(static_cast<const uint8_t*>(mv.mv_data));
     mdb_txn_abort(txn);
     return get_block(addr);
+}
+
+std::vector<AggregatorStorage::Fork> AggregatorStorage::forks(const UserId& chain) const {
+    std::vector<Fork> out;
+    MDB_txn* txn;
+    lcheck(mdb_txn_begin(impl_->env, nullptr, MDB_RDONLY, &txn), "forks: begin");
+    MDB_cursor* cur;
+    if (mdb_cursor_open(txn, impl_->dbi_fork, &cur) != MDB_SUCCESS) { mdb_txn_abort(txn); return out; }
+    MDB_val k{}, v{};
+    std::vector<Block> rivals;
+    for (int rc = mdb_cursor_get(cur, &k, &v, MDB_FIRST); rc == MDB_SUCCESS;
+         rc = mdb_cursor_get(cur, &k, &v, MDB_NEXT)) {
+        try {
+            Block b = Serializer::decode_block(static_cast<const uint8_t*>(v.mv_data), v.mv_size);
+            if (b.address.user_id == chain) rivals.push_back(std::move(b));
+        } catch (const std::exception&) {}
+    }
+    mdb_cursor_close(cur);
+    mdb_txn_abort(txn);
+    for (const Block& r : rivals) {
+        const auto kept = get_block(r.address);
+        if (!kept) continue;
+        out.push_back({r.address, Crypto::hash_block(*kept), Crypto::hash_block(r)});
+    }
+    return out;
 }
 
 std::vector<Hash> AggregatorStorage::all_block_hashes() const {
