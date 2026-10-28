@@ -1617,6 +1617,7 @@ static std::optional<records::json::Value> fetch_json(const std::string& via,
                                                       const std::string& path);
 static std::string jstr(const records::json::Object& o, const char* k);
 static double jnum(const records::json::Object& o, const char* k);
+static bool jbool(const records::json::Object& o, const char* k, bool def);
 static const records::json::Value* jarr(const records::json::Object& o,
                                         const char* k);
 
@@ -3961,8 +3962,16 @@ static std::vector<NoteRow> own_notes(Context& ctx) {
         std::vector<Block> blocks;
         try { blocks = ctx.bc.get_branch(ctx.user_id, node); }
         catch (const BlockchainError&) { continue; }
+        // A note is one-sided: from a revoked key past the owner's line, or in
+        // the suspect zone, it carries no weight (blockchain.md §6.7 rules 5, 12).
+        std::optional<BranchRevocationStatus> st;
+        try { st = ctx.validator.branch_revocation_status(ctx.user_id, node); }
+        catch (const std::exception&) {}
         for (const auto& b : blocks) {
             if (b.type != BlockType::DATA) continue;
+            if (st && b.address.block_index < st->blocks.size() &&
+                st->blocks[b.address.block_index] != BlockRevocationStatus::CLEAN)
+                continue;
             try {
                 // Запись или суточный пакет — список заметок (records.md §2).
                 const auto recs = Codec::decode_list(b.payload.data(), b.payload.size());
@@ -3987,6 +3996,9 @@ static std::optional<std::vector<NoteRow>> fetch_notes(const std::string& via,
     if (!notes) return out;
     for (const auto& e : notes->array) {
         if (!e.is_object()) continue;
+        // The aggregator found it written by a revoked key past the owner's line
+        // or in the suspect zone: no weight (blockchain.md §6.7 rules 5, 12).
+        if (!jbool(e.object, "weight", true)) continue;
         NoteRow r;
         r.block = jstr(e.object, "block");
         if (r.block.size() != 64 || !from_hex(jstr(e.object, "chain"), r.chain.data(), 32)) continue;

@@ -34,6 +34,23 @@
 
 namespace aggregator {
 
+namespace {
+
+// A fork whose rival is the owner's while the block in place is not: the
+// owner's goes in place (blockchain.md §6.7 rules 9, 12) — the views read what stands.
+void settle_forks(AggregatorStorage& storage, const BranchKeys& keys, const UserId& chain) {
+    for (const auto& f : storage.forks(chain)) {
+        const auto kept  = storage.get_block(f.address);
+        const auto rival = storage.get_block_by_hash(f.rival);
+        if (!kept || !rival) continue;
+        if (keys.whose(*rival, storage) == BranchKeys::Whose::owner &&
+            keys.whose(*kept, storage) != BranchKeys::Whose::owner)
+            storage.swap_fork(f.rival);
+    }
+}
+
+} // namespace
+
 // ── JSON helpers (hand-written — no extra dependency) ─────────────────────────
 
 namespace {
@@ -355,6 +372,7 @@ void AggregatorServer::setup_routes() {
                 && !(Crypto::hash_block(*in_place) == Crypto::hash_block(b));
             bool added = storage_.add_block(b);
             if (added && !contested && b.type == BlockType::KEY_ROTATION) keys_.learn_rotation(b);
+            if (added && contested) settle_forks(storage_, keys_, b.address.user_id);
             res.status = 200;
             res.set_content(!added   ? "{\"status\":\"duplicate\"}"
                             : contested ? "{\"status\":\"fork\"}"
@@ -697,6 +715,7 @@ void AggregatorServer::setup_routes() {
                     reinterpret_cast<const uint8_t*>(req.body.data()), req.body.size());
                 keys_.learn_revocation(cert);
                 storage_.note_arrival(Crypto::hash_block(cert.block));
+                settle_forks(storage_, keys_, chain);
             } catch (const std::exception&) {}
             res.set_content(stored ? "{\"status\":\"stored\"}"
                                    : "{\"status\":\"duplicate\"}",
@@ -835,6 +854,12 @@ void AggregatorServer::setup_routes() {
             if (n.re)            body += ",\"re\":\"" + json_escape(records::subject_id(*n.re)) + "\"";
             if (n.from)          body += ",\"from\":" + std::to_string(*n.from);
             if (n.to)            body += ",\"to\":" + std::to_string(*n.to);
+            // Written by a revoked key past the owner's line, or in the suspect
+            // zone: a note is one-sided and carries no weight (blockchain.md §6.7 rules
+            // 5, 10, 12). The raw note stays — readers may check for themselves.
+            if (const auto blk = storage_.get_block_by_hash(e.block);
+                blk && keys_.whose(*blk, storage_) == BranchKeys::Whose::not_owner)
+                body += ",\"weight\":false";
             body += '}';
         }
         body += "]}";
@@ -2693,6 +2718,7 @@ void AggregatorServer::sync_with_peer(const std::string& peer_url) {
                     static_cast<std::size_t>(len));
                 keys_.learn_revocation(cert);
                 storage_.note_arrival(Crypto::hash_block(cert.block));
+                settle_forks(storage_, keys_, chain);
             } catch (...) {}
             pos += static_cast<std::size_t>(len);
         }

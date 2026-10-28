@@ -174,6 +174,18 @@ bcx anna social ignore "$GLEB" | sed 's/^/   anna: /'
 SHOW3="$(bcx anna social show "$VIDEO" --via "$VIA")"
 printf '%s\n' "$SHOW3" | head -3 | sed 's/^/   /'
 
+hr "у Бориса украли ключ: вор ставит дизлайк от его имени (blockchain.md §6.7)"
+cp -a "$work/boris" "$work/thief"
+sleep 1   # в одну секунду блок вора совпал бы с блоком Бориса
+post thief social dislike "$VIDEO"
+SHOW_STOLEN="$(bcx anna social show "$VIDEO" --via "$VIA")"
+printf '%s\n' "$SHOW_STOLEN" | head -3 | sed 's/^/   /'
+hr "Борис отзывает ключ и называет свой последний верный блок — дизлайк вора теряет вес"
+bcx boris revoke create --node 2147483647 --replace --last-good tip --via "$VIA" 2>&1 \
+    | grep -E "revoked node|owner's line" | sed 's/^/   boris: /'
+SHOW_LINE="$(bcx anna social show "$VIDEO" --via "$VIA")"
+printf '%s\n' "$SHOW_LINE" | head -3 | sed 's/^/   /'
+
 hr "пост Telegram: комментарий с одной ссылки, лайк — с другой"
 post vera  social comment "$TG1" "Важный пост, перечитайте"
 post boris social like    "$TG2"
@@ -218,6 +230,10 @@ check "второй шаг добавил Дину" \
       "$(line "$SHOW2" 'реакции круга')" "реакции круга: +4 −1   (вы +1 · шаг 1 +2 −1 · шаг 2 +1)"
 check "игнор убрал дизлайк Глеба" \
       "$(line "$SHOW3" 'реакции круга')" "реакции круга: +3   (вы +1 · шаг 1 +2)"
+check "дизлайк вора с ключом Бориса — последнее слово Бориса, пока ключ не отозван" \
+      "$(line "$SHOW_STOLEN" 'реакции круга')" "реакции круга: +2 −1   (вы +1 · шаг 1 +1 −1)"
+check "отзыв с линией Бориса снял дизлайк вора, лайк Бориса вернулся" \
+      "$(line "$SHOW_LINE" 'реакции круга')" "реакции круга: +3   (вы +1 · шаг 1 +2)"
 check "пост Telegram сошёлся с двух ссылок" \
       "$(line "$SHOW_TG" 'реакции круга')" "реакции круга: +1   (вы — · шаг 1 +1)"
 check "лента не видит ферму" "$(printf '%s\n' "$FEED" | grep -c 'крутое видео')" "0"

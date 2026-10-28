@@ -284,6 +284,125 @@ TEST(BranchKeys, AForkIsKeptAsEvidence) {
     std::filesystem::remove_all(db);
 }
 
+// Развилка, где на месте блок вора, а в стороне блок хозяина: агрегатор меняет их
+// местами (blockchain.md §6.7 правила 9, 12) — витрины читают то, что стоит.
+TEST(BranchKeys, ASwapPutsTheOwnersRivalInPlace) {
+    Chain      a("swap");
+    const auto db = std::filesystem::temp_directory_path() / "bc_branch_keys_swap_db";
+    std::filesystem::remove_all(db);
+    {
+        AggregatorStorage storage(db);
+        const KeyPair&    kp    = a.keys.at(kLeaf);
+        const Block       owner = a.write(kp);
+        Block thief   = owner;                                // тот же номер — первым пришёл вор
+        thief.payload = {0x81, 0x01};
+        thief         = resigned(thief, kp);
+        ASSERT_TRUE(storage.add_block(thief));
+        ASSERT_TRUE(storage.add_block(owner));                // хозяин — в сторону
+        const uint64_t before = storage.instance_id();
+        ASSERT_TRUE(storage.swap_fork(Crypto::hash_block(owner)));
+        EXPECT_NE(storage.instance_id(), before);             // витрины пересчитают
+        EXPECT_EQ(storage.get_block(owner.address)->payload, owner.payload);
+        const auto forks = storage.forks(a.uid);
+        ASSERT_EQ(forks.size(), 1u);
+        EXPECT_EQ(forks[0].kept, Crypto::hash_block(owner));
+        EXPECT_EQ(forks[0].rival, Crypto::hash_block(thief));
+        EXPECT_EQ(storage.get_block_by_hash(Crypto::hash_block(thief))->payload, thief.payload);
+        EXPECT_FALSE(storage.swap_fork(Crypto::hash_block(owner)));   // уже на месте
+    }
+    std::filesystem::remove_all(db);
+}
+
+// Чей блок — для витрин (blockchain.md §6.7 правила 5, 12): до названного последнего
+// верного блока — хозяина, после — нет, блоки замены — хозяина.
+TEST(BranchKeys, WhoseFollowsTheOwnersLine) {
+    Chain      a("whose_line");
+    const auto db = std::filesystem::temp_directory_path() / "bc_branch_keys_whose_line_db";
+    std::filesystem::remove_all(db);
+    {
+        AggregatorStorage storage(db);
+        const NodeIndex   parent = (kLeaf - 1) / 2;
+        const KeyPair&    old    = a.keys.at(kLeaf);
+        const Block       b0     = a.write(old);
+        const Block       b1     = a.write(old);
+        const Block       b2     = a.write(old);
+        for (const Block& b : {b0, b1, b2}) storage.add_block(b);
+        const KeyPair k1  = Crypto::generate_keypair();
+        const Block   rev = a.bc->revoke_node(a.uid, kLeaf, 1, k1.pub, parent, a.keys.at(parent),
+                                              ++a.now, Crypto::hash_block(b1));
+        const Block after = a.write(k1);
+        BranchKeys  keys;
+        keys.learn_path(a.path());
+        keys.learn_revocation(RevocationCert::build(*a.storage, rev.address));
+        EXPECT_EQ(keys.whose(b0, storage), BranchKeys::Whose::owner);
+        EXPECT_EQ(keys.whose(b1, storage), BranchKeys::Whose::owner);
+        EXPECT_EQ(keys.whose(b2, storage), BranchKeys::Whose::not_owner);
+        EXPECT_EQ(keys.whose(after, storage), BranchKeys::Whose::owner);
+        EXPECT_EQ(keys.whose(forged(after), storage), BranchKeys::Whose::unknown);
+    }
+    std::filesystem::remove_all(db);
+}
+
+// Без названной линии — по времени (blockchain.md §6.7 правило 5): одностороннее после
+// момента компрометации веса не имеет.
+TEST(BranchKeys, WhoseByTimeWithoutALine) {
+    Chain      a("whose_time");
+    const auto db = std::filesystem::temp_directory_path() / "bc_branch_keys_whose_time_db";
+    std::filesystem::remove_all(db);
+    {
+        AggregatorStorage storage(db);
+        const NodeIndex   parent = (kLeaf - 1) / 2;
+        const KeyPair&    old    = a.keys.at(kLeaf);
+        const Block       b0     = a.write(old);
+        const Block       b1     = a.write(old);
+        const Block rev = a.bc->revoke_node(a.uid, kLeaf, b0.timestamp_claimed, std::nullopt,
+                                            parent, a.keys.at(parent), ++a.now);
+        BranchKeys keys;
+        keys.learn_path(a.path());
+        keys.learn_revocation(RevocationCert::build(*a.storage, rev.address));
+        EXPECT_EQ(keys.whose(b0, storage), BranchKeys::Whose::owner);
+        EXPECT_EQ(keys.whose(b1, storage), BranchKeys::Whose::not_owner);
+    }
+    std::filesystem::remove_all(db);
+}
+
+// Правило 10 на агрегаторе: вор с ключом родителя «отзывает» замену и
+// назначает свою; пока родителя не отозвали, это работает. Дед отзывает
+// родителя и называет его последний верный блок — подложная запись лежит вне
+// линии родителя и не считается: блоки хозяина снова его, вора — ничьи.
+TEST(BranchKeys, AStolenParentsRecordDoesNotCount) {
+    Chain      a("whose_rule10");
+    const auto db = std::filesystem::temp_directory_path() / "bc_branch_keys_whose_rule10_db";
+    std::filesystem::remove_all(db);
+    {
+        AggregatorStorage storage(db);
+        const NodeIndex   parent = (kLeaf - 1) / 2;
+        const NodeIndex   grand  = (parent - 1) / 2;
+        const KeyPair     k1     = Crypto::generate_keypair();
+        const Block r1 = a.bc->revoke_node(a.uid, kLeaf, 1, k1.pub, parent, a.keys.at(parent),
+                                           ++a.now);
+        const Block by_k1  = a.write(k1);
+        const KeyPair kx   = Crypto::generate_keypair();
+        const Block hijack = a.bc->revoke_node(a.uid, kLeaf, 1, kx.pub, parent,
+                                               a.keys.at(parent), ++a.now);
+        const Block by_kx  = a.write(kx);
+
+        BranchKeys keys;
+        keys.learn_path(a.path());
+        keys.learn_revocation(RevocationCert::build(*a.storage, r1.address));
+        keys.learn_revocation(RevocationCert::build(*a.storage, hijack.address));
+        EXPECT_EQ(keys.whose(by_kx, storage), BranchKeys::Whose::owner);       // пока работает
+        EXPECT_EQ(keys.whose(by_k1, storage), BranchKeys::Whose::not_owner);
+
+        const Block g = a.bc->revoke_node(a.uid, parent, 1, std::nullopt, grand, a.keys.at(grand),
+                                          ++a.now, Crypto::hash_block(r1));
+        keys.learn_revocation(RevocationCert::build(*a.storage, g.address));
+        EXPECT_EQ(keys.whose(by_k1, storage), BranchKeys::Whose::owner);
+        EXPECT_EQ(keys.whose(by_kx, storage), BranchKeys::Whose::unknown);
+    }
+    std::filesystem::remove_all(db);
+}
+
 // Из двух отзывов одной ветки решает тот, чей автор ближе к корню
 // (blockchain.md §4.4) — в каком бы порядке они ни пришли.
 TEST(BranchKeys, TheHigherAncestorDecides) {

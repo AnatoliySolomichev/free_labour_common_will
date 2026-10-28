@@ -81,12 +81,16 @@ struct AggregatorStorage::Impl {
 
 // ── Constructor / Destructor ──────────────────────────────────────────────────
 
+namespace {
+uint64_t fresh_instance_id() {
+    static std::atomic<uint64_t> next{1};
+    return next++;
+}
+} // namespace
+
 AggregatorStorage::AggregatorStorage(std::filesystem::path db_path)
     : impl_(std::make_unique<Impl>())
-    , instance_id_([] {
-          static std::atomic<uint64_t> next{1};
-          return next++;
-      }())
+    , instance_id_(fresh_instance_id())
 {
     std::filesystem::create_directories(db_path);
     lcheck(mdb_env_create(&impl_->env),              "mdb_env_create");
@@ -267,6 +271,55 @@ std::optional<Block> AggregatorStorage::get_block_by_hash(const Hash& bh) const 
     BlockAddress addr = block_key_to_address(static_cast<const uint8_t*>(mv.mv_data));
     mdb_txn_abort(txn);
     return get_block(addr);
+}
+
+bool AggregatorStorage::swap_fork(const Hash& rival_hash) {
+    MDB_txn* txn;
+    lcheck(mdb_txn_begin(impl_->env, nullptr, 0, &txn), "swap_fork: begin");
+    const auto fail = [&]() { mdb_txn_abort(txn); return false; };
+    MDB_val mk_r{rival_hash.bytes.size(), const_cast<uint8_t*>(rival_hash.bytes.data())}, rv{};
+    if (mdb_get(txn, impl_->dbi_fork, &mk_r, &rv) != MDB_SUCCESS) return fail();
+    const std::vector<uint8_t> rival_cbor(static_cast<const uint8_t*>(rv.mv_data),
+                                          static_cast<const uint8_t*>(rv.mv_data) + rv.mv_size);
+    const Block rival = Serializer::decode_block(rival_cbor.data(), rival_cbor.size());
+    auto        bk    = block_key(rival.address);
+    MDB_val     mk_bk{bk.size(), bk.data()}, kv{};
+    if (mdb_get(txn, impl_->dbi_blk, &mk_bk, &kv) != MDB_SUCCESS) return fail();
+    const std::vector<uint8_t> kept_cbor(static_cast<const uint8_t*>(kv.mv_data),
+                                         static_cast<const uint8_t*>(kv.mv_data) + kv.mv_size);
+    const Block kept      = Serializer::decode_block(kept_cbor.data(), kept_cbor.size());
+    Hash        kept_hash = Crypto::hash_block(kept);
+    MDB_val     mk_k{kept_hash.bytes.size(), kept_hash.bytes.data()};
+
+    const auto put = [&](MDB_dbi dbi, MDB_val* k, const void* data, std::size_t n, unsigned fl) {
+        MDB_val v{n, const_cast<void*>(data)};
+        const int rc = mdb_put(txn, dbi, k, &v, fl);
+        if (rc != MDB_SUCCESS && rc != MDB_KEYEXIST) { mdb_txn_abort(txn); lcheck(rc, "swap_fork: put"); }
+    };
+    put(impl_->dbi_blk,  &mk_bk, rival_cbor.data(), rival_cbor.size(), 0);
+    mdb_del(txn, impl_->dbi_fork, &mk_r, nullptr);
+    put(impl_->dbi_fork, &mk_k, kept_cbor.data(), kept_cbor.size(), MDB_NOOVERWRITE);
+    put(impl_->dbi_hash, &mk_r, bk.data(), bk.size(), 0);
+    mdb_del(txn, impl_->dbi_hash, &mk_k, nullptr);
+
+    // The payload index: this address now holds the rival's payload.
+    const auto reindex = [&](const Block& b, bool add) {
+        Hash ph = Crypto::hash(b.payload.data(), b.payload.size());
+        MDB_val mk{ph.bytes.size(), ph.bytes.data()}, mv{};
+        std::vector<BlockAddress> ws;
+        if (mdb_get(txn, impl_->dbi_idea, &mk, &mv) == MDB_SUCCESS)
+            ws = decode_witnesses(static_cast<const uint8_t*>(mv.mv_data), mv.mv_size);
+        ws.erase(std::remove(ws.begin(), ws.end(), b.address), ws.end());
+        if (add) ws.push_back(b.address);
+        if (ws.empty()) { mdb_del(txn, impl_->dbi_idea, &mk, nullptr); return; }
+        const auto enc = encode_witnesses(ws);
+        put(impl_->dbi_idea, &mk, enc.data(), enc.size(), 0);
+    };
+    reindex(kept, false);
+    reindex(rival, true);
+    lcheck(mdb_txn_commit(txn), "swap_fork: commit");
+    instance_id_ = fresh_instance_id();
+    return true;
 }
 
 std::vector<AggregatorStorage::Fork> AggregatorStorage::forks(const UserId& chain) const {

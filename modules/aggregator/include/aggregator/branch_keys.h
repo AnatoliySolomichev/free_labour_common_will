@@ -74,6 +74,17 @@ public:
     // branch's blocks by; nullopt when no path has come.
     std::optional<KeyPath> path(const UserId& chain, NodeIndex node) const;
 
+    // Whose a block is — for the views (blockchain.md §6.7 rules 5, 9, 10, 12): the owner's
+    // (a key of an epoch not revoked, or before its compromise, or on the
+    // owner's line named for it), not the owner's (a revoked key past both:
+    // one-sided records lose weight), or unknown (a key the branch is not
+    // known to have). A revocation record counts only if its own block is its
+    // author's — the author itself may be under revocation (rule 10), checked
+    // up to the root. The owner's line is walked through `storage`; where its
+    // blocks are not there, the block's number against the line's decides.
+    enum class Whose { owner, not_owner, unknown };
+    Whose whose(const Block& b, const AggregatorStorage& storage) const;
+
 private:
     using Key = std::pair<UserId, NodeIndex>;
     struct Branch {
@@ -87,6 +98,8 @@ private:
         Timestamp                since = 0;
         std::optional<PublicKey> replacement;
         std::optional<LastGood>  last_good;
+        Block                    written;       // the REVOCATION block itself (rule 10)
+        PublicKey                author_key{};  // its author's node key, from the certificate's path
     };
     // The revocations that decide a branch: the highest author's records, and
     // the replacement lines they opened — each replacement, then its own changes.
@@ -100,6 +113,15 @@ private:
     // revoked, or the block is before the compromise, or on the owner's line.
     static bool admits(const std::vector<Record>& records,
                        const std::vector<PublicKey>& epoch, const Block& b);
+
+    // whose(), under mu_: `own` — the branch's own line when its path has not
+    // come (an author known only from a certificate).
+    Whose whose_locked(const Block& b, const std::vector<PublicKey>* own,
+                       const AggregatorStorage& storage, int depth) const;
+    // The records of `rev` that count: their author not under revocation, or
+    // the record its author's own (rule 10).
+    std::vector<Record> counting(const UserId& chain, const Revocation& rev,
+                                 const AggregatorStorage& storage, int depth) const;
 
     mutable std::mutex         mu_;
     std::map<Key, Branch>      branches_;

@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 
 #include "blockchain/types.h"
 #include "blockchain/crypto.h"
@@ -69,6 +70,11 @@ public:
     };
     std::vector<Fork> forks(const UserId& chain) const;
 
+    // The rival goes in place and the block that stood there goes aside
+    // (blockchain.md §6.7 rules 9, 12): the caller found the rival the owner's and the other
+    // not. Indexes follow — the hash, the payload index. False — no such rival.
+    bool swap_fork(const Hash& rival);
+
     // All known block hashes (used to build sync manifest).
     std::vector<Hash> all_block_hashes() const;
 
@@ -83,7 +89,9 @@ public:
     // Unique per storage object in this process — with block_count() and
     // cosig_count() (both only ever grow) it names one state of what the table
     // of deals reads, so a reader may cache what it computed from it.
-    uint64_t instance_id() const noexcept { return instance_id_; }
+    // A swap of a fork (swap_fork) changes what stands without changing the
+    // counts — it takes a fresh id, so the views recompute.
+    uint64_t instance_id() const noexcept { return instance_id_.load(); }
 
     // Snapshot warehouse (sync.md §7.1). Values are opaque bytes.
     // put_* return false when the key already exists (first write wins).
@@ -142,7 +150,7 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
-    uint64_t              instance_id_;
+    std::atomic<uint64_t> instance_id_;
 };
 
 } // namespace aggregator
