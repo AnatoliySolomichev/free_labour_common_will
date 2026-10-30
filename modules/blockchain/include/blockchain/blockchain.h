@@ -39,7 +39,8 @@ public:
     std::vector<Node> ensure_path(
         const UserId&                      user_id,
         NodeIndex                          leaf_index,
-        std::function<KeyPair(NodeIndex)>  key_for
+        std::function<KeyPair(NodeIndex)>  key_for,
+        Timestamp                          timestamp = 0
     );
 
     // Throws: NodeNotFoundError.

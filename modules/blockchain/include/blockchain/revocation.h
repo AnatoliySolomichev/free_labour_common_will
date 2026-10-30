@@ -13,6 +13,7 @@ namespace blockchain {
 struct RevocationCertificate {
     Block             block;  // the REVOCATION block in the author's branch
     std::vector<Node> path;   // nodes root → author, inclusive
+    std::vector<Block> births; // BIRTH blocks of the path (blockchain.md §11.2)
 };
 
 class RevocationCert {

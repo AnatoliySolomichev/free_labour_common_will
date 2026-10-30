@@ -1213,7 +1213,7 @@ static int cmd_identity_create(const fs::path& data_dir) {
         if (it == key_map.end())
             throw std::runtime_error("key not found for node " + std::to_string(n));
         return it->second;
-    });
+    }, static_cast<Timestamp>(std::time(nullptr)));
 
     std::cout << "Identity created.\n";
     std::cout << "User ID: " << to_hex(root_kp.pub.bytes) << "\n";
@@ -1277,7 +1277,7 @@ static int cmd_branch_init(const fs::path& data_dir, int argc, char** argv) {
         auto it = new_keys.find(n);
         if (it != new_keys.end()) return it->second;
         return load_keypair(data_dir, n);
-    });
+    }, static_cast<Timestamp>(std::time(nullptr)));
 
     std::cout << "Branch " << leaf << " initialized.\n";
     return 0;

@@ -197,7 +197,7 @@ sleep 1
 OUT_VERA="$(bcx vera social comment "$VIDEO" "Пересмотрела, всё верно" --via "$VIA" 2>&1 || true)"
 printf '%s\n' "$OUT_VERA" | grep -i "refused" | sed 's/^/   vera: /'
 hr "старший ключ отзывает родителя — подложный отзыв не считается; Вера выкладывает блоки заново"
-bcx vera revoke create --node 1073741823 --replace --since $(( $(date +%s) - 3600 )) --via "$VIA" 2>&1 \
+bcx vera revoke create --node 1073741823 --replace --last-good tip --since $(( $(date +%s) - 3600 )) --via "$VIA" 2>&1 \
     | grep -E "revoked node" | sed 's/^/   vera: /'
 PUSH_VERA="$(bcx vera block push --via "$VIA" 2>&1)"
 printf '%s\n' "$PUSH_VERA" | sed 's/^/   vera: /'

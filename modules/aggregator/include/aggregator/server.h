@@ -57,9 +57,9 @@ public:
 
     static constexpr std::size_t kMailboxCap       = 1024;  // envelopes per recipient
     static constexpr std::size_t kRevocationsPerChainCap = 256;    // certificates per chain
-    static constexpr std::size_t kRevocationCertMaxBytes = 16384;  // path ≤ 32 nodes + block
+    static constexpr std::size_t kRevocationCertMaxBytes = 32768;  // path ≤ 32 nodes, their births, block
     static constexpr std::size_t kKeyPathsPerKeyCap      = 8;      // claims per signing key
-    static constexpr std::size_t kKeyPathMaxBytes        = 16384;  // path ≤ 32 nodes
+    static constexpr std::size_t kKeyPathMaxBytes        = 65536;  // path ≤ 32 nodes, births, key changes
 
     ~AggregatorServer();
 

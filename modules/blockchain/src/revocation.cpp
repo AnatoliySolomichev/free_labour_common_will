@@ -15,6 +15,7 @@ RevocationCertificate RevocationCert::build(const IStorage& storage,
 
     for (NodeIndex idx : path_indices(revocation_block.node_index))
         cert.path.push_back(storage.get_node(revocation_block.user_id, idx));
+    cert.births = births_of(storage, revocation_block.user_id, revocation_block.node_index);
     return cert;
 }
 
@@ -28,7 +29,7 @@ void RevocationCert::verify(const RevocationCertificate& cert) {
         throw RevocationError("certificate: not a REVOCATION block");
     // Node path: links check is shared with the key-path certificate
     // (blockchain.md §7.5); here it additionally names the chain.
-    const UserId chain = verify_node_path(cert.path);
+    const UserId chain = verify_node_path(cert.path, cert.births);
     if (chain != cert.block.address.user_id)
         throw RevocationError("certificate: root key does not match the block's chain");
 

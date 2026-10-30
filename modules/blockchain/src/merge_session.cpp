@@ -17,6 +17,7 @@ BranchTipInfo MergeSession::prepare_tip(const UserId& user_id,
 
     for (NodeIndex idx : path_indices(leaf_index))
         info.path.push_back(storage_.get_node(user_id, idx));
+    info.births = births_of(storage_, user_id, leaf_index);
 
     auto tip_opt = storage_.branch_tip_index(user_id, leaf_index);
     if (!tip_opt.has_value()) {
@@ -40,7 +41,7 @@ void MergeSession::verify_partner_tip(const BranchTipInfo& partner_tip) const {
     // подписаны ключом родителя. Отсюда и право доверять сохранённым узлам:
     // в хранилище попадают только проверенные пути.
     try {
-        verify_node_path(partner_tip.path);
+        verify_node_path(partner_tip.path, partner_tip.births);
     } catch (const ChainIntegrityError& e) {
         throw ChainIntegrityError(std::string("partner path: ") + e.what());
     } catch (const SignatureError& e) {
@@ -201,6 +202,10 @@ void MergeSession::import_partner_data(const BranchTipInfo& partner_tip) {
         if (!storage_.has_node(partner_id, node.index))
             storage_.put_node(partner_id, node);
     }
+
+    for (const Block& birth : partner_tip.births)
+        if (!storage_.has_block(birth.address) && !storage_.has_external_block(birth.address))
+            storage_.put_external_block(birth);
 
     if (partner_tip.tip_block.has_value()) {
         const Block& block = *partner_tip.tip_block;

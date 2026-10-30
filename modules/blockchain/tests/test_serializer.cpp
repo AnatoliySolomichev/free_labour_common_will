@@ -31,7 +31,6 @@ static Node make_node(NodeIndex idx, uint8_t fill = 0xAB) {
     n.working_pubkey     = make_pubkey(static_cast<uint8_t>(fill + 1));
     n.parent_hash        = make_hash(fill);
     n.parent_sig         = make_sig(fill);
-    n.created_at         = 1'700'000'000LL;
     return n;
 }
 
@@ -111,12 +110,21 @@ TEST(Serializer, NodeRoundTripLargeIndex) {
     EXPECT_EQ(n, Serializer::decode_node(enc.data(), enc.size()));
 }
 
-TEST(Serializer, NodeNegativeTimestamp) {
+TEST(Serializer, NodeNamesItsBirth) {
     Node n       = make_node(1);
-    n.created_at = -1LL;  // before Unix epoch — unusual but valid
+    n.birth      = BirthRef{7, make_hash(0x42)};
     auto enc     = Serializer::encode(n);
     Node decoded = Serializer::decode_node(enc.data(), enc.size());
-    EXPECT_EQ(decoded.created_at, -1LL);
+    EXPECT_EQ(decoded.birth, n.birth);
+}
+
+TEST(Serializer, BirthPayloadRoundTrip) {
+    const BirthPayload p{3, make_pubkey(0x11), make_pubkey(0x22)};
+    const auto enc = Serializer::encode(p);
+    const BirthPayload d = Serializer::decode_birth_payload(enc.data(), enc.size());
+    EXPECT_EQ(d.child_index, 3u);
+    EXPECT_EQ(d.structural_pubkey, p.structural_pubkey);
+    EXPECT_EQ(d.working_pubkey, p.working_pubkey);
 }
 
 TEST(Serializer, NodeDeterministic) {

@@ -1,6 +1,6 @@
 # API модуля блокчейна
 
-**Статус:** черновик v0.2  
+**Статус:** черновик v0.3  
 **Основание:** [docs/blockchain.md](blockchain.md)  
 **Язык реализации:** C++17  
 **Внешние зависимости:** libsodium, LMDB (CBOR реализован вручную, без внешней библиотеки)
@@ -105,6 +105,7 @@ enum class BlockType : uint8_t {
     MERGE,         // блок слияния двух веток (blockchain.md §6.4)
     KEY_ROTATION,  // ротация рабочего ключа (blockchain.md §6.6)
     REVOCATION,    // отзыв скомпрометированного узла (blockchain.md §6.7)
+    BIRTH,         // рождение узла в ветке родителя (blockchain.md §11.2)
 };
 
 } // namespace blockchain
@@ -149,7 +150,7 @@ struct Node {
 
     Hash       parent_hash;         // хеш родительского узла (Hash::zero() для корня)
     Signature  parent_sig;          // подпись родительским ключом (самоподпись для корня)
-    Timestamp  created_at;          // UTC, секунды
+    BirthRef   birth;               // блок рождения в ветке родителя: номер и хеш (нули у корня)
 
     // Вычисляемые свойства (не хранятся отдельно)
     uint32_t  depth()             const noexcept;  // ⌊log₂(index + 1)⌋
@@ -595,7 +596,8 @@ public:
     std::vector<Node> ensure_path(
         const UserId&                          user_id,
         NodeIndex                              leaf_index,
-        std::function<KeyPair(NodeIndex)>      key_for
+        std::function<KeyPair(NodeIndex)>      key_for,
+        Timestamp                              timestamp = 0   // время блоков рождения
     );
 
     // Получить узел. Бросает: NodeNotFoundError
@@ -772,5 +774,6 @@ session_alice.check_partner_half(answer, after_half, tip_bob, now(), merged);
 
 ## 17. История изменений
 
+- **v0.3** — рождение узла блоком (2026-10-30, `blockchain.md §11.2`): `BlockType::BIRTH`, `BirthRef`, `BirthPayload`; `Node::created_at` убран; `KeyPath`, `RevocationCertificate`, `BranchTipInfo` несут `births`.
 - **v0.2** — подпись партнёра в слиянии стала блоком (2026-10-30, `blockchain.md §6.4`): `MergeSession` переписан под `write_half` и `check_partner_half`; убраны `Block::co_signature`, `Seal`, `SealMode`, `SealManager`, таблица `seals`, `validate_seal`, `validate_co_signature`. Разделы 5.8 и 11 закрыты, их номера не переиспользуются.
 - **v0.1** — первая версия API. Покрывает MVP-операции: идентичность, дерево узлов, ветки, слияние, ротация ключа, отзыв, валидация, пломбы.

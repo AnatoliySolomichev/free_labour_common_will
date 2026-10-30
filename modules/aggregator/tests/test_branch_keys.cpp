@@ -639,3 +639,50 @@ TEST(BranchKeys, AnAnswerOnTheOwnersLineStands) {
     }
     std::filesystem::remove_all(db);
 }
+
+// ── Рождение узла блоком в ветке родителя (blockchain.md §11.2) ──────────────
+
+// Подложный потомок: вор с ключом родителя рождает узел, ставит раннюю дату, но
+// блок рождения лежит за линией хозяина. Отзыв режет его по месту, дата не спасает.
+TEST(BranchKeys, AFakeChildDiesWithItsBirth) {
+    Chain a("birth_fake");
+    const NodeIndex parent = (kLeaf - 1) / 2;
+    const NodeIndex child  = kLeaf + 1;                  // второе место у родителя
+    const Block     last   = a.storage->get_block({a.uid, parent, 0});
+    KeyPair kc = Crypto::generate_keypair();
+    a.bc->ensure_path(a.uid, child,
+                      [&](NodeIndex i) { return i == child ? kc : a.keys.at(i); }, 5);
+    const Block fake = a.bc->append_data_block(a.uid, child, {0x80}, kc, ++a.now);
+
+    BranchKeys keys;
+    keys.learn_path(KeyPathCert::build(*a.storage, a.uid, child));
+    EXPECT_EQ(keys.check(fake), BranchKeys::Verdict::signed_by_branch);
+
+    const NodeIndex grand = (parent - 1) / 2;
+    const Block     rev   = a.bc->revoke_node(a.uid, parent, 1, Crypto::generate_keypair().pub,
+                                              grand, a.keys.at(grand), ++a.now,
+                                              Crypto::hash_block(last));
+    keys.learn_revocation(RevocationCert::build(*a.storage, rev.address));
+    EXPECT_EQ(keys.check(fake), BranchKeys::Verdict::revoked_key);
+    // Настоящий потомок на линии хозяина стоит.
+    const Block real = a.write(a.keys.at(kLeaf));
+    keys.learn_path(a.path());
+    EXPECT_EQ(keys.check(real), BranchKeys::Verdict::signed_by_branch);
+}
+
+// Ветка не старше своего рождения; путь без блоков рождения не проверяется.
+TEST(BranchKeys, ABranchIsNotOlderThanItsBirth) {
+    Chain   a("birth_time");
+    KeyPath kp = a.path();
+    BranchKeys keys;
+    Block   b{};
+    b.address = {a.uid, kLeaf, 0};
+    b.prev_hash = Crypto::hash_node(kp.path.back());
+    b.timestamp_claimed = -1;
+    b.type = BlockType::DATA;
+    b.payload = {0x80};
+    keys.learn_path(kp);
+    EXPECT_EQ(keys.check(resigned(b, a.keys.at(kLeaf))), BranchKeys::Verdict::before_birth);
+    kp.births.pop_back();
+    EXPECT_THROW(KeyPathCert::verify(kp), ChainIntegrityError);
+}

@@ -1,3 +1,4 @@
+#include "blockchain/key_path.h"
 #include "blockchain/validator.h"
 #include "blockchain/crypto.h"
 #include "blockchain/serializer.h"
@@ -36,6 +37,9 @@ void Validator::validate_node(const Node& node, const UserId& user_id) const {
             throw ChainIntegrityError("node parent_hash does not match stored parent");
         if (!Crypto::verify(bytes.data(), bytes.size(), node.parent_sig, parent.working_pubkey))
             throw SignatureError("node signature by parent key is invalid");
+        const BlockAddress at{user_id, parent_idx, node.birth.index};
+        check_birth(storage_.has_block(at) ? storage_.get_block(at) : storage_.get_external_block(at),
+                    node, parent, user_id);
     }
 }
 
@@ -68,6 +72,14 @@ void Validator::validate_branch(const UserId& user_id, NodeIndex leaf_index) con
     // Signatures follow the key epochs: the lineage, then each replacement from
     // its first use (blockchain.md §6.7 rules 3/9) — the walk attributes every
     // block or throws SignatureError.
+    if (leaf_index != 0) {
+        // No branch is older than its birth (blockchain.md §11.2).
+        const BlockAddress at{user_id, (leaf_index - 1) / 2, leaf.birth.index};
+        const Block birth = storage_.has_block(at) ? storage_.get_block(at)
+                                                   : storage_.get_external_block(at);
+        if (storage_.get_block({user_id, leaf_index, 0}).timestamp_claimed < birth.timestamp_claimed)
+            throw TimestampError("branch begins before its birth (blockchain.md §11.2)");
+    }
     const auto st = branch_revocation_status(user_id, leaf_index);
 
     // First block references the hash of the leaf node.
@@ -242,18 +254,38 @@ BranchRevocationStatus Validator::branch_revocation_status(
     return out;
 }
 
+bool Validator::birth_stands(const Block& birth, const RevocationState& st) const {
+    if (!st.last_good.has_value()) return birth.timestamp_claimed <= st.compromised_since;
+    const LastGood& line = *st.last_good;
+    if (birth.address.block_index > line.index) return false;
+    const Hash mine = Crypto::hash_block(birth);
+    if (birth.address.block_index == line.index) return mine == line.hash;
+    // Along the owner's line, as far as its blocks are here; past that, by the number.
+    Hash at = line.hash;
+    for (BlockIndex i = line.index; i > birth.address.block_index; --i) {
+        const BlockAddress step{birth.address.user_id, birth.address.node_index, i};
+        Block b;
+        if      (storage_.has_block(step))          b = storage_.get_block(step);
+        else if (storage_.has_external_block(step)) b = storage_.get_external_block(step);
+        else return true;
+        if (Crypto::hash_block(b) != at) return true;   // not the line's block: nothing to walk
+        at = b.prev_hash;
+    }
+    return at == mine;
+}
+
 bool Validator::node_invalidated_by_revocation(
     const UserId& user_id, NodeIndex node_index) const {
     auto indices = path_indices(node_index); // root → node
     for (size_t k = 1; k < indices.size(); ++k) {
         const NodeIndex parent = indices[k - 1];
-        const NodeIndex child  = indices[k];
         auto st = effective_revocation(user_id, parent);
         if (!st.has_value()) continue;
-        Node c = storage_.get_node(user_id, child);
-        // created_at is author-claimed; anti-backdating of node creation is the
-        // witnessing-based finalization (blockchain.md §11.2).
-        if (c.created_at > st->compromised_since) return true;
+        const Node         c = storage_.get_node(user_id, indices[k]);
+        const BlockAddress at{user_id, parent, c.birth.index};
+        if (!birth_stands(storage_.has_block(at) ? storage_.get_block(at)
+                                                 : storage_.get_external_block(at), *st))
+            return true;
     }
     return false;
 }
@@ -411,7 +443,7 @@ void Validator::check_tip_against_revocations(const BranchTipInfo& tip) const {
     // itself — the partner's tree need not be in storage.
     for (size_t k = 1; k < tip.path.size(); ++k) {
         auto st = effective_revocation(chain, tip.path[k - 1].index);
-        if (st.has_value() && tip.path[k].created_at > st->compromised_since)
+        if (st.has_value() && k - 1 < tip.births.size() && !birth_stands(tip.births[k - 1], *st))
             throw RevocationError(
                 "partner path node was created under a revoked key (blockchain.md §6.7 rule 6)");
     }

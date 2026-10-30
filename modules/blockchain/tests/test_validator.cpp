@@ -10,13 +10,12 @@ using namespace blockchain;
 
 // ── Signing helpers (mirror the production logic) ─────────────────────────────
 
-static Node make_signed_root(const KeyPair& kp, Timestamp ts = 1'000'000LL) {
+static Node make_signed_root(const KeyPair& kp) {
     Node n{};
     n.index             = 0;
     n.structural_pubkey = kp.pub;
     n.working_pubkey    = kp.pub;
     n.parent_hash       = Hash::zero();
-    n.created_at        = ts;
     n.parent_sig        = Signature::null();
     auto b              = Serializer::encode(n);
     n.parent_sig        = Crypto::sign(b.data(), b.size(), kp.sec);
@@ -25,13 +24,25 @@ static Node make_signed_root(const KeyPair& kp, Timestamp ts = 1'000'000LL) {
 
 static Node make_signed_child(NodeIndex idx, const KeyPair& kp,
                                const Node& parent, const KeyPair& parent_kp,
-                               Timestamp ts = 1'000'001LL) {
+                               IStorage* storage = nullptr, const UserId& chain = UserId{}) {
     Node n{};
     n.index             = idx;
     n.structural_pubkey = kp.pub;
     n.working_pubkey    = kp.pub;
     n.parent_hash       = Crypto::hash_node(parent);
-    n.created_at        = ts;
+    if (storage) {   // its birth, the first block of the parent's branch
+        Block bb{};
+        bb.address           = {chain, parent.index, 0};
+        bb.prev_hash         = Crypto::hash_node(parent);
+        bb.timestamp_claimed = 0;
+        bb.type              = BlockType::BIRTH;
+        bb.payload           = Serializer::encode(BirthPayload{idx, kp.pub, kp.pub});
+        bb.signature         = Signature::null();
+        auto bytes           = Serializer::encode(bb);
+        bb.signature         = Crypto::sign(bytes.data(), bytes.size(), parent_kp.sec);
+        storage->put_block(bb);
+        n.birth = BirthRef{0, Crypto::hash_block(bb)};
+    }
     n.parent_sig        = Signature::null();
     auto b              = Serializer::encode(n);
     n.parent_sig        = Crypto::sign(b.data(), b.size(), parent_kp.sec);
@@ -80,8 +91,8 @@ protected:
         child3_kp_ = Crypto::generate_keypair();
 
         root_   = make_signed_root(root_kp_);
-        child1_ = make_signed_child(1, child1_kp_, root_,   root_kp_);
-        child3_ = make_signed_child(3, child3_kp_, child1_, child1_kp_);
+        child1_ = make_signed_child(1, child1_kp_, root_,   root_kp_,   storage_.get(), root_kp_.pub);
+        child3_ = make_signed_child(3, child3_kp_, child1_, child1_kp_, storage_.get(), root_kp_.pub);
 
         storage_->put_node(root_kp_.pub, root_);
         storage_->put_node(root_kp_.pub, child1_);

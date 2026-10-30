@@ -68,6 +68,7 @@ enum class BlockType : uint8_t {
     MERGE,
     KEY_ROTATION,
     REVOCATION,
+    BIRTH,        // a node is born: in its parent's branch (blockchain.md §11.2)
 };
 
 // ── Free tree utilities ───────────────────────────────────────────────────────
@@ -136,13 +137,23 @@ struct ExternalRef {
 
 // ── Node ──────────────────────────────────────────────────────────────────────
 
+// Where a node was born (blockchain.md §11.2): its BIRTH block in the parent's
+// branch. Zero for the root, which has no parent.
+struct BirthRef {
+    BlockIndex index = 0;
+    Hash       hash{};
+    bool operator==(const BirthRef& o) const noexcept {
+        return index == o.index && hash == o.hash;
+    }
+};
+
 struct Node {
     NodeIndex  index;
     PublicKey  structural_pubkey;   // in MVP same as working_pubkey
     PublicKey  working_pubkey;
     Hash       parent_hash;         // Hash::zero() for root
     Signature  parent_sig;          // self-signed for root
-    Timestamp  created_at;
+    BirthRef   birth;
 
     uint32_t  depth()             const noexcept { return node_depth(index); }
     bool      is_root()           const noexcept { return index == 0; }
@@ -158,7 +169,7 @@ struct Node {
             && working_pubkey    == o.working_pubkey
             && parent_hash       == o.parent_hash
             && parent_sig        == o.parent_sig
-            && created_at        == o.created_at;
+            && birth             == o.birth;
     }
 };
 
@@ -184,6 +195,13 @@ struct MergePayload {
     Hash         merkle_root;      // hierarchical Merkle root over the participant set
     Hash         hll_hash;         // BLAKE2b of the HLL register array (unique-count commitment)
     uint32_t     validated_depth;  // self-declared full-validation depth (blockchain.md §6.5.5)
+};
+
+// A node's birth (blockchain.md §11.2): who is born and with which keys.
+struct BirthPayload {
+    NodeIndex child_index;
+    PublicKey structural_pubkey;
+    PublicKey working_pubkey;
 };
 
 struct KeyRotationPayload {
@@ -224,6 +242,7 @@ struct BranchTipInfo {
     Hash                 tip_hash;     // hash of last block, or hash of leaf node if empty
     std::vector<Node>    path;         // nodes from root to leaf (inclusive)
     std::optional<Block> tip_block;    // last block; nullopt when branch is empty
+    std::vector<Block>   births;       // BIRTH block of each path node but the root
 };
 
 } // namespace blockchain

@@ -20,6 +20,8 @@ public:
     static std::vector<uint8_t> encode(const Node& node);
     static std::vector<uint8_t> encode(const Block& block);
     static std::vector<uint8_t> encode(const BranchTipInfo& tip);
+    static std::vector<uint8_t> encode(const BirthPayload& payload);
+    static BirthPayload decode_birth_payload(const uint8_t* data, size_t len);
     static std::vector<uint8_t> encode(const MergePayload& payload);
     static std::vector<uint8_t> encode(const ExternalRef& ref);
     static std::vector<uint8_t> encode(const MergeSnapshot& snapshot);

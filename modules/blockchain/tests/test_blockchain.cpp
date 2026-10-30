@@ -120,7 +120,8 @@ TEST_F(BlockchainTest, BranchOnIntermediateNode) {
     bc_->ensure_path(root_kp_.pub, 11, key_for);
     bc_->append_data_block(root_kp_.pub, 11, {0xBB}, keys.at(11), 1'001LL);
 
-    EXPECT_EQ(bc_->get_branch(root_kp_.pub, 5).size(), 1u);
+    // Its own block and the birth of 11 (blockchain.md §11.2).
+    EXPECT_EQ(bc_->get_branch(root_kp_.pub, 5).size(), 2u);
     EXPECT_EQ(bc_->get_branch(root_kp_.pub, 11).size(), 1u);
 }
 
@@ -620,28 +621,15 @@ TEST_F(RevocationTest, ReplacedAuthorRevokesWithNewKey) {
 }
 
 TEST_F(RevocationTest, NodeInvalidatedByRevocation) {
-    // Children of 7: 15 (created after the compromise moment) and 16 (before).
-    auto make_node = [&](NodeIndex idx, Timestamp created_at,
-                         const Node& parent, const KeyPair& parent_kp) {
-        KeyPair kp = Crypto::generate_keypair();
-        Node n{};
-        n.index             = idx;
-        n.structural_pubkey = kp.pub;
-        n.working_pubkey    = kp.pub;
-        n.parent_hash       = Crypto::hash_node(parent);
-        n.created_at        = created_at;
-        n.parent_sig        = Signature::null();
-        auto bytes          = Serializer::encode(n);
-        n.parent_sig        = Crypto::sign(bytes.data(), bytes.size(), parent_kp.sec);
-        storage_->put_node(root_kp_.pub, n);
-        return kp;
-    };
-    Node node7 = bc_->get_node(root_kp_.pub, 7);
-    KeyPair kp15 = make_node(15, 9'000LL, node7, kp7_);
-    make_node(16, 1'000LL, node7, kp7_);
-    // Grandchild under the poisoned edge: "created before" — still invalid.
-    Node node15 = bc_->get_node(root_kp_.pub, 15);
-    make_node(31, 100LL, node15, kp15);
+    // Children of 7: 16 (born before the compromise moment) and 15 (after).
+    std::map<NodeIndex, KeyPair> kids{{7, kp7_}, {15, Crypto::generate_keypair()},
+                                      {16, Crypto::generate_keypair()},
+                                      {31, Crypto::generate_keypair()}};
+    const auto key = [&](NodeIndex i) { return kids.at(i); };
+    bc_->ensure_path(root_kp_.pub, 16, key, 1'000LL);
+    bc_->ensure_path(root_kp_.pub, 15, key, 9'000LL);
+    // Grandchild under the poisoned edge: an early date saves nothing.
+    bc_->ensure_path(root_kp_.pub, 31, key, 100LL);
 
     bc_->revoke_node(root_kp_.pub, 7, 5'000LL, std::nullopt, 3, kp3_, 6'000LL);
 
@@ -695,7 +683,7 @@ TEST_F(RevocationTest, CertificateSurvivesSerialization) {
 TEST_F(RevocationTest, CertificateTamperedNodeRejected) {
     Block b = bc_->revoke_node(root_kp_.pub, 7, 1'000LL, std::nullopt, 3, kp3_, 2'000LL);
     auto cert = RevocationCert::build(*storage_, b.address);
-    cert.path[1].created_at += 1; // breaks node 1's own parent signature
+    cert.path[1].birth.index += 1; // breaks node 1's own parent signature
     EXPECT_THROW(RevocationCert::verify(cert), SignatureError);
 }
 
@@ -734,6 +722,7 @@ TEST_F(RevocationTest, CertificateNonAncestorRejected) {
     Block b = craft_revocation(4, kp4, rp, 2'000LL);
 
     RevocationCertificate cert{};
+    cert.births = births_of(*storage_, root_kp_.pub, 4);
     cert.block = b;
     for (NodeIndex idx : path_indices(4))
         cert.path.push_back(storage_->get_node(root_kp_.pub, idx));
@@ -881,19 +870,10 @@ TEST_F(RevocationTest, TipCheckSilentWithoutLocalKnowledge) {
 
 TEST_F(RevocationTest, TipCheckRefusesFakeSubtreeNode) {
     ForeignChain f("fake");
-    // Node 15 under 7, "created" after the compromise moment (blockchain.md §6.7 rule 6).
+    // Node 15 under 7, born after the compromise moment (blockchain.md §6.7 rule 6).
     KeyPair kp15 = Crypto::generate_keypair();
-    Node n7 = f.bc->get_node(f.uid(), 7);
-    Node n{};
-    n.index             = 15;
-    n.structural_pubkey = kp15.pub;
-    n.working_pubkey    = kp15.pub;
-    n.parent_hash       = Crypto::hash_node(n7);
-    n.created_at        = 9'000LL;
-    n.parent_sig        = Signature::null();
-    auto nb = Serializer::encode(n);
-    n.parent_sig = Crypto::sign(nb.data(), nb.size(), f.kp7.sec);
-    f.storage->put_node(f.uid(), n);
+    f.bc->ensure_path(f.uid(), 15,
+                      [&](NodeIndex i) { return i == 15 ? kp15 : f.kp7; }, 9'000LL);
     f.bc->append_data_block(f.uid(), 15, {0x01}, kp15, 9'500LL);
 
     Block rev = f.bc->revoke_node(f.uid(), 7, 5'000LL, std::nullopt, 3, f.kp3, 9'600LL);
@@ -1140,4 +1120,29 @@ TEST_F(RevocationTest, ThreeTheftsInARow) {
     ASSERT_EQ(st.blocks.size(), 5u);
     for (auto s : st.blocks) EXPECT_EQ(s, BlockRevocationStatus::CLEAN);
     EXPECT_NO_THROW(bc_->validate_branch(root_kp_.pub, 7));
+}
+
+// Потомков рождают по одному и в любом месте ветки родителя; второго можно позже
+// (blockchain.md §11.2). Блок рождения подписан родителем и называет ключи потомка.
+TEST_F(BlockchainTest, ChildrenAreBornOneByOneAnywhereInTheBranch) {
+    std::map<NodeIndex, KeyPair> keys{{0, root_kp_}};
+    const auto key_for = [&](NodeIndex i) {
+        auto it = keys.find(i);
+        if (it == keys.end()) it = keys.emplace(i, Crypto::generate_keypair()).first;
+        return it->second;
+    };
+    bc_->ensure_path(root_kp_.pub, 1, key_for, 100LL);
+    bc_->append_data_block(root_kp_.pub, 0, {0x80}, root_kp_, 200LL);
+    bc_->ensure_path(root_kp_.pub, 2, key_for, 300LL);
+
+    const Node n1 = storage_->get_node(root_kp_.pub, 1);
+    const Node n2 = storage_->get_node(root_kp_.pub, 2);
+    EXPECT_EQ(n1.birth.index, 0u);
+    EXPECT_EQ(n2.birth.index, 2u);
+    EXPECT_NO_THROW(validator_->validate_path(root_kp_.pub, 2));
+    EXPECT_NO_THROW(validator_->validate_branch(root_kp_.pub, 0));
+
+    // Ветка не старше рождения.
+    bc_->append_data_block(root_kp_.pub, 2, {0x80}, keys.at(2), 299LL);
+    EXPECT_THROW(validator_->validate_branch(root_kp_.pub, 2), TimestampError);
 }

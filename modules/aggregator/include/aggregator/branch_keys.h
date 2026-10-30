@@ -44,7 +44,9 @@ public:
         signed_by_branch,   // one of the branch's keys signed it
         unknown_branch,     // no key path of this branch has come yet
         foreign_signature,  // none of the branch's keys signed it
-        revoked_key,        // a revoked key signed it past its compromise and the owner's line
+        revoked_key,        // a revoked key signed it past its compromise and the owner's line,
+                            // or its node's birth lies outside the owner's line (blockchain.md §11.2)
+        before_birth,       // the branch's first block is dated before the node's birth
     };
 
     // Everything the storage already holds: key paths, key changes, revocations —
@@ -115,6 +117,10 @@ private:
     // revoked, or the block is before the compromise, or on the owner's line.
     static bool admits(const std::vector<Record>& records,
                        const std::vector<PublicKey>& epoch, const Block& b);
+
+    // Whether every birth on the branch's path stands: each one is its parent's
+    // block, and a revocation of the parent cuts it like any other (blockchain.md §11.2).
+    bool born(const Branch& br, const AggregatorStorage* storage, int depth) const;
 
     // whose(), under mu_: `own` — the branch's own line when its path has not
     // come (an author known only from a certificate).

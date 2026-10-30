@@ -258,7 +258,7 @@ TEST_F(RelayTest, RevocationWarehouseStoresDedupesAndLists) {
 
     // Oversized certificate is rejected.
     auto big = cli.Post("/revocations/" + chain,
-                        std::string(20000, 'x'), "application/cbor");
+                        std::string(40000, 'x'), "application/cbor");
     ASSERT_TRUE(big);
     EXPECT_EQ(big->status, 400);
 }

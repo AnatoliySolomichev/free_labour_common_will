@@ -135,7 +135,14 @@ BranchKeys::Verdict BranchKeys::check(const Block& b, const AggregatorStorage* s
         const auto br  = branches_.find(k);
         const auto rev = revocations_.find(k);
         if (br == branches_.end() && rev == revocations_.end()) return Verdict::unknown_branch;
-        if (br != branches_.end()) epochs.push_back(br->second.own);
+        if (br != branches_.end()) {
+            const auto& births = br->second.path.births;
+            if (b.address.block_index == 0 && !births.empty() &&
+                b.timestamp_claimed < births.back().timestamp_claimed)
+                return Verdict::before_birth;
+            if (!born(br->second, storage, 0)) return Verdict::revoked_key;
+            epochs.push_back(br->second.own);
+        }
         if (rev != revocations_.end()) {
             records = counting(k.first, rev->second, storage, 0);
             for (const auto& line : rev->second.lines)
@@ -197,6 +204,17 @@ std::vector<BranchKeys::Record> BranchKeys::counting(const UserId& chain, const 
     return out;
 }
 
+bool BranchKeys::born(const Branch& br, const AggregatorStorage* storage, int depth) const {
+    const auto& path = br.path.path;
+    for (std::size_t k = 0; k < br.path.births.size() && k + 1 < path.size(); ++k) {
+        const Block& birth = br.path.births[k];
+        if (!revocations_.count({birth.address.user_id, path[k].index})) continue;
+        const std::vector<PublicKey> own{path[k].working_pubkey};
+        if (whose_locked(birth, &own, storage, depth + 1) == Whose::not_owner) return false;
+    }
+    return true;
+}
+
 BranchKeys::Whose BranchKeys::whose_locked(const Block& b, const std::vector<PublicKey>* own,
                                            const AggregatorStorage* storage, int depth) const {
     if (depth > 64) return Whose::unknown;                   // deeper than any tree
@@ -204,6 +222,8 @@ BranchKeys::Whose BranchKeys::whose_locked(const Block& b, const std::vector<Pub
     const auto br  = branches_.find(k);
     const auto rev = revocations_.find(k);
     if (br == branches_.end() && rev == revocations_.end() && !own) return Whose::unknown;
+    // `own` marks a check of a birth or a record: the path is being walked already.
+    if (!own && br != branches_.end() && !born(br->second, storage, depth)) return Whose::not_owner;
     std::vector<Record> records;
     if (rev != revocations_.end()) records = counting(k.first, rev->second, storage, depth);
     // The epochs: the own line, then each replacement a counting record named.

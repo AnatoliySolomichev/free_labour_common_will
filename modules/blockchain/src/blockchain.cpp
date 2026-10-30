@@ -10,13 +10,13 @@ namespace {
 // Build a signed node. parent_sec signs the canonical CBOR (with parent_sig zeroed).
 Node build_signed_node(NodeIndex idx, const KeyPair& kp,
                        const Hash& parent_hash, const SecretKey& parent_sec,
-                       Timestamp created_at) {
+                       const BirthRef& birth) {
     Node n{};
     n.index              = idx;
     n.structural_pubkey  = kp.pub;
     n.working_pubkey     = kp.pub; // MVP: structural == working
     n.parent_hash        = parent_hash;
-    n.created_at         = created_at;
+    n.birth              = birth;
     n.parent_sig         = Signature::null();
     auto bytes           = Serializer::encode(n);
     n.parent_sig         = Crypto::sign(bytes.data(), bytes.size(), parent_sec);
@@ -52,7 +52,7 @@ Node Blockchain::create_identity(const KeyPair& root_keypair) {
     if (storage_.has_node(uid, 0))
         throw InvalidArgumentError("identity already exists for this key");
     // Root: parent_hash = zero, self-signed (parent_sec = own sec).
-    Node n = build_signed_node(0, root_keypair, Hash::zero(), root_keypair.sec, 0);
+    Node n = build_signed_node(0, root_keypair, Hash::zero(), root_keypair.sec, BirthRef{});
     storage_.put_node(uid, n);
     return n;
 }
@@ -62,7 +62,8 @@ Node Blockchain::create_identity(const KeyPair& root_keypair) {
 std::vector<Node> Blockchain::ensure_path(
     const UserId&                     user_id,
     NodeIndex                         leaf_index,
-    std::function<KeyPair(NodeIndex)> key_for)
+    std::function<KeyPair(NodeIndex)> key_for,
+    Timestamp                         timestamp)
 {
     // Branches may grow from any node of the tree (blockchain.md §3.2 v0.7);
     // only the heap index itself must be valid (depth ≤ 31).
@@ -83,7 +84,21 @@ std::vector<Node> Blockchain::ensure_path(
         Hash ph            = Crypto::hash_node(parent);
         KeyPair parent_kp  = key_for(par_idx);
 
-        Node n = build_signed_node(idx, kp, ph, parent_kp.sec, 0);
+        // Born by a block in the parent's branch (blockchain.md §11.2), wherever
+        // that branch stands now; time there only goes forward (blockchain.md §9.4).
+        ensure_branch_writable(user_id, par_idx, parent_kp.pub);
+        const auto tip_opt = storage_.branch_tip_index(user_id, par_idx);
+        const BlockIndex at = tip_opt.has_value() ? (*tip_opt + 1) : 0;
+        Timestamp born = timestamp;
+        if (tip_opt.has_value())
+            born = std::max(born, storage_.get_block({user_id, par_idx, *tip_opt}).timestamp_claimed);
+        const Block birth = build_signed_block(
+            {user_id, par_idx, at}, branch_tip_hash(user_id, par_idx), born, BlockType::BIRTH,
+            Serializer::encode(BirthPayload{idx, kp.pub, kp.pub}), parent_kp.sec);
+        storage_.put_block(birth);
+
+        Node n = build_signed_node(idx, kp, ph, parent_kp.sec,
+                                   BirthRef{at, Crypto::hash_block(birth)});
         storage_.put_node(user_id, n);
         created.push_back(n);
     }

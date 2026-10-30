@@ -18,6 +18,8 @@ struct KeyPath {
     // заканчивается первоначальным ключом узла, и подпись ветки, сменившей
     // ключ, к цепи не привести (ограничение снято 2026-10-10).
     std::vector<Block> rotations;
+    // Блоки рождения всех узлов пути, кроме корня (blockchain.md §11.2).
+    std::vector<Block> births;
 };
 
 // Shared link check for node paths (KeyPathCert and RevocationCert):
@@ -25,7 +27,17 @@ struct KeyPath {
 // node is a child of the previous one, parent_hash and parent signatures link
 // up. Returns the chain identity (root structural key).
 // Throws: SignatureError, ChainIntegrityError.
-UserId verify_node_path(const std::vector<Node>& path);
+// Every node but the root comes with its BIRTH block (blockchain.md §11.2).
+UserId verify_node_path(const std::vector<Node>& path, const std::vector<Block>& births);
+
+// `birth` is the block `child` names: in the parent's branch, signed by the
+// parent's key, naming this child and its keys.
+// Throws: SignatureError, ChainIntegrityError, SerializationError.
+void check_birth(const Block& birth, const Node& child, const Node& parent, const UserId& chain);
+
+// The BIRTH blocks of the path to `node`, root's child first — own or imported.
+// Throws: NodeNotFoundError, BlockNotFoundError.
+std::vector<Block> births_of(const IStorage& storage, const UserId& chain, NodeIndex node);
 
 class KeyPathCert {
 public:

@@ -42,7 +42,7 @@ protected:
         n.working_pubkey    = make_uid(static_cast<uint8_t>(fill + 1));
         n.parent_hash       = make_hash(fill);
         n.parent_sig        = make_sig(fill);
-        n.created_at        = 1'700'000'000LL + idx;
+
         return n;
     }
 

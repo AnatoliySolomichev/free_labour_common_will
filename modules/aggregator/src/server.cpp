@@ -356,6 +356,11 @@ void AggregatorServer::setup_routes() {
                     res.set_content("{\"error\":\"not signed by its branch\"}",
                                     "application/json");
                     return;
+                case BranchKeys::Verdict::before_birth:
+                    res.status = 403;
+                    res.set_content("{\"error\":\"branch begins before its birth\"}",
+                                    "application/json");
+                    return;
                 case BranchKeys::Verdict::revoked_key:
                     res.status = 403;
                     res.set_content("{\"error\":\"signed by a revoked key past its compromise "
@@ -965,6 +970,7 @@ void AggregatorServer::setup_routes() {
                 if (!(KeyPathCert::signer_key(kp) == key))
                     throw ChainIntegrityError("path leads to another key");
                 keys_.learn_path(kp);
+                for (const Block& birth : kp.births) storage_.add_block(birth);
             } catch (const std::exception& e) {
                 res.status = 400;
                 res.set_content(std::string("{\"error\":\"key path does not check: ")
@@ -2625,6 +2631,7 @@ void AggregatorServer::sync_with_peer(const std::string& peer_url) {
                     static_cast<std::size_t>(len));
                 if (KeyPathCert::signer_key(kp) == key) {
                     keys_.learn_path(kp);                     // throws on a path that does not check
+                    for (const Block& birth : kp.births) storage_.add_block(birth);
                     if (storage_.put_keypath_bytes(
                             key, {body.begin() + pos, body.begin() + pos + len}))
                         ++gossiped;

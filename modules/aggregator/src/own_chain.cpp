@@ -58,7 +58,8 @@ struct OwnChain::Impl {
             bc.create_identity(keys.at(0));
         if (!storage.has_node(uid, kLeaf))
             bc.ensure_path(uid, kLeaf,
-                           [&](NodeIndex idx) { return keys.at(idx); });
+                           [&](NodeIndex idx) { return keys.at(idx); },
+                           static_cast<Timestamp>(std::time(nullptr)));
     }
 };
 

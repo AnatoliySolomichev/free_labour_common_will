@@ -88,7 +88,7 @@ void enc_node(Buf& out, const Node& n) {
     w_uint(out, 2); w_fixed(out, n.working_pubkey.bytes);
     w_uint(out, 3); w_fixed(out, n.parent_hash.bytes);
     w_uint(out, 4); w_fixed(out, n.parent_sig.bytes);
-    w_uint(out, 5); w_int64(out, n.created_at);
+    w_uint(out, 5); w_arr(out, 2); w_uint(out, n.birth.index); w_fixed(out, n.birth.hash.bytes);
 }
 
 void enc_block(Buf& out, const Block& b) {
@@ -134,25 +134,29 @@ void enc_revocation_payload(Buf& out, const RevocationPayload& rp) {
 }
 
 void enc_revocation_cert(Buf& out, const RevocationCertificate& c) {
-    w_map(out, 2);
+    w_map(out, 3);
     w_uint(out, 0); enc_block(out, c.block);
     w_uint(out, 1);
     w_arr(out, c.path.size());
     for (const auto& n : c.path) enc_node(out, n);
+    w_uint(out, 2);
+    w_arr(out, c.births.size());
+    for (const auto& b : c.births) enc_block(out, b);
 }
 
 void enc_key_path(Buf& out, const KeyPath& kp) {
     // Ключ 1 — звенья смены рабочего ключа (blockchain.md §6.6); без них путь
     // приводит к первоначальному ключу узла.
-    w_map(out, kp.rotations.empty() ? 1 : 2);
+    w_map(out, 3);
     w_uint(out, 0);
     w_arr(out, kp.path.size());
     for (const auto& n : kp.path) enc_node(out, n);
-    if (!kp.rotations.empty()) {
-        w_uint(out, 1);
-        w_arr(out, kp.rotations.size());
-        for (const auto& b : kp.rotations) enc_block(out, b);
-    }
+    w_uint(out, 1);
+    w_arr(out, kp.rotations.size());
+    for (const auto& b : kp.rotations) enc_block(out, b);
+    w_uint(out, 2);
+    w_arr(out, kp.births.size());
+    for (const auto& b : kp.births) enc_block(out, b);
 }
 
 void enc_merkle_proof(Buf& out, const MerkleTree::Proof& p) {
@@ -182,7 +186,7 @@ void enc_snapshot(Buf& out, const MergeSnapshot& s) {
 }
 
 void enc_tip(Buf& out, const BranchTipInfo& t) {
-    w_map(out, 4);
+    w_map(out, 5);
     w_uint(out, 0); enc_address(out, t.tip_address);
     w_uint(out, 1); w_fixed(out, t.tip_hash.bytes);
     w_uint(out, 2);
@@ -196,6 +200,9 @@ void enc_tip(Buf& out, const BranchTipInfo& t) {
     } else {
         w_bytes(out, nullptr, 0);
     }
+    w_uint(out, 4);
+    w_arr(out, t.births.size());
+    for (const auto& b : t.births) enc_block(out, b);
 }
 
 // ── CBOR reader ───────────────────────────────────────────────────────────────
@@ -336,7 +343,10 @@ Node dec_node(CborReader& r) {
     expect_key(r, 2); r.r_fixed(n.working_pubkey.bytes);
     expect_key(r, 3); r.r_fixed(n.parent_hash.bytes);
     expect_key(r, 4); r.r_fixed(n.parent_sig.bytes);
-    expect_key(r, 5); n.created_at = r.r_int();
+    expect_key(r, 5);
+    if (r.r_arr() != 2) throw SerializationError("Node: birth must be [index, hash]");
+    n.birth.index = r.r_uint();
+    r.r_fixed(n.birth.hash.bytes);
     return n;
 }
 
@@ -403,31 +413,35 @@ RevocationPayload dec_revocation_payload(CborReader& r) {
 }
 
 RevocationCertificate dec_revocation_cert(CborReader& r) {
-    if (r.r_map() != 2) throw SerializationError("RevocationCertificate: expected 2 fields");
+    if (r.r_map() != 3) throw SerializationError("RevocationCertificate: expected 3 fields");
     RevocationCertificate c{};
     expect_key(r, 0); c.block = dec_block(r);
     expect_key(r, 1);
     const uint64_t n = r.r_arr();
     c.path.reserve(static_cast<size_t>(n));
     for (uint64_t i = 0; i < n; ++i) c.path.push_back(dec_node(r));
+    expect_key(r, 2);
+    const uint64_t m = r.r_arr();
+    c.births.reserve(static_cast<size_t>(m));
+    for (uint64_t i = 0; i < m; ++i) c.births.push_back(dec_block(r));
     return c;
 }
 
 KeyPath dec_key_path(CborReader& r) {
-    const uint64_t fields = r.r_map();
-    if (fields < 1 || fields > 2)
-        throw SerializationError("KeyPath: expected 1..2 fields");
+    if (r.r_map() != 3) throw SerializationError("KeyPath: expected 3 fields");
     KeyPath kp{};
     expect_key(r, 0);
     const uint64_t n = r.r_arr();
     kp.path.reserve(static_cast<size_t>(n));
     for (uint64_t i = 0; i < n; ++i) kp.path.push_back(dec_node(r));
-    if (fields > 1) {
-        expect_key(r, 1);
-        const uint64_t m = r.r_arr();
-        kp.rotations.reserve(static_cast<size_t>(m));
-        for (uint64_t i = 0; i < m; ++i) kp.rotations.push_back(dec_block(r));
-    }
+    expect_key(r, 1);
+    const uint64_t m = r.r_arr();
+    kp.rotations.reserve(static_cast<size_t>(m));
+    for (uint64_t i = 0; i < m; ++i) kp.rotations.push_back(dec_block(r));
+    expect_key(r, 2);
+    const uint64_t b = r.r_arr();
+    kp.births.reserve(static_cast<size_t>(b));
+    for (uint64_t i = 0; i < b; ++i) kp.births.push_back(dec_block(r));
     return kp;
 }
 
@@ -470,7 +484,7 @@ MergeSnapshot dec_snapshot(CborReader& r) {
 }
 
 BranchTipInfo dec_tip(CborReader& r) {
-    if (r.r_map() != 4) throw SerializationError("BranchTipInfo: expected 4 fields");
+    if (r.r_map() != 5) throw SerializationError("BranchTipInfo: expected 5 fields");
     BranchTipInfo t{};
     expect_key(r, 0); t.tip_address = dec_address(r);
     expect_key(r, 1); r.r_fixed(t.tip_hash.bytes);
@@ -485,6 +499,10 @@ BranchTipInfo dec_tip(CborReader& r) {
         CborReader br(block_bytes.data(), block_bytes.size());
         t.tip_block = dec_block(br);
     }
+    expect_key(r, 4);
+    const uint64_t birth_count = r.r_arr();
+    t.births.reserve(static_cast<size_t>(birth_count));
+    for (uint64_t i = 0; i < birth_count; ++i) t.births.push_back(dec_block(r));
     return t;
 }
 
@@ -514,6 +532,25 @@ Block Serializer::decode_block(const uint8_t* data, size_t len) {
 
 BranchTipInfo Serializer::decode_tip(const uint8_t* data, size_t len) {
     CborReader r(data, len); return dec_tip(r);
+}
+
+std::vector<uint8_t> Serializer::encode(const BirthPayload& payload) {
+    Buf out;
+    w_arr(out, 3);
+    w_uint(out, payload.child_index);
+    w_fixed(out, payload.structural_pubkey.bytes);
+    w_fixed(out, payload.working_pubkey.bytes);
+    return out;
+}
+
+BirthPayload Serializer::decode_birth_payload(const uint8_t* data, size_t len) {
+    CborReader r(data, len);
+    if (r.r_arr() != 3) throw SerializationError("BirthPayload: expected 3 fields");
+    BirthPayload p{};
+    p.child_index = static_cast<NodeIndex>(r.r_uint());
+    r.r_fixed(p.structural_pubkey.bytes);
+    r.r_fixed(p.working_pubkey.bytes);
+    return p;
 }
 
 std::vector<uint8_t> Serializer::encode(const MergePayload& payload) {

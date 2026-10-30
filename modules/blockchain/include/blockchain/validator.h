@@ -114,10 +114,12 @@ public:
     BranchRevocationStatus branch_revocation_status(
         const UserId& user_id, NodeIndex node_index) const;
 
+    // Whether a birth stands under a revocation of the parent (rule 6): on the
+    // owner's line it names, or, with no line named, not after the compromise.
+    bool birth_stands(const Block& birth, const RevocationState& st) const;
+
     // blockchain.md §6.7 rule 6: true if any edge on the path root→node was created under a
-    // revoked parent key after its compromised_since. created_at is
-    // author-claimed — anti-backdating of node creation is the witnessing-based
-    // finalization (blockchain.md §11.2), out of scope here.
+    // revoked parent key: its birth lies past the owner's line or the compromise.
     // Throws: NodeNotFoundError.
     bool node_invalidated_by_revocation(
         const UserId& user_id, NodeIndex node_index) const;

@@ -8,7 +8,38 @@
 
 namespace blockchain {
 
-UserId verify_node_path(const std::vector<Node>& path) {
+namespace {
+bool signed_by(const Block& block, const PublicKey& key);
+}
+
+void check_birth(const Block& birth, const Node& child, const Node& parent, const UserId& chain) {
+    if (birth.type != BlockType::BIRTH)
+        throw ChainIntegrityError("node path: birth is not a BIRTH block");
+    if (!(birth.address.user_id == chain) || birth.address.node_index != parent.index ||
+        birth.address.block_index != child.birth.index ||
+        Crypto::hash_block(birth) != child.birth.hash)
+        throw ChainIntegrityError("node path: birth block is not the one the node names");
+    const BirthPayload p = Serializer::decode_birth_payload(birth.payload.data(), birth.payload.size());
+    if (p.child_index != child.index || !(p.structural_pubkey == child.structural_pubkey) ||
+        !(p.working_pubkey == child.working_pubkey))
+        throw ChainIntegrityError("node path: birth names another node");
+    if (!signed_by(birth, parent.working_pubkey))
+        throw SignatureError("node path: birth is not signed by the parent's key");
+}
+
+std::vector<Block> births_of(const IStorage& storage, const UserId& chain, NodeIndex node) {
+    std::vector<Block> out;
+    for (NodeIndex idx : path_indices(node)) {
+        if (idx == 0) continue;
+        const Node         n = storage.get_node(chain, idx);
+        const BlockAddress at{chain, (idx - 1) / 2, n.birth.index};
+        out.push_back(storage.has_block(at) ? storage.get_block(at)
+                                            : storage.get_external_block(at));
+    }
+    return out;
+}
+
+UserId verify_node_path(const std::vector<Node>& path, const std::vector<Block>& births) {
     if (path.empty())
         throw ChainIntegrityError("node path: empty");
 
@@ -38,6 +69,9 @@ UserId verify_node_path(const std::vector<Node>& path) {
         if (!Crypto::verify(bytes.data(), bytes.size(), n.parent_sig,
                             parent.working_pubkey))
             throw SignatureError("node path: signature by parent key invalid");
+        if (births.size() != path.size() - 1)
+            throw ChainIntegrityError("node path: a node without its birth block");
+        check_birth(births[k - 1], n, parent, root.structural_pubkey);
     }
     return root.structural_pubkey;
 }
@@ -66,6 +100,7 @@ KeyPath KeyPathCert::build(const IStorage& storage, const UserId& chain, NodeInd
     KeyPath kp{};
     for (NodeIndex idx : path_indices(node))
         kp.path.push_back(storage.get_node(chain, idx));  // NodeNotFoundError
+    kp.births = births_of(storage, chain, node);
 
     // Звенья смены рабочего ключа этой ветки — по порядку блоков. Без них путь
     // привёл бы к первоначальному ключу узла, а подписывает ветка уже новым
@@ -82,7 +117,7 @@ KeyPath KeyPathCert::build(const IStorage& storage, const UserId& chain, NodeInd
 }
 
 UserId KeyPathCert::verify(const KeyPath& kp) {
-    const UserId chain = verify_node_path(kp.path);
+    const UserId chain = verify_node_path(kp.path, kp.births);
 
     // Звенья смены ключа: каждое подписано ПРЕЖНИМ ключом и называет новый.
     const Node& tip = kp.path.back();
