@@ -70,11 +70,6 @@ enum class BlockType : uint8_t {
     REVOCATION,
 };
 
-enum class SealMode : uint8_t {
-    BLIND,
-    OPEN,
-};
-
 // ── Free tree utilities ───────────────────────────────────────────────────────
 
 // ⌊log₂(index + 1)⌋  (root depth = 0, leaves at depth 31)
@@ -177,8 +172,6 @@ struct Block {
     std::vector<uint8_t>     payload;
     std::vector<ExternalRef> external_refs;
     Signature                signature;
-    // co_signature is excluded from canonical hash (see blockchain-api.md §5.4)
-    std::optional<Signature> co_signature;
 };
 
 // ── Payload structures ────────────────────────────────────────────────────────
@@ -224,24 +217,6 @@ struct RevocationPayload {
     std::optional<LastGood>  last_good;
 };
 
-// ── Seal ──────────────────────────────────────────────────────────────────────
-
-struct Seal {
-    UserId    signer_id;
-    Hash      block_hash;
-    Signature signature;
-    SealMode  mode;
-    Timestamp sealed_at;
-
-    bool operator==(const Seal& o) const noexcept {
-        return signer_id == o.signer_id
-            && block_hash == o.block_hash
-            && signature  == o.signature
-            && mode       == o.mode
-            && sealed_at  == o.sealed_at;
-    }
-};
-
 // ── Branch tip info (used in merge protocol blockchain.md §6.4) ─────────────────────────────
 
 struct BranchTipInfo {
@@ -249,13 +224,6 @@ struct BranchTipInfo {
     Hash                 tip_hash;     // hash of last block, or hash of leaf node if empty
     std::vector<Node>    path;         // nodes from root to leaf (inclusive)
     std::optional<Block> tip_block;    // last block; nullopt when branch is empty
-};
-
-// ── Pending merge block (intermediate state in MergeSession) ──────────────────
-
-struct PendingMergeBlock {
-    Block draft;       // signed by own key; co_signature == nullopt
-    Hash  draft_hash;  // Crypto::hash_block(draft) — sent to partner for co-signing
 };
 
 } // namespace blockchain

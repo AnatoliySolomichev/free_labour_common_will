@@ -9,12 +9,10 @@ namespace chainsync {
 
 using blockchain::Block;
 using blockchain::BranchTipInfo;
-using blockchain::Hash;
+using blockchain::MergeSession;
 using blockchain::MergeSnapshot;
-using blockchain::PublicKey;
 using blockchain::SerializationError;
 using blockchain::Serializer;
-using blockchain::Signature;
 
 // ── Wire format ───────────────────────────────────────────────────────────────
 //
@@ -23,9 +21,10 @@ using blockchain::Signature;
 //   [ uint version, uint type, bstr payload ]
 //
 //   OFFER / ACCEPT payload: [ bstr encode(BranchTipInfo), bstr encode(MergeSnapshot) ]
-//   DRAFT payload:          encode(Block) — the draft itself, so that the partner
-//                           sees what it co-signs: the tip taken and the time
-//   COSIG payload:          the 64-byte co-signature
+//   HALF payload:           encode(Block) — the initiator's half, so that the
+//                           responder reads what it answers: the tip taken and the time
+//   ANSWER payload:         encode(Block) — the responder's half, which takes the
+//                           initiator's half itself (blockchain.md §6.4)
 //
 // Decoding is strict: exact array sizes, minimal-length heads, no trailing
 // bytes. Anything else is a protocol failure.
@@ -36,9 +35,9 @@ using wire::CborReader;
 using wire::put_bstr;
 using wire::put_head;
 
-constexpr uint64_t WIRE_VERSION = 1;
+constexpr uint64_t WIRE_VERSION = 2;
 
-enum class MsgType : uint8_t { OFFER = 1, ACCEPT = 2, DRAFT = 3, COSIG = 4 };
+enum class MsgType : uint8_t { OFFER = 1, ACCEPT = 2, HALF = 3, ANSWER = 4 };
 
 std::vector<uint8_t> encode_envelope(MsgType type, std::vector<uint8_t> payload) {
     std::vector<uint8_t> out;
@@ -86,21 +85,6 @@ void decode_tip_snapshot(const std::vector<uint8_t>& payload,
     snapshot = Serializer::decode_snapshot(snap_bytes.data(), snap_bytes.size());
 }
 
-template <typename ArrayStruct>
-std::vector<uint8_t> encode_fixed(MsgType type, const ArrayStruct& value) {
-    return encode_envelope(
-        type, std::vector<uint8_t>(value.bytes.begin(), value.bytes.end()));
-}
-
-template <typename ArrayStruct>
-ArrayStruct decode_fixed(const std::vector<uint8_t>& payload) {
-    ArrayStruct value{};
-    if (payload.size() != value.bytes.size())
-        throw SerializationError("merge message: bad fixed-size payload");
-    std::copy(payload.begin(), payload.end(), value.bytes.begin());
-    return value;
-}
-
 } // namespace (anonymous)
 
 // ── Dialogue ──────────────────────────────────────────────────────────────────
@@ -117,7 +101,7 @@ void MergeDialogue::fail(const std::string& why) noexcept {
 
 void MergeDialogue::prepare_own_side() {
     own_tip_ = session_.prepare_tip(config_.user_id, config_.leaf_index);
-    // Captured BEFORE create_pending, which replaces the stored snapshot with
+    // Captured BEFORE write_half, which replaces the stored snapshot with
     // the union: both sides must merge the partner's pre-merge snapshot.
     own_snapshot_ = session_.snapshot_for(config_.user_id, config_.leaf_index);
 }
@@ -149,11 +133,11 @@ MergeDialogue::Messages MergeDialogue::on_message(const uint8_t* data,
             case State::WAIT_ACCEPT:
                 if (env.type == MsgType::ACCEPT) return handle_accept(env.payload);
                 break;
-            case State::WAIT_DRAFT:
-                if (env.type == MsgType::DRAFT)  return handle_draft(env.payload);
+            case State::WAIT_HALF:
+                if (env.type == MsgType::HALF)   return handle_half(env.payload);
                 break;
-            case State::WAIT_COSIG:
-                if (env.type == MsgType::COSIG)  return handle_cosig(env.payload);
+            case State::WAIT_ANSWER:
+                if (env.type == MsgType::ANSWER) return handle_answer(env.payload);
                 break;
             default:
                 break;
@@ -174,51 +158,52 @@ void MergeDialogue::accept_partner(const std::vector<uint8_t>& payload) {
 MergeDialogue::Messages MergeDialogue::handle_offer(const std::vector<uint8_t>& payload) {
     accept_partner(payload);
     prepare_own_side();
-    pending_ = session_.create_pending(config_.user_id, config_.leaf_index,
-                                       partner_tip_, partner_snapshot_,
-                                       config_.working_keypair,
-                                       config_.merge_timestamp,
-                                       config_.validated_depth);
-    state_ = State::WAIT_DRAFT;
-    return {encode_tip_snapshot(MsgType::ACCEPT, own_tip_, own_snapshot_),
-            encode_envelope(MsgType::DRAFT, Serializer::encode(pending_->draft))};
+    // Said now, not after the initiator has written its half.
+    session_.check_own_branch(config_.user_id, config_.leaf_index, config_.working_keypair);
+    state_ = State::WAIT_HALF;
+    return {encode_tip_snapshot(MsgType::ACCEPT, own_tip_, own_snapshot_)};
 }
 
 MergeDialogue::Messages MergeDialogue::handle_accept(const std::vector<uint8_t>& payload) {
     accept_partner(payload);
-    pending_ = session_.create_pending(config_.user_id, config_.leaf_index,
-                                       partner_tip_, partner_snapshot_,
+    merge_block_ = session_.write_half(own_tip_, partner_tip_, partner_snapshot_,
                                        config_.working_keypair,
                                        config_.merge_timestamp,
                                        config_.validated_depth);
-    state_ = State::WAIT_DRAFT;
-    return {encode_envelope(MsgType::DRAFT, Serializer::encode(pending_->draft))};
+    state_ = State::WAIT_ANSWER;
+    return {encode_envelope(MsgType::HALF, Serializer::encode(*merge_block_))};
 }
 
-MergeDialogue::Messages MergeDialogue::handle_draft(const std::vector<uint8_t>& payload) {
-    // Co-sign only what was read (blockchain.md §6.4): the partner's draft takes
-    // our tip, at a time that is now by our clock, over the same union.
-    const Block draft = Serializer::decode_block(payload.data(), payload.size());
-    const Hash  partner_draft = session_.check_partner_draft(
-        draft, own_tip_, partner_tip_, config_.merge_timestamp, pending_->draft);
-    const Signature co_sig = session_.co_sign(partner_draft, config_.working_keypair);
-    state_ = State::WAIT_COSIG;
-    return {encode_fixed(MsgType::COSIG, co_sig)};
+MergeDialogue::Messages MergeDialogue::handle_half(const std::vector<uint8_t>& payload) {
+    // Answer only what was read (blockchain.md §6.4): the partner's half takes our
+    // tip, at a time that is now by our clock, over the same union.
+    const Block half = Serializer::decode_block(payload.data(), payload.size());
+    session_.check_partner_half(half, own_tip_, partner_tip_, config_.merge_timestamp,
+                                MergeSnapshot::merge(own_snapshot_, partner_snapshot_));
+    merge_block_ = session_.write_half(own_tip_, MergeSession::tip_after(partner_tip_, half),
+                                       partner_snapshot_, config_.working_keypair,
+                                       config_.merge_timestamp, config_.validated_depth);
+    finish();
+    return {encode_envelope(MsgType::ANSWER, Serializer::encode(*merge_block_))};
 }
 
-MergeDialogue::Messages MergeDialogue::handle_cosig(const std::vector<uint8_t>& payload) {
-    const Signature partner_co_sig = decode_fixed<Signature>(payload);
-    // path is non-empty — verify_partner_tip guaranteed it.
-    const PublicKey partner_wpk = partner_tip_.path.back().working_pubkey;
-    merge_block_ = session_.finalize(*pending_, partner_co_sig, partner_wpk);
-    session_.import_partner_data(partner_tip_);
-    state_ = State::DONE;
-    fill_cache();
+MergeDialogue::Messages MergeDialogue::handle_answer(const std::vector<uint8_t>& payload) {
+    const Block answer = Serializer::decode_block(payload.data(), payload.size());
+    session_.check_partner_half(answer, MergeSession::tip_after(own_tip_, *merge_block_),
+                                partner_tip_, config_.merge_timestamp,
+                                MergeSnapshot::merge(own_snapshot_, partner_snapshot_));
+    finish();
     return {};
 }
 
+void MergeDialogue::finish() {
+    session_.import_partner_data(partner_tip_);
+    state_ = State::DONE;
+    fill_cache();
+}
+
 void MergeDialogue::fill_cache() noexcept {
-    // Best-effort (sync.md §5.2): a cache hiccup must not invalidate a finalized merge —
+    // Best-effort (sync.md §5.2): a cache hiccup must not invalidate a written merge —
     // a missing entry only means build_proof returns nullopt later.
     try {
         record_merge(cache_, own_tip_, own_snapshot_, partner_tip_, partner_snapshot_);

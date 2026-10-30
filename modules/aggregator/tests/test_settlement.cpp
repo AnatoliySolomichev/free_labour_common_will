@@ -119,8 +119,8 @@ protected:
     }
 
     // `owner`'s half of a merge (blockchain.md §6.4): the block at `index` of its
-    // branch, taking the partner's last block `took`, co-signed. Nobody checks
-    // the co-signature on this table (sync.md §10.10).
+    // branch, taking the partner's block `took` — its tip, or, for the responder,
+    // the initiator's half itself.
     Block merge(const UserId& owner, BlockIndex index, const Block& took, Timestamp when,
                 uint32_t node = kLeaf) {
         MergePayload mp{};
@@ -133,7 +133,6 @@ protected:
         b.timestamp_claimed = when;
         b.type              = BlockType::MERGE;
         b.payload           = Serializer::encode(mp);
-        b.co_signature      = Signature::null();
         sign_and_add(b);
         return b;
     }
@@ -558,9 +557,9 @@ TEST_F(SettlementTableTest, ALapseIsAsSureAsTheSellersPurseIsFixed) {
     EXPECT_EQ(read_deals(*storage_).lapse.at(h(d)), "none");
     const Block s = stub(gleb_, 1, kT0 + 400);
     EXPECT_EQ(read_deals(*storage_).lapse.at(h(d)), "seen");
-    const Block pt = stub(petr_, 0, kT0 + 410);
-    merge(petr_, 1, s, kT0 + 420);                 // Пётр взял блок Глеба…
-    merge(gleb_, 2, pt, kT0 + 420);                // …и Глеб — блок Петра
+    stub(petr_, 0, kT0 + 410);
+    const Block half = merge(petr_, 1, s, kT0 + 420);   // Пётр взял блок Глеба…
+    merge(gleb_, 2, half, kT0 + 425);                   // …и Глеб ответил на саму половину
     auto deals = read_deals(*storage_);
     EXPECT_EQ(deals.lapse.at(h(d)), "witnessed");
     EXPECT_EQ(deals.witnessed(gleb_, kLeaf, 1), std::optional<int64_t>(kT0 + 420));
@@ -573,24 +572,43 @@ TEST_F(SettlementTableTest, ALapseIsAsSureAsTheSellersPurseIsFixed) {
     EXPECT_FALSE(deals.moves_hours(h(d)));
 }
 
-// Половина слияния с со-подписью партнёра (он прочёл черновик и нашёл время
-// «сейчас», blockchain.md §6.4) — свидетельство сама: она закрепляет и ветку
-// партнёра до взятого блока, и свою — до самой себя; встречной половины не надо.
-TEST_F(SettlementTableTest, ACoSignedHalfFixesBothBranches) {
+// Слияние закрепляют две половины (blockchain.md §6.4): ответ берёт половину
+// инициатора, а та — блок прямо перед ответом. Закреплены обе ветки временем
+// половины, которую ответчик прочёл: инициатор — до неё самой, ответчик — до
+// взятого блока. Сам ответ ждёт следующего слияния.
+TEST_F(SettlementTableTest, AnAnswerFixesBothBranches) {
     const Block w = put_at(gleb_, work_for(boris_, 3.0), kLeaf, 0);
     const Block d = put(boris_, offer(boris_, gleb_, w, {{boris_.bytes, 3.0}}, kT0 + 100,
                                       kT0 + 300));
-    stub(gleb_, 1, kT0 + 400);
-    const Block pt = stub(petr_, 0, kT0 + 410);
-    const Block g2 = merge(gleb_, 2, pt, kT0 + 420);            // только половина Глеба
+    const Block s    = stub(gleb_, 1, kT0 + 400);
+    stub(petr_, 0, kT0 + 410);
+    const Block half = merge(petr_, 1, s, kT0 + 420);           // только половина Петра
     EXPECT_EQ(read_deals(*storage_).lapse.at(h(d)), "seen");
-    Signature cosig{};
-    cosig.bytes.fill(0x5C);                                     // проверяют её на входе
-    ASSERT_TRUE(storage_->put_cosig(Crypto::hash_block(g2), cosig));
+    EXPECT_EQ(read_deals(*storage_).witnessed(petr_, kLeaf, 1), std::nullopt);
+    merge(gleb_, 2, half, kT0 + 425);
     const auto deals = read_deals(*storage_);
-    EXPECT_EQ(deals.witnessed(petr_, kLeaf, 0), std::optional<int64_t>(kT0 + 420));
-    EXPECT_EQ(deals.witnessed(gleb_, kLeaf, 2), std::optional<int64_t>(kT0 + 420));
+    EXPECT_EQ(deals.witnessed(petr_, kLeaf, 1), std::optional<int64_t>(kT0 + 420));
+    EXPECT_EQ(deals.witnessed(gleb_, kLeaf, 1), std::optional<int64_t>(kT0 + 420));
+    EXPECT_EQ(deals.witnessed(gleb_, kLeaf, 2), std::nullopt);
     EXPECT_EQ(deals.lapse.at(h(d)), "witnessed");
+}
+
+// Две половины, взявшие вершины друг друга, ни одна из которых не читала другую,
+// — не слияние: каждая говорит только за себя. И ответ, вставший не сразу за
+// взятым блоком, — тоже: между ними могло случиться что угодно.
+TEST_F(SettlementTableTest, OnlyAnAnswerToTheHalfItselfCounts) {
+    const Block s  = stub(gleb_, 1, kT0 + 400);
+    const Block pt = stub(petr_, 0, kT0 + 410);
+    merge(petr_, 1, s, kT0 + 420);
+    merge(gleb_, 2, pt, kT0 + 420);
+    EXPECT_EQ(read_deals(*storage_).witnessed(gleb_, kLeaf, 1), std::nullopt);
+
+    const Block s2 = stub(anna_, 1, kT0 + 400);
+    stub(boris_, 0, kT0 + 410);
+    const Block half = merge(boris_, 1, s2, kT0 + 420);
+    stub(anna_, 2, kT0 + 421);
+    merge(anna_, 3, half, kT0 + 425);
+    EXPECT_EQ(read_deals(*storage_).witnessed(boris_, kLeaf, 1), std::nullopt);
 }
 
 // Блок из будущего (blockchain.md §9.4): заявляет время позже, чем доказуемо
@@ -601,8 +619,8 @@ TEST_F(SettlementTableTest, ABlockFromTheFutureIsSeen) {
     const Block present = stub(anna_, 0, now - 100);
     const Block pt      = stub(petr_, 0, now - 7'200);          // Пётр закрепил блок Глеба…
     const Block g1      = stub(gleb_, 1, now - 3'600 + 86'400); // …а тот назвался днём позже
-    merge(petr_, 1, g1, now - 3'600);
-    merge(gleb_, 2, pt, now - 3'600);
+    const Block half    = merge(petr_, 1, g1, now - 3'600);
+    merge(gleb_, 2, half, now - 3'600);
     const auto deals = read_deals(*storage_);
     EXPECT_TRUE(deals.from_future.count(h(ahead)));
     EXPECT_TRUE(deals.from_future.count(h(g1)));
@@ -619,8 +637,8 @@ TEST_F(SettlementTableTest, OnlyABilateralMergeWithAnotherFixesTime) {
                                       kT0 + 300));
     const Block s   = stub(gleb_, 1, kT0 + 400);
     const Block own = stub(gleb_, 0, kT0 + 405, kSafe);
-    merge(gleb_, 1, s, kT0 + 420, kSafe);           // своя ветка взяла блок кошелька…
-    const Block g2 = merge(gleb_, 2, own, kT0 + 420);   // …и кошелёк — блок своей ветки
+    const Block half = merge(gleb_, 1, s, kT0 + 420, kSafe);   // своя ветка взяла блок кошелька…
+    const Block g2   = merge(gleb_, 2, half, kT0 + 420);       // …и кошелёк ответил ей
     stub(petr_, 0, kT0 + 410);
     merge(petr_, 1, g2, kT0 + 430);                 // Пётр взял, а ответной половины нет
     const auto deals = read_deals(*storage_);

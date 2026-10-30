@@ -32,6 +32,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -46,8 +47,9 @@ public:
         revoked_key,        // a revoked key signed it past its compromise and the owner's line
     };
 
-    // Everything the storage already holds: key paths, key changes, revocations.
-    void load(const AggregatorStorage& storage);
+    // Everything the storage already holds: key paths, key changes, revocations —
+    // of the chains in `only`, when given.
+    void load(const AggregatorStorage& storage, const std::set<UserId>* only = nullptr);
 
     // A key path, checked on the spot (KeyPathCert::verify). Returns the chain.
     // Throws: SignatureError, ChainIntegrityError — a path that does not check.
@@ -68,11 +70,6 @@ public:
     // `storage` — where the owner's line is walked (rule 10, for an author under
     // revocation); without it the block's number against the line's decides.
     Verdict check(const Block& b, const AggregatorStorage* storage = nullptr) const;
-
-    // Whether one of the branch's keys signed `message` (a block hash, as a merge
-    // partner co-signs it, blockchain.md §6.4).
-    bool vouches(const UserId& chain, NodeIndex node, const Hash& message,
-                 const Signature& sig) const;
 
     // The branch's path with every key change known — what a reader checks the
     // branch's blocks by; nullopt when no path has come.

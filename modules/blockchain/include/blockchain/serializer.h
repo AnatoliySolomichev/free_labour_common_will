@@ -19,7 +19,6 @@ public:
     // Serialize to CBOR. Throws: SerializationError.
     static std::vector<uint8_t> encode(const Node& node);
     static std::vector<uint8_t> encode(const Block& block);
-    static std::vector<uint8_t> encode(const Seal& seal);
     static std::vector<uint8_t> encode(const BranchTipInfo& tip);
     static std::vector<uint8_t> encode(const MergePayload& payload);
     static std::vector<uint8_t> encode(const ExternalRef& ref);
@@ -32,7 +31,6 @@ public:
     // Deserialize from CBOR. Throws: SerializationError on malformed input.
     static Node          decode_node         (const uint8_t* data, size_t len);
     static Block         decode_block        (const uint8_t* data, size_t len);
-    static Seal          decode_seal         (const uint8_t* data, size_t len);
     static BranchTipInfo decode_tip          (const uint8_t* data, size_t len);
     static MergePayload  decode_merge_payload(const uint8_t* data, size_t len);
     static MergeSnapshot decode_snapshot     (const uint8_t* data, size_t len);

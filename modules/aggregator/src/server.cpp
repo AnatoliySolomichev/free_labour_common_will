@@ -606,66 +606,6 @@ void AggregatorServer::setup_routes() {
         snapshot_manifest(res, false);
     });
 
-    // ── Seal warehouse (sync.md §7.2) ─────────────────────────────────────────
-    //
-    // Many seals per block; bytes in, bytes out — signatures are checked by
-    // the fetching node, never here. Content-addressed dedupe in storage.
-
-    // Registered before /seals/:hash — httplib matches in registration order.
-    svr.Get("/seals/manifest", [&](const httplib::Request&, httplib::Response& res) {
-        const auto hashes = storage_.all_sealed_block_hashes();
-        std::string body = "{\"hashes\":[";
-        for (std::size_t i = 0; i < hashes.size(); ++i) {
-            if (i) body += ',';
-            body += '"';
-            body += to_hex(hashes[i].bytes);
-            body += '"';
-        }
-        body += "]}";
-        res.set_content(body, "application/json");
-    });
-
-    svr.Post("/seals/:hash", [&](const httplib::Request& req, httplib::Response& res) {
-        auto bh = hex_to_hash(req.path_params.at("hash"));
-        if (!bh) {
-            res.status = 400;
-            res.set_content("{\"error\":\"invalid block hash\"}", "application/json");
-            return;
-        }
-        if (req.body.empty() || req.body.size() > 4096) {
-            res.status = 400;
-            res.set_content("{\"error\":\"bad size\"}", "application/json");
-            return;
-        }
-        try {
-            if (storage_.get_seal_bytes(*bh).size() >= kSealsPerBlockCap) {
-                res.status = 429;
-                res.set_content("{\"error\":\"seal list full\"}", "application/json");
-                return;
-            }
-            const bool stored = storage_.put_seal_bytes(
-                *bh, {req.body.begin(), req.body.end()});
-            res.set_content(stored ? "{\"status\":\"stored\"}"
-                                   : "{\"status\":\"duplicate\"}",
-                            "application/json");
-        } catch (const std::exception& e) {
-            res.status = 500;
-            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}",
-                            "application/json");
-        }
-    });
-
-    svr.Get("/seals/:hash", [&](const httplib::Request& req, httplib::Response& res) {
-        auto bh = hex_to_hash(req.path_params.at("hash"));
-        if (!bh) { res.status = 400; return; }
-        std::string body;
-        const auto seals = storage_.get_seal_bytes(*bh);
-        cbor_array_head(body, seals.size());
-        for (const auto& s : seals)
-            cbor_bstr(body, std::string(s.begin(), s.end()));
-        res.set_content(body, "application/cbor");
-    });
-
     // ── Revocation warehouse (sync.md §7.2; blockchain.md §6.7 rule 8) ────────
     //
     // Self-verifying certificates; bytes in, bytes out — the fetching node runs
@@ -1060,66 +1000,6 @@ void AggregatorServer::setup_routes() {
         for (const auto& p : paths)
             cbor_bstr(body, std::string(p.begin(), p.end()));
         res.set_content(body, "application/cbor");
-    });
-
-    // ── Co-signatures of merges (blockchain.md §6.4, blockchain.md §5.2) ─────
-    //
-    // A side's MERGE block comes with the partner's co-signature over its hash:
-    // the partner read the draft and found it taking its tip at a time that was
-    // now by its clock. Checked on arrival against the partner's branch keys;
-    // the half then fixes both branches by the merge time (DealsOnTable::witnessed).
-
-    svr.Get("/cosigs/manifest", [&](const httplib::Request&, httplib::Response& res) {
-        const auto hashes = storage_.all_cosig_hashes();
-        std::string body = "{\"hashes\":[";
-        for (std::size_t i = 0; i < hashes.size(); ++i)
-            body += std::string(i ? "," : "") + "\"" + to_hex(hashes[i].bytes) + "\"";
-        body += "]}";
-        res.set_content(body, "application/json");
-    });
-
-    svr.Post("/cosigs/:hash", [&](const httplib::Request& req, httplib::Response& res) {
-        const auto bh = hex_to_hash(req.path_params.at("hash"));
-        if (!bh || req.body.size() != 64) {
-            res.status = 400;
-            res.set_content("{\"error\":\"block hash and a 64-byte signature\"}",
-                            "application/json");
-            return;
-        }
-        Signature sig{};
-        std::copy(req.body.begin(), req.body.end(), sig.bytes.begin());
-        try {
-            const auto block = storage_.get_block_by_hash(*bh);
-            if (!block || block->type != BlockType::MERGE) {
-                res.status = 404;
-                res.set_content("{\"error\":\"no such merge block here\"}", "application/json");
-                return;
-            }
-            const MergePayload mp =
-                Serializer::decode_merge_payload(block->payload.data(), block->payload.size());
-            const auto& partner = mp.partner_last_address;
-            if (!keys_.vouches(partner.user_id, partner.node_index, *bh, sig)) {
-                res.status = 403;
-                res.set_content("{\"error\":\"not signed by the partner's branch\"}",
-                                "application/json");
-                return;
-            }
-            const bool stored = storage_.put_cosig(*bh, sig);
-            res.set_content(stored ? "{\"status\":\"stored\"}" : "{\"status\":\"duplicate\"}",
-                            "application/json");
-        } catch (const std::exception& e) {
-            res.status = 500;
-            res.set_content(std::string("{\"error\":\"") + json_escape(e.what()) + "\"}",
-                            "application/json");
-        }
-    });
-
-    svr.Get("/cosigs/:hash", [&](const httplib::Request& req, httplib::Response& res) {
-        const auto bh = hex_to_hash(req.path_params.at("hash"));
-        if (!bh) { res.status = 400; return; }
-        const auto sig = storage_.get_cosig(*bh);
-        if (!sig) { res.status = 404; return; }
-        res.set_content(std::string(sig->bytes.begin(), sig->bytes.end()), "application/octet-stream");
     });
 
     // ── Economy view (records.md §13) ─────────────────────────────────────────
@@ -2672,39 +2552,6 @@ void AggregatorServer::sync_with_peer(const std::string& peer_url) {
         } catch (...) {}
     }
 
-    // 3. Pull seal lists the same way (sync.md §7.2): fetch each listed
-    // block's seals and merge — content-addressed storage dedupes.
-    for (const Hash& bh : manifest_hashes("/seals/manifest")) {
-        auto res = cli.Get("/seals/" + to_hex(bh.bytes));
-        if (!res || res->status != 200) continue;
-        // CBOR array(bstr) — minimal parse mirroring the response encoder.
-        const auto& body = res->body;
-        std::size_t pos = 0;
-        auto head = [&](uint8_t expect_major) -> long long {
-            if (pos >= body.size()) return -1;
-            const uint8_t b = static_cast<uint8_t>(body[pos++]);
-            if ((b >> 5) != expect_major) return -1;
-            const uint8_t ai = b & 0x1F;
-            if (ai < 24) return ai;
-            int extra = ai == 24 ? 1 : ai == 25 ? 2 : ai == 26 ? 4 : ai == 27 ? 8 : -1;
-            if (extra < 0 || pos + extra > body.size()) return -1;
-            long long v = 0;
-            for (int i = 0; i < extra; ++i) v = (v << 8) | static_cast<uint8_t>(body[pos++]);
-            return v;
-        };
-        const long long n = head(4);
-        for (long long i = 0; i < n; ++i) {
-            const long long len = head(2);
-            if (len < 0 || pos + len > body.size()) break;
-            try {
-                if (storage_.put_seal_bytes(
-                        bh, {body.begin() + pos, body.begin() + pos + len}))
-                    ++gossiped;
-            } catch (...) {}
-            pos += static_cast<std::size_t>(len);
-        }
-    }
-
     // 4. Pull revocation certificates (sync.md §7.2): merge per-chain lists —
     // content-addressed storage dedupes; certificates are self-verifying and
     // checked by end clients; one that checks here too names the replacement
@@ -2806,26 +2653,6 @@ void AggregatorServer::sync_with_peer(const std::string& peer_url) {
                 ++pulled;
                 if (b.type == BlockType::KEY_ROTATION) keys_.learn_rotation(b);
             }
-        } catch (...) {}
-    }
-
-    // 7. Pull co-signatures of merges, each checked against the partner's keys
-    // like the ones posted here; the block must have come first.
-    for (const Hash& ch : manifest_hashes("/cosigs/manifest")) {
-        if (storage_.get_cosig(ch)) continue;
-        const auto block = storage_.get_block_by_hash(ch);
-        if (!block || block->type != BlockType::MERGE) continue;
-        auto res = cli.Get("/cosigs/" + to_hex(ch.bytes));
-        if (!res || res->status != 200 || res->body.size() != 64) continue;
-        try {
-            Signature sig{};
-            std::copy(res->body.begin(), res->body.end(), sig.bytes.begin());
-            const MergePayload mp =
-                Serializer::decode_merge_payload(block->payload.data(), block->payload.size());
-            if (keys_.vouches(mp.partner_last_address.user_id,
-                              mp.partner_last_address.node_index, ch, sig) &&
-                storage_.put_cosig(ch, sig))
-                ++gossiped;
         } catch (...) {}
     }
 

@@ -1,6 +1,6 @@
 # API модуля блокчейна
 
-**Статус:** черновик v0.1  
+**Статус:** черновик v0.2  
 **Основание:** [docs/blockchain.md](blockchain.md)  
 **Язык реализации:** C++17  
 **Внешние зависимости:** libsodium, LMDB (CBOR реализован вручную, без внешней библиотеки)
@@ -9,14 +9,14 @@
 
 ## 1. Обзор архитектуры
 
-Модуль состоит из шести слоёв:
+Модуль состоит из слоёв:
 
 ```
 ┌─────────────────────────────────┐
 │         Blockchain              │  ← главный фасад
-├──────────────┬──────────────────┤
-│ MergeSession │   SealManager    │  ← протоколы
-├──────────────┴──────────────────┤
+├─────────────────────────────────┤
+│          MergeSession           │  ← протокол слияния
+├─────────────────────────────────┤
 │           Validator             │  ← проверка инвариантов
 ├─────────────────────────────────┤
 │     IStorage / LmdbStorage      │  ← персистентность
@@ -75,7 +75,7 @@ struct Signature {
     std::array<uint8_t, 64> bytes;
 
     bool operator==(const Signature&) const noexcept;
-    static Signature null() noexcept;  // нулевая подпись (заглушка до получения co-sign)
+    static Signature null() noexcept;  // нулевая подпись (на время подписи самого блока)
 };
 
 // Идентификатор пользователя = публичный ключ корневого узла
@@ -105,12 +105,6 @@ enum class BlockType : uint8_t {
     MERGE,         // блок слияния двух веток (blockchain.md §6.4)
     KEY_ROTATION,  // ротация рабочего ключа (blockchain.md §6.6)
     REVOCATION,    // отзыв скомпрометированного узла (blockchain.md §6.7)
-};
-
-// Тип пломбы (blockchain.md §7.1)
-enum class SealMode : uint8_t {
-    BLIND,   // подписан только хеш блока (содержимое не раскрывалось)
-    OPEN,    // подписаны и хеш, и содержимое
 };
 
 } // namespace blockchain
@@ -180,15 +174,10 @@ struct Block {
     std::vector<ExternalRef> external_refs;      // опциональные ссылки на чужие блоки
 
     Signature  signature;                        // подпись рабочим ключом ветки
-    // Для MERGE-блоков — дополнительная co-подпись партнёра.
-    // Подписывается hash(block без co_signature), а не hash(block целиком).
-    std::optional<Signature> co_signature;
 };
 ```
 
-**Примечание по co_signature:** поле отсутствует в CBOR-сериализации canonical блока.
-Хеш блока вычисляется по CBOR без co_signature, что позволяет партнёру подписать хеш
-до того, как co_signature известен. co_signature хранится как расширение рядом с блоком.
+Подпись у блока одна. Партнёр по слиянию подтверждает блок своим блоком в своей ветке (blockchain.md §6.4); поля со-подписи больше нет, каноническая сериализация от этого не изменилась.
 
 ### 5.5. Payload MERGE-блока
 
@@ -196,9 +185,12 @@ struct Block {
 
 ```cpp
 struct MergePayload {
-    BlockAddress partner_last_address;  // адрес последнего блока партнёра
-    Hash         partner_last_hash;     // хеш последнего блока партнёра
-    Timestamp    merge_timestamp;       // UTC, согласованное время слияния
+    BlockAddress partner_last_address;  // что взято: вершина партнёра, у ответчика — половина инициатора
+    Hash         partner_last_hash;     // хеш взятого блока
+    Timestamp    merge_timestamp;       // UTC, время слияния по часам автора
+    Hash         merkle_root;           // обязательства снимка (blockchain.md §6.5.1)
+    Hash         hll_hash;
+    uint32_t     validated_depth;       // само-декларированная глубина (blockchain.md §6.5.5)
 };
 ```
 
@@ -226,18 +218,6 @@ struct RevocationPayload {
     Timestamp                compromised_since;  // заявленный момент компрометации
     std::optional<PublicKey> replacement_pubkey; // нет — стоп-кран
     std::optional<LastGood>  last_good;          // линия хозяина (правило 12)
-};
-```
-
-### 5.8. Пломба
-
-```cpp
-struct Seal {
-    UserId    signer_id;    // идентификатор подписывающего
-    Hash      block_hash;   // хеш заверяемого блока
-    Signature signature;    // подпись block_hash ключом signer_id
-    SealMode  mode;
-    Timestamp sealed_at;   // UTC, время создания пломбы
 };
 ```
 
@@ -341,8 +321,8 @@ public:
     // Используется как parent_hash в дочерних узлах
     static Hash hash_node(const Node& node);
 
-    // Хеш блока (по канонической CBOR-сериализации без поля co_signature)
-    // Используется как prev_hash, для пломб и co-подписи при слиянии
+    // Хеш блока (по канонической CBOR-сериализации, с подписью)
+    // Используется как prev_hash, в пломбах и в слиянии
     static Hash hash_block(const Block& block);
 };
 ```
@@ -363,14 +343,12 @@ public:
     // Бросает: SerializationError
     static std::vector<uint8_t> encode(const Node& node);
     static std::vector<uint8_t> encode(const Block& block);
-    static std::vector<uint8_t> encode(const Seal& seal);
     static std::vector<uint8_t> encode(const BranchTipInfo& tip);
 
     // Десериализация из CBOR
     // Бросает: SerializationError при неверном формате
     static Node          decode_node (std::span<const uint8_t> data);
     static Block         decode_block(std::span<const uint8_t> data);
-    static Seal          decode_seal (std::span<const uint8_t> data);
     static BranchTipInfo decode_tip  (std::span<const uint8_t> data);
 };
 ```
@@ -414,15 +392,6 @@ public:
     // Индекс последнего блока ветки. Возвращает std::nullopt если ветка пуста.
     virtual std::optional<BlockIndex> branch_tip_index(
         const UserId& user_id, NodeIndex leaf_index) const noexcept = 0;
-
-    // --- Пломбы ---
-
-    // Добавить пломбу. Несколько пломб на один блок допустимы.
-    // Бросает: StorageError
-    virtual void put_seal(const Seal& seal) = 0;
-
-    // Все пломбы для заданного хеша блока
-    virtual std::vector<Seal> get_seals(const Hash& block_hash) const = 0;
 
     // --- Внешние блоки (чужих пользователей) ---
 
@@ -475,7 +444,6 @@ public:
 |---|---|---|
 | `nodes` | `(user_id, node_index)` — CBOR | сериализованный `Node` — CBOR |
 | `blocks` | `(user_id, node_index, block_index)` — CBOR | сериализованный `Block` — CBOR |
-| `seals` | `block_hash` (32 байта) | список сериализованных `Seal` — CBOR |
 | `external_blocks` | `(user_id, node_index, block_index)` — CBOR | сериализованный `Block` — CBOR |
 
 ---
@@ -517,50 +485,6 @@ public:
     // Бросает: SignatureError, ChainIntegrityError, TimestampError,
     //          BlockNotFoundError, NodeNotFoundError
     void validate_branch(const UserId& user_id, NodeIndex leaf_index) const;
-
-    // --- Проверка пломбы (инвариант 3) ---
-
-    // Бросает: SignatureError
-    void validate_seal(const Seal& seal) const;
-
-    // --- Проверка co-подписи MERGE-блока ---
-
-    // Проверяет, что co_signature в block действительно является подписью
-    // partner_pubkey на Crypto::hash_block(block).
-    // Бросает: SignatureError, InvalidArgumentError (если block.type != MERGE)
-    void validate_co_signature(const Block& block, const PublicKey& partner_pubkey) const;
-};
-```
-
----
-
-## 11. `SealManager` — управление пломбами
-
-```cpp
-class SealManager {
-public:
-    explicit SealManager(IStorage& storage);
-
-    // Создать пломбу: подписать block_hash ключом signer_keypair.
-    // Сохраняет в хранилище.
-    // mode == BLIND: подписывается только block_hash.
-    // mode == OPEN:  перед подписью верифицируется block_hash == Crypto::hash_block(block).
-    // Бросает: CryptoError, StorageError, InvalidArgumentError (несовпадение хеша при OPEN)
-    Seal create_seal(const Hash& block_hash,
-                     const KeyPair& signer_keypair,
-                     SealMode mode);
-
-    Seal create_open_seal(const Block& block, const KeyPair& signer_keypair);
-
-    // Получить все пломбы для блока
-    std::vector<Seal> get_seals(const Hash& block_hash) const;
-
-    // Вычислить witnessed_time: самую позднюю верхнюю границу времени существования блока.
-    // Анализирует граф MERGE-блоков: если блок B ссылается на наш блок A,
-    // то A точно существовал не позже B.timestamp_claimed.
-    // Возвращает std::nullopt, если внешних свидетелей нет.
-    // [OPEN blockchain.md §11.3] распространение знания об отзывах при gossip не реализовано в MVP
-    std::optional<Timestamp> compute_witnessed_time(const BlockAddress& address) const;
 };
 ```
 
@@ -568,15 +492,9 @@ public:
 
 ## 12. `MergeSession` — протокол двустороннего слияния
 
-Инкапсулирует состояние двухраундового протокола (blockchain.md §6.4).
+Шаги протокола blockchain.md §6.4. Слово каждой стороны стоит блоком в её ветке: инициатор пишет свою половину первым, ответчик читает её и отвечает своей половиной, которая берёт половину инициатора. Диалог поверх этих шагов — `chainsync::MergeDialogue` (sync.md §6.1).
 
 ```cpp
-// Промежуточное состояние после первого раунда
-struct PendingMergeBlock {
-    Block draft;       // block с signature (своей), co_signature == nullopt
-    Hash  draft_hash;  // Crypto::hash_block(draft) — отправляется партнёру для co-sign
-};
-
 class MergeSession {
 public:
     MergeSession(IStorage& storage, Validator& validator);
@@ -585,49 +503,67 @@ public:
     // Бросает: NodeNotFoundError, BlockNotFoundError
     BranchTipInfo prepare_tip(const UserId& user_id, NodeIndex leaf_index) const;
 
-    // Шаг 1б: верифицировать полученный BranchTipInfo партнёра (путь + подписи).
-    // Бросает: SignatureError, ChainIntegrityError, NodeNotFoundError
+    // Шаг 1б: проверить BranchTipInfo партнёра: путь, вершину, отзывы (blockchain.md §6.7 rule 11).
+    // Бросает: SignatureError, ChainIntegrityError, NodeNotFoundError, RevocationError
     void verify_partner_tip(const BranchTipInfo& partner_tip) const;
 
-    // Шаг 2: создать черновик MERGE-блока (своя подпись; co_signature пуста).
-    // Добавляет черновик в хранилище как финальный блок ветки (см. примечание ниже).
-    // Возвращает pending для отправки draft_hash партнёру.
-    // Бросает: CryptoError, StorageError, NodeNotFoundError
-    //
-    // Примечание: блок сохраняется сразу, но без co_signature (поле == nullopt).
-    // После получения co-подписи партнёра вызвать finalize().
-    PendingMergeBlock create_pending(
-        const UserId&       user_id,
-        NodeIndex           leaf_index,
-        const BranchTipInfo& partner_tip,
-        const KeyPair&      own_working_keypair,
-        Timestamp           merge_timestamp
-    );
+    // Шаг 1в: вершина партнёра не из будущего (blockchain.md §9.4).
+    // Бросает: TimestampError
+    void check_partner_time(const BranchTipInfo& partner_tip, Timestamp now) const;
 
-    // Шаг 3: co-подписать черновик MERGE-блока партнёра.
-    // Возвращает Signature, которую надо передать партнёру.
-    // Бросает: CryptoError
-    Signature co_sign(const Hash& partner_draft_hash, const KeyPair& own_working_keypair);
+    // Снимок ветки для обмена: сохранённый, если ветка уже сливалась, иначе лист
+    // над вершиной (blockchain.md §6.5.1).
+    // Бросает: InvalidArgumentError (пустая ветка), StorageError, BlockNotFoundError
+    MergeSnapshot snapshot_for(const UserId& user_id, NodeIndex leaf_index) const;
 
-    // Шаг 4: добавить co_signature партнёра к своему pending-блоку и сохранить.
-    // После этого блок считается финализированным.
-    // Бросает: SignatureError (если co_sig невалидна), StorageError
-    Block finalize(const PendingMergeBlock& pending,
-                   const Signature&         partner_co_sig,
-                   const PublicKey&         partner_pubkey);
+    // Можно ли этой ветке начать двусторонний акт (blockchain.md §6.7).
+    // Бросает: RevocationError
+    void check_own_branch(const UserId& user_id, NodeIndex leaf_index,
+                          const KeyPair& own_working_keypair) const;
+
+    // Шаг 2: записать свою половину — MERGE-блок сразу за own_tip, берущий partner_tip.
+    // Объединяет снимки, коммитит merkle_root + hll_hash, сохраняет выросший снимок.
+    // Блок подписан и лежит в ветке сразу; потом к нему ничего не добавляется.
+    // Бросает: CryptoError, StorageError, NodeNotFoundError, RevocationError,
+    //          ChainIntegrityError (ветка ушла дальше own_tip),
+    //          InvalidArgumentError (своя или партнёрская ветка пуста)
+    Block write_half(const BranchTipInfo& own_tip,
+                     const BranchTipInfo& partner_tip,
+                     const MergeSnapshot& partner_snapshot,
+                     const KeyPair&       own_working_keypair,
+                     Timestamp            merge_timestamp,
+                     uint32_t             validated_depth);
+
+    // Шаг 3: прочитать половину партнёра, прежде чем ответить или принять ответ:
+    // MERGE-блок сразу за partner_tip, берёт own_tip, время в пределах kClockSlack
+    // от now, коммитит merged — объединение обоих до-слиянных снимков.
+    // own_tip ответчика — его вершина; инициатора — tip_after(своя вершина, своя половина).
+    // Подпись половины не проверяется: её проверяет тот, кто половину считает
+    // (вход агрегатора и читатель, blockchain.md §6.4).
+    // Бросает: ChainIntegrityError, TimestampError, SerializationError,
+    //          InvalidArgumentError (пустая ветка партнёра)
+    void check_partner_half(const Block& half, const BranchTipInfo& own_tip,
+                            const BranchTipInfo& partner_tip, Timestamp now,
+                            const MergeSnapshot& merged) const;
+
+    // Вершина tip, ушедшая на half: это берёт половина ответчика.
+    static BranchTipInfo tip_after(const BranchTipInfo& tip, const Block& half);
+
+    // Шаг 4 (необязательный): сохранить путь и вершину партнёра у себя. Идемпотентен.
+    // Бросает: StorageError
+    void import_partner_data(const BranchTipInfo& partner_tip);
 };
 ```
 
 **Типичный порядок вызовов:**
 
 ```
-Alice                               Bob
-prepare_tip() ─────────────────►  verify_partner_tip()
-verify_partner_tip()  ◄─────────  prepare_tip()
-create_pending() ──── draft_hash ►  co_sign()
-co_sign()        ◄── draft_hash ──  create_pending()
-finalize() ◄──────── co_sig ──────  finalize()
-           ─────────── co_sig ────►
+Alice (инициатор)                     Bob (ответчик)
+prepare_tip()  ──── tip, snapshot ──►  verify_partner_tip()
+verify_partner_tip() ◄── tip, snapshot ── prepare_tip()
+write_half()   ────── половина ─────►  check_partner_half()
+                                       write_half(tip_after(её tip, её половина))
+check_partner_half() ◄──── ответ ─────
 ```
 
 ---
@@ -799,19 +735,22 @@ BranchTipInfo tip_bob   = session_bob.prepare_tip  (bob_id,   leaf_bob);
 session_alice.verify_partner_tip(tip_bob);
 session_bob.verify_partner_tip  (tip_alice);
 
-// Шаг 2: черновики MERGE-блоков
-PendingMergeBlock pending_alice = session_alice.create_pending(
-    alice_id, leaf_alice, tip_bob, alice_working_kp, now());
-PendingMergeBlock pending_bob   = session_bob.create_pending(
-    bob_id, leaf_bob, tip_alice, bob_working_kp, now());
+MergeSnapshot snap_alice = session_alice.snapshot_for(alice_id, leaf_alice);
+MergeSnapshot snap_bob   = session_bob.snapshot_for  (bob_id,   leaf_bob);
+MergeSnapshot merged     = MergeSnapshot::merge(snap_alice, snap_bob);
 
-// Шаг 3: обмен co-подписями
-Signature co_alice = session_alice.co_sign(pending_bob.draft_hash,   alice_working_kp);
-Signature co_bob   = session_bob.co_sign  (pending_alice.draft_hash, bob_working_kp);
+// Шаг 2: Алиса пишет свою половину
+Block half = session_alice.write_half(tip_alice, tip_bob, snap_bob,
+                                      alice_working_kp, now(), depth);
 
-// Шаг 4: финализация
-Block merge_alice = session_alice.finalize(pending_alice, co_bob,   bob_working_kp.pub);
-Block merge_bob   = session_bob.finalize  (pending_bob,   co_alice, alice_working_kp.pub);
+// Шаг 3: Боб читает её и отвечает своей половиной, которая берёт половину Алисы
+session_bob.check_partner_half(half, tip_bob, tip_alice, now(), merged);
+BranchTipInfo after_half = MergeSession::tip_after(tip_alice, half);
+Block answer = session_bob.write_half(tip_bob, after_half, snap_alice,
+                                      bob_working_kp, now(), depth);
+
+// Алиса читает ответ
+session_alice.check_partner_half(answer, after_half, tip_bob, now(), merged);
 ```
 
 ---
@@ -824,7 +763,7 @@ Block merge_bob   = session_bob.finalize  (pending_bob,   co_alice, alice_workin
 |---|---|---|
 | 11.1 | Где размещается REVOCATION-блок | Сигнатура `Blockchain::revoke_node()` может измениться |
 | 11.2 | Защита от фальшивых поддеревьев | Возможно добавление `Blockchain::finalize_node()` (свидетельствование) |
-| 11.3 | Gossip об отзывах | Возможно добавление `SealManager::invalidate_stale_seals()` |
+| 11.3 | Gossip об отзывах | API модуля не меняет: склад отзывов, `sync.md §7.2` |
 | 11.4 | Отказоустойчивость группового слияния | `MergeSession` потребует timeout/retry параметры |
 | 11.5 | Восстановление мастер-идентичности | Поле `master_key_version` в `Node` зарезервировано |
 | 11.7 | Ротация структурного ключа | Не покрывается MVP API; `Node::structural_pubkey` зарезервировано |
@@ -833,4 +772,5 @@ Block merge_bob   = session_bob.finalize  (pending_bob,   co_alice, alice_workin
 
 ## 17. История изменений
 
+- **v0.2** — подпись партнёра в слиянии стала блоком (2026-10-30, `blockchain.md §6.4`): `MergeSession` переписан под `write_half` и `check_partner_half`; убраны `Block::co_signature`, `Seal`, `SealMode`, `SealManager`, таблица `seals`, `validate_seal`, `validate_co_signature`. Разделы 5.8 и 11 закрыты, их номера не переиспользуются.
 - **v0.1** — первая версия API. Покрывает MVP-операции: идентичность, дерево узлов, ветки, слияние, ротация ключа, отзыв, валидация, пломбы.

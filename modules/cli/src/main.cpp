@@ -3,7 +3,6 @@
 #include <blockchain/fraud.h>
 #include <blockchain/key_path.h>
 #include <blockchain/merge_session.h>
-#include <blockchain/seal_manager.h>
 #include <blockchain/serializer.h>
 #include <blockchain/storage.h>
 #include <blockchain/validator.h>
@@ -1108,18 +1107,15 @@ static int cmd_block_stub(const fs::path& data_dir, int argc, char** argv) {
 }
 
 // ── Merge state persistence ───────────────────────────────────────────────────
-// Saved between 'merge create' and 'merge finalize' in data_dir/merge/<leaf>.state.
-// Format (all LE): partner_pubkey(32) | draft_block_index(4)
+// Saved between 'merge create' and 'merge finalize' in data_dir/merge/<leaf>.half.
+// Format (all LE): half_block_index(4)
 //                  | tip_len(4)      | peer_tip_cbor(N)
 //                  | own_tip_len(4)  | own_tip_cbor(N)     ┐ pre-merge data for
 //                  | own_snap_len(4) | own_snap_cbor(N)    │ the participant
 //                  | peer_snap_len(4)| peer_snap_cbor(N)   ┘ cache (sync.md §5.2)
-// The three trailing blobs may be absent (older state files) — the cache fill
-// is then skipped.
 
 struct MergeState {
-    PublicKey            partner_pubkey;
-    BlockIndex           draft_block_index;
+    BlockIndex           half_block_index;
     std::vector<uint8_t> peer_tip_cbor;
     std::vector<uint8_t> own_tip_cbor;    // BranchTipInfo as of 'merge create'
     std::vector<uint8_t> own_snap_cbor;   // own PRE-merge MergeSnapshot
@@ -1127,7 +1123,7 @@ struct MergeState {
 };
 
 static fs::path merge_state_path(const fs::path& data_dir, NodeIndex leaf) {
-    return data_dir / "merge" / (std::to_string(leaf) + ".state");
+    return data_dir / "merge" / (std::to_string(leaf) + ".half");
 }
 
 static void save_merge_state(const fs::path& data_dir, NodeIndex leaf,
@@ -1136,8 +1132,6 @@ static void save_merge_state(const fs::path& data_dir, NodeIndex leaf,
     fs::create_directories(path.parent_path());
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
     if (!f) throw std::runtime_error("cannot write merge state: " + path.string());
-
-    f.write(reinterpret_cast<const char*>(state.partner_pubkey.bytes.data()), 32);
 
     auto le32 = [](uint32_t v, std::ofstream& out) {
         uint8_t b[4] = { uint8_t(v), uint8_t(v>>8), uint8_t(v>>16), uint8_t(v>>24) };
@@ -1149,7 +1143,7 @@ static void save_merge_state(const fs::path& data_dir, NodeIndex leaf,
             out.write(reinterpret_cast<const char*>(bytes.data()),
                       static_cast<std::streamsize>(bytes.size()));
     };
-    le32(state.draft_block_index, f);
+    le32(state.half_block_index, f);
     blob(state.peer_tip_cbor, f);
     blob(state.own_tip_cbor, f);
     blob(state.own_snap_cbor, f);
@@ -1165,14 +1159,13 @@ static MergeState load_merge_state(const fs::path& data_dir, NodeIndex leaf) {
         "merge state not found — run 'bc merge create --peer-tip HEX' first");
 
     MergeState state{};
-    f.read(reinterpret_cast<char*>(state.partner_pubkey.bytes.data()), 32);
 
     auto read_le32 = [](std::ifstream& in) -> uint32_t {
         uint8_t b[4];
         in.read(reinterpret_cast<char*>(b), 4);
         return b[0] | (uint32_t(b[1])<<8) | (uint32_t(b[2])<<16) | (uint32_t(b[3])<<24);
     };
-    state.draft_block_index = read_le32(f);
+    state.half_block_index = read_le32(f);
 
     auto read_blob = [&read_le32](std::ifstream& in, std::vector<uint8_t>& out) {
         const uint32_t len = read_le32(in);
@@ -1181,15 +1174,10 @@ static MergeState load_merge_state(const fs::path& data_dir, NodeIndex leaf) {
         if (len > 0) in.read(reinterpret_cast<char*>(out.data()), len);
     };
     read_blob(f, state.peer_tip_cbor);
+    read_blob(f, state.own_tip_cbor);
+    read_blob(f, state.own_snap_cbor);
+    read_blob(f, state.peer_snap_cbor);
     if (!f) throw std::runtime_error("merge state file truncated");
-
-    // Trailing cache blobs are optional (older state files).
-    if (f.peek() != EOF) {
-        read_blob(f, state.own_tip_cbor);
-        read_blob(f, state.own_snap_cbor);
-        read_blob(f, state.peer_snap_cbor);
-        if (!f) throw std::runtime_error("merge state file truncated");
-    }
     return state;
 }
 
@@ -6391,9 +6379,19 @@ static int cmd_merge_prepare(const fs::path& data_dir, int argc, char** argv) {
     return 0;
 }
 
+// Feed a completed merge into the persistent participant cache (sync.md §5.2) —
+// the raw material for fraud claims (blockchain.md §11.9).
+static void remember_merge(const fs::path& data_dir, const BranchTipInfo& own_tip,
+                           const MergeSnapshot& own_snap, const BranchTipInfo& peer_tip,
+                           const MergeSnapshot& peer_snap) {
+    chainsync::ParticipantCache cache(data_dir / "sync_cache");
+    const Hash union_root = chainsync::record_merge(cache, own_tip, own_snap, peer_tip, peer_snap);
+    std::cerr << "Participant cache updated: union root " << to_hex(union_root.bytes) << "\n";
+}
+
 // bc merge create --peer-tip HEX --peer-snapshot HEX [--leaf L] [--depth N]
-// Verifies partner's tip, unions snapshots, creates own MERGE draft, saves state.
-// Prints draft_hash to send to partner.
+// The initiator: verifies the partner's tip, unions snapshots, writes own half
+// into the branch, saves state. Prints the half to send to the partner.
 static int cmd_merge_create(const fs::path& data_dir, int argc, char** argv) {
     const auto peer_hex = flag_val(argc, argv, "--peer-tip");
     const auto snap_hex = flag_val(argc, argv, "--peer-snapshot");
@@ -6420,154 +6418,119 @@ static int cmd_merge_create(const fs::path& data_dir, int argc, char** argv) {
     const uint32_t validated_depth =
         dep_s.empty() ? 1u : static_cast<uint32_t>(std::stoul(dep_s));
 
-    // Pre-merge view of the own branch — create_pending replaces the stored
+    // Pre-merge view of the own branch — write_half replaces the stored
     // snapshot with the union, so capture both for the cache fill (sync.md §5.2).
     const auto own_tip  = session.prepare_tip(ctx.user_id, leaf);
     const auto own_snap = session.snapshot_for(ctx.user_id, leaf);
 
-    const auto pending = session.create_pending(
-        ctx.user_id, leaf, partner_tip, partner_snap, ctx.working_kp, now, validated_depth);
+    const Block half = session.write_half(own_tip, partner_tip, partner_snap, ctx.working_kp,
+                                          now, validated_depth);
 
     MergeState state{};
-    state.partner_pubkey    = partner_tip.path.back().working_pubkey;
-    state.draft_block_index = pending.draft.address.block_index;
-    state.peer_tip_cbor     = peer_cbor;
-    state.own_tip_cbor      = Serializer::encode(own_tip);
-    state.own_snap_cbor     = Serializer::encode(own_snap);
-    state.peer_snap_cbor    = snap_cbor;
+    state.half_block_index = half.address.block_index;
+    state.peer_tip_cbor    = peer_cbor;
+    state.own_tip_cbor     = Serializer::encode(own_tip);
+    state.own_snap_cbor    = Serializer::encode(own_snap);
+    state.peer_snap_cbor   = snap_cbor;
     save_merge_state(data_dir, leaf, state);
 
     const auto pid = to_hex(partner_tip.path.front().structural_pubkey.bytes);
     std::cerr << "Partner verified: " << pid.substr(0, 16) << "...\n";
-    std::cerr << "Draft MERGE block #" << pending.draft.address.block_index << " saved.\n";
-    const auto draft_bytes = Serializer::encode(pending.draft);
-    std::cout << "draft_hash: " << to_hex(pending.draft_hash.bytes) << "\n";
-    std::cout << "draft: " << to_hex(draft_bytes.data(), draft_bytes.size()) << "\n";
-    std::cerr << "(send the draft to partner; they read it and run: bc merge cosign --draft <DRAFT>)\n";
-    std::cerr << "Next (after receiving partner's co_sig): bc merge finalize --co-sig <SIG>\n";
+    std::cerr << "MERGE half #" << half.address.block_index << " written.\n";
+    const auto half_bytes = Serializer::encode(half);
+    std::cout << "half: " << to_hex(half_bytes.data(), half_bytes.size()) << "\n";
+    std::cerr << "(send the half to partner, with your tip and snapshot; they read it and run: "
+                 "bc merge answer --peer-tip <TIP> --peer-snapshot <SNAP> --half <HALF>)\n";
+    std::cerr << "Next (after receiving partner's answer): bc merge finalize --answer <ANSWER>\n";
     return 0;
 }
 
-// bc merge cosign --draft DRAFT_HEX [--leaf L]
-// Reads the partner's draft — the «draft:» line of their bc merge create — and
-// co-signs it with own working key only if it takes the tip we sent, at a time
-// that is now by our clock, over the same union (blockchain.md §6.4). Prints the
-// signature to send back.
-static int cmd_merge_cosign(const fs::path& data_dir, int argc, char** argv) {
-    const auto draft_hex = flag_val(argc, argv, "--draft");
-    if (draft_hex.empty()) {
-        std::cerr << "Usage: bc merge cosign --draft DRAFT_HEX [--leaf L]\n";
+// bc merge answer --peer-tip HEX --peer-snapshot HEX --half HEX [--leaf L] [--depth N]
+// The responder: reads the initiator's half — the «half:» line of their bc merge
+// create — and only if it takes our tip, at a time that is now by our clock, over
+// the same union (blockchain.md §6.4), writes own half, which takes that half
+// itself. Prints the answer to send back.
+static int cmd_merge_answer(const fs::path& data_dir, int argc, char** argv) {
+    const auto peer_hex = flag_val(argc, argv, "--peer-tip");
+    const auto snap_hex = flag_val(argc, argv, "--peer-snapshot");
+    const auto half_hex = flag_val(argc, argv, "--half");
+    if (peer_hex.empty() || snap_hex.empty() || half_hex.empty()) {
+        std::cerr << "Usage: bc merge answer --peer-tip HEX --peer-snapshot HEX --half HEX "
+                     "[--leaf L] [--depth N]\n";
         return 1;
     }
-    if (draft_hex.size() == 64) {
-        std::cerr << "--draft: нужен сам черновик (строка «draft:» из bc merge create партнёра), "
-                     "а не его хеш — вслепую не подписывают (blockchain.md §6.4)\n";
-        return 1;
-    }
-    const auto  draft_cbor = from_hex_vec(draft_hex);
-    const Block draft      = Serializer::decode_block(draft_cbor.data(), draft_cbor.size());
+    const auto  peer_cbor    = from_hex_vec(peer_hex);
+    const auto  partner_tip  = Serializer::decode_tip(peer_cbor.data(), peer_cbor.size());
+    const auto  snap_cbor    = from_hex_vec(snap_hex);
+    const auto  partner_snap = Serializer::decode_snapshot(snap_cbor.data(), snap_cbor.size());
+    const auto  half_cbor    = from_hex_vec(half_hex);
+    const Block half         = Serializer::decode_block(half_cbor.data(), half_cbor.size());
 
-    const NodeIndex leaf  = parse_leaf_index(argc, argv);
-    const auto      state = load_merge_state(data_dir, leaf);
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
     Context ctx(data_dir, leaf);
     MergeSession session(ctx.storage, ctx.validator);
 
-    const auto own_tip  = Serializer::decode_tip(state.own_tip_cbor.data(), state.own_tip_cbor.size());
-    const auto peer_tip = Serializer::decode_tip(state.peer_tip_cbor.data(), state.peer_tip_cbor.size());
-    const Block own_draft = ctx.storage.get_block({ctx.user_id, leaf, state.draft_block_index});
-    const Hash  draft_hash = session.check_partner_draft(
-        draft, own_tip, peer_tip, static_cast<Timestamp>(std::time(nullptr)), own_draft);
-    const Signature co_sig = session.co_sign(draft_hash, ctx.working_kp);
-    std::cout << "co_signature: " << to_hex(co_sig.bytes) << "\n";
-    std::cerr << "(send co_signature to partner; they run: bc merge finalize --co-sig <SIG>)\n";
+    session.verify_partner_tip(partner_tip);
+    const auto now = static_cast<Timestamp>(std::time(nullptr));
+    session.check_partner_time(partner_tip, now);   // no merging with the future (blockchain.md §9.4)
+    const auto     dep_s = flag_val(argc, argv, "--depth");
+    const uint32_t validated_depth =
+        dep_s.empty() ? 1u : static_cast<uint32_t>(std::stoul(dep_s));
+
+    const auto own_tip  = session.prepare_tip(ctx.user_id, leaf);
+    const auto own_snap = session.snapshot_for(ctx.user_id, leaf);
+    session.check_partner_half(half, own_tip, partner_tip, now,
+                               MergeSnapshot::merge(own_snap, partner_snap));
+    const Block answer = session.write_half(own_tip, MergeSession::tip_after(partner_tip, half),
+                                            partner_snap, ctx.working_kp, now, validated_depth);
+    session.import_partner_data(partner_tip);
+    remember_merge(data_dir, own_tip, own_snap, partner_tip, partner_snap);
+
+    const auto answer_bytes = Serializer::encode(answer);
+    std::cout << "answer: " << to_hex(answer_bytes.data(), answer_bytes.size()) << "\n";
+    std::cout << "merge block #" << answer.address.block_index
+              << "  hash: " << to_hex(Crypto::hash_block(answer).bytes) << "\n";
+    std::cerr << "(send the answer to partner; they run: bc merge finalize --answer <ANSWER>)\n";
     return 0;
 }
 
-// bc merge finalize --co-sig HEX [--leaf L]
-// Attaches partner's co-signature to own pending MERGE block and completes the merge.
+// bc merge finalize --answer HEX [--leaf L]
+// The initiator: reads the partner's answer against own half and completes the merge.
 static int cmd_merge_finalize(const fs::path& data_dir, int argc, char** argv) {
-    const auto cosig_hex = flag_val(argc, argv, "--co-sig");
-    if (cosig_hex.empty()) {
-        std::cerr << "Usage: bc merge finalize --co-sig HEX [--leaf L]\n";
+    const auto answer_hex = flag_val(argc, argv, "--answer");
+    if (answer_hex.empty()) {
+        std::cerr << "Usage: bc merge finalize --answer HEX [--leaf L]\n";
         return 1;
     }
-
-    Signature co_sig{};
-    if (!from_hex(cosig_hex, co_sig.bytes.data(), 64)) {
-        std::cerr << "Invalid --co-sig hex (expected 128 hex chars)\n";
-        return 1;
-    }
+    const auto  answer_cbor = from_hex_vec(answer_hex);
+    const Block answer      = Serializer::decode_block(answer_cbor.data(), answer_cbor.size());
 
     const NodeIndex leaf  = parse_leaf_index(argc, argv);
     const auto state      = load_merge_state(data_dir, leaf);
     Context ctx(data_dir, leaf);
 
-    const Block draft = ctx.storage.get_block({ctx.user_id, leaf, state.draft_block_index});
-    const PendingMergeBlock pending{draft, Crypto::hash_block(draft)};
+    const Block half = ctx.storage.get_block({ctx.user_id, leaf, state.half_block_index});
+    const auto peer_tip  = Serializer::decode_tip(state.peer_tip_cbor.data(), state.peer_tip_cbor.size());
+    const auto own_tip   = Serializer::decode_tip(state.own_tip_cbor.data(), state.own_tip_cbor.size());
+    const auto own_snap  = Serializer::decode_snapshot(state.own_snap_cbor.data(), state.own_snap_cbor.size());
+    const auto peer_snap = Serializer::decode_snapshot(state.peer_snap_cbor.data(), state.peer_snap_cbor.size());
 
     MergeSession session(ctx.storage, ctx.validator);
-    const Block finalized = session.finalize(pending, co_sig, state.partner_pubkey);
-
-    if (!state.peer_tip_cbor.empty()) {
-        const auto partner_tip = Serializer::decode_tip(
-            state.peer_tip_cbor.data(), state.peer_tip_cbor.size());
-        session.import_partner_data(partner_tip);
-
-        // Feed the completed merge into the persistent participant cache
-        // (sync.md §5.2) — the raw material for fraud claims (blockchain.md §11.9).
-        if (!state.own_tip_cbor.empty()) {
-            chainsync::ParticipantCache cache(data_dir / "sync_cache");
-            const auto own_tip = Serializer::decode_tip(
-                state.own_tip_cbor.data(), state.own_tip_cbor.size());
-            const auto own_snap = Serializer::decode_snapshot(
-                state.own_snap_cbor.data(), state.own_snap_cbor.size());
-            const auto peer_snap = Serializer::decode_snapshot(
-                state.peer_snap_cbor.data(), state.peer_snap_cbor.size());
-            const Hash union_root = chainsync::record_merge(
-                cache, own_tip, own_snap, partner_tip, peer_snap);
-            std::cerr << "Participant cache updated: union root "
-                      << to_hex(union_root.bytes) << "\n";
-        }
-    }
+    // Against the half's own time: the answer may take a while by hand.
+    session.check_partner_half(answer, MergeSession::tip_after(own_tip, half), peer_tip,
+                               half.timestamp_claimed, MergeSnapshot::merge(own_snap, peer_snap));
+    session.import_partner_data(peer_tip);
+    remember_merge(data_dir, own_tip, own_snap, peer_tip, peer_snap);
 
     fs::remove(merge_state_path(data_dir, leaf));
 
-    const Hash merge_hash = Crypto::hash_block(finalized);
-    std::cout << "merge block #" << finalized.address.block_index
-              << "  hash: " << to_hex(merge_hash.bytes) << "\n";
-    std::cerr << "Merge complete. Co-signature stored as seal.\n";
-    std::cerr << "Seals: bc seal list " << to_hex(merge_hash.bytes) << "\n";
+    std::cout << "merge block #" << half.address.block_index
+              << "  hash: " << to_hex(Crypto::hash_block(half).bytes) << "\n";
+    std::cerr << "Merge complete.\n";
     return 0;
 }
 
 // ── Networked merge over the aggregator relay (sync.md §4.1) ──────────────────
-
-// The partner's co-signature of our merge block, next to the block on the
-// aggregator (blockchain.md §6.4): checked there against the partner's branch
-// keys — so the partner's path goes first if the aggregator does not know it
-// yet (a merge brought its nodes here).
-static void post_cosig(Context& ctx, const std::string& via, const Block& merge) {
-    if (!merge.co_signature) return;
-    const Hash        h = Crypto::hash_block(merge);
-    const std::string body(reinterpret_cast<const char*>(merge.co_signature->bytes.data()), 64);
-    httplib::Client   cli(via);
-    cli.set_connection_timeout(5);
-    const auto post = [&]() {
-        const auto res = cli.Post("/cosigs/" + to_hex(h.bytes), body, "application/octet-stream");
-        return res ? res->status : -1;
-    };
-    int status = post();
-    if (status == 403) {
-        const MergePayload mp = Serializer::decode_merge_payload(merge.payload.data(),
-                                                                 merge.payload.size());
-        if (publish_key_path(via, ctx.storage, mp.partner_last_address.user_id,
-                             mp.partner_last_address.node_index))
-            status = post();
-    }
-    if (status != 200)
-        std::cerr << "co-signature not stored on " << via << " — the merge stands, its "
-                     "evidence there is the pair of halves\n";
-}
 
 static void print_merge_result(const Block& blk) {
     const Hash merge_hash = Crypto::hash_block(blk);
@@ -6657,7 +6620,6 @@ static int cmd_merge_run(const fs::path& data_dir, int argc, char** argv) {
         print_merge_result(*dialogue.merge_block());
         publish_cache_via(via, cache);
         upload_block(ctx, via, *dialogue.merge_block());   // feeds discovery (sync.md §8)
-        post_cosig(ctx, via, *dialogue.merge_block());
         return 0;
     }
     if (dialogue.failed()) { std::cerr << "merge failed: " << dialogue.error() << "\n"; return 1; }
@@ -6668,8 +6630,8 @@ static int cmd_merge_run(const fs::path& data_dir, int argc, char** argv) {
 
 // bc merge own --with NODE [--leaf L] [--depth N]
 // Internal merge (blockchain.md §3.2/blockchain.md §5.3): the --leaf branch (public vertex)
-// merges with own branch NODE in-process; both branches append co-signed
-// MERGE blocks and the vertex snapshot commits both.
+// merges with own branch NODE in-process; both branches append MERGE blocks,
+// the second taking the first, and the vertex snapshot commits both.
 static int cmd_merge_own(const fs::path& data_dir, int argc, char** argv) {
     const auto with_s = flag_val(argc, argv, "--with");
     if (with_s.empty()) {
@@ -6757,7 +6719,7 @@ static int cmd_merge_serve(const fs::path& data_dir, int argc, char** argv) {
     chainsync::HttpDialogueChannel channel(via, ctx.user_id);
 
     // One dialogue per (session, sender). Concurrent dialogues on the same
-    // branch resolve themselves: the second create_pending fails its dialogue.
+    // branch resolve themselves: the second write_half fails its dialogue.
     struct Serving {
         MergeSession             session;
         chainsync::MergeDialogue dialogue;
@@ -6805,7 +6767,6 @@ static int cmd_merge_serve(const fs::path& data_dir, int argc, char** argv) {
                 print_merge_result(*d.merge_block());
                 publish_cache_via(via, cache);
                 upload_block(ctx, via, *d.merge_block());   // feeds discovery (sync.md §8)
-                post_cosig(ctx, via, *d.merge_block());
                 if (once) return 0;
                 it = serving.erase(it);
             } else if (d.failed()) {
@@ -10087,14 +10048,6 @@ static int cmd_seal_list(const fs::path& data_dir, int argc, char** argv) {
         std::cout << "  [каждая пломба — блок в ветке свидетеля: за ложную "
                      "отвечает он сам]\n";
     }
-
-    // Со-подписи слияний — другая сущность (blockchain.md §6.4): это не «я видел»,
-    // а «мы согласились», и живут они в таблице, не в ветке.
-    SealManager sm(ctx.storage);
-    const auto cosigs = sm.get_seals(block_hash);
-    if (!cosigs.empty())
-        std::cout << "\nсо-подписей слияния на этот блок: " << cosigs.size()
-                  << " (blockchain.md §6.4)\n";
     return 0;
 }
 
@@ -10923,10 +10876,11 @@ Merge over a relay (sync.md §4.1):
 
 Merge, manual relay (blockchain.md §6.4 bilateral two-round protocol):
   merge prepare                    Step 1: print own tip + snapshot blobs (send to partner)
-  merge create --peer-tip HEX      Step 2: verify tip, union snapshots, create draft
+  merge create --peer-tip HEX      Step 2 (initiator): verify tip, union snapshots, write own half
                --peer-snapshot HEX          print draft_hash [--depth N: declared depth]
-  merge cosign --draft HASH        Step 3: co-sign partner's draft_hash, print co_signature
-  merge finalize --co-sig HEX      Step 4: attach partner co_sig, complete merge block
+  merge answer --peer-tip HEX      Step 3 (responder): read the initiator's half,
+    --peer-snapshot HEX --half HEX     write own half taking it, print the answer
+  merge finalize --answer HEX      Step 4 (initiator): read the answer, complete the merge
 
 Пломбы — «я видел это состояние» (blockchain.md §7.4, records.md §8.9):
   seal add ХЕШ --chain ЦЕПЬ        Слепая пломба: запись в СВОЕЙ ветке о том,
@@ -11150,7 +11104,7 @@ int main(int argc, char** argv) {
         else if (cmd == "list")                             return cmd_list(data_dir, argc, argv);
         else if (cmd == "merge"     && subcmd == "prepare") return cmd_merge_prepare(data_dir, argc, argv);
         else if (cmd == "merge"     && subcmd == "create")  return cmd_merge_create(data_dir, argc, argv);
-        else if (cmd == "merge"     && subcmd == "cosign")  return cmd_merge_cosign(data_dir, argc, argv);
+        else if (cmd == "merge"     && subcmd == "answer")  return cmd_merge_answer(data_dir, argc, argv);
         else if (cmd == "merge"     && subcmd == "finalize")return cmd_merge_finalize(data_dir, argc, argv);
         else if (cmd == "merge"     && subcmd == "run")     return cmd_merge_run(data_dir, argc, argv);
         else if (cmd == "merge"     && subcmd == "own")     return cmd_merge_own(data_dir, argc, argv);

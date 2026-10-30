@@ -1,5 +1,7 @@
 #include "aggregator/recognition.h"
 
+#include "aggregator/branch_keys.h"
+
 #include <blockchain/serializer.h>
 #include <records/codec.h>
 
@@ -163,47 +165,50 @@ DealsOnTable compute_deals(const AggregatorStorage& storage) {
         for (auto& e : list)
             e.seen.since = branch_since(UserId{e.seen.author}, e.seen.node, e.seen.index);
     }
-    // Merges both halves of which are on the table: the partner's branch up to
-    // the block taken is fixed by the merge time (blockchain.md §5.2).
-    std::map<std::tuple<UserId, uint32_t, uint64_t>, const SeenBlock*> merge_at;
-    for (const auto& [mh, m] : merges) {
-        (void)mh;
-        merge_at[{m->address.user_id, m->address.node_index, m->address.block_index}] = m;
-    }
     // A block the merge names may not be here yet: seen_block does not remember
     // a miss, and an absent block has no address.
     const auto lies_at = [&](const Hash& h, const BlockAddress& a) {
         return seen_block(storage, h).address == a;
     };
+    // Whose a half is (blockchain.md §5.2, blockchain.md §6.7 rule 12): a merge
+    // written with a stolen key fixes nothing. Only a chain under revocation has
+    // anything to settle, so only such a chain pays for its keys here.
+    const auto             revoked = storage.all_revoked_chains();
+    const std::set<UserId> disputed(revoked.begin(), revoked.end());
+    BranchKeys             keys;
+    if (!disputed.empty()) keys.load(storage, &disputed);
+    const auto not_owners = [&](const Hash& h, const SeenBlock& b) {
+        if (!disputed.count(b.address.user_id)) return false;
+        const auto block = storage.get_block_by_hash(h);
+        return !block || keys.whose(*block, storage) == BranchKeys::Whose::not_owner;
+    };
+    // Each merge the answer to which is on the table (blockchain.md §6.4): the
+    // responder's half takes the initiator's half itself, and that half takes the
+    // block right before the answer. Both words stand in their branches, so both
+    // are fixed by the time the responder read and answered: the initiator's up
+    // to its half, the responder's up to the block taken. A half lying at the
+    // address of another (a rival, blockchain.md §6.7 rule 13) is not this table's.
+    std::map<std::tuple<UserId, uint32_t, uint64_t>, Hash32> kept_at;
+    for (const auto& [mh, m] : merges)
+        kept_at[{m->address.user_id, m->address.node_index, m->address.block_index}] = mh;
     for (const auto& [mh, m] : merges) {
         const auto& took = m->merge->partner_last_address;
         // A merge of one's own branches is signed by one hand: it proves nothing
         // against that hand.
         if (took.user_id == m->address.user_id || m->address.block_index == 0) continue;
-        if (!lies_at(m->merge->partner_last_hash, took)) continue;   // the block it took is not here
-        // The partner co-signed this very half having read it (blockchain.md §6.4;
-        // checked when it came, AggregatorStorage::put_cosig): both branches are
-        // fixed by the merge time — the partner's up to the block taken, this one
-        // up to the half itself.
-        if (storage.get_cosig(Hash{mh})) {
-            out.witnessed_at[{took.user_id, took.node_index}].push_back(
-                {took.block_index, m->merge->merge_timestamp});
-            out.witnessed_at[{m->address.user_id, m->address.node_index}].push_back(
-                {m->address.block_index, m->merge->merge_timestamp});
-            continue;
-        }
-        // Each side's merge is the next block after the tip the other took
-        // (blockchain.md §6.4): the partner's half lies right after `took` and
-        // takes the block right before this one.
-        const auto half = merge_at.find({took.user_id, took.node_index, took.block_index + 1});
-        if (half == merge_at.end()) continue;                   // the partner's half is not here
+        const auto half = kept_at.find({took.user_id, took.node_index, took.block_index});
+        if (half == kept_at.end() || half->second != m->merge->partner_last_hash.bytes)
+            continue;                                           // not an answer, or the half is not here
+        const SeenBlock&  asked = seen_block(storage, Hash{half->second});
         const BlockAddress mine{m->address.user_id, m->address.node_index,
                                 m->address.block_index - 1};
-        const auto& other = *half->second->merge;
-        if (!(other.partner_last_address == mine) || !lies_at(other.partner_last_hash, mine))
+        if (!(asked.merge->partner_last_address == mine) ||
+            !lies_at(asked.merge->partner_last_hash, mine))
             continue;
-        out.witnessed_at[{took.user_id, took.node_index}].push_back(
-            {took.block_index, m->merge->merge_timestamp});
+        if (not_owners(Hash{half->second}, asked) || not_owners(Hash{mh}, *m)) continue;
+        const int64_t at = asked.merge->merge_timestamp;
+        out.witnessed_at[{took.user_id, took.node_index}].push_back({took.block_index, at});
+        out.witnessed_at[{mine.user_id, mine.node_index}].push_back({mine.block_index, at});
     }
     for (auto& [branch, v] : out.witnessed_at) {
         (void)branch;
@@ -999,19 +1004,19 @@ std::shared_ptr<const DealsOnTable> deals_on_table(const AggregatorStorage& stor
     static std::mutex                          mu;
     static uint64_t                            cached_id     = 0;
     static std::size_t                         cached_count  = 0;
-    static std::size_t                         cached_cosigs = 0;
+    static std::size_t                         cached_revs   = 0;
     static std::shared_ptr<const DealsOnTable> cached;
     std::lock_guard<std::mutex> lock(mu);   // one computes, the rest wait for it
-    // Taken before: a block or a co-signature landing meanwhile forces the next recompute.
-    const std::size_t count  = storage.block_count();
-    const std::size_t cosigs = storage.cosig_count();
+    // Taken before: a block or a revocation landing meanwhile forces the next recompute.
+    const std::size_t count = storage.block_count();
+    const std::size_t revs  = storage.revocation_count();
     if (cached && cached_id == storage.instance_id() && cached_count == count &&
-        cached_cosigs == cosigs)
+        cached_revs == revs)
         return cached;
-    cached        = std::make_shared<const DealsOnTable>(compute_deals(storage));
-    cached_id     = storage.instance_id();
-    cached_count  = count;
-    cached_cosigs = cosigs;
+    cached       = std::make_shared<const DealsOnTable>(compute_deals(storage));
+    cached_id    = storage.instance_id();
+    cached_count = count;
+    cached_revs  = revs;
     return cached;
 }
 

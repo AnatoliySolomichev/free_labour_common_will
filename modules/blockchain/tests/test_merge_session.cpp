@@ -155,52 +155,42 @@ TEST_F(MergeSessionTest, FullMergeProtocol) {
     EXPECT_NO_THROW(alice_->ms->verify_partner_tip(bob_tip));
     EXPECT_NO_THROW(bob_->ms->verify_partner_tip(alice_tip));
 
-    // Step 2: create pending merge blocks (exchange snapshots first)
+    // Step 2: Alice writes her half (snapshots exchanged first): it is signed
+    // and in her branch at once.
     Timestamp ts = 2'000LL;
     MergeSnapshot alice_snap = alice_->ms->snapshot_for(alice_->root_kp.pub, LEAF);
     MergeSnapshot bob_snap   = bob_->ms->snapshot_for(bob_->root_kp.pub, LEAF);
+    const MergeSnapshot merged = MergeSnapshot::merge(alice_snap, bob_snap);
 
-    PendingMergeBlock alice_pending = alice_->ms->create_pending(
-        alice_->root_kp.pub, LEAF, bob_tip, bob_snap, alice_leaf, ts, 1u);
-    PendingMergeBlock bob_pending = bob_->ms->create_pending(
-        bob_->root_kp.pub, LEAF, alice_tip, alice_snap, bob_leaf, ts, 1u);
+    const Block alice_half =
+        alice_->ms->write_half(alice_tip, bob_tip, bob_snap, alice_leaf, ts, 1u);
+    EXPECT_TRUE(alice_->storage->has_block(alice_half.address));
+
+    // Step 3: Bob reads it and answers: his half takes hers itself.
+    EXPECT_NO_THROW(bob_->ms->check_partner_half(alice_half, bob_tip, alice_tip, ts, merged));
+    const BranchTipInfo alice_after = MergeSession::tip_after(alice_tip, alice_half);
+    const Block bob_half =
+        bob_->ms->write_half(bob_tip, alice_after, alice_snap, bob_leaf, ts, 1u);
+    EXPECT_TRUE(bob_->storage->has_block(bob_half.address));
+
+    // Alice reads the answer against her half.
+    EXPECT_NO_THROW(alice_->ms->check_partner_half(bob_half, alice_after, bob_tip, ts, merged));
+
+    const MergePayload alice_mp = Serializer::decode_merge_payload(
+        alice_half.payload.data(), alice_half.payload.size());
+    const MergePayload bob_mp = Serializer::decode_merge_payload(
+        bob_half.payload.data(), bob_half.payload.size());
+    // Hers takes his tip, his takes her half: each signature stands in its own
+    // branch, right after the tip the other side named.
+    EXPECT_EQ(alice_mp.partner_last_address, bob_tip.tip_address);
+    EXPECT_EQ(alice_mp.partner_last_hash,    bob_tip.tip_hash);
+    EXPECT_EQ(bob_mp.partner_last_address,   alice_half.address);
+    EXPECT_EQ(bob_mp.partner_last_hash,      Crypto::hash_block(alice_half));
+    EXPECT_EQ(bob_half.prev_hash,            bob_tip.tip_hash);
 
     // Both sides committed the same union snapshot (commutative merge).
-    MergePayload alice_mp = Serializer::decode_merge_payload(
-        alice_pending.draft.payload.data(), alice_pending.draft.payload.size());
-    MergePayload bob_mp = Serializer::decode_merge_payload(
-        bob_pending.draft.payload.data(), bob_pending.draft.payload.size());
     EXPECT_EQ(alice_mp.merkle_root, bob_mp.merkle_root);
     EXPECT_EQ(alice_mp.hll_hash,    bob_mp.hll_hash);
-
-    // Drafts are persisted
-    EXPECT_TRUE(alice_->storage->has_block(alice_pending.draft.address));
-    EXPECT_TRUE(bob_->storage->has_block(bob_pending.draft.address));
-
-    // Step 3: co-sign partner's draft hash
-    Signature alice_co_sig = alice_->ms->co_sign(bob_pending.draft_hash, alice_leaf);
-    Signature bob_co_sig   = bob_->ms->co_sign(alice_pending.draft_hash, bob_leaf);
-
-    // Step 4: finalize
-    Block alice_final = alice_->ms->finalize(alice_pending, bob_co_sig,   bob_leaf.pub);
-    Block bob_final   = bob_->ms->finalize(  bob_pending,   alice_co_sig, alice_leaf.pub);
-
-    ASSERT_TRUE(alice_final.co_signature.has_value());
-    ASSERT_TRUE(bob_final.co_signature.has_value());
-
-    // Validate co-signatures
-    EXPECT_NO_THROW(alice_->validator->validate_co_signature(alice_final, bob_leaf.pub));
-    EXPECT_NO_THROW(bob_->validator->validate_co_signature(  bob_final, alice_leaf.pub));
-
-    // co_sig stored as Seal in seals table
-    auto alice_seals = alice_->storage->get_seals(alice_pending.draft_hash);
-    ASSERT_EQ(alice_seals.size(), 1u);
-    EXPECT_EQ(alice_seals[0].signer_id, bob_leaf.pub);
-    EXPECT_EQ(alice_seals[0].mode, SealMode::OPEN);
-
-    auto bob_seals = bob_->storage->get_seals(bob_pending.draft_hash);
-    ASSERT_EQ(bob_seals.size(), 1u);
-    EXPECT_EQ(bob_seals[0].signer_id, alice_leaf.pub);
 }
 
 // ── import_partner_data ───────────────────────────────────────────────────────
@@ -275,16 +265,16 @@ TEST_F(MergeSessionTest, DagSnapshotAccumulatesUniqueParticipants) {
     BranchTipInfo bob_tip = bob_->ms->prepare_tip(bob_->root_kp.pub, LEAF);
     alice_->ms->verify_partner_tip(bob_tip);
     MergeSnapshot bob_snap = bob_->ms->snapshot_for(bob_->root_kp.pub, LEAF);
-    alice_->ms->create_pending(alice_->root_kp.pub, LEAF, bob_tip, bob_snap,
-                               alice_leaf, 2'000LL, 1u);
+    alice_->ms->write_half(alice_->ms->prepare_tip(alice_->root_kp.pub, LEAF), bob_tip, bob_snap,
+                           alice_leaf, 2'000LL, 1u);
     EXPECT_EQ(alice_->ms->snapshot_for(alice_->root_kp.pub, LEAF).estimate(), 2u);
 
     // Alice ⋈ Carol → Alice's snapshot grows to {A, B, C}
     BranchTipInfo carol_tip = carol->ms->prepare_tip(carol->root_kp.pub, LEAF);
     alice_->ms->verify_partner_tip(carol_tip);
     MergeSnapshot carol_snap = carol->ms->snapshot_for(carol->root_kp.pub, LEAF);
-    alice_->ms->create_pending(alice_->root_kp.pub, LEAF, carol_tip, carol_snap,
-                               alice_leaf, 3'000LL, 1u);
+    alice_->ms->write_half(alice_->ms->prepare_tip(alice_->root_kp.pub, LEAF), carol_tip,
+                           carol_snap, alice_leaf, 3'000LL, 1u);
     EXPECT_EQ(alice_->ms->snapshot_for(alice_->root_kp.pub, LEAF).estimate(), 3u);
 
     carol.reset();
@@ -292,7 +282,7 @@ TEST_F(MergeSessionTest, DagSnapshotAccumulatesUniqueParticipants) {
 
 // ── merge precondition: both branches must be non-empty (blockchain.md §6.4) ─────────────────
 
-TEST_F(MergeSessionTest, CreatePendingEmptyOwnBranchThrows) {
+TEST_F(MergeSessionTest, WriteHalfEmptyOwnBranchThrows) {
     KeyPair alice_leaf = alice_->setup_leaf();
     KeyPair bob_leaf   = bob_->setup_leaf();
     bob_->bc->append_data_block(bob_->root_kp.pub, LEAF, {0x02}, bob_leaf, 1'000LL);
@@ -303,12 +293,12 @@ TEST_F(MergeSessionTest, CreatePendingEmptyOwnBranchThrows) {
 
     // Alice's branch is empty → cannot merge.
     EXPECT_THROW(
-        alice_->ms->create_pending(alice_->root_kp.pub, LEAF, bob_tip, bob_snap,
-                                   alice_leaf, 1'000LL, 1u),
+        alice_->ms->write_half(alice_->ms->prepare_tip(alice_->root_kp.pub, LEAF), bob_tip,
+                               bob_snap, alice_leaf, 1'000LL, 1u),
         InvalidArgumentError);
 }
 
-TEST_F(MergeSessionTest, CreatePendingEmptyPartnerThrows) {
+TEST_F(MergeSessionTest, WriteHalfEmptyPartnerThrows) {
     KeyPair alice_leaf = alice_->setup_leaf();
     bob_->setup_leaf();
     alice_->bc->append_data_block(alice_->root_kp.pub, LEAF, {0x01}, alice_leaf, 1'000LL);
@@ -319,30 +309,26 @@ TEST_F(MergeSessionTest, CreatePendingEmptyPartnerThrows) {
 
     // Empty partner → thrown before partner_snapshot is used (pass a default).
     EXPECT_THROW(
-        alice_->ms->create_pending(alice_->root_kp.pub, LEAF, bob_tip, MergeSnapshot{},
-                                   alice_leaf, 1'000LL, 1u),
+        alice_->ms->write_half(alice_->ms->prepare_tip(alice_->root_kp.pub, LEAF), bob_tip,
+                               MergeSnapshot{}, alice_leaf, 1'000LL, 1u),
         InvalidArgumentError);
 }
 
-TEST_F(MergeSessionTest, FinalizeWrongCoSigThrows) {
+// Половина встаёт сразу за вершиной, которую взял партнёр (blockchain.md §6.4):
+// ветка, ушедшая дальше, — уже не та вершина.
+TEST_F(MergeSessionTest, ABranchThatMovedOnWritesNoHalf) {
     KeyPair alice_leaf = alice_->setup_leaf();
     KeyPair bob_leaf   = bob_->setup_leaf();
     alice_->bc->append_data_block(alice_->root_kp.pub, LEAF, {0x01}, alice_leaf, 1'000LL);
     bob_->bc->append_data_block(bob_->root_kp.pub, LEAF, {0x02}, bob_leaf, 1'000LL);
 
-    BranchTipInfo bob_tip = bob_->ms->prepare_tip(bob_->root_kp.pub, LEAF);
-    alice_->ms->verify_partner_tip(bob_tip);
-    MergeSnapshot bob_snap = bob_->ms->snapshot_for(bob_->root_kp.pub, LEAF);
+    const BranchTipInfo alice_tip = alice_->ms->prepare_tip(alice_->root_kp.pub, LEAF);
+    const BranchTipInfo bob_tip   = bob_->ms->prepare_tip(bob_->root_kp.pub, LEAF);
+    const MergeSnapshot bob_snap  = bob_->ms->snapshot_for(bob_->root_kp.pub, LEAF);
+    alice_->bc->append_data_block(alice_->root_kp.pub, LEAF, {0x03}, alice_leaf, 1'500LL);
 
-    PendingMergeBlock pending = alice_->ms->create_pending(
-        alice_->root_kp.pub, LEAF, bob_tip, bob_snap, alice_leaf, 1'000LL, 1u);
-
-    // Bad co-signature: corrupted
-    Signature bad_co = Crypto::sign(
-        pending.draft_hash.bytes.data(), 32, bob_leaf.sec);
-    bad_co.bytes[0] ^= 0xFF;
-
-    EXPECT_THROW(alice_->ms->finalize(pending, bad_co, bob_leaf.pub), SignatureError);
+    EXPECT_THROW(alice_->ms->write_half(alice_tip, bob_tip, bob_snap, alice_leaf, 2'000LL, 1u),
+                 ChainIntegrityError);
 }
 
 // ── Время слияния (blockchain.md §9.4) ────────────────────────────────────────
@@ -359,10 +345,10 @@ TEST_F(MergeSessionTest, ATipFromTheFutureIsNotMergedWith) {
                  TimestampError);
 }
 
-// Со-подписант читает черновик партнёра, а не только его хеш: черновик берёт
-// посланную вершину, датирован «сейчас» по своим часам и коммитит то же
-// объединение снимков. Иначе — не подписывать.
-TEST_F(MergeSessionTest, ACoSignerReadsTheDraftItSigns) {
+// Ответчик читает половину инициатора, прежде чем ответить: она берёт посланную
+// вершину, датирована «сейчас» по его часам и коммитит то же объединение снимков.
+// Инициатор так же читает ответ. Иначе — не отвечать и ответа не принимать.
+TEST_F(MergeSessionTest, AnAnswerIsWrittenOnlyAfterReadingTheHalf) {
     KeyPair alice_leaf = alice_->setup_leaf();
     KeyPair bob_leaf   = bob_->setup_leaf();
     alice_->bc->append_data_block(alice_->root_kp.pub, LEAF, {0xAA}, alice_leaf, 1'000LL);
@@ -371,27 +357,32 @@ TEST_F(MergeSessionTest, ACoSignerReadsTheDraftItSigns) {
     const BranchTipInfo bob_tip    = bob_->ms->prepare_tip(bob_->root_kp.pub, LEAF);
     const MergeSnapshot alice_snap = alice_->ms->snapshot_for(alice_->root_kp.pub, LEAF);
     const MergeSnapshot bob_snap   = bob_->ms->snapshot_for(bob_->root_kp.pub, LEAF);
-    const PendingMergeBlock alice_pending = alice_->ms->create_pending(
-        alice_->root_kp.pub, LEAF, bob_tip, bob_snap, alice_leaf, 2'000LL, 1u);
-    const PendingMergeBlock bob_pending = bob_->ms->create_pending(
-        bob_->root_kp.pub, LEAF, alice_tip, alice_snap, bob_leaf, 2'000LL + 300, 1u);
+    const MergeSnapshot merged     = MergeSnapshot::merge(alice_snap, bob_snap);
+    const Block half =
+        alice_->ms->write_half(alice_tip, bob_tip, bob_snap, alice_leaf, 2'000LL, 1u);
 
-    // Боб честен: в пределах допуска часов, берёт вершину Алисы, то же объединение.
-    EXPECT_EQ(alice_->ms->check_partner_draft(bob_pending.draft, alice_tip, bob_tip, 2'000LL,
-                                              alice_pending.draft),
-              bob_pending.draft_hash);
-    // Часы Алисы ушли на час вперёд: черновик Боба для неё — из прошлого.
-    EXPECT_THROW(alice_->ms->check_partner_draft(bob_pending.draft, alice_tip, bob_tip,
-                                                 2'000LL + 3'600),
+    // Алиса честна: в пределах допуска часов, берёт вершину Боба, то же объединение.
+    EXPECT_NO_THROW(bob_->ms->check_partner_half(half, bob_tip, alice_tip, 2'000LL + 300, merged));
+    // Часы Боба ушли на час вперёд: половина Алисы для него — из прошлого.
+    EXPECT_THROW(bob_->ms->check_partner_half(half, bob_tip, alice_tip, 2'000LL + 3'600, merged),
                  TimestampError);
-    // Черновик, который берёт не ту вершину, — не подписывать.
-    BranchTipInfo other = alice_tip;
+    // Половина, которая берёт не ту вершину, — не отвечать.
+    BranchTipInfo other = bob_tip;
     other.tip_hash.bytes[0] ^= 0xFF;
-    EXPECT_THROW(alice_->ms->check_partner_draft(bob_pending.draft, other, bob_tip, 2'000LL),
+    EXPECT_THROW(bob_->ms->check_partner_half(half, other, alice_tip, 2'000LL, merged),
                  ChainIntegrityError);
-    // Черновик без слияния — не слияние.
-    Block data = bob_pending.draft;
+    // Другое объединение снимков — не то слияние.
+    EXPECT_THROW(bob_->ms->check_partner_half(half, bob_tip, alice_tip, 2'000LL, bob_snap),
+                 ChainIntegrityError);
+    // Блок без слияния — не слияние.
+    Block data = half;
     data.type = BlockType::DATA;
-    EXPECT_THROW(alice_->ms->check_partner_draft(data, alice_tip, bob_tip, 2'000LL),
+    EXPECT_THROW(bob_->ms->check_partner_half(data, bob_tip, alice_tip, 2'000LL, merged),
+                 ChainIntegrityError);
+
+    // Ответ, взявший вершину Алисы вместо её половины, ей ни о чём не говорит.
+    const Block stale = bob_->ms->write_half(bob_tip, alice_tip, alice_snap, bob_leaf, 2'000LL, 1u);
+    EXPECT_THROW(alice_->ms->check_partner_half(stale, MergeSession::tip_after(alice_tip, half),
+                                                bob_tip, 2'000LL, merged),
                  ChainIntegrityError);
 }

@@ -4,10 +4,12 @@
 // key path, checked on arrival.
 
 #include "aggregator/branch_keys.h"
+#include "aggregator/recognition.h"
 #include "aggregator/server.h"
 
 #include <blockchain/blockchain.h>
 #include <blockchain/crypto.h>
+#include <blockchain/merge_session.h>
 #include <blockchain/serializer.h>
 #include <blockchain/storage.h>
 #include <blockchain/validator.h>
@@ -548,56 +550,92 @@ TEST(BranchKeys, AggregatorsPassOnlySignedBlocks) {
     std::filesystem::remove_all(db_b);
 }
 
-// Со-подпись слияния лежит рядом с блоком на агрегаторе (blockchain.md §6.4):
-// принимается, только если её поставил ключ ветки партнёра, названного в самом
-// блоке; у блока, который не слияние, со-подписи не бывает.
-TEST(BranchKeys, ACoSignatureComesWithItsMerge) {
-    Chain a("cosig_a"), b("cosig_b");
-    const auto db = std::filesystem::temp_directory_path() / "bc_branch_keys_cosig_db";
+// Настоящее слияние двух цепей на столе: половина инициатора `a`, ответ `b`.
+struct MergedPair {
+    Block a0, b0, half, answer;
+};
+MergedPair merged(Chain& a, Chain& b, AggregatorStorage& storage) {
+    for (Chain* c : {&a, &b}) {
+        const KeyPath kp = c->path();
+        storage.put_keypath_bytes(KeyPathCert::signer_key(kp), Serializer::encode(kp));
+    }
+    const Block a0 = a.write(a.keys.at(kLeaf));
+    const Block b0 = b.write(b.keys.at(kLeaf));
+    MergeSession sa(*a.storage, *a.validator), sb(*b.storage, *b.validator);
+    const auto   ta = sa.prepare_tip(a.uid, kLeaf);
+    const auto   tb = sb.prepare_tip(b.uid, kLeaf);
+    const auto   na = sa.snapshot_for(a.uid, kLeaf);
+    const auto   nb = sb.snapshot_for(b.uid, kLeaf);
+    const Block half = sa.write_half(ta, tb, nb, a.keys.at(kLeaf), ++a.now, 1);
+    const Block answer =
+        sb.write_half(tb, MergeSession::tip_after(ta, half), na, b.keys.at(kLeaf), ++b.now, 1);
+    for (const Block* blk : {&a0, &b0, &half, &answer}) storage.add_block(*blk);
+    return {a0, b0, half, answer};
+}
+
+// Отзыв с линией: `chain` помечает всё после блока `last` чужим.
+void revoke_after(Chain& chain, const Block& last, AggregatorStorage& storage) {
+    const NodeIndex parent = (kLeaf - 1) / 2;
+    const Block     rev    = chain.bc->revoke_node(chain.uid, kLeaf, 1,
+                                                   Crypto::generate_keypair().pub, parent,
+                                                   chain.keys.at(parent), ++chain.now,
+                                                   Crypto::hash_block(last));
+    storage.put_revocation_bytes(
+        chain.uid, Serializer::encode(RevocationCert::build(*chain.storage, rev.address)));
+}
+
+// Слияние — два блока, по одному в ветке каждой стороны (blockchain.md §6.4):
+// слово каждой стоит на своём месте, и отзыв режет его по этому месту. Ответ
+// вора перестаёт что-либо закреплять, как только хозяин провёл линию мимо него.
+TEST(BranchKeys, AThiefsAnswerFixesNothing) {
+    Chain      a("answer_a"), b("answer_b");
+    const auto db = std::filesystem::temp_directory_path() / "bc_branch_keys_answer_db";
     std::filesystem::remove_all(db);
     {
         AggregatorStorage storage(db);
-        Live agg(storage, 18963);
-        for (Chain* c : {&a, &b}) {
-            const KeyPath kp = c->path();
-            ASSERT_EQ(agg.status(agg.cli.Post("/keypaths/" + hex(KeyPathCert::signer_key(kp).bytes),
-                                              cbor(kp), "application/cbor")),
-                      200);
-        }
-        const Block a0 = a.write(a.keys.at(kLeaf));
-        const Block b0 = b.write(b.keys.at(kLeaf));
-        // Половина Алисы: следующий её блок берёт блок Боба.
-        MergePayload mp{};
-        mp.partner_last_address = b0.address;
-        mp.partner_last_hash    = Crypto::hash_block(b0);
-        mp.merge_timestamp      = ++a.now;
-        Block m{};
-        m.address           = {a.uid, kLeaf, a0.address.block_index + 1};
-        m.prev_hash         = Crypto::hash_block(a0);
-        m.timestamp_claimed = mp.merge_timestamp;
-        m.type              = BlockType::MERGE;
-        m.payload           = Serializer::encode(mp);
-        m = resigned(m, a.keys.at(kLeaf));
-        for (const Block* blk : std::initializer_list<const Block*>{&a0, &b0, &m})
-            ASSERT_EQ(agg.status(agg.cli.Post("/blocks", cbor(*blk), "application/cbor")), 200);
-
-        const Hash      mh = Crypto::hash_block(m);
-        const Signature by_bob =
-            Crypto::sign(mh.bytes.data(), mh.bytes.size(), b.keys.at(kLeaf).sec);
-        const Signature by_stranger =
-            Crypto::sign(mh.bytes.data(), mh.bytes.size(), Crypto::generate_keypair().sec);
-        const auto post = [&](const Hash& h, const Signature& s) {
-            return agg.status(agg.cli.Post("/cosigs/" + hex(h.bytes),
-                                           std::string(s.bytes.begin(), s.bytes.end()),
-                                           "application/octet-stream"));
+        const MergedPair  m     = merged(a, b, storage);
+        const auto        fixed = [&] {
+            return read_deals(storage).witnessed(a.uid, kLeaf, m.half.address.block_index);
         };
-        EXPECT_EQ(post(mh, by_stranger), 403);
-        EXPECT_EQ(post(Crypto::hash_block(a0), by_bob), 404);    // не слияние
-        EXPECT_EQ(post(mh, by_bob), 200);
-        const auto got = agg.cli.Get("/cosigs/" + hex(mh.bytes));
-        ASSERT_TRUE(got && got->status == 200);
-        EXPECT_EQ(got->body, std::string(by_bob.bytes.begin(), by_bob.bytes.end()));
-        EXPECT_TRUE(storage.get_cosig(mh).has_value());
+        ASSERT_EQ(fixed(), std::optional<int64_t>(m.half.timestamp_claimed));
+        EXPECT_EQ(read_deals(storage).witnessed(b.uid, kLeaf, m.b0.address.block_index),
+                  std::optional<int64_t>(m.half.timestamp_claimed));
+
+        revoke_after(b, m.b0, storage);                  // ответ — за концом линии хозяина
+        EXPECT_EQ(fixed(), std::nullopt);
+        EXPECT_EQ(read_deals(storage).witnessed(b.uid, kLeaf, m.b0.address.block_index),
+                  std::nullopt);
+    }
+    std::filesystem::remove_all(db);
+}
+
+// Половина инициатора, написанная вором, — то же: ответ честного партнёра на неё
+// ничего не закрепляет, хозяин от неё отрёкся.
+TEST(BranchKeys, AThiefsHalfFixesNothing) {
+    Chain      a("half_a"), b("half_b");
+    const auto db = std::filesystem::temp_directory_path() / "bc_branch_keys_half_db";
+    std::filesystem::remove_all(db);
+    {
+        AggregatorStorage storage(db);
+        const MergedPair  m = merged(a, b, storage);
+        revoke_after(a, m.a0, storage);
+        EXPECT_EQ(read_deals(storage).witnessed(b.uid, kLeaf, m.b0.address.block_index),
+                  std::nullopt);
+    }
+    std::filesystem::remove_all(db);
+}
+
+// Отзыв не трогает то, что хозяин оставил на своей линии: ответ на ней стоит.
+TEST(BranchKeys, AnAnswerOnTheOwnersLineStands) {
+    Chain      a("line_a"), b("line_b");
+    const auto db = std::filesystem::temp_directory_path() / "bc_branch_keys_line_db";
+    std::filesystem::remove_all(db);
+    {
+        AggregatorStorage storage(db);
+        const MergedPair  m = merged(a, b, storage);
+        revoke_after(b, m.answer, storage);
+        EXPECT_EQ(read_deals(storage).witnessed(a.uid, kLeaf, m.half.address.block_index),
+                  std::optional<int64_t>(m.half.timestamp_claimed));
     }
     std::filesystem::remove_all(db);
 }

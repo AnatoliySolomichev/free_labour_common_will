@@ -715,7 +715,7 @@ merge_pair anna  galina
 if command -v faketime >/dev/null; then
     hr "с веткой из будущего не сливаются (blockchain.md §9.4)"
     say "Ирина «прожила» 30 дней раньше всех (выкуп палатки) — честный Пётр с ней не сливается,"
-    say "пока время её не догонит; со-подписант теперь читает черновик и сверяет время со своими часами"
+    say "пока время её не догонит; ответчик читает половину инициатора и сверяет время со своими часами"
     bcp irina merge serve --via "$VIA" --once --timeout 4 >"$work/serve_irina.log" 2>&1 &
     sv_irina=$!
     sleep 0.6
@@ -898,9 +898,6 @@ if command -v faketime >/dev/null; then
         echo "   ✓ с веткой из будущего честный партнёр не сливается"
     else echo "   ✗ слияние с веткой из будущего не остановлено"; fail=1; fi
 fi
-# со-подписи слияний лежат рядом с блоками на агрегаторе (blockchain.md §6.4)
-COSIGS="$(curl -s "$VIA/cosigs/manifest" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["hashes"]))')"
-checkn "со-подписей слияний на агрегаторе" "$COSIGS" ">= 12"
 # просрочка, закреплённая слиянием (economy.md §8.14)
 check "молчание Раисы закреплено слиянием" "$(deal_field "$OFF_les" lapse)" "witnessed"
 check "повторная трата векселя принята после закрепления" "$(deal_status "$OFF_cut")" "accepted"

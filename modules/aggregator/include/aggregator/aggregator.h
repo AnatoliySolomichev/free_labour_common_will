@@ -84,11 +84,11 @@ public:
 
     std::size_t block_count() const noexcept;
     std::size_t idea_count() const noexcept;
-    std::size_t cosig_count() const noexcept;
+    std::size_t revocation_count() const noexcept;
 
     // Unique per storage object in this process — with block_count() and
-    // cosig_count() (both only ever grow) it names one state of what the table
-    // of deals reads, so a reader may cache what it computed from it.
+    // revocation_count() (both only ever grow) it names one state of what the
+    // table of deals reads, so a reader may cache what it computed from it.
     // A swap of a fork (swap_fork) changes what stands without changing the
     // counts — it takes a fresh id, so the views recompute.
     uint64_t instance_id() const noexcept { return instance_id_.load(); }
@@ -102,14 +102,6 @@ public:
     std::optional<std::vector<uint8_t>> get_snapshot_composition(const Hash& parent_root) const;
     std::vector<Hash> all_snapshot_leaf_hashes() const;
     std::vector<Hash> all_snapshot_composition_roots() const;
-
-    // Seal warehouse (sync.md §7.2). Many seals per block; entries are opaque
-    // bytes keyed block_hash‖BLAKE2b(bytes), so identical seals store once.
-    // The fetching node verifies signatures — the warehouse never does.
-    // Throws: StorageError.
-    bool put_seal_bytes(const Hash& block_hash, const std::vector<uint8_t>& bytes);
-    std::vector<std::vector<uint8_t>> get_seal_bytes(const Hash& block_hash) const;
-    std::vector<Hash> all_sealed_block_hashes() const;
 
     // Revocation warehouse (sync.md §7.2; blockchain.md §6.7 rule 8).
     // Certificates are opaque bytes keyed chain(32)‖BLAKE2b(bytes)(32) —
@@ -138,14 +130,6 @@ public:
     // Note that a block came here now — a revocation certificate's block, which
     // comes to the warehouse, not to add_block (blockchain.md §11.10). First write wins.
     void note_arrival(const Hash& block_hash);
-
-    // The partner's co-signature of a MERGE block (blockchain.md §6.4), checked by
-    // the caller before it is put: the partner read the draft, found it taking its
-    // tip at a time that was now by its clock, and signed. One per block; false
-    // when one is there already. Throws: StorageError.
-    bool put_cosig(const Hash& block_hash, const Signature& sig);
-    std::optional<Signature> get_cosig(const Hash& block_hash) const;
-    std::vector<Hash> all_cosig_hashes() const;
 
 private:
     struct Impl;

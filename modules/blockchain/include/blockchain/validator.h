@@ -134,18 +134,6 @@ public:
     // Throws: RevocationError.
     void check_tip_against_revocations(const BranchTipInfo& tip) const;
 
-    // ── Seal check (invariant 3) ──────────────────────────────────────────────
-
-    // Throws: SignatureError.
-    void validate_seal(const Seal& seal) const;
-
-    // ── MERGE block co-signature check ────────────────────────────────────────
-
-    // Verify co_signature is a valid signature of partner_pubkey on
-    // Crypto::hash_block(block).
-    // Throws: SignatureError, InvalidArgumentError (if block.type != MERGE).
-    void validate_co_signature(const Block& block, const PublicKey& partner_pubkey) const;
-
 private:
     // REVOCATION records targeting `target`, from the storage index, filtered by
     // ancestry and author validity (blockchain.md §6.7 rule 10), ordered root-most first, then

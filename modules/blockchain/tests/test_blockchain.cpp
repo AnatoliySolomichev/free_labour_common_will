@@ -928,8 +928,8 @@ TEST_F(RevocationTest, MergeFromRevokedOwnBranchRefused) {
 
     MergeSession session(*storage_, *validator_);
     EXPECT_THROW(
-        session.create_pending(root_kp_.pub, 7, partner_tip, partner_snap,
-                               kp7_, 3'000LL, 1),
+        session.write_half(session.prepare_tip(root_kp_.pub, 7), partner_tip, partner_snap,
+                           kp7_, 3'000LL, 1),
         RevocationError);
 }
 

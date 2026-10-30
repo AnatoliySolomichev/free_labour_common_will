@@ -26,7 +26,7 @@ public:
     // Throws: SerializationError, CryptoError.
     static Hash hash_node(const Node& node);
 
-    // Hash of a block's canonical CBOR encoding (co_signature field excluded).
+    // Hash of a block's canonical CBOR encoding.
     // Throws: SerializationError, CryptoError.
     static Hash hash_block(const Block& block);
 };

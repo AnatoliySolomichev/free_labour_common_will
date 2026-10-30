@@ -5,17 +5,18 @@
 
 namespace blockchain {
 
-// Two-round bilateral merge protocol (blockchain.md §6.4).
+// Bilateral merge protocol (blockchain.md §6.4): each side's signature stands in
+// its own branch. The initiator writes its half first; the responder reads it
+// and answers with its half, which takes the initiator's half itself.
 //
 // Typical call order:
 //
-//   Alice                               Bob
-//   prepare_tip()  ──────────────────►  verify_partner_tip()
-//   verify_partner_tip()  ◄────────────  prepare_tip()
-//   create_pending() ─── draft_hash ───► co_sign()
-//   co_sign()       ◄── draft_hash ────  create_pending()
-//   finalize()      ◄──── co_sig ──────  finalize()
-//                   ─────── co_sig ────►
+//   Alice (initiator)                     Bob (responder)
+//   prepare_tip()  ──── tip, snapshot ──►  verify_partner_tip()
+//   verify_partner_tip()  ◄── tip, snapshot ── prepare_tip()
+//   write_half()   ────── her half ─────►  check_partner_half()
+//                                          write_half(tip_after(her tip, her half))
+//   check_partner_half() ◄── his half ───
 class MergeSession {
 public:
     MergeSession(IStorage& storage, Validator& validator);
@@ -40,47 +41,48 @@ public:
     // Throws: InvalidArgumentError (empty branch), StorageError, BlockNotFoundError.
     MergeSnapshot snapshot_for(const UserId& user_id, NodeIndex leaf_index) const;
 
-    // Step 2: create a MERGE block draft (own signature; co_signature absent).
-    // Unions the own snapshot with the partner's, commits the resulting
-    // merkle_root + hll_hash into the block, and retains the grown snapshot for
-    // the branch. validated_depth is the author's self-declared verification
-    // depth (blockchain.md §6.5.5). The draft is saved to storage immediately (without
-    // co_signature); call finalize() once the partner's co-signature arrives.
-    // Throws: CryptoError, StorageError, NodeNotFoundError,
+    // Whether this branch may open a bilateral act now (blockchain.md §6.7): a
+    // revoked branch is frozen, or goes on only under the key the revocation
+    // named. Mirrors Blockchain::ensure_branch_writable; merges bypass the facade.
+    // Throws: RevocationError.
+    void check_own_branch(const UserId& user_id, NodeIndex leaf_index,
+                          const KeyPair& own_working_keypair) const;
+
+    // Step 2: write own half: a MERGE block right after `own_tip` — the tip sent
+    // to the partner — that takes `partner_tip`. Unions the own snapshot with the
+    // partner's, commits the resulting merkle_root + hll_hash into the block, and
+    // retains the grown snapshot for the branch. validated_depth is the author's
+    // self-declared verification depth (blockchain.md §6.5.5). The block is signed
+    // and in the branch on return: nothing is added to it later. An unanswered
+    // half stays an ordinary block that fixes nothing (blockchain.md §5.2).
+    // Throws: CryptoError, StorageError, NodeNotFoundError, RevocationError,
+    //         ChainIntegrityError (own branch moved past `own_tip`),
     //         InvalidArgumentError (own or partner branch empty, blockchain.md §6.4).
-    PendingMergeBlock create_pending(
-        const UserId&        user_id,
-        NodeIndex            leaf_index,
-        const BranchTipInfo& partner_tip,
-        const MergeSnapshot& partner_snapshot,
-        const KeyPair&       own_working_keypair,
-        Timestamp            merge_timestamp,
-        uint32_t             validated_depth
-    );
+    Block write_half(const BranchTipInfo& own_tip,
+                     const BranchTipInfo& partner_tip,
+                     const MergeSnapshot& partner_snapshot,
+                     const KeyPair&       own_working_keypair,
+                     Timestamp            merge_timestamp,
+                     uint32_t             validated_depth);
 
-    // Step 3: co-sign the partner's draft hash with own key.
-    // Returns the Signature to send back to the partner.
-    // Throws: CryptoError.
-    Signature co_sign(const Hash& partner_draft_hash, const KeyPair& own_working_keypair);
+    // Step 3: read the partner's half before answering it, or before taking the
+    // answer (blockchain.md §6.4): a MERGE block right after `partner_tip` that
+    // takes `own_tip`, at a time within kClockSlack of our `now`, committing
+    // `merged` — the union of both pre-merge snapshots. The responder's own_tip is
+    // its tip; the initiator's is tip_after(own tip, own half). The half's signature
+    // is not checked here: whoever counts it does — the aggregator's door, the
+    // reader — and a side would need all the partner's key changes for it.
+    // Throws: ChainIntegrityError, TimestampError, SerializationError,
+    //         InvalidArgumentError (empty partner branch).
+    void check_partner_half(const Block& half, const BranchTipInfo& own_tip,
+                            const BranchTipInfo& partner_tip, Timestamp now,
+                            const MergeSnapshot& merged) const;
 
-    // Step 3a: before co-signing, read the partner's draft itself (blockchain.md
-    // §6.4): a MERGE block right after the partner's tip that takes `own_tip` —
-    // the tip we sent — at a time within kClockSlack of our `now`, and, given our
-    // own draft, commits the same union of snapshots. Returns the hash to co-sign.
-    // Throws: ChainIntegrityError, TimestampError, SerializationError.
-    Hash check_partner_draft(const Block& draft, const BranchTipInfo& own_tip,
-                             const BranchTipInfo& partner_tip, Timestamp now,
-                             const std::optional<Block>& own_draft = std::nullopt) const;
+    // `tip` moved on to `half`: what the responder's half takes, and what the
+    // initiator reads the answer against.
+    static BranchTipInfo tip_after(const BranchTipInfo& tip, const Block& half);
 
-    // Step 4: attach partner's co_signature to own pending block and finalize.
-    // Verifies co_sig, stores it as a Seal (SealMode::OPEN) in the seals table,
-    // and returns the block with co_signature set in memory.
-    // Throws: SignatureError (invalid co_sig), StorageError.
-    Block finalize(const PendingMergeBlock& pending,
-                   const Signature&         partner_co_sig,
-                   const PublicKey&         partner_pubkey);
-
-    // Step 5 (optional): import partner's path nodes and tip block into local storage.
+    // Step 4 (optional): import partner's path nodes and tip block into local storage.
     // Path nodes are stored in the nodes table under the partner's user_id.
     // The tip block (if present in partner_tip) is stored in external_blocks.
     // Safe to call multiple times with the same partner (idempotent).

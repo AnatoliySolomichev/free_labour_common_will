@@ -60,15 +60,6 @@ protected:
         return b;
     }
 
-    static Seal make_seal(const Hash& bh, uint8_t fill) {
-        Seal s{};
-        s.signer_id  = make_uid(fill);
-        s.block_hash = bh;
-        s.signature  = make_sig(fill);
-        s.mode       = SealMode::BLIND;
-        s.sealed_at  = 1'700'000'042LL;
-        return s;
-    }
 };
 
 // ── Node CRUD ─────────────────────────────────────────────────────────────────
@@ -206,42 +197,6 @@ TEST_F(StorageTest, BranchTipIsolatedByUser) {
 
     EXPECT_EQ(storage_->branch_tip_index(uid1, 5), std::optional<BlockIndex>(1));
     EXPECT_EQ(storage_->branch_tip_index(uid2, 5), std::optional<BlockIndex>(0));
-}
-
-// ── Seals ─────────────────────────────────────────────────────────────────────
-
-TEST_F(StorageTest, GetSealsEmpty) {
-    EXPECT_TRUE(storage_->get_seals(make_hash(0x01)).empty());
-}
-
-TEST_F(StorageTest, PutAndGetSingleSeal) {
-    auto bh   = make_hash(0xBB);
-    Seal seal = make_seal(bh, 0xAA);
-    storage_->put_seal(seal);
-
-    auto seals = storage_->get_seals(bh);
-    ASSERT_EQ(seals.size(), 1u);
-    EXPECT_EQ(seals[0], seal);
-}
-
-TEST_F(StorageTest, PutMultipleSeals) {
-    auto bh = make_hash(0xBB);
-    storage_->put_seal(make_seal(bh, 0x01));
-    storage_->put_seal(make_seal(bh, 0x02));
-    storage_->put_seal(make_seal(bh, 0x03));
-
-    auto seals = storage_->get_seals(bh);
-    ASSERT_EQ(seals.size(), 3u);
-}
-
-TEST_F(StorageTest, SealsIsolatedByHash) {
-    auto bh1 = make_hash(0x11);
-    auto bh2 = make_hash(0x22);
-    storage_->put_seal(make_seal(bh1, 0xAA));
-    storage_->put_seal(make_seal(bh2, 0xBB));
-
-    EXPECT_EQ(storage_->get_seals(bh1).size(), 1u);
-    EXPECT_EQ(storage_->get_seals(bh2).size(), 1u);
 }
 
 // ── External blocks ───────────────────────────────────────────────────────────

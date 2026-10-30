@@ -9,7 +9,6 @@
 #include "storage.h"
 #include "validator.h"
 #include "revocation.h"
-#include "seal_manager.h"
 #include "merge_session.h"
 
 #include <functional>

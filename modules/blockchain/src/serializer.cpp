@@ -92,7 +92,6 @@ void enc_node(Buf& out, const Node& n) {
 }
 
 void enc_block(Buf& out, const Block& b) {
-    // co_signature is excluded from canonical encoding (blockchain-api.md §5.4)
     w_map(out, 7);
     w_uint(out, 0); enc_address(out, b.address);
     w_uint(out, 1); w_fixed(out, b.prev_hash.bytes);
@@ -103,15 +102,6 @@ void enc_block(Buf& out, const Block& b) {
     w_arr(out, b.external_refs.size());
     for (const auto& ref : b.external_refs) enc_ext_ref(out, ref);
     w_uint(out, 6); w_fixed(out, b.signature.bytes);
-}
-
-void enc_seal(Buf& out, const Seal& s) {
-    w_map(out, 5);
-    w_uint(out, 0); w_fixed(out, s.signer_id.bytes);
-    w_uint(out, 1); w_fixed(out, s.block_hash.bytes);
-    w_uint(out, 2); w_fixed(out, s.signature.bytes);
-    w_uint(out, 3); w_uint(out, static_cast<uint64_t>(s.mode));
-    w_uint(out, 4); w_int64(out, s.sealed_at);
 }
 
 void enc_merge_payload(Buf& out, const MergePayload& mp) {
@@ -367,17 +357,6 @@ Block dec_block(CborReader& r) {
     return b;
 }
 
-Seal dec_seal(CborReader& r) {
-    if (r.r_map() != 5) throw SerializationError("Seal: expected 5 fields");
-    Seal s{};
-    expect_key(r, 0); r.r_fixed(s.signer_id.bytes);
-    expect_key(r, 1); r.r_fixed(s.block_hash.bytes);
-    expect_key(r, 2); r.r_fixed(s.signature.bytes);
-    expect_key(r, 3); s.mode = static_cast<SealMode>(r.r_uint());
-    expect_key(r, 4); s.sealed_at = r.r_int();
-    return s;
-}
-
 MergePayload dec_merge_payload(CborReader& r) {
     if (r.r_map() != 6) throw SerializationError("MergePayload: expected 6 fields");
     MergePayload mp{};
@@ -521,10 +500,6 @@ std::vector<uint8_t> Serializer::encode(const Block& block) {
     Buf out; enc_block(out, block); return out;
 }
 
-std::vector<uint8_t> Serializer::encode(const Seal& seal) {
-    Buf out; enc_seal(out, seal); return out;
-}
-
 std::vector<uint8_t> Serializer::encode(const BranchTipInfo& tip) {
     Buf out; enc_tip(out, tip); return out;
 }
@@ -535,10 +510,6 @@ Node Serializer::decode_node(const uint8_t* data, size_t len) {
 
 Block Serializer::decode_block(const uint8_t* data, size_t len) {
     CborReader r(data, len); return dec_block(r);
-}
-
-Seal Serializer::decode_seal(const uint8_t* data, size_t len) {
-    CborReader r(data, len); return dec_seal(r);
 }
 
 BranchTipInfo Serializer::decode_tip(const uint8_t* data, size_t len) {

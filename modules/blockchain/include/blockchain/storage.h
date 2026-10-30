@@ -56,13 +56,6 @@ public:
     virtual std::vector<BlockAddress> get_revocation_addresses(
         const UserId& user_id, NodeIndex revoked_node) const = 0;
 
-    // ── Seals ─────────────────────────────────────────────────────────────────
-
-    // Multiple seals per block are allowed. Throws: StorageError.
-    virtual void put_seal(const Seal& seal) = 0;
-
-    virtual std::vector<Seal> get_seals(const Hash& block_hash) const = 0;
-
     // ── External blocks (other users, received during sync) ───────────────────
 
     virtual void  put_external_block(const Block& block) = 0;
@@ -127,8 +120,6 @@ public:
     std::vector<BlockAddress> get_revocation_addresses(
         const UserId& user_id, NodeIndex revoked_node) const override;
 
-    void              put_seal(const Seal& seal) override;
-    std::vector<Seal> get_seals(const Hash& block_hash) const override;
 
     void  put_external_block(const Block& block) override;
     Block get_external_block(const BlockAddress& address) const override;

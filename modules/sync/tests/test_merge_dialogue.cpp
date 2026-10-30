@@ -45,8 +45,12 @@ TEST_F(MergeDialogueTest, FullMergeFillsBothCaches) {
     ASSERT_TRUE(b.done()) << b.error();
     ASSERT_TRUE(a.merge_block().has_value());
     ASSERT_TRUE(b.merge_block().has_value());
-    EXPECT_TRUE(a.merge_block()->co_signature.has_value());
-    EXPECT_TRUE(b.merge_block()->co_signature.has_value());
+
+    // The responder's half takes the initiator's half itself (blockchain.md §6.4).
+    const MergePayload answer = Serializer::decode_merge_payload(
+        b.merge_block()->payload.data(), b.merge_block()->payload.size());
+    EXPECT_EQ(answer.partner_last_address, a.merge_block()->address);
+    EXPECT_EQ(answer.partner_last_hash, Crypto::hash_block(*a.merge_block()));
 
     // Both sides committed the same union root.
     Hash root = alice_->committed_root(*a.merge_block());
@@ -226,20 +230,17 @@ TEST_F(MergeDialogueTest, MessageFlowSequence) {
     auto offer = a.start();
     ASSERT_EQ(offer.size(), 1u);                          // OFFER
 
-    auto accept_draft = b.on_message(offer[0].data(), offer[0].size());
-    ASSERT_EQ(accept_draft.size(), 2u);                   // ACCEPT + DRAFT
+    auto accept = b.on_message(offer[0].data(), offer[0].size());
+    ASSERT_EQ(accept.size(), 1u);                         // ACCEPT
 
-    auto draft_a = a.on_message(accept_draft[0].data(), accept_draft[0].size());
-    ASSERT_EQ(draft_a.size(), 1u);                        // DRAFT
+    auto half = a.on_message(accept[0].data(), accept[0].size());
+    ASSERT_EQ(half.size(), 1u);                           // HALF
 
-    auto cosig_a = a.on_message(accept_draft[1].data(), accept_draft[1].size());
-    ASSERT_EQ(cosig_a.size(), 1u);                        // COSIG for Bob
+    auto answer = b.on_message(half[0].data(), half[0].size());
+    ASSERT_EQ(answer.size(), 1u);                         // ANSWER
+    EXPECT_TRUE(b.done());
 
-    auto cosig_b = b.on_message(draft_a[0].data(), draft_a[0].size());
-    ASSERT_EQ(cosig_b.size(), 1u);                        // COSIG for Alice
-
-    EXPECT_TRUE(b.on_message(cosig_a[0].data(), cosig_a[0].size()).empty());
-    EXPECT_TRUE(a.on_message(cosig_b[0].data(), cosig_b[0].size()).empty());
+    EXPECT_TRUE(a.on_message(answer[0].data(), answer[0].size()).empty());
     EXPECT_TRUE(a.done());
     EXPECT_TRUE(b.done());
 
@@ -304,17 +305,18 @@ TEST_F(MergeDialogueTest, OfferToAnotherInitiatorFails) {
     EXPECT_TRUE(a.failed());
 }
 
-// Часы сторон разошлись больше допуска (blockchain.md §9.4): ни одна не
-// подписывает черновик другой — время в нём не «сейчас» по её часам.
-TEST_F(MergeDialogueTest, ClocksTooFarApartDoNotCoSign) {
+// Часы сторон разошлись больше допуска (blockchain.md §9.4): ответчик не отвечает
+// на половину инициатора — время в ней не «сейчас» по его часам. Половина
+// остаётся блоком без ответа и ничего не закрепляет.
+TEST_F(MergeDialogueTest, ClocksTooFarApartDoNotAnswer) {
     alice_->append_block(0x01, 1'000LL);
     bob_->append_block(0x02, 1'000LL);
     MergeDialogue a = alice_->dialogue(2'000LL);
     MergeDialogue b = bob_->dialogue(2'000LL + blockchain::kClockSlack + 1);
     pump(a, b);
     EXPECT_FALSE(a.done());
-    EXPECT_FALSE(b.done());
-    EXPECT_TRUE(a.failed() || b.failed());
+    EXPECT_TRUE(b.failed());
+    EXPECT_FALSE(b.merge_block().has_value());
 }
 
 // С веткой из будущего не сливаются: она ждёт, пока время её догонит.
@@ -328,21 +330,67 @@ TEST_F(MergeDialogueTest, ABranchFromTheFutureWaits) {
     EXPECT_FALSE(a.merge_block().has_value());
 }
 
-TEST_F(MergeDialogueTest, TamperedCoSignatureFails) {
+// Ответ, изменённый в пути, — не ответ на эту половину.
+TEST_F(MergeDialogueTest, TamperedAnswerFails) {
     alice_->append_block(0x01, 1'000LL);
     bob_->append_block(0x02, 1'000LL);
     MergeDialogue a = alice_->dialogue(2'000LL);
     MergeDialogue b = bob_->dialogue(2'000LL);
 
-    auto offer        = a.start();
-    auto accept_draft = b.on_message(offer[0].data(), offer[0].size());
-    auto draft_a      = a.on_message(accept_draft[0].data(), accept_draft[0].size());
-    a.on_message(accept_draft[1].data(), accept_draft[1].size());
-    auto cosig_b      = b.on_message(draft_a[0].data(), draft_a[0].size());
-    ASSERT_EQ(cosig_b.size(), 1u);
+    auto offer  = a.start();
+    auto accept = b.on_message(offer[0].data(), offer[0].size());
+    auto half   = a.on_message(accept[0].data(), accept[0].size());
+    auto answer = b.on_message(half[0].data(), half[0].size());
+    ASSERT_EQ(answer.size(), 1u);
 
-    cosig_b[0].back() ^= 0xFF;   // corrupt the co-signature bytes
-    a.on_message(cosig_b[0].data(), cosig_b[0].size());
+    answer[0][answer[0].size() / 2] ^= 0xFF;         // inside the block's payload
+    a.on_message(answer[0].data(), answer[0].size());
     EXPECT_TRUE(a.failed());
+    EXPECT_FALSE(a.done());
+}
+
+// Сменённый ключ слиянию не помеха: половина — блок ветки и подписана как любой
+// её блок, а отдельной подписи над чужим хешем, которую надо было бы сверять с
+// ключом партнёра, больше нет.
+TEST_F(MergeDialogueTest, AKeyChangeDoesNotStopAMerge) {
+    alice_->append_block(0x01, 1'000LL);
+    bob_->append_block(0x02, 1'000LL);
+    const KeyPair next = Crypto::generate_keypair();
+    alice_->bc->rotate_key(alice_->root_kp.pub, LEAF, alice_->leaf_kp, next, 1'500LL);
+    alice_->leaf_kp = next;
+    MergeDialogue a = alice_->dialogue(2'000LL);
+    MergeDialogue b = bob_->dialogue(2'000LL);
+    pump(a, b);
+    EXPECT_TRUE(a.done()) << a.error();
+    EXPECT_TRUE(b.done()) << b.error();
+}
+
+// Ветка ответчика ушла вперёд, пока шёл диалог: половина инициатора взяла уже не
+// вершину. Ответа нет: он встал бы не за той вершиной.
+TEST_F(MergeDialogueTest, AResponderWhoseBranchMovedOnDoesNotAnswer) {
+    alice_->append_block(0x01, 1'000LL);
+    bob_->append_block(0x02, 1'000LL);
+    MergeDialogue a = alice_->dialogue(2'000LL);
+    MergeDialogue b = bob_->dialogue(2'000LL);
+
+    auto offer  = a.start();
+    auto accept = b.on_message(offer[0].data(), offer[0].size());
+    auto half   = a.on_message(accept[0].data(), accept[0].size());
+    bob_->append_block(0x03, 1'500LL);
+
+    EXPECT_TRUE(b.on_message(half[0].data(), half[0].size()).empty());
+    EXPECT_TRUE(b.failed());
+    EXPECT_FALSE(b.merge_block().has_value());
+}
+
+// Отозванная ветка говорит об этом сразу, а не после чужой половины.
+TEST_F(MergeDialogueTest, AFrozenResponderRefusesBeforeTheInitiatorWrites) {
+    alice_->append_block(0x01, 1'000LL);
+    bob_->append_block(0x02, 1'000LL);
+    bob_->bc->revoke_node(bob_->root_kp.pub, LEAF, 500LL, std::nullopt, 0, bob_->root_kp, 1'500LL);
+    MergeDialogue a = alice_->dialogue(2'000LL);
+    MergeDialogue b = bob_->dialogue(2'000LL);
+    pump(a, b);
+    EXPECT_TRUE(b.failed());
     EXPECT_FALSE(a.merge_block().has_value());
 }

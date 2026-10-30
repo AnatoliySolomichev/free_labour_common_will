@@ -68,31 +68,37 @@ void MergeSession::check_partner_time(const BranchTipInfo& partner_tip, Timestam
                              "catches up (blockchain.md §9.4)");
 }
 
-Hash MergeSession::check_partner_draft(const Block& draft, const BranchTipInfo& own_tip,
-                                       const BranchTipInfo& partner_tip, Timestamp now,
-                                       const std::optional<Block>& own_draft) const {
+void MergeSession::check_partner_half(const Block& half, const BranchTipInfo& own_tip,
+                                      const BranchTipInfo& partner_tip, Timestamp now,
+                                      const MergeSnapshot& merged) const {
     const BlockAddress& tip = partner_tip.tip_address;
-    if (draft.type != BlockType::MERGE)
-        throw ChainIntegrityError("partner draft: not a MERGE block");
-    if (!(draft.address.user_id == tip.user_id) || draft.address.node_index != tip.node_index ||
-        draft.address.block_index != tip.block_index + 1 || draft.prev_hash != partner_tip.tip_hash)
-        throw ChainIntegrityError("partner draft: not the block right after the partner's tip");
-    const MergePayload mp = Serializer::decode_merge_payload(draft.payload.data(),
-                                                             draft.payload.size());
+    if (tip.block_index == EMPTY_BRANCH_INDEX)
+        throw InvalidArgumentError(
+            "cannot merge with an empty-branch partner (blockchain.md §6.4)");
+    if (half.type != BlockType::MERGE)
+        throw ChainIntegrityError("partner half: not a MERGE block");
+    if (!(half.address.user_id == tip.user_id) || half.address.node_index != tip.node_index ||
+        half.address.block_index != tip.block_index + 1 || half.prev_hash != partner_tip.tip_hash)
+        throw ChainIntegrityError("partner half: not the block right after the partner's tip");
+    const MergePayload mp = Serializer::decode_merge_payload(half.payload.data(),
+                                                             half.payload.size());
     if (!(mp.partner_last_address == own_tip.tip_address) || mp.partner_last_hash != own_tip.tip_hash)
-        throw ChainIntegrityError("partner draft: does not take the tip we sent");
-    // The time the partner writes is the time we vouch for by co-signing.
-    if (draft.timestamp_claimed != mp.merge_timestamp ||
+        throw ChainIntegrityError("partner half: does not take the tip we sent");
+    // The time the partner writes is the time we vouch for by answering.
+    if (half.timestamp_claimed != mp.merge_timestamp ||
         mp.merge_timestamp > now + kClockSlack || mp.merge_timestamp < now - kClockSlack)
-        throw TimestampError("partner draft: merge time is not now by our clock "
+        throw TimestampError("partner half: merge time is not now by our clock "
                              "(blockchain.md §9.4)");
-    if (own_draft) {
-        const MergePayload ours = Serializer::decode_merge_payload(own_draft->payload.data(),
-                                                                   own_draft->payload.size());
-        if (ours.merkle_root != mp.merkle_root || ours.hll_hash != mp.hll_hash)
-            throw ChainIntegrityError("partner draft: commits another union of snapshots");
-    }
-    return Crypto::hash_block(draft);
+    if (merged.merkle_root != mp.merkle_root || merged.sketch_hash() != mp.hll_hash)
+        throw ChainIntegrityError("partner half: commits another union of snapshots");
+}
+
+BranchTipInfo MergeSession::tip_after(const BranchTipInfo& tip, const Block& half) {
+    BranchTipInfo next = tip;
+    next.tip_address   = half.address;
+    next.tip_hash      = Crypto::hash_block(half);
+    next.tip_block     = half;
+    return next;
 }
 
 // ── Snapshot accessor ─────────────────────────────────────────────────────────
@@ -114,15 +120,28 @@ MergeSnapshot MergeSession::snapshot_for(const UserId& user_id,
 
 // ── Step 2 ────────────────────────────────────────────────────────────────────
 
-PendingMergeBlock MergeSession::create_pending(
-    const UserId&        user_id,
-    NodeIndex            leaf_index,
+void MergeSession::check_own_branch(const UserId& user_id, NodeIndex leaf_index,
+                                    const KeyPair& own_working_keypair) const {
+    if (!validator_.effective_revocation(user_id, leaf_index).has_value()) return;
+    const auto own_st = validator_.branch_revocation_status(user_id, leaf_index);
+    if (own_st.state == BranchRevocationState::FROZEN)
+        throw RevocationError("own branch is frozen by revocation (blockchain.md §6.7)");
+    if (own_st.next_key.has_value() && own_working_keypair.pub != *own_st.next_key)
+        throw RevocationError(
+            "own branch key was replaced by revocation; use the replacement key (blockchain.md §6.7)");
+}
+
+Block MergeSession::write_half(
+    const BranchTipInfo& own_tip,
     const BranchTipInfo& partner_tip,
     const MergeSnapshot& partner_snapshot,
     const KeyPair&       own_working_keypair,
     Timestamp            merge_timestamp,
     uint32_t             validated_depth)
 {
+    const UserId&   user_id    = own_tip.tip_address.user_id;
+    const NodeIndex leaf_index = own_tip.tip_address.node_index;
+
     // A merge participant must have at least one block (blockchain.md §6.4): both the own branch
     // and the partner branch need a block-0 to appear as snapshot leaves. An empty
     // branch must append a stub block first (blockchain.md §5.4).
@@ -134,17 +153,12 @@ PendingMergeBlock MergeSession::create_pending(
         throw InvalidArgumentError(
             "cannot merge with an empty-branch partner (blockchain.md §6.4)");
 
-    // blockchain.md §6.7: a revoked own branch may not open new bilateral acts — frozen at
-    // all, replaced only under the authorized key (mirrors
-    // Blockchain::ensure_branch_writable; merges bypass the facade).
-    if (validator_.effective_revocation(user_id, leaf_index).has_value()) {
-        const auto own_st = validator_.branch_revocation_status(user_id, leaf_index);
-        if (own_st.state == BranchRevocationState::FROZEN)
-            throw RevocationError("own branch is frozen by revocation (blockchain.md §6.7)");
-        if (own_st.next_key.has_value() && own_working_keypair.pub != *own_st.next_key)
-            throw RevocationError(
-                "own branch key was replaced by revocation; use the replacement key (blockchain.md §6.7)");
-    }
+    // Each half comes right after the tip the other side takes (blockchain.md
+    // §6.4): a branch that moved on since then is no longer that tip.
+    if (*tip_opt != own_tip.tip_address.block_index)
+        throw ChainIntegrityError("own branch moved on during the merge");
+
+    check_own_branch(user_id, leaf_index, own_working_keypair);
 
     // Union own snapshot with the partner's → the packet's new snapshot and the
     // in-block commitments (blockchain.md §6.5.1).
@@ -160,65 +174,23 @@ PendingMergeBlock MergeSession::create_pending(
     mp.validated_depth      = validated_depth;
     std::vector<uint8_t> payload = Serializer::encode(mp);
 
-    // prev_hash / next index (branch is non-empty).
-    Hash prev_hash = Crypto::hash_block(
-        storage_.get_block({user_id, leaf_index, *tip_opt}));
-    BlockIndex new_idx = *tip_opt + 1;
+    Block half{};
+    half.address           = {user_id, leaf_index, *tip_opt + 1};
+    half.prev_hash         = own_tip.tip_hash;
+    half.timestamp_claimed = merge_timestamp;
+    half.type              = BlockType::MERGE;
+    half.payload           = std::move(payload);
+    half.signature         = Signature::null();
 
-    Block draft{};
-    draft.address           = {user_id, leaf_index, new_idx};
-    draft.prev_hash         = prev_hash;
-    draft.timestamp_claimed = merge_timestamp;
-    draft.type              = BlockType::MERGE;
-    draft.payload           = std::move(payload);
-    draft.signature         = Signature::null();
+    auto bytes     = Serializer::encode(half);
+    half.signature = Crypto::sign(bytes.data(), bytes.size(), own_working_keypair.sec);
 
-    auto bytes      = Serializer::encode(draft);
-    draft.signature = Crypto::sign(bytes.data(), bytes.size(), own_working_keypair.sec);
-
-    // Persist the draft and the grown snapshot immediately (mirrors the early draft
-    // persistence; both roll back together if a merge is later abandoned).
-    storage_.put_block(draft);
+    storage_.put_block(half);
     storage_.put_snapshot(user_id, leaf_index, merged);
-
-    return PendingMergeBlock{draft, Crypto::hash_block(draft)};
+    return half;
 }
 
-// ── Step 3 ────────────────────────────────────────────────────────────────────
-
-Signature MergeSession::co_sign(const Hash& partner_draft_hash,
-                                 const KeyPair& own_working_keypair) {
-    return Crypto::sign(partner_draft_hash.bytes.data(),
-                        partner_draft_hash.bytes.size(),
-                        own_working_keypair.sec);
-}
-
-// ── Step 4 ────────────────────────────────────────────────────────────────────
-
-Block MergeSession::finalize(const PendingMergeBlock& pending,
-                              const Signature&         partner_co_sig,
-                              const PublicKey&         partner_pubkey) {
-    if (!Crypto::verify(pending.draft_hash.bytes.data(),
-                        pending.draft_hash.bytes.size(),
-                        partner_co_sig, partner_pubkey))
-        throw SignatureError("partner co_signature is invalid");
-
-    Seal seal{};
-    seal.signer_id  = {partner_pubkey.bytes};
-    seal.block_hash = pending.draft_hash;
-    seal.signature  = partner_co_sig;
-    seal.mode       = SealMode::OPEN;
-    seal.sealed_at  = pending.draft.timestamp_claimed;
-    storage_.put_seal(seal);
-
-    // co_signature is excluded from canonical CBOR encoding (not in LMDB block bytes).
-    // The returned block carries it in memory for immediate use by the caller.
-    Block finalized        = pending.draft;
-    finalized.co_signature = partner_co_sig;
-    return finalized;
-}
-
-// ── Step 5 (optional) ─────────────────────────────────────────────────────────
+// ── Step 4 (optional) ─────────────────────────────────────────────────────────
 
 void MergeSession::import_partner_data(const BranchTipInfo& partner_tip) {
     if (partner_tip.path.empty()) return;

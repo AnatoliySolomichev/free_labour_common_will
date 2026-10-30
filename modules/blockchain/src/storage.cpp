@@ -40,72 +40,6 @@ std::array<uint8_t, 40> block_key(const BlockAddress& addr) noexcept {
     return k;
 }
 
-// ── CBOR array wrapper for seal lists ─────────────────────────────────────────
-//
-// Seals are stored as:  array(N)[ bstr(seal_0_cbor), bstr(seal_1_cbor), ... ]
-// Wrapping each seal in a bstr makes each element self-delimiting without
-// needing to know the internal CBOR structure of a Seal.
-
-void write_cbor_head(std::vector<uint8_t>& out, uint8_t major, uint64_t n) {
-    const uint8_t base = static_cast<uint8_t>(major << 5);
-    if (n <= 23)          { out.push_back(base | static_cast<uint8_t>(n)); }
-    else if (n <= 0xFF)   { out.push_back(base | 24); out.push_back(static_cast<uint8_t>(n)); }
-    else if (n <= 0xFFFF) {
-        out.push_back(base | 25);
-        out.push_back(static_cast<uint8_t>(n >> 8));
-        out.push_back(static_cast<uint8_t>(n));
-    } else {
-        throw StorageError("seal list: count too large to encode");
-    }
-}
-
-std::vector<uint8_t> encode_seal_list(const std::vector<Seal>& seals) {
-    std::vector<uint8_t> out;
-    write_cbor_head(out, 4, seals.size()); // array header
-    for (const auto& s : seals) {
-        auto enc = Serializer::encode(s);
-        write_cbor_head(out, 2, enc.size()); // bstr header
-        out.insert(out.end(), enc.begin(), enc.end());
-    }
-    return out;
-}
-
-std::vector<Seal> decode_seal_list(const uint8_t* data, size_t len) {
-    if (len == 0) return {};
-    size_t pos = 0;
-
-    auto need = [&](size_t n) {
-        if (pos + n > len) throw SerializationError("seal list: unexpected end");
-    };
-    auto read_head = [&](uint8_t expected_major) -> uint64_t {
-        need(1);
-        uint8_t b = data[pos++];
-        if ((b >> 5) != expected_major)
-            throw SerializationError("seal list: wrong CBOR major type");
-        uint8_t info = b & 0x1fu;
-        if (info <= 23) return info;
-        if (info == 24) { need(1); return data[pos++]; }
-        if (info == 25) {
-            need(2);
-            uint64_t v = (static_cast<uint64_t>(data[pos]) << 8) | data[pos+1];
-            pos += 2; return v;
-        }
-        throw SerializationError("seal list: array/bstr count too large or indefinite");
-    };
-
-    uint64_t count = read_head(4); // major type 4 = array
-    std::vector<Seal> seals;
-    seals.reserve(static_cast<size_t>(count));
-    for (uint64_t i = 0; i < count; ++i) {
-        uint64_t elem_len = read_head(2); // major type 2 = bstr
-        need(static_cast<size_t>(elem_len));
-        seals.push_back(
-            Serializer::decode_seal(data + pos, static_cast<size_t>(elem_len)));
-        pos += static_cast<size_t>(elem_len);
-    }
-    return seals;
-}
-
 } // namespace (anonymous)
 
 // ── LmdbStorage::Impl ─────────────────────────────────────────────────────────
@@ -114,7 +48,6 @@ struct LmdbStorage::Impl {
     MDB_env* env             = nullptr;
     MDB_dbi  dbi_nodes       = 0;
     MDB_dbi  dbi_blocks      = 0;
-    MDB_dbi  dbi_seals       = 0;
     MDB_dbi  dbi_ext         = 0;
     MDB_dbi  dbi_snapshots   = 0;
     MDB_dbi  dbi_revocations = 0;
@@ -154,7 +87,6 @@ LmdbStorage::LmdbStorage(std::filesystem::path db_path)
     int rc = 0;
     if ((rc = mdb_dbi_open(txn, "nodes",     MDB_CREATE, &impl_->dbi_nodes))     != MDB_SUCCESS ||
         (rc = mdb_dbi_open(txn, "blocks",    MDB_CREATE, &impl_->dbi_blocks))    != MDB_SUCCESS ||
-        (rc = mdb_dbi_open(txn, "seals",     MDB_CREATE, &impl_->dbi_seals))     != MDB_SUCCESS ||
         (rc = mdb_dbi_open(txn, "external",  MDB_CREATE, &impl_->dbi_ext))       != MDB_SUCCESS ||
         (rc = mdb_dbi_open(txn, "snapshots", MDB_CREATE, &impl_->dbi_snapshots)) != MDB_SUCCESS ||
         (rc = mdb_dbi_open(txn, "revocations", MDB_CREATE, &impl_->dbi_revocations)) != MDB_SUCCESS) {
@@ -428,55 +360,6 @@ std::optional<BlockIndex> LmdbStorage::branch_tip_index(
         mdb_txn_abort(txn);
         return result;
     } catch (...) { return std::nullopt; }
-}
-
-// ── Seals ─────────────────────────────────────────────────────────────────────
-
-void LmdbStorage::put_seal(const Seal& seal) {
-    // Read + append + write-back in one write transaction for atomicity.
-    std::array<uint8_t, 32> hash_buf = seal.block_hash.bytes;
-    MDB_val mk{hash_buf.size(), hash_buf.data()};
-    MDB_val mv{};
-
-    MDB_txn* txn;
-    lcheck(mdb_txn_begin(impl_->env, nullptr, 0, &txn), "put_seal: begin");
-
-    std::vector<Seal> list;
-    int rc = mdb_get(txn, impl_->dbi_seals, &mk, &mv);
-    if (rc == MDB_SUCCESS) {
-        try {
-            list = decode_seal_list(
-                static_cast<const uint8_t*>(mv.mv_data), mv.mv_size);
-        } catch (...) { mdb_txn_abort(txn); throw; }
-    } else if (rc != MDB_NOTFOUND) {
-        mdb_txn_abort(txn); lcheck(rc, "put_seal: mdb_get");
-    }
-
-    list.push_back(seal);
-    auto encoded = encode_seal_list(list);
-    MDB_val new_mv{encoded.size(), encoded.data()};
-
-    rc = mdb_put(txn, impl_->dbi_seals, &mk, &new_mv, 0);
-    if (rc != MDB_SUCCESS) { mdb_txn_abort(txn); lcheck(rc, "put_seal: mdb_put"); }
-    lcheck(mdb_txn_commit(txn), "put_seal: commit");
-}
-
-std::vector<Seal> LmdbStorage::get_seals(const Hash& block_hash) const {
-    std::array<uint8_t, 32> hash_buf = block_hash.bytes;
-    MDB_val mk{hash_buf.size(), hash_buf.data()};
-    MDB_val mv{};
-
-    MDB_txn* txn;
-    lcheck(mdb_txn_begin(impl_->env, nullptr, MDB_RDONLY, &txn), "get_seals: begin");
-    int rc = mdb_get(txn, impl_->dbi_seals, &mk, &mv);
-    if (rc == MDB_NOTFOUND) { mdb_txn_abort(txn); return {}; }
-    if (rc != MDB_SUCCESS)  { mdb_txn_abort(txn); lcheck(rc, "get_seals: mdb_get"); }
-    try {
-        auto seals = decode_seal_list(
-            static_cast<const uint8_t*>(mv.mv_data), mv.mv_size);
-        mdb_txn_abort(txn);
-        return seals;
-    } catch (...) { mdb_txn_abort(txn); throw; }
 }
 
 // ── External blocks ───────────────────────────────────────────────────────────

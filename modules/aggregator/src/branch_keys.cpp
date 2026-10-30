@@ -155,21 +155,6 @@ BranchKeys::Verdict BranchKeys::check(const Block& b, const AggregatorStorage* s
     return revoked ? Verdict::revoked_key : Verdict::foreign_signature;
 }
 
-bool BranchKeys::vouches(const UserId& chain, NodeIndex node, const Hash& message,
-                         const Signature& sig) const {
-    std::vector<PublicKey> keys;
-    {
-        std::lock_guard<std::mutex> lock(mu_);
-        const Key k{chain, node};
-        if (const auto it = branches_.find(k); it != branches_.end()) keys = it->second.own;
-        if (const auto rev = revocations_.find(k); rev != revocations_.end())
-            for (const auto& line : rev->second.lines) keys.insert(keys.end(), line.begin(), line.end());
-    }
-    for (const auto& key : keys)
-        if (Crypto::verify(message.bytes.data(), message.bytes.size(), sig, key)) return true;
-    return false;
-}
-
 namespace {
 
 // Whether `b` lies on the owner's line ending at `line`: prev_hash back through
@@ -262,23 +247,28 @@ std::optional<KeyPath> BranchKeys::path(const UserId& chain, NodeIndex node) con
     return it->second.path;
 }
 
-void BranchKeys::load(const AggregatorStorage& storage) {
+void BranchKeys::load(const AggregatorStorage& storage, const std::set<UserId>* only) {
+    const auto wanted = [&](const UserId& chain) { return !only || only->count(chain) > 0; };
     for (const auto& key : storage.all_keypath_keys())
         for (const auto& bytes : storage.get_keypath_bytes(key)) {
             try {
-                learn_path(Serializer::decode_key_path(bytes.data(), bytes.size()));
+                const KeyPath kp = Serializer::decode_key_path(bytes.data(), bytes.size());
+                if (!kp.path.empty() && wanted(kp.path.front().structural_pubkey)) learn_path(kp);
             } catch (const std::exception&) {}               // stored before the filter: skip
         }
-    for (const auto& chain : storage.all_revoked_chains())
+    for (const auto& chain : storage.all_revoked_chains()) {
+        if (!wanted(chain)) continue;
         for (const auto& bytes : storage.get_revocation_bytes(chain)) {
             try {
                 learn_revocation(Serializer::decode_revocation_cert(bytes.data(), bytes.size()));
             } catch (const std::exception&) {}
         }
+    }
     // Key changes the paths did not carry, branch by branch, in order.
     std::map<Key, std::map<BlockIndex, Block>> rotations;
     for (const Hash& h : storage.all_block_hashes())
-        if (const auto b = storage.get_block_by_hash(h); b && b->type == BlockType::KEY_ROTATION)
+        if (const auto b = storage.get_block_by_hash(h);
+            b && b->type == BlockType::KEY_ROTATION && wanted(b->address.user_id))
             rotations[{b->address.user_id, b->address.node_index}][b->address.block_index] = *b;
     for (const auto& [branch, blocks] : rotations) {
         (void)branch;

@@ -71,11 +71,9 @@ struct AggregatorStorage::Impl {
     MDB_dbi  dbi_idea  = 0; // ideas:       payload_hash → N×40B witness list
     MDB_dbi  dbi_leaf  = 0; // snap_leaves: leaf_hash → opaque LeafRecord bytes
     MDB_dbi  dbi_comp  = 0; // snap_comps:  parent_root → left‖right (64B)
-    MDB_dbi  dbi_seal  = 0; // seals: block_hash(32)‖blake2b(bytes)(32) → seal bytes
     MDB_dbi  dbi_rev   = 0; // revocations: chain(32)‖blake2b(bytes)(32) → certificate bytes
     MDB_dbi  dbi_kpath = 0; // keypaths: signing_key(32)‖blake2b(bytes)(32) → node path bytes
     MDB_dbi  dbi_arr   = 0; // arrivals: block_hash → first seen here (int64, little-endian)
-    MDB_dbi  dbi_cosig = 0; // cosigs:   merge block_hash → the partner's co-signature (64B)
     MDB_dbi  dbi_fork  = 0; // forks:    block_hash → CBOR(Block), a rival at a taken address
 };
 
@@ -106,11 +104,9 @@ AggregatorStorage::AggregatorStorage(std::filesystem::path db_path)
         (rc = mdb_dbi_open(txn, "ideas",       MDB_CREATE, &impl_->dbi_idea)) != MDB_SUCCESS ||
         (rc = mdb_dbi_open(txn, "snap_leaves", MDB_CREATE, &impl_->dbi_leaf)) != MDB_SUCCESS ||
         (rc = mdb_dbi_open(txn, "snap_comps",  MDB_CREATE, &impl_->dbi_comp)) != MDB_SUCCESS ||
-        (rc = mdb_dbi_open(txn, "seals",       MDB_CREATE, &impl_->dbi_seal)) != MDB_SUCCESS ||
         (rc = mdb_dbi_open(txn, "revocations", MDB_CREATE, &impl_->dbi_rev))  != MDB_SUCCESS ||
         (rc = mdb_dbi_open(txn, "keypaths",    MDB_CREATE, &impl_->dbi_kpath)) != MDB_SUCCESS ||
         (rc = mdb_dbi_open(txn, "arrivals",    MDB_CREATE, &impl_->dbi_arr))   != MDB_SUCCESS ||
-        (rc = mdb_dbi_open(txn, "cosigs",      MDB_CREATE, &impl_->dbi_cosig)) != MDB_SUCCESS ||
         (rc = mdb_dbi_open(txn, "forks",       MDB_CREATE, &impl_->dbi_fork))  != MDB_SUCCESS) {
         mdb_txn_abort(txn);
         throw StorageError(std::string("mdb_dbi_open: ") + mdb_strerror(rc));
@@ -471,23 +467,6 @@ void AggregatorStorage::note_arrival(const Hash& block_hash) {
     put_opaque(impl_->env, impl_->dbi_arr, block_hash, le, "note_arrival");
 }
 
-bool AggregatorStorage::put_cosig(const Hash& block_hash, const Signature& sig) {
-    return put_opaque(impl_->env, impl_->dbi_cosig, block_hash,
-                      {sig.bytes.begin(), sig.bytes.end()}, "put_cosig");   // first write wins
-}
-
-std::optional<Signature> AggregatorStorage::get_cosig(const Hash& block_hash) const {
-    const auto v = get_opaque(impl_->env, impl_->dbi_cosig, block_hash, "get_cosig");
-    if (!v || v->size() != 64) return std::nullopt;
-    Signature s{};
-    std::copy(v->begin(), v->end(), s.bytes.begin());
-    return s;
-}
-
-std::vector<Hash> AggregatorStorage::all_cosig_hashes() const {
-    return all_keys(impl_->env, impl_->dbi_cosig, "cosig_manifest");
-}
-
 namespace {
 
 std::vector<Hash> all_keys(MDB_env* env, MDB_dbi dbi, const char* op) {
@@ -539,71 +518,6 @@ std::vector<Hash> AggregatorStorage::all_snapshot_leaf_hashes() const {
 
 std::vector<Hash> AggregatorStorage::all_snapshot_composition_roots() const {
     return all_keys(impl_->env, impl_->dbi_comp, "snap_comp_manifest");
-}
-
-// ── Seal warehouse (sync.md §7.2) ─────────────────────────────────────────────
-
-bool AggregatorStorage::put_seal_bytes(const Hash& block_hash,
-                                       const std::vector<uint8_t>& bytes) {
-    const Hash content = Crypto::hash(bytes.data(), bytes.size());
-    std::array<uint8_t, 64> key{};
-    std::memcpy(key.data(),      block_hash.bytes.data(), 32);
-    std::memcpy(key.data() + 32, content.bytes.data(),    32);
-
-    MDB_val mk{key.size(),   key.data()};
-    MDB_val mv{bytes.size(), const_cast<uint8_t*>(bytes.data())};
-    MDB_txn* txn;
-    lcheck(mdb_txn_begin(impl_->env, nullptr, 0, &txn), "put_seal: begin");
-    int rc = mdb_put(txn, impl_->dbi_seal, &mk, &mv, MDB_NOOVERWRITE);
-    if (rc == MDB_KEYEXIST) { mdb_txn_abort(txn); return false; }
-    if (rc != MDB_SUCCESS)  { mdb_txn_abort(txn); lcheck(rc, "put_seal"); }
-    lcheck(mdb_txn_commit(txn), "put_seal: commit");
-    return true;
-}
-
-std::vector<std::vector<uint8_t>>
-AggregatorStorage::get_seal_bytes(const Hash& block_hash) const {
-    std::vector<std::vector<uint8_t>> result;
-    MDB_txn* txn;
-    lcheck(mdb_txn_begin(impl_->env, nullptr, MDB_RDONLY, &txn), "get_seals: begin");
-    MDB_cursor* cur;
-    if (mdb_cursor_open(txn, impl_->dbi_seal, &cur) != MDB_SUCCESS) {
-        mdb_txn_abort(txn); return {};
-    }
-    std::array<uint8_t, 64> prefix{};
-    std::memcpy(prefix.data(), block_hash.bytes.data(), 32);
-    MDB_val mk{prefix.size(), prefix.data()}, mv{};
-    int rc = mdb_cursor_get(cur, &mk, &mv, MDB_SET_RANGE);
-    while (rc == MDB_SUCCESS && mk.mv_size == 64 &&
-           std::memcmp(mk.mv_data, block_hash.bytes.data(), 32) == 0) {
-        result.emplace_back(static_cast<const uint8_t*>(mv.mv_data),
-                            static_cast<const uint8_t*>(mv.mv_data) + mv.mv_size);
-        rc = mdb_cursor_get(cur, &mk, &mv, MDB_NEXT);
-    }
-    mdb_cursor_close(cur);
-    mdb_txn_abort(txn);
-    return result;
-}
-
-std::vector<Hash> AggregatorStorage::all_sealed_block_hashes() const {
-    std::vector<Hash> result;
-    MDB_txn* txn;
-    lcheck(mdb_txn_begin(impl_->env, nullptr, MDB_RDONLY, &txn), "seal_manifest: begin");
-    MDB_cursor* cur;
-    if (mdb_cursor_open(txn, impl_->dbi_seal, &cur) != MDB_SUCCESS) {
-        mdb_txn_abort(txn); return {};
-    }
-    MDB_val mk{}, mv{};
-    while (mdb_cursor_get(cur, &mk, &mv, MDB_NEXT) == MDB_SUCCESS) {
-        if (mk.mv_size != 64) continue;
-        Hash h;
-        std::memcpy(h.bytes.data(), mk.mv_data, 32);
-        if (result.empty() || !(result.back() == h))   // keys sorted: dedupe run
-            result.push_back(h);
-    }
-    mdb_cursor_close(cur);
-    mdb_txn_abort(txn);
-    return result;
 }
 
 // ── Revocation warehouse (sync.md §7.2; blockchain.md §6.7 rule 8) ────────────
@@ -747,12 +661,12 @@ std::size_t AggregatorStorage::block_count() const noexcept {
     } catch (...) { return 0; }
 }
 
-std::size_t AggregatorStorage::cosig_count() const noexcept {
+std::size_t AggregatorStorage::revocation_count() const noexcept {
     try {
         MDB_txn* txn;
         if (mdb_txn_begin(impl_->env, nullptr, MDB_RDONLY, &txn) != MDB_SUCCESS) return 0;
         MDB_stat st{};
-        mdb_stat(txn, impl_->dbi_cosig, &st);
+        mdb_stat(txn, impl_->dbi_rev, &st);
         mdb_txn_abort(txn);
         return static_cast<std::size_t>(st.ms_entries);
     } catch (...) { return 0; }

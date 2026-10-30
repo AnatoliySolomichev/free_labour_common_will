@@ -428,21 +428,4 @@ void Validator::check_tip_against_revocations(const BranchTipInfo& tip) const {
             "partner tip is not signed by the revocation replacement key (blockchain.md §6.7)");
 }
 
-void Validator::validate_seal(const Seal& seal) const {
-    if (!Crypto::verify(seal.block_hash.bytes.data(), seal.block_hash.bytes.size(),
-                        seal.signature, seal.signer_id))
-        throw SignatureError("seal signature invalid");
-}
-
-void Validator::validate_co_signature(const Block& block,
-                                      const PublicKey& partner_pubkey) const {
-    if (block.type != BlockType::MERGE)
-        throw InvalidArgumentError("co_signature validation only applies to MERGE blocks");
-    if (!block.co_signature.has_value())
-        throw SignatureError("MERGE block has no co_signature");
-    Hash bh = Crypto::hash_block(block);
-    if (!Crypto::verify(bh.bytes.data(), bh.bytes.size(), *block.co_signature, partner_pubkey))
-        throw SignatureError("MERGE block co_signature is invalid");
-}
-
 } // namespace blockchain

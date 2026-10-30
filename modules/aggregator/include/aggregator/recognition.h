@@ -197,13 +197,13 @@ struct DealsOnTable {
     // ── Witnessed time (blockchain.md §5.2, economy.md §8.14) ─────────────
     // A merge takes the partner's last block, its hash and the merge time into
     // a block both sides sign; so everything before that point of the partner's
-    // branch provably existed by then. Evidence on this table: a half with the
-    // partner's co-signature (the partner read it and found its time to be now,
-    // blockchain.md §6.4) — it fixes both branches, the partner's up to the block
-    // taken and its own up to the half; or, without it, the pair: each side's
-    // half in its own chain, each taking the other's block right before it. A
-    // one-sided «merge» proves nothing, and one's own branches merged are one
-    // hand.
+    // branch provably existed by then. Evidence on this table: a merge with its
+    // answer — the responder's half takes the initiator's half itself, read at a
+    // time that was now by the responder's clock (blockchain.md §6.4). Both halves
+    // stand in their branches and fix both: the initiator's up to its half, the
+    // responder's up to the block taken. A half with no answer proves nothing,
+    // one's own branches merged are one hand, and a half that is not its owner's
+    // (blockchain.md §6.7 rule 12) does not count.
     using Branch = std::pair<UserId, uint32_t>;
     std::map<Branch, std::vector<std::pair<uint64_t, int64_t>>> branch_time;   // index → latest claimed so far
     std::map<Branch, std::vector<std::pair<uint64_t, int64_t>>> witnessed_at;  // index → earliest merge fixing it

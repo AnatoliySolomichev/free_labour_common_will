@@ -142,18 +142,6 @@ TEST(Serializer, BlockRoundTripData) {
     EXPECT_EQ(b.signature,         d.signature);
 }
 
-TEST(Serializer, BlockCoSignatureExcluded) {
-    Block b = make_data_block(1, 0);
-    b.co_signature = make_sig(0xFF);  // set a co-signature
-
-    auto enc_with    = Serializer::encode(b);
-    b.co_signature   = std::nullopt;
-    auto enc_without = Serializer::encode(b);
-
-    // Canonical encoding must be identical regardless of co_signature
-    EXPECT_EQ(enc_with, enc_without);
-}
-
 TEST(Serializer, BlockEmptyPayload) {
     Block b = make_data_block(0, 0);
     b.payload.clear();
@@ -192,33 +180,6 @@ TEST(Serializer, BlockDeterministic) {
     auto enc1 = Serializer::encode(b);
     auto enc2 = Serializer::encode(b);
     EXPECT_EQ(enc1, enc2);
-}
-
-// ── Seal round-trip ───────────────────────────────────────────────────────────
-
-TEST(Serializer, SealRoundTripBlind) {
-    Seal s{};
-    s.signer_id = make_pubkey(0xAA);
-    s.block_hash = make_hash(0xBB);
-    s.signature  = make_sig(0xCC);
-    s.mode       = SealMode::BLIND;
-    s.sealed_at  = 1'700'000'100LL;
-
-    auto enc = Serializer::encode(s);
-    Seal d   = Serializer::decode_seal(enc.data(), enc.size());
-    EXPECT_EQ(s, d);
-}
-
-TEST(Serializer, SealRoundTripOpen) {
-    Seal s{};
-    s.signer_id  = make_pubkey(0x11);
-    s.block_hash = make_hash(0x22);
-    s.signature  = make_sig(0x33);
-    s.mode       = SealMode::OPEN;
-    s.sealed_at  = 0LL;
-
-    auto enc = Serializer::encode(s);
-    EXPECT_EQ(s, Serializer::decode_seal(enc.data(), enc.size()));
 }
 
 // ── BranchTipInfo round-trip ──────────────────────────────────────────────────
