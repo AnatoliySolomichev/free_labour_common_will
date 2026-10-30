@@ -6,12 +6,11 @@ namespace blockchain {
 
 // Effective revocation state of a node, resolved over all REVOCATION blocks
 // found in its ancestors' branches (blockchain.md §6.7): the highest ancestor wins (blockchain.md §4.4);
-// within the winning branch, the earliest compromised_since applies and the
-// latest block has the last word on replacement ("stop now, replace later").
+// within the winning branch the latest block has the last word on the
+// replacement and on the line ("stop now, name the line and replace later").
 // A summary over all revoked keys of the node; the branch walk
 // (branch_revocation_status) reads the records key by key.
 struct RevocationState {
-    Timestamp                compromised_since;
     std::optional<PublicKey> replacement_pubkey; // nullopt = branch is frozen
     std::optional<LastGood>  last_good;          // the latest named last valid block (rule 12)
     BlockAddress             latest;             // block that had the last word
@@ -31,7 +30,7 @@ enum class BranchRevocationState : uint8_t {
 // with its own; a revocation of any key of an epoch covers the whole epoch.
 enum class BlockRevocationStatus : uint8_t {
     CLEAN,
-    SUSPECT,                    // signed by the revoked key after compromised_since
+    SUSPECT,                    // signed by a revoked key, no line named yet: in question
     INVALID_AFTER_REPLACEMENT,  // signed by the old key after the replacement took over
     OUTSIDE_LINE,               // signed by the revoked key past the owner's last valid block
 };
@@ -107,19 +106,19 @@ public:
     // (blockchain.md §6.7 rules 5, 9, 11, 12): follows the key epochs — the
     // first block of a replacement switches the key, over replacements revoked
     // before any use; within a revoked epoch the owner's line (up to the named
-    // last valid block) is CLEAN and the rest OUTSIDE_LINE, or, with no line
-    // named, the zones go by time. Throws: NodeNotFoundError, BlockNotFoundError,
+    // last valid block) is CLEAN and the rest OUTSIDE_LINE; with no line
+    // named its blocks are SUSPECT. Throws: NodeNotFoundError, BlockNotFoundError,
     // SignatureError (block signed by none of the branch keys — structurally
     // broken branch).
     BranchRevocationStatus branch_revocation_status(
         const UserId& user_id, NodeIndex node_index) const;
 
     // Whether a birth stands under a revocation of the parent (rule 6): on the
-    // owner's line it names, or, with no line named, not after the compromise.
+    // owner's line it names; with no line named nothing stands yet.
     bool birth_stands(const Block& birth, const RevocationState& st) const;
 
     // blockchain.md §6.7 rule 6: true if any edge on the path root→node was created under a
-    // revoked parent key: its birth lies past the owner's line or the compromise.
+    // revoked parent key: its birth lies off the owner's line.
     // Throws: NodeNotFoundError.
     bool node_invalidated_by_revocation(
         const UserId& user_id, NodeIndex node_index) const;
@@ -130,8 +129,7 @@ public:
     // in storage. Refuses: a frozen branch; a tip of a replaced branch not
     // signed by the replacement key (stale or stolen; a rotation *after* the
     // replacement is not recognized without the partner's branch history — MVP
-    // limitation); a path node created under a revoked key after its
-    // compromised_since (fake subtree, rule 6). No local knowledge — no
+    // limitation); a path node whose birth does not stand (fake subtree, rule 6). No local knowledge — no
     // objection: freshness is the caller's policy (sync.md §10.3).
     // Throws: RevocationError.
     void check_tip_against_revocations(const BranchTipInfo& tip) const;

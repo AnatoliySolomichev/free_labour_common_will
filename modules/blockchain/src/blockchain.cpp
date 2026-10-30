@@ -224,7 +224,6 @@ PublicKey Blockchain::effective_working_pubkey(const UserId& user_id,
 Block Blockchain::revoke_node(
     const UserId&                   user_id,
     NodeIndex                       revoked_node_index,
-    Timestamp                       compromised_since,
     const std::optional<PublicKey>& replacement_pubkey,
     NodeIndex                       ancestor_index,
     const KeyPair&                  ancestor_keypair,
@@ -250,7 +249,10 @@ Block Blockchain::revoke_node(
     // The owner names the line from their own copy of the branch (blockchain.md §6.7
     // rule 12): the last valid block must be one of its blocks.
     std::optional<LastGood> line;
-    if (last_good.has_value()) {
+    if (last_good.has_value() &&
+        *last_good == Crypto::hash_node(storage_.get_node(user_id, revoked_node_index))) {
+        line = LastGood{EMPTY_BRANCH_INDEX, *last_good};   // no valid block at all
+    } else if (last_good.has_value()) {
         if (auto tip = storage_.branch_tip_index(user_id, revoked_node_index); tip.has_value())
             for (BlockIndex i = 0; i <= *tip && !line.has_value(); ++i)
                 if (Crypto::hash_block(storage_.get_block({user_id, revoked_node_index, i}))
@@ -277,7 +279,6 @@ Block Blockchain::revoke_node(
     RevocationPayload rp{};
     rp.revoked_node_index = revoked_node_index;
     rp.revoked_pubkey     = revoked_key;
-    rp.compromised_since  = compromised_since;
     rp.replacement_pubkey = replacement_pubkey;
     rp.last_good          = line;
 

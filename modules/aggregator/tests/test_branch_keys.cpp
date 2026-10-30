@@ -177,8 +177,9 @@ TEST(BranchKeys, AfterTheCompromiseOnlyTheReplacementSigns) {
     const Block     before      = a.write(old);
     const KeyPair   replacement = Crypto::generate_keypair();
     const NodeIndex parent      = (kLeaf - 1) / 2;
-    const Block     rev = a.bc->revoke_node(a.uid, kLeaf, a.now, replacement.pub, parent,
-                                            a.keys.at(parent), ++a.now);
+    const Block     rev = a.bc->revoke_node(a.uid, kLeaf, replacement.pub, parent,
+                                            a.keys.at(parent), ++a.now,
+                                            Crypto::hash_block(before));
     const Block after  = a.write(replacement);
     const Block stolen = resigned(after, old);               // старым ключом после компрометации
                                                              // (своя цепь такого и не напишет)
@@ -197,12 +198,15 @@ TEST(BranchKeys, ASecondTheftKeepsTheFirstReplacementsBlocks) {
     Chain           a("second_theft");
     const NodeIndex parent = (kLeaf - 1) / 2;
     const KeyPair   k1     = Crypto::generate_keypair();
-    const Block     r1     = a.bc->revoke_node(a.uid, kLeaf, a.now, k1.pub, parent,
-                                               a.keys.at(parent), ++a.now);
+    const Block     b0     = a.write(a.keys.at(kLeaf));
+    const Block     r1     = a.bc->revoke_node(a.uid, kLeaf, k1.pub, parent,
+                                               a.keys.at(parent), ++a.now,
+                                               Crypto::hash_block(b0));
     const Block by_k1      = a.write(k1);
     const KeyPair k2       = Crypto::generate_keypair();
-    const Block r2         = a.bc->revoke_node(a.uid, kLeaf, a.now, k2.pub, parent,
-                                               a.keys.at(parent), ++a.now);
+    const Block r2         = a.bc->revoke_node(a.uid, kLeaf, k2.pub, parent,
+                                               a.keys.at(parent), ++a.now,
+                                               Crypto::hash_block(by_k1));
     const Block by_k2      = a.write(k2);
     const Block stolen_k1  = resigned(by_k2, k1);            // вор с K1 после компрометации
 
@@ -226,7 +230,7 @@ TEST(BranchKeys, TheOwnersLateBlocksOnTheNamedLineComeIn) {
     const Block     b1     = a.write(old);
     const Block     b2     = a.write(old);
     const KeyPair   k1     = Crypto::generate_keypair();
-    const Block     rev    = a.bc->revoke_node(a.uid, kLeaf, 1, k1.pub, parent, a.keys.at(parent),
+    const Block     rev    = a.bc->revoke_node(a.uid, kLeaf, k1.pub, parent, a.keys.at(parent),
                                                ++a.now, Crypto::hash_block(b1));
 
     BranchKeys keys;
@@ -330,7 +334,7 @@ TEST(BranchKeys, WhoseFollowsTheOwnersLine) {
         const Block       b2     = a.write(old);
         for (const Block& b : {b0, b1, b2}) storage.add_block(b);
         const KeyPair k1  = Crypto::generate_keypair();
-        const Block   rev = a.bc->revoke_node(a.uid, kLeaf, 1, k1.pub, parent, a.keys.at(parent),
+        const Block   rev = a.bc->revoke_node(a.uid, kLeaf, k1.pub, parent, a.keys.at(parent),
                                               ++a.now, Crypto::hash_block(b1));
         const Block after = a.write(k1);
         BranchKeys  keys;
@@ -347,9 +351,9 @@ TEST(BranchKeys, WhoseFollowsTheOwnersLine) {
 
 // Без названной линии — по времени (blockchain.md §6.7 правило 5): одностороннее после
 // момента компрометации веса не имеет.
-TEST(BranchKeys, WhoseByTimeWithoutALine) {
-    Chain      a("whose_time");
-    const auto db = std::filesystem::temp_directory_path() / "bc_branch_keys_whose_time_db";
+TEST(BranchKeys, AStopLeavesEveryBlockInQuestion) {
+    Chain      a("whose_stop");
+    const auto db = std::filesystem::temp_directory_path() / "bc_branch_keys_whose_stop_db";
     std::filesystem::remove_all(db);
     {
         AggregatorStorage storage(db);
@@ -357,15 +361,38 @@ TEST(BranchKeys, WhoseByTimeWithoutALine) {
         const KeyPair&    old    = a.keys.at(kLeaf);
         const Block       b0     = a.write(old);
         const Block       b1     = a.write(old);
-        const Block rev = a.bc->revoke_node(a.uid, kLeaf, b0.timestamp_claimed, std::nullopt,
+        const Block rev = a.bc->revoke_node(a.uid, kLeaf, std::nullopt,
                                             parent, a.keys.at(parent), ++a.now);
         BranchKeys keys;
         keys.learn_path(a.path());
         keys.learn_revocation(RevocationCert::build(*a.storage, rev.address));
+        EXPECT_EQ(keys.whose(b0, storage), BranchKeys::Whose::not_owner);
+        EXPECT_EQ(keys.check(b0), BranchKeys::Verdict::revoked_key);
+
+        const Block line = a.bc->revoke_node(a.uid, kLeaf, std::nullopt, parent,
+                                             a.keys.at(parent), ++a.now, Crypto::hash_block(b0));
+        keys.learn_revocation(RevocationCert::build(*a.storage, line.address));
         EXPECT_EQ(keys.whose(b0, storage), BranchKeys::Whose::owner);
         EXPECT_EQ(keys.whose(b1, storage), BranchKeys::Whose::not_owner);
     }
     std::filesystem::remove_all(db);
+}
+
+// Дыра на входе: блок вора с ранней датой за концом линии не проходит. Дата в
+// блоке ничего не решает, только его место.
+TEST(BranchKeys, AnEarlyDateDoesNotPassTheLine) {
+    Chain           a("early_date");
+    const NodeIndex parent = (kLeaf - 1) / 2;
+    const Block     b0     = a.write(a.keys.at(kLeaf));
+    Block           late   = a.write(a.keys.at(kLeaf));
+    const Block     rev    = a.bc->revoke_node(a.uid, kLeaf, std::nullopt, parent,
+                                               a.keys.at(parent), ++a.now, Crypto::hash_block(b0));
+    late.timestamp_claimed = 1;
+    BranchKeys keys;
+    keys.learn_path(a.path());
+    keys.learn_revocation(RevocationCert::build(*a.storage, rev.address));
+    EXPECT_EQ(keys.check(resigned(late, a.keys.at(kLeaf))), BranchKeys::Verdict::revoked_key);
+    EXPECT_EQ(keys.check(b0), BranchKeys::Verdict::signed_by_branch);
 }
 
 // Правило 10 на агрегаторе: вор с ключом родителя «отзывает» замену и
@@ -381,11 +408,11 @@ TEST(BranchKeys, AStolenParentsRecordDoesNotCount) {
         const NodeIndex   parent = (kLeaf - 1) / 2;
         const NodeIndex   grand  = (parent - 1) / 2;
         const KeyPair     k1     = Crypto::generate_keypair();
-        const Block r1 = a.bc->revoke_node(a.uid, kLeaf, 1, k1.pub, parent, a.keys.at(parent),
+        const Block r1 = a.bc->revoke_node(a.uid, kLeaf, k1.pub, parent, a.keys.at(parent),
                                            ++a.now);
         const Block by_k1  = a.write(k1);
         const KeyPair kx   = Crypto::generate_keypair();
-        const Block hijack = a.bc->revoke_node(a.uid, kLeaf, 1, kx.pub, parent,
+        const Block hijack = a.bc->revoke_node(a.uid, kLeaf, kx.pub, parent,
                                                a.keys.at(parent), ++a.now);
         const Block by_kx  = a.write(kx);
 
@@ -398,7 +425,7 @@ TEST(BranchKeys, AStolenParentsRecordDoesNotCount) {
         EXPECT_EQ(keys.check(by_kx, &storage), BranchKeys::Verdict::signed_by_branch);
         EXPECT_EQ(keys.check(by_k1, &storage), BranchKeys::Verdict::revoked_key);
 
-        const Block g = a.bc->revoke_node(a.uid, parent, 1, std::nullopt, grand, a.keys.at(grand),
+        const Block g = a.bc->revoke_node(a.uid, parent, std::nullopt, grand, a.keys.at(grand),
                                           ++a.now, Crypto::hash_block(r1));
         keys.learn_revocation(RevocationCert::build(*a.storage, g.address));
         // И на входе: блок хозяина снова проходит, блок вора — нет.
@@ -418,9 +445,9 @@ TEST(BranchKeys, TheHigherAncestorDecides) {
     const NodeIndex grand  = (parent - 1) / 2;
     const KeyPair   low    = Crypto::generate_keypair();
     const KeyPair   high   = Crypto::generate_keypair();
-    const Block rev_low  = a.bc->revoke_node(a.uid, kLeaf, a.now, low.pub, parent,
+    const Block rev_low  = a.bc->revoke_node(a.uid, kLeaf, low.pub, parent,
                                              a.keys.at(parent), ++a.now);
-    const Block rev_high = a.bc->revoke_node(a.uid, kLeaf, a.now, high.pub, grand,
+    const Block rev_high = a.bc->revoke_node(a.uid, kLeaf, high.pub, grand,
                                              a.keys.at(grand), ++a.now);
     const Block by_high = a.write(high);
     const Block by_low  = resigned(by_high, low);            // своя цепь его уже не напишет
@@ -576,8 +603,7 @@ MergedPair merged(Chain& a, Chain& b, AggregatorStorage& storage) {
 // Отзыв с линией: `chain` помечает всё после блока `last` чужим.
 void revoke_after(Chain& chain, const Block& last, AggregatorStorage& storage) {
     const NodeIndex parent = (kLeaf - 1) / 2;
-    const Block     rev    = chain.bc->revoke_node(chain.uid, kLeaf, 1,
-                                                   Crypto::generate_keypair().pub, parent,
+    const Block     rev    = chain.bc->revoke_node(chain.uid, kLeaf, Crypto::generate_keypair().pub, parent,
                                                    chain.keys.at(parent), ++chain.now,
                                                    Crypto::hash_block(last));
     storage.put_revocation_bytes(
@@ -659,7 +685,7 @@ TEST(BranchKeys, AFakeChildDiesWithItsBirth) {
     EXPECT_EQ(keys.check(fake), BranchKeys::Verdict::signed_by_branch);
 
     const NodeIndex grand = (parent - 1) / 2;
-    const Block     rev   = a.bc->revoke_node(a.uid, parent, 1, Crypto::generate_keypair().pub,
+    const Block     rev   = a.bc->revoke_node(a.uid, parent, Crypto::generate_keypair().pub,
                                               grand, a.keys.at(grand), ++a.now,
                                               Crypto::hash_block(last));
     keys.learn_revocation(RevocationCert::build(*a.storage, rev.address));

@@ -105,7 +105,6 @@ public:
     Block revoke_node(
         const UserId&                   user_id,
         NodeIndex                       revoked_node_index,
-        Timestamp                       compromised_since,
         const std::optional<PublicKey>& replacement_pubkey,
         NodeIndex                       ancestor_index,
         const KeyPair&                  ancestor_keypair,

@@ -838,7 +838,7 @@ OUT_frozen="$(bcp petr transfer recv "$ACC_oleg" --via "$VIA" --yes 2>&1 || true
 printf '%s\n' "$OUT_frozen" | sed 's/^/   /'
 hr "предок отзывает ключ и называет последний верный блок Олега (bc revoke create --last-good tip)"
 say "под подозрением с прошлого часа: ключ увели раньше, чем появилась развилка"
-bcp oleg revoke create --node 2147483647 --replace --last-good tip --since $(( $(date +%s) - 3600 )) \
+bcp oleg revoke create --node 2147483647 --replace --last-good tip \
     --out "$work/oleg.cert" --via "$VIA" | sed 's/^/   /'
 hr "сертификат проверяется автономно кем угодно (bc revoke verify)"
 bcp anna revoke verify --cert "$work/oleg.cert" | sed 's/^/   /'

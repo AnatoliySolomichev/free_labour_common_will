@@ -111,11 +111,10 @@ bool has_key(const std::vector<PublicKey>& keys, const PublicKey& k) {
 }
 
 // The revocation of one key epoch, merged over the records that name any key
-// of the epoch (blockchain.md §6.7 rules 3, 12): the earliest compromise, the latest
-// word on the replacement, the latest named last valid block.
+// of the epoch (blockchain.md §6.7 rules 3, 12): the latest word on the replacement,
+// the latest named last valid block.
 struct EpochRevocation {
     bool                     any   = false;
-    Timestamp                since = std::numeric_limits<Timestamp>::max();
     std::optional<PublicKey> replacement;
     std::optional<LastGood>  last_good;
 };
@@ -126,7 +125,6 @@ EpochRevocation epoch_revocation(const Records& records, const std::vector<Publi
         (void)addr;
         if (!has_key(keys, rp.revoked_pubkey)) continue;
         er.any         = true;
-        er.since       = std::min(er.since, rp.compromised_since);
         er.replacement = rp.replacement_pubkey; // the last word
         if (rp.last_good.has_value()) er.last_good = rp.last_good;
     }
@@ -206,18 +204,15 @@ BranchRevocationStatus Validator::branch_revocation_status(
         }
     }
 
-    // Pass 2: classify. A revoked epoch with a named last valid block present
-    // in the branch splits by the line (rule 12); without one — by time (rule 5).
-    std::vector<EpochRevocation>           revs;
-    std::vector<std::optional<BlockIndex>> line_end;
+    // Pass 2: classify. A revoked epoch splits by the named line (rule 12); with
+    // no line named yet its blocks stay in question. Blocks past what is here
+    // do not matter: the number decides.
+    std::vector<EpochRevocation> revs;
     for (const auto& keys : epochs) {
         revs.push_back(epoch_revocation(records, keys));
-        std::optional<BlockIndex> end;
-        if (const auto& lg = revs.back().last_good;
-            lg.has_value() && lg->index < seen.size() && seen[lg->index].hash == lg->hash)
-            end = lg->index;
-        line_end.push_back(end);
-        if (revs.back().any && end.has_value()) out.line_end = end;
+        const auto& lg = revs.back().last_good;
+        if (revs.back().any && lg.has_value() && lg->index != EMPTY_BRANCH_INDEX)
+            out.line_end = lg->index;
     }
     out.blocks.reserve(seen.size());
     for (BlockIndex i = 0; i < seen.size(); ++i) {
@@ -227,12 +222,15 @@ BranchRevocationStatus Validator::branch_revocation_status(
             out.blocks.push_back(BlockRevocationStatus::INVALID_AFTER_REPLACEMENT);
         else if (!er.any)
             out.blocks.push_back(BlockRevocationStatus::CLEAN);
-        else if (line_end[s.epoch].has_value())
-            out.blocks.push_back(i <= *line_end[s.epoch] ? BlockRevocationStatus::CLEAN
-                                                         : BlockRevocationStatus::OUTSIDE_LINE);
-        else
-            out.blocks.push_back(s.ts > er.since ? BlockRevocationStatus::SUSPECT
-                                                 : BlockRevocationStatus::CLEAN);
+        else if (!er.last_good.has_value())
+            out.blocks.push_back(BlockRevocationStatus::SUSPECT);
+        else {
+            const LastGood& lg = *er.last_good;
+            const bool on_line = lg.index != EMPTY_BRANCH_INDEX &&
+                (i < lg.index || (i == lg.index && s.hash == lg.hash));
+            out.blocks.push_back(on_line ? BlockRevocationStatus::CLEAN
+                                         : BlockRevocationStatus::OUTSIDE_LINE);
+        }
     }
 
     out.current_key = current;
@@ -255,9 +253,9 @@ BranchRevocationStatus Validator::branch_revocation_status(
 }
 
 bool Validator::birth_stands(const Block& birth, const RevocationState& st) const {
-    if (!st.last_good.has_value()) return birth.timestamp_claimed <= st.compromised_since;
+    if (!st.last_good.has_value()) return false;            // stopped: no line yet
     const LastGood& line = *st.last_good;
-    if (birth.address.block_index > line.index) return false;
+    if (line.index == EMPTY_BRANCH_INDEX || birth.address.block_index > line.index) return false;
     const Hash mine = Crypto::hash_block(birth);
     if (birth.address.block_index == line.index) return mine == line.hash;
     // Along the owner's line, as far as its blocks are here; past that, by the number.
@@ -393,15 +391,17 @@ bool Validator::author_record_counts(const Block& record, bool own_branch,
             return record.address.block_index < st.blocks.size()
                 && st.blocks[record.address.block_index] == BlockRevocationStatus::CLEAN;
         } catch (const std::exception&) {
-            // a broken author branch — judge by time below
+            // a broken author branch — judge by the line below
         }
     }
-    // An imported certificate comes without the author's branch: by time, or
-    // signed by the author's replacement (a rotated successor of the
+    // An imported certificate comes without the author's branch: by the number
+    // against the named line, or signed by the author's replacement (a rotated successor of the
     // replacement is not recognized here — MVP simplification).
     const bool by_replacement = author_state.replacement_pubkey.has_value()
         && block_signed_by(record, *author_state.replacement_pubkey);
-    return by_replacement || record.timestamp_claimed <= author_state.compromised_since;
+    const auto& line = author_state.last_good;
+    return by_replacement || (line.has_value() && line->index != EMPTY_BRANCH_INDEX &&
+                              record.address.block_index <= line->index);
 }
 
 std::vector<std::pair<BlockAddress, RevocationPayload>>
@@ -424,9 +424,7 @@ std::optional<RevocationState> Validator::effective_revocation(
     if (found.empty()) return std::nullopt;
 
     RevocationState st{};
-    st.compromised_since = std::numeric_limits<Timestamp>::max();
     for (const auto& [addr, rp] : found) {
-        st.compromised_since   = std::min(st.compromised_since, rp.compromised_since);
         st.replacement_pubkey  = rp.replacement_pubkey; // last block has the last word
         if (rp.last_good.has_value()) st.last_good = rp.last_good;
         st.latest              = addr;

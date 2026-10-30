@@ -326,7 +326,7 @@ protected:
 };
 
 TEST_F(RevocationTest, EmergencyStopByParent) {
-    Block b = bc_->revoke_node(root_kp_.pub, 7, 1'000LL, std::nullopt, 3, kp3_, 2'000LL);
+    Block b = bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, kp3_, 2'000LL);
 
     EXPECT_EQ(b.address.node_index, 3u);
     EXPECT_EQ(b.type, BlockType::REVOCATION);
@@ -334,7 +334,6 @@ TEST_F(RevocationTest, EmergencyStopByParent) {
     auto rp = Serializer::decode_revocation_payload(b.payload.data(), b.payload.size());
     EXPECT_EQ(rp.revoked_node_index, 7u);
     EXPECT_EQ(rp.revoked_pubkey, kp7_.pub);
-    EXPECT_EQ(rp.compromised_since, 1'000LL);
     EXPECT_FALSE(rp.replacement_pubkey.has_value());
 
     EXPECT_NO_THROW(bc_->validate_branch(root_kp_.pub, 3));
@@ -342,7 +341,7 @@ TEST_F(RevocationTest, EmergencyStopByParent) {
 }
 
 TEST_F(RevocationTest, RevokeByGrandparent) {
-    Block b = bc_->revoke_node(root_kp_.pub, 7, 1'000LL, std::nullopt, 1, kp1_, 2'000LL);
+    Block b = bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 1, kp1_, 2'000LL);
     EXPECT_EQ(b.address.node_index, 1u);
     EXPECT_NO_THROW(validator_->validate_revocation(b));
 }
@@ -354,38 +353,37 @@ TEST_F(RevocationTest, NonAncestorAuthorThrows) {
     bc_->ensure_path(root_kp_.pub, 4, [&](NodeIndex i) { return keys.at(i); });
 
     EXPECT_THROW(
-        bc_->revoke_node(root_kp_.pub, 7, 1'000LL, std::nullopt, 4, kp4, 2'000LL),
+        bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 4, kp4, 2'000LL),
         RevocationError);
 }
 
 TEST_F(RevocationTest, SelfRevocationThrows) {
     EXPECT_THROW(
-        bc_->revoke_node(root_kp_.pub, 7, 1'000LL, std::nullopt, 7, kp7_, 2'000LL),
+        bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 7, kp7_, 2'000LL),
         RevocationError);
 }
 
 TEST_F(RevocationTest, RootRevocationThrows) {
     EXPECT_THROW(
-        bc_->revoke_node(root_kp_.pub, 0, 1'000LL, std::nullopt, 0, root_kp_, 2'000LL),
+        bc_->revoke_node(root_kp_.pub, 0, std::nullopt, 0, root_kp_, 2'000LL),
         RevocationError);
 }
 
 TEST_F(RevocationTest, AncestorKeypairMismatchThrows) {
     // Signing with node 1's key while writing into node 3's branch.
     EXPECT_THROW(
-        bc_->revoke_node(root_kp_.pub, 7, 1'000LL, std::nullopt, 3, kp1_, 2'000LL),
+        bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, kp1_, 2'000LL),
         InvalidArgumentError);
 }
 
 TEST_F(RevocationTest, StopThenReplaceLastWordWins) {
     // Night: emergency stop. Later: a second block assigns the replacement.
-    bc_->revoke_node(root_kp_.pub, 7, 5'000LL, std::nullopt, 3, kp3_, 5'100LL);
+    bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, kp3_, 5'100LL);
     KeyPair fresh = Crypto::generate_keypair();
-    Block second = bc_->revoke_node(root_kp_.pub, 7, 5'000LL, fresh.pub, 3, kp3_, 9'000LL);
+    Block second = bc_->revoke_node(root_kp_.pub, 7, fresh.pub, 3, kp3_, 9'000LL);
 
     auto st = validator_->effective_revocation(root_kp_.pub, 7);
     ASSERT_TRUE(st.has_value());
-    EXPECT_EQ(st->compromised_since, 5'000LL);
     ASSERT_TRUE(st->replacement_pubkey.has_value());
     EXPECT_EQ(*st->replacement_pubkey, fresh.pub);
     EXPECT_EQ(st->latest, second.address);
@@ -393,22 +391,23 @@ TEST_F(RevocationTest, StopThenReplaceLastWordWins) {
     EXPECT_NO_THROW(validator_->validate_revocation(second));
 }
 
-TEST_F(RevocationTest, EarliestCompromisedSinceIsKept) {
-    // A later block cannot shrink retroactivity: min(compromised_since) wins.
-    bc_->revoke_node(root_kp_.pub, 7, 3'000LL, std::nullopt, 3, kp3_, 5'000LL);
+TEST_F(RevocationTest, ALaterRecordHasTheLastWord) {
+    // Stop first, replace later: the later block of the same author decides.
+    bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, kp3_, 5'000LL);
     KeyPair fresh = Crypto::generate_keypair();
-    bc_->revoke_node(root_kp_.pub, 7, 8'000LL, fresh.pub, 3, kp3_, 9'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, fresh.pub, 3, kp3_, 9'000LL);
 
     auto st = validator_->effective_revocation(root_kp_.pub, 7);
     ASSERT_TRUE(st.has_value());
-    EXPECT_EQ(st->compromised_since, 3'000LL);
+    ASSERT_TRUE(st->replacement_pubkey.has_value());
+    EXPECT_EQ(*st->replacement_pubkey, fresh.pub);
 }
 
 TEST_F(RevocationTest, HigherAncestorWins) {
     KeyPair repl_parent = Crypto::generate_keypair();
     KeyPair repl_grand  = Crypto::generate_keypair();
-    bc_->revoke_node(root_kp_.pub, 7, 1'000LL, repl_parent.pub, 3, kp3_, 2'000LL);
-    bc_->revoke_node(root_kp_.pub, 7, 4'000LL, repl_grand.pub, 1, kp1_, 5'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, repl_parent.pub, 3, kp3_, 2'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, repl_grand.pub, 1, kp1_, 5'000LL);
 
     auto st = validator_->effective_revocation(root_kp_.pub, 7);
     ASSERT_TRUE(st.has_value());
@@ -416,7 +415,6 @@ TEST_F(RevocationTest, HigherAncestorWins) {
     EXPECT_EQ(st->latest.node_index, 1u);
     ASSERT_TRUE(st->replacement_pubkey.has_value());
     EXPECT_EQ(*st->replacement_pubkey, repl_grand.pub);
-    EXPECT_EQ(st->compromised_since, 4'000LL);
 }
 
 TEST_F(RevocationTest, EffectiveRevocationNoneIsNullopt) {
@@ -427,7 +425,6 @@ TEST_F(RevocationTest, WrongRevokedPubkeyRejected) {
     RevocationPayload rp{};
     rp.revoked_node_index = 7;
     rp.revoked_pubkey     = Crypto::generate_keypair().pub; // never was node 7's key
-    rp.compromised_since  = 1'000LL;
 
     Block b = craft_revocation(3, kp3_, rp, 2'000LL);
     EXPECT_THROW(validator_->validate_revocation(b), RevocationError);
@@ -437,7 +434,7 @@ TEST_F(RevocationTest, RevokeAfterRotationUsesCurrentKey) {
     KeyPair rotated = Crypto::generate_keypair();
     bc_->rotate_key(root_kp_.pub, 7, kp7_, rotated, 1'000LL);
 
-    Block b = bc_->revoke_node(root_kp_.pub, 7, 2'000LL, std::nullopt, 3, kp3_, 3'000LL);
+    Block b = bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, kp3_, 3'000LL);
     auto rp = Serializer::decode_revocation_payload(b.payload.data(), b.payload.size());
     EXPECT_EQ(rp.revoked_pubkey, rotated.pub);
     EXPECT_NO_THROW(validator_->validate_revocation(b));
@@ -451,7 +448,6 @@ TEST_F(RevocationTest, HistoricalPreRotationKeyAccepted) {
     RevocationPayload rp{};
     rp.revoked_node_index = 7;
     rp.revoked_pubkey     = kp7_.pub;
-    rp.compromised_since  = 500LL;
 
     Block b = craft_revocation(3, kp3_, rp, 2'000LL);
     EXPECT_NO_THROW(validator_->validate_revocation(b));
@@ -460,12 +456,11 @@ TEST_F(RevocationTest, HistoricalPreRotationKeyAccepted) {
 TEST_F(RevocationTest, ReplacementKeyIsRevocableAgain) {
     // stop → replace → the replacement key itself gets compromised.
     KeyPair repl = Crypto::generate_keypair();
-    bc_->revoke_node(root_kp_.pub, 7, 1'000LL, repl.pub, 3, kp3_, 2'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, repl.pub, 3, kp3_, 2'000LL);
 
     RevocationPayload rp{};
     rp.revoked_node_index = 7;
     rp.revoked_pubkey     = repl.pub; // known only via the earlier replacement
-    rp.compromised_since  = 3'000LL;
 
     Block b = craft_revocation(3, kp3_, rp, 4'000LL);
     storage_->put_block(b);
@@ -479,17 +474,35 @@ TEST_F(RevocationTest, ReplacementKeyIsRevocableAgain) {
 
 // ── Step 2: revocation effects in validation (blockchain.md §6.7 rules 9–11) ────────────────
 
-TEST_F(RevocationTest, StatusCleanSuspectSplit) {
-    bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 1'000LL);
+// Без названной линии — полный стоп: все блоки ключа под вопросом. Линия делит их
+// по месту; дата в блоке ни при чём (blockchain.md §6.7 rule 12).
+TEST_F(RevocationTest, AStopLeavesBlocksInQuestionUntilTheLine) {
+    const Block b0 = bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 1'000LL);
     bc_->append_data_block(root_kp_.pub, 7, {0x02}, kp7_, 2'000LL);
-    bc_->revoke_node(root_kp_.pub, 7, 1'500LL, std::nullopt, 3, kp3_, 3'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, kp3_, 3'000LL);
 
     auto st = validator_->branch_revocation_status(root_kp_.pub, 7);
     EXPECT_EQ(st.state, BranchRevocationState::FROZEN);
     EXPECT_FALSE(st.next_key.has_value());
     ASSERT_EQ(st.blocks.size(), 2u);
-    EXPECT_EQ(st.blocks[0], BlockRevocationStatus::CLEAN);   // ts 1000 ≤ since 1500
-    EXPECT_EQ(st.blocks[1], BlockRevocationStatus::SUSPECT); // ts 2000 > since 1500
+    EXPECT_EQ(st.blocks[0], BlockRevocationStatus::SUSPECT);
+    EXPECT_EQ(st.blocks[1], BlockRevocationStatus::SUSPECT);
+
+    bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, kp3_, 4'000LL, Crypto::hash_block(b0));
+    st = validator_->branch_revocation_status(root_kp_.pub, 7);
+    EXPECT_EQ(st.blocks[0], BlockRevocationStatus::CLEAN);
+    EXPECT_EQ(st.blocks[1], BlockRevocationStatus::OUTSIDE_LINE);
+}
+
+// Ни одного верного блока: отзыв называет точку до блока №0 — отпечаток узла.
+TEST_F(RevocationTest, ALineCanEndBeforeTheFirstBlock) {
+    bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 1'000LL);
+    const Hash before = Crypto::hash_node(storage_->get_node(root_kp_.pub, 7));
+    bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, kp3_, 2'000LL, before);
+    const auto st = validator_->branch_revocation_status(root_kp_.pub, 7);
+    ASSERT_EQ(st.blocks.size(), 1u);
+    EXPECT_EQ(st.blocks[0], BlockRevocationStatus::OUTSIDE_LINE);
+    EXPECT_FALSE(st.line_end.has_value());
 }
 
 TEST_F(RevocationTest, ActiveBranchStatus) {
@@ -503,7 +516,7 @@ TEST_F(RevocationTest, ActiveBranchStatus) {
 }
 
 TEST_F(RevocationTest, AppendToFrozenBranchThrows) {
-    bc_->revoke_node(root_kp_.pub, 7, 1'000LL, std::nullopt, 3, kp3_, 2'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, kp3_, 2'000LL);
     EXPECT_THROW(
         bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 3'000LL),
         RevocationError);
@@ -511,7 +524,7 @@ TEST_F(RevocationTest, AppendToFrozenBranchThrows) {
 
 TEST_F(RevocationTest, ReplacedBranchAcceptsOnlyReplacement) {
     KeyPair repl = Crypto::generate_keypair();
-    bc_->revoke_node(root_kp_.pub, 7, 1'000LL, repl.pub, 3, kp3_, 2'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, repl.pub, 3, kp3_, 2'000LL);
 
     EXPECT_THROW(
         bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 3'000LL),
@@ -534,7 +547,7 @@ TEST_F(RevocationTest, ReplacedBranchAcceptsOnlyReplacement) {
 TEST_F(RevocationTest, SwitchAfterExistingBlocks) {
     bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 1'000LL);
     KeyPair repl = Crypto::generate_keypair();
-    bc_->revoke_node(root_kp_.pub, 7, 500LL, repl.pub, 3, kp3_, 2'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, repl.pub, 3, kp3_, 2'000LL);
     bc_->append_data_block(root_kp_.pub, 7, {0x02}, repl, 3'000LL);
 
     auto st = validator_->branch_revocation_status(root_kp_.pub, 7);
@@ -546,7 +559,7 @@ TEST_F(RevocationTest, SwitchAfterExistingBlocks) {
 
 TEST_F(RevocationTest, OldKeyAfterSwitchIsInvalid) {
     KeyPair repl = Crypto::generate_keypair();
-    bc_->revoke_node(root_kp_.pub, 7, 1'000LL, repl.pub, 3, kp3_, 2'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, repl.pub, 3, kp3_, 2'000LL);
     bc_->append_data_block(root_kp_.pub, 7, {0x01}, repl, 3'000LL);
 
     // The thief appends with the old key after the switch (bypassing the facade).
@@ -570,7 +583,7 @@ TEST_F(RevocationTest, OldKeyAfterSwitchIsInvalid) {
 
 TEST_F(RevocationTest, RotationAfterReplacementContinues) {
     KeyPair repl = Crypto::generate_keypair();
-    bc_->revoke_node(root_kp_.pub, 7, 1'000LL, repl.pub, 3, kp3_, 2'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, repl.pub, 3, kp3_, 2'000LL);
     bc_->append_data_block(root_kp_.pub, 7, {0x01}, repl, 3'000LL);
 
     KeyPair repl2 = Crypto::generate_keypair();
@@ -588,40 +601,39 @@ TEST_F(RevocationTest, RotationAfterReplacementContinues) {
 TEST_F(RevocationTest, HijackedAuthorRecordIsFiltered) {
     // The thief of node 3's key "revokes" 7 to hijack it via replacement.
     KeyPair thief_repl = Crypto::generate_keypair();
-    bc_->revoke_node(root_kp_.pub, 7, 8'000LL, thief_repl.pub, 3, kp3_, 9'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, thief_repl.pub, 3, kp3_, 9'000LL);
 
     // The owner escalates: node 1 revokes node 3 as compromised since 5'000 —
     // earlier than the thief's record (ts 9'000), so that record loses weight
     // (blockchain.md §6.7 rule 10).
-    bc_->revoke_node(root_kp_.pub, 3, 5'000LL, std::nullopt, 1, kp1_, 10'000LL);
+    bc_->revoke_node(root_kp_.pub, 3, std::nullopt, 1, kp1_, 10'000LL);
 
     EXPECT_FALSE(validator_->effective_revocation(root_kp_.pub, 7).has_value());
 }
 
-TEST_F(RevocationTest, PreCompromiseAuthorRecordStillCounts) {
-    // A record written before the author's own compromise moment keeps weight.
-    bc_->revoke_node(root_kp_.pub, 7, 2'000LL, std::nullopt, 3, kp3_, 3'000LL);
-    bc_->revoke_node(root_kp_.pub, 3, 5'000LL, std::nullopt, 1, kp1_, 10'000LL);
+TEST_F(RevocationTest, AnAuthorRecordOnItsLineCounts) {
+    // Under a full stop of the author its record is in question; on the line it counts.
+    const Block record = bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, kp3_, 3'000LL);
+    bc_->revoke_node(root_kp_.pub, 3, std::nullopt, 1, kp1_, 10'000LL);
+    EXPECT_FALSE(validator_->effective_revocation(root_kp_.pub, 7).has_value());
 
-    auto st = validator_->effective_revocation(root_kp_.pub, 7);
-    ASSERT_TRUE(st.has_value());
-    EXPECT_EQ(st->compromised_since, 2'000LL);
+    bc_->revoke_node(root_kp_.pub, 3, std::nullopt, 1, kp1_, 11'000LL, Crypto::hash_block(record));
+    EXPECT_TRUE(validator_->effective_revocation(root_kp_.pub, 7).has_value());
 }
 
 TEST_F(RevocationTest, ReplacedAuthorRevokesWithNewKey) {
     // Node 3 was revoked and replaced; the owner keeps administering 7 from 3 —
     // records signed by the replacement count (blockchain.md §6.7 rule 10).
     KeyPair repl3 = Crypto::generate_keypair();
-    bc_->revoke_node(root_kp_.pub, 3, 5'000LL, repl3.pub, 1, kp1_, 6'000LL);
-    bc_->revoke_node(root_kp_.pub, 7, 7'000LL, std::nullopt, 3, repl3, 8'000LL);
+    bc_->revoke_node(root_kp_.pub, 3, repl3.pub, 1, kp1_, 6'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, repl3, 8'000LL);
 
     auto st = validator_->effective_revocation(root_kp_.pub, 7);
     ASSERT_TRUE(st.has_value());
-    EXPECT_EQ(st->compromised_since, 7'000LL);
 }
 
 TEST_F(RevocationTest, NodeInvalidatedByRevocation) {
-    // Children of 7: 16 (born before the compromise moment) and 15 (after).
+    // Children of 7: 16 (on the owner's line) and 15 (past it).
     std::map<NodeIndex, KeyPair> kids{{7, kp7_}, {15, Crypto::generate_keypair()},
                                       {16, Crypto::generate_keypair()},
                                       {31, Crypto::generate_keypair()}};
@@ -631,7 +643,8 @@ TEST_F(RevocationTest, NodeInvalidatedByRevocation) {
     // Grandchild under the poisoned edge: an early date saves nothing.
     bc_->ensure_path(root_kp_.pub, 31, key, 100LL);
 
-    bc_->revoke_node(root_kp_.pub, 7, 5'000LL, std::nullopt, 3, kp3_, 6'000LL);
+    const Hash line = Crypto::hash_block(storage_->get_block({root_kp_.pub, 7, 0}));
+    bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, kp3_, 6'000LL, line);
 
     EXPECT_TRUE (validator_->node_invalidated_by_revocation(root_kp_.pub, 15));
     EXPECT_FALSE(validator_->node_invalidated_by_revocation(root_kp_.pub, 16));
@@ -640,9 +653,9 @@ TEST_F(RevocationTest, NodeInvalidatedByRevocation) {
 }
 
 TEST_F(RevocationTest, StorageIndexReturnsAddresses) {
-    bc_->revoke_node(root_kp_.pub, 7, 1'000LL, std::nullopt, 3, kp3_, 2'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, kp3_, 2'000LL);
     KeyPair repl = Crypto::generate_keypair();
-    bc_->revoke_node(root_kp_.pub, 7, 1'000LL, repl.pub, 1, kp1_, 3'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, repl.pub, 1, kp1_, 3'000LL);
 
     auto addrs = storage_->get_revocation_addresses(root_kp_.pub, 7);
     ASSERT_EQ(addrs.size(), 2u);
@@ -655,7 +668,7 @@ TEST_F(RevocationTest, StorageIndexReturnsAddresses) {
 
 TEST_F(RevocationTest, CertificateBuildAndVerify) {
     KeyPair repl = Crypto::generate_keypair();
-    Block b = bc_->revoke_node(root_kp_.pub, 7, 1'000LL, repl.pub, 3, kp3_, 2'000LL);
+    Block b = bc_->revoke_node(root_kp_.pub, 7, repl.pub, 3, kp3_, 2'000LL);
 
     auto cert = RevocationCert::build(*storage_, b.address);
     EXPECT_EQ(cert.path.size(), 3u); // nodes 0 → 1 → 3
@@ -669,7 +682,7 @@ TEST_F(RevocationTest, CertificateBuildAndVerify) {
 }
 
 TEST_F(RevocationTest, CertificateSurvivesSerialization) {
-    Block b = bc_->revoke_node(root_kp_.pub, 7, 1'000LL, std::nullopt, 1, kp1_, 2'000LL);
+    Block b = bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 1, kp1_, 2'000LL);
     auto cert = RevocationCert::build(*storage_, b.address);
 
     auto enc = Serializer::encode(cert);
@@ -681,28 +694,28 @@ TEST_F(RevocationTest, CertificateSurvivesSerialization) {
 }
 
 TEST_F(RevocationTest, CertificateTamperedNodeRejected) {
-    Block b = bc_->revoke_node(root_kp_.pub, 7, 1'000LL, std::nullopt, 3, kp3_, 2'000LL);
+    Block b = bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, kp3_, 2'000LL);
     auto cert = RevocationCert::build(*storage_, b.address);
     cert.path[1].birth.index += 1; // breaks node 1's own parent signature
     EXPECT_THROW(RevocationCert::verify(cert), SignatureError);
 }
 
 TEST_F(RevocationTest, CertificateTruncatedPathRejected) {
-    Block b = bc_->revoke_node(root_kp_.pub, 7, 1'000LL, std::nullopt, 3, kp3_, 2'000LL);
+    Block b = bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, kp3_, 2'000LL);
     auto cert = RevocationCert::build(*storage_, b.address);
     cert.path.pop_back(); // tip no longer matches the block's node
     EXPECT_THROW(RevocationCert::verify(cert), ChainIntegrityError);
 }
 
 TEST_F(RevocationTest, CertificateTamperedPayloadRejected) {
-    Block b = bc_->revoke_node(root_kp_.pub, 7, 1'000LL, std::nullopt, 3, kp3_, 2'000LL);
+    Block b = bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, kp3_, 2'000LL);
     auto cert = RevocationCert::build(*storage_, b.address);
     cert.block.payload.push_back(0x00); // breaks the block signature
     EXPECT_THROW(RevocationCert::verify(cert), SignatureError);
 }
 
 TEST_F(RevocationTest, CertificateForeignRootRejected) {
-    Block b = bc_->revoke_node(root_kp_.pub, 7, 1'000LL, std::nullopt, 3, kp3_, 2'000LL);
+    Block b = bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, kp3_, 2'000LL);
     auto cert = RevocationCert::build(*storage_, b.address);
     cert.block.address.user_id = Crypto::generate_keypair().pub;
     // Root identity no longer matches the block's chain (checked before sigs).
@@ -718,7 +731,6 @@ TEST_F(RevocationTest, CertificateNonAncestorRejected) {
     RevocationPayload rp{};
     rp.revoked_node_index = 7;
     rp.revoked_pubkey     = kp7_.pub;
-    rp.compromised_since  = 1'000LL;
     Block b = craft_revocation(4, kp4, rp, 2'000LL);
 
     RevocationCertificate cert{};
@@ -751,7 +763,7 @@ TEST_F(RevocationTest, ImportedForeignRevocationIsEffective) {
         f_bc.ensure_path(f_root.pub, 7, [&](NodeIndex i) { return keys.at(i); });
 
         KeyPair repl = Crypto::generate_keypair();
-        Block b = f_bc.revoke_node(f_root.pub, 7, 4'000LL, repl.pub, 3, f_kp3, 5'000LL);
+        Block b = f_bc.revoke_node(f_root.pub, 7, repl.pub, 3, f_kp3, 5'000LL);
         auto cert = RevocationCert::build(f_storage, b.address);
 
         // ── the "wire": only certificate bytes cross storages ──
@@ -769,7 +781,6 @@ TEST_F(RevocationTest, ImportedForeignRevocationIsEffective) {
         // The partner's node 7 is now revoked in our view.
         auto st = validator_->effective_revocation(chain, 7);
         ASSERT_TRUE(st.has_value());
-        EXPECT_EQ(st->compromised_since, 4'000LL);
         ASSERT_TRUE(st->replacement_pubkey.has_value());
         EXPECT_EQ(*st->replacement_pubkey, repl.pub);
     }
@@ -829,7 +840,7 @@ static void import_certificate(LmdbStorage& into, const ForeignChain& f,
 TEST_F(RevocationTest, TipCheckRefusesFrozenPartnerBranch) {
     ForeignChain f("frozen");
     f.bc->append_data_block(f.uid(), 7, {0x01}, f.kp7, 1'000LL);
-    Block rev = f.bc->revoke_node(f.uid(), 7, 500LL, std::nullopt, 3, f.kp3, 2'000LL);
+    Block rev = f.bc->revoke_node(f.uid(), 7, std::nullopt, 3, f.kp3, 2'000LL);
     import_certificate(*storage_, f, rev);
 
     EXPECT_THROW(validator_->check_tip_against_revocations(f.tip(7)),
@@ -840,7 +851,7 @@ TEST_F(RevocationTest, TipCheckRefusesStaleTipOfReplacedBranch) {
     ForeignChain f("stale");
     f.bc->append_data_block(f.uid(), 7, {0x01}, f.kp7, 1'000LL);
     KeyPair repl = Crypto::generate_keypair();
-    Block rev = f.bc->revoke_node(f.uid(), 7, 500LL, repl.pub, 3, f.kp3, 2'000LL);
+    Block rev = f.bc->revoke_node(f.uid(), 7, repl.pub, 3, f.kp3, 2'000LL);
     import_certificate(*storage_, f, rev);
 
     // The tip is still under the old key — stale or stolen.
@@ -852,7 +863,7 @@ TEST_F(RevocationTest, TipCheckAcceptsReplacedTip) {
     ForeignChain f("replaced");
     f.bc->append_data_block(f.uid(), 7, {0x01}, f.kp7, 1'000LL);
     KeyPair repl = Crypto::generate_keypair();
-    Block rev = f.bc->revoke_node(f.uid(), 7, 500LL, repl.pub, 3, f.kp3, 2'000LL);
+    Block rev = f.bc->revoke_node(f.uid(), 7, repl.pub, 3, f.kp3, 2'000LL);
     f.bc->append_data_block(f.uid(), 7, {0x02}, repl, 3'000LL); // re-tip under R
     import_certificate(*storage_, f, rev);
 
@@ -862,7 +873,7 @@ TEST_F(RevocationTest, TipCheckAcceptsReplacedTip) {
 TEST_F(RevocationTest, TipCheckSilentWithoutLocalKnowledge) {
     ForeignChain f("unknown");
     f.bc->append_data_block(f.uid(), 7, {0x01}, f.kp7, 1'000LL);
-    f.bc->revoke_node(f.uid(), 7, 500LL, std::nullopt, 3, f.kp3, 2'000LL);
+    f.bc->revoke_node(f.uid(), 7, std::nullopt, 3, f.kp3, 2'000LL);
     // Certificate NOT imported: no local knowledge — no objection.
     // Keeping knowledge fresh is the caller's policy (sync.md §10.3).
     EXPECT_NO_THROW(validator_->check_tip_against_revocations(f.tip(7)));
@@ -876,7 +887,7 @@ TEST_F(RevocationTest, TipCheckRefusesFakeSubtreeNode) {
                       [&](NodeIndex i) { return i == 15 ? kp15 : f.kp7; }, 9'000LL);
     f.bc->append_data_block(f.uid(), 15, {0x01}, kp15, 9'500LL);
 
-    Block rev = f.bc->revoke_node(f.uid(), 7, 5'000LL, std::nullopt, 3, f.kp3, 9'600LL);
+    Block rev = f.bc->revoke_node(f.uid(), 7, std::nullopt, 3, f.kp3, 9'600LL);
     import_certificate(*storage_, f, rev);
 
     // Branch 15 itself is not revoked; the poisoned edge 7→15 is refused.
@@ -887,7 +898,7 @@ TEST_F(RevocationTest, TipCheckRefusesFakeSubtreeNode) {
 TEST_F(RevocationTest, VerifyPartnerTipChecksRevocations) {
     ForeignChain f("verify");
     f.bc->append_data_block(f.uid(), 7, {0x01}, f.kp7, 1'000LL);
-    Block rev = f.bc->revoke_node(f.uid(), 7, 500LL, std::nullopt, 3, f.kp3, 2'000LL);
+    Block rev = f.bc->revoke_node(f.uid(), 7, std::nullopt, 3, f.kp3, 2'000LL);
     import_certificate(*storage_, f, rev);
 
     MergeSession session(*storage_, *validator_);
@@ -898,7 +909,7 @@ TEST_F(RevocationTest, MergeFromRevokedOwnBranchRefused) {
     // A frozen own branch may not open new bilateral acts (merges bypass the
     // facade's append protection).
     bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 1'000LL);
-    bc_->revoke_node(root_kp_.pub, 7, 500LL, std::nullopt, 3, kp3_, 2'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, kp3_, 2'000LL);
 
     ForeignChain f("mergepeer");
     f.bc->append_data_block(f.uid(), 7, {0x01}, f.kp7, 1'000LL);
@@ -917,14 +928,14 @@ TEST_F(RevocationTest, MergeFromRevokedOwnBranchRefused) {
 // ── Repeated thefts and the owner's line (blockchain.md §6.7 rules 9, 10, 12) ────────────────
 
 TEST_F(RevocationTest, SecondTheftOfTheSameLeaf) {
-    bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 1'000LL);
+    const Block b0 = bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 1'000LL);
     KeyPair k1 = Crypto::generate_keypair();
-    bc_->revoke_node(root_kp_.pub, 7, 500LL, k1.pub, 3, kp3_, 2'000LL);
-    bc_->append_data_block(root_kp_.pub, 7, {0x02}, k1, 3'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, k1.pub, 3, kp3_, 2'000LL, Crypto::hash_block(b0));
+    const Block b1 = bc_->append_data_block(root_kp_.pub, 7, {0x02}, k1, 3'000LL);
 
     // The replacement is stolen too: the parent revokes it in turn.
     KeyPair k2 = Crypto::generate_keypair();
-    Block r2 = bc_->revoke_node(root_kp_.pub, 7, 3'500LL, k2.pub, 3, kp3_, 4'000LL);
+    Block r2 = bc_->revoke_node(root_kp_.pub, 7, k2.pub, 3, kp3_, 4'000LL, Crypto::hash_block(b1));
     auto rp2 = Serializer::decode_revocation_payload(r2.payload.data(), r2.payload.size());
     EXPECT_EQ(rp2.revoked_pubkey, k1.pub);
     EXPECT_NO_THROW(validator_->validate_revocation(r2));
@@ -938,18 +949,18 @@ TEST_F(RevocationTest, SecondTheftOfTheSameLeaf) {
     ASSERT_TRUE(st.next_key.has_value());
     EXPECT_EQ(*st.next_key, k2.pub);
     ASSERT_EQ(st.blocks.size(), 3u);
-    EXPECT_EQ(st.blocks[0], BlockRevocationStatus::SUSPECT); // K0, ts 1000 > since 500
-    EXPECT_EQ(st.blocks[1], BlockRevocationStatus::CLEAN);   // K1, ts 3000 <= its since 3500
+    EXPECT_EQ(st.blocks[0], BlockRevocationStatus::CLEAN);   // K0, on its line
+    EXPECT_EQ(st.blocks[1], BlockRevocationStatus::CLEAN);   // K1, on its line
     EXPECT_EQ(st.blocks[2], BlockRevocationStatus::CLEAN);   // K2, not revoked
     EXPECT_NO_THROW(bc_->validate_branch(root_kp_.pub, 7));
 }
 
 TEST_F(RevocationTest, ReplacementRevokedBeforeUseIsSkipped) {
     KeyPair k1 = Crypto::generate_keypair();
-    bc_->revoke_node(root_kp_.pub, 7, 500LL, k1.pub, 3, kp3_, 1'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, k1.pub, 3, kp3_, 1'000LL);
     // K1 is revoked before it signed anything: the chain goes on to K2.
     KeyPair k2 = Crypto::generate_keypair();
-    Block r2 = bc_->revoke_node(root_kp_.pub, 7, 1'500LL, k2.pub, 3, kp3_, 2'000LL);
+    Block r2 = bc_->revoke_node(root_kp_.pub, 7, k2.pub, 3, kp3_, 2'000LL);
     auto rp2 = Serializer::decode_revocation_payload(r2.payload.data(), r2.payload.size());
     EXPECT_EQ(rp2.revoked_pubkey, k1.pub);
 
@@ -965,10 +976,10 @@ TEST_F(RevocationTest, ReplacementRevokedBeforeUseIsSkipped) {
 
 TEST_F(RevocationTest, EarlierEpochKeyAfterSecondSwitchIsInvalid) {
     KeyPair k1 = Crypto::generate_keypair();
-    bc_->revoke_node(root_kp_.pub, 7, 500LL, k1.pub, 3, kp3_, 1'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, k1.pub, 3, kp3_, 1'000LL);
     bc_->append_data_block(root_kp_.pub, 7, {0x01}, k1, 2'000LL);
     KeyPair k2 = Crypto::generate_keypair();
-    bc_->revoke_node(root_kp_.pub, 7, 2'500LL, k2.pub, 3, kp3_, 3'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, k2.pub, 3, kp3_, 3'000LL);
     bc_->append_data_block(root_kp_.pub, 7, {0x02}, k2, 4'000LL);
 
     // The thief of K1 appends past the switch to K2 (bypassing the facade).
@@ -996,7 +1007,7 @@ TEST_F(RevocationTest, LastGoodSplitsByLineNotByTime) {
 
     // Suspected since long ago, but the owner names B1 as the last own block.
     KeyPair k1 = Crypto::generate_keypair();
-    Block r = bc_->revoke_node(root_kp_.pub, 7, 100LL, k1.pub, 3, kp3_, 4'000LL,
+    Block r = bc_->revoke_node(root_kp_.pub, 7, k1.pub, 3, kp3_, 4'000LL,
                                Crypto::hash_block(b1));
     auto rp = Serializer::decode_revocation_payload(r.payload.data(), r.payload.size());
     ASSERT_TRUE(rp.last_good.has_value());
@@ -1025,7 +1036,7 @@ TEST_F(RevocationTest, LastGoodMustBeABlockOfTheBranch) {
     bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 1'000LL);
     Hash stranger{};
     stranger.bytes.fill(0x5A);
-    EXPECT_THROW(bc_->revoke_node(root_kp_.pub, 7, 500LL, std::nullopt, 3, kp3_, 2'000LL,
+    EXPECT_THROW(bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, kp3_, 2'000LL,
                                   stranger),
                  InvalidArgumentError);
 }
@@ -1035,7 +1046,7 @@ TEST_F(RevocationTest, LastGoodNamedLaterWithTheReplacement) {
     bc_->append_data_block(root_kp_.pub, 7, {0x02}, kp7_, 2'000LL);
 
     // Stop first, in a hurry: zones by time.
-    bc_->revoke_node(root_kp_.pub, 7, 500LL, std::nullopt, 3, kp3_, 3'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, kp3_, 3'000LL);
     auto st = validator_->branch_revocation_status(root_kp_.pub, 7);
     EXPECT_EQ(st.state, BranchRevocationState::FROZEN);
     EXPECT_EQ(st.blocks[0], BlockRevocationStatus::SUSPECT);
@@ -1043,7 +1054,7 @@ TEST_F(RevocationTest, LastGoodNamedLaterWithTheReplacement) {
 
     // Later, calmly: the replacement and the owner's line (rule 3, rule 12).
     KeyPair k1 = Crypto::generate_keypair();
-    bc_->revoke_node(root_kp_.pub, 7, 500LL, k1.pub, 3, kp3_, 4'000LL, Crypto::hash_block(b0));
+    bc_->revoke_node(root_kp_.pub, 7, k1.pub, 3, kp3_, 4'000LL, Crypto::hash_block(b0));
     st = validator_->branch_revocation_status(root_kp_.pub, 7);
     EXPECT_EQ(st.state, BranchRevocationState::REPLACED);
     EXPECT_EQ(st.blocks[0], BlockRevocationStatus::CLEAN);
@@ -1056,14 +1067,13 @@ TEST_F(RevocationTest, ForgedEndorsementByStolenAncestorIsVoid) {
     Block b0 = bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 1'000LL);
     Block b1 = bc_->append_data_block(root_kp_.pub, 7, {0x02}, kp7_, 2'000LL);
     KeyPair k1 = Crypto::generate_keypair();
-    Block e = bc_->revoke_node(root_kp_.pub, 7, 500LL, k1.pub, 3, kp3_, 3'000LL,
+    Block e = bc_->revoke_node(root_kp_.pub, 7, k1.pub, 3, kp3_, 3'000LL,
                                Crypto::hash_block(b1));
 
     KeyPair thief = Crypto::generate_keypair();
     RevocationPayload forged{};
     forged.revoked_node_index = 7;
     forged.revoked_pubkey     = kp7_.pub;
-    forged.compromised_since  = 100LL;
     forged.replacement_pubkey = thief.pub;
     forged.last_good          = LastGood{0, Crypto::hash_block(b0)};
     storage_->put_block(craft_revocation(3, kp3_, forged, 5'000LL));
@@ -1074,7 +1084,7 @@ TEST_F(RevocationTest, ForgedEndorsementByStolenAncestorIsVoid) {
     EXPECT_EQ(st.blocks[1], BlockRevocationStatus::OUTSIDE_LINE);
 
     // The grandparent revokes the parent and names its last valid block — E.
-    bc_->revoke_node(root_kp_.pub, 3, 4'000LL, std::nullopt, 1, kp1_, 6'000LL,
+    bc_->revoke_node(root_kp_.pub, 3, std::nullopt, 1, kp1_, 6'000LL,
                      Crypto::hash_block(e));
     st = validator_->branch_revocation_status(root_kp_.pub, 7);
     ASSERT_TRUE(st.next_key.has_value());
@@ -1088,11 +1098,11 @@ TEST_F(RevocationTest, ThreeTheftsInARow) {
     bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 1'000LL);
     Block b2 = bc_->append_data_block(root_kp_.pub, 7, {0x02}, kp7_, 3'000LL);
     KeyPair k1 = Crypto::generate_keypair();
-    bc_->revoke_node(root_kp_.pub, 7, 1'500LL, k1.pub, 3, kp3_, 3'500LL, Crypto::hash_block(b2));
+    bc_->revoke_node(root_kp_.pub, 7, k1.pub, 3, kp3_, 3'500LL, Crypto::hash_block(b2));
 
     Block b3 = bc_->append_data_block(root_kp_.pub, 7, {0x03}, k1, 4'000LL);
     KeyPair k2 = Crypto::generate_keypair();
-    Block r2 = bc_->revoke_node(root_kp_.pub, 7, 4'500LL, k2.pub, 3, kp3_, 6'000LL,
+    Block r2 = bc_->revoke_node(root_kp_.pub, 7, k2.pub, 3, kp3_, 6'000LL,
                                 Crypto::hash_block(b3));
     bc_->append_data_block(root_kp_.pub, 7, {0x04}, k2, 6'500LL);
 
@@ -1101,7 +1111,6 @@ TEST_F(RevocationTest, ThreeTheftsInARow) {
     RevocationPayload hijack{};
     hijack.revoked_node_index = 7;
     hijack.revoked_pubkey     = k2.pub;
-    hijack.compromised_since  = 6'000LL;
     hijack.replacement_pubkey = kx.pub;
     storage_->put_block(craft_revocation(3, kp3_, hijack, 8'000LL));
     auto st = validator_->branch_revocation_status(root_kp_.pub, 7);
@@ -1109,7 +1118,7 @@ TEST_F(RevocationTest, ThreeTheftsInARow) {
     EXPECT_EQ(*st.next_key, kx.pub);
 
     // A higher key names the parent's last valid block — R2: the hijack is off its line.
-    bc_->revoke_node(root_kp_.pub, 3, 7'000LL, std::nullopt, 1, kp1_, 9'000LL,
+    bc_->revoke_node(root_kp_.pub, 3, std::nullopt, 1, kp1_, 9'000LL,
                      Crypto::hash_block(r2));
     EXPECT_THROW(bc_->append_data_block(root_kp_.pub, 7, {0x05}, kx, 9'600LL),
                  RevocationError);

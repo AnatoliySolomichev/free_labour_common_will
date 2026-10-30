@@ -225,7 +225,6 @@ struct LastGood {
 struct RevocationPayload {
     NodeIndex                revoked_node_index;
     PublicKey                revoked_pubkey;     // the exact key being revoked
-    Timestamp                compromised_since;
     // absent = emergency stop; a replacement may be assigned later by a second
     // REVOCATION block (blockchain.md §6.7 rule 3)
     std::optional<PublicKey> replacement_pubkey;

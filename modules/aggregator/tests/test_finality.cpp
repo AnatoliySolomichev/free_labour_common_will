@@ -62,7 +62,7 @@ struct Scene {
     }
     // The parent revokes the branch key; the certificate comes to the table now.
     void revoke(const std::optional<Hash>& last_good) {
-        const Block rev = bc->revoke_node(uid, kLeaf, 1, Crypto::generate_keypair().pub,
+        const Block rev = bc->revoke_node(uid, kLeaf, Crypto::generate_keypair().pub,
                                           kParent, keys.at(kParent), ++clock, last_good);
         const auto cert = RevocationCert::build(*chain_db, rev.address);
         table->put_revocation_bytes(uid, Serializer::encode(cert));

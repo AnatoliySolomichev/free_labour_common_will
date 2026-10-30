@@ -17,9 +17,9 @@
 // ancestor's wins (as in Validator::effective_revocation). The branch's keys
 // come in epochs (blockchain.md §6.7 rule 9): its own line, then each replacement a
 // revocation named, with that key's own changes. A key of a revoked epoch
-// signs only up to the moment of compromise — or, past it, the owner's line
-// up to the last valid block the revocation named (rule 12): the owner's late
-// uploads come in, the thief's do not. A revocation counts only if its own
+// signs only the owner's line up to the last valid block the revocation named
+// (rule 12), whatever date a block claims: the owner's late uploads come in, the
+// thief's do not. With no line named it signs nothing: a full stop. A revocation counts only if its own
 // block is its author's (rule 10): a record written with a stolen ancestor key
 // stops counting the moment that ancestor is revoked, both here at the door
 // and in what the views show. Readers check every block again all the same.
@@ -44,7 +44,7 @@ public:
         signed_by_branch,   // one of the branch's keys signed it
         unknown_branch,     // no key path of this branch has come yet
         foreign_signature,  // none of the branch's keys signed it
-        revoked_key,        // a revoked key signed it past its compromise and the owner's line,
+        revoked_key,        // a revoked key signed it off the owner's line,
                             // or its node's birth lies outside the owner's line (blockchain.md §11.2)
         before_birth,       // the branch's first block is dated before the node's birth
     };
@@ -63,9 +63,8 @@ public:
     void learn_rotation(const Block& b);
 
     // A revocation certificate, checked on the spot (RevocationCert::verify): if
-    // its author is the highest ancestor heard yet, it decides the branch — from
-    // its moment of compromise the revoked epoch signs only the owner's line it
-    // named, and its replacement opens the next epoch (none: frozen).
+    // its author is the highest ancestor heard yet, it decides the branch — the revoked
+    // epoch signs only the owner's line it named, and its replacement opens the next epoch (none: frozen).
     // Throws: SignatureError, ChainIntegrityError, RevocationError, SerializationError.
     void learn_revocation(const RevocationCertificate& cert);
 
@@ -78,8 +77,8 @@ public:
     std::optional<KeyPath> path(const UserId& chain, NodeIndex node) const;
 
     // Whose a block is — for the views (blockchain.md §6.7 rules 5, 9, 10, 12): the owner's
-    // (a key of an epoch not revoked, or before its compromise, or on the
-    // owner's line named for it), not the owner's (a revoked key past both, or
+    // (a key of an epoch not revoked, or on the owner's line named for it), not
+    // the owner's (a revoked key off the line or under a full stop, or
     // a key no counting record gave the branch: one-sided records lose weight),
     // or unknown (nothing is known of this branch). A revocation record counts
     // only if its own block is its author's — the author itself may be under
@@ -99,7 +98,6 @@ private:
     struct Record {
         BlockIndex               block = 0;
         PublicKey                revoked{};
-        Timestamp                since = 0;
         std::optional<PublicKey> replacement;
         std::optional<LastGood>  last_good;
         Block                    written;       // the REVOCATION block itself (rule 10)
@@ -114,9 +112,10 @@ private:
     };
 
     // Whether a block a key of `epoch` signed may come in: the epoch is not
-    // revoked, or the block is before the compromise, or on the owner's line.
+    // revoked, or the block is on the owner's line.
     static bool admits(const std::vector<Record>& records,
-                       const std::vector<PublicKey>& epoch, const Block& b);
+                       const std::vector<PublicKey>& epoch, const Block& b,
+                       const AggregatorStorage* storage);
 
     // Whether every birth on the branch's path stands: each one is its parent's
     // block, and a revocation of the parent cuts it like any other (blockchain.md §11.2).

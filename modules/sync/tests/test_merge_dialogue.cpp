@@ -387,7 +387,7 @@ TEST_F(MergeDialogueTest, AResponderWhoseBranchMovedOnDoesNotAnswer) {
 TEST_F(MergeDialogueTest, AFrozenResponderRefusesBeforeTheInitiatorWrites) {
     alice_->append_block(0x01, 1'000LL);
     bob_->append_block(0x02, 1'000LL);
-    bob_->bc->revoke_node(bob_->root_kp.pub, LEAF, 500LL, std::nullopt, 0, bob_->root_kp, 1'500LL);
+    bob_->bc->revoke_node(bob_->root_kp.pub, LEAF, std::nullopt, 0, bob_->root_kp, 1'500LL);
     MergeDialogue a = alice_->dialogue(2'000LL);
     MergeDialogue b = bob_->dialogue(2'000LL);
     pump(a, b);

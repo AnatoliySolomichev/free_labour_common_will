@@ -1,6 +1,6 @@
 # API модуля блокчейна
 
-**Статус:** черновик v0.3  
+**Статус:** черновик v0.4  
 **Основание:** [docs/blockchain.md](blockchain.md)  
 **Язык реализации:** C++17  
 **Внешние зависимости:** libsodium, LMDB (CBOR реализован вручную, без внешней библиотеки)
@@ -216,9 +216,9 @@ struct LastGood {
 struct RevocationPayload {
     NodeIndex                revoked_node_index; // отзываемый узел
     PublicKey                revoked_pubkey;     // отзываемый ключ
-    Timestamp                compromised_since;  // заявленный момент компрометации
-    std::optional<PublicKey> replacement_pubkey; // нет — стоп-кран
-    std::optional<LastGood>  last_good;          // линия хозяина (правило 12)
+    std::optional<PublicKey> replacement_pubkey; // нет — ветка заморожена
+    std::optional<LastGood>  last_good;          // линия хозяина (правило 12); нет — полный стоп-кран;
+                                                 // индекс EMPTY_BRANCH_INDEX — верных блоков нет
 };
 ```
 
@@ -646,7 +646,6 @@ public:
     Block revoke_node(
         const UserId&                   user_id,
         NodeIndex                       revoked_node_index,
-        Timestamp                       compromised_since,
         const std::optional<PublicKey>& replacement_pubkey,
         NodeIndex                       ancestor_index,
         const KeyPair&                  ancestor_keypair,
@@ -774,6 +773,7 @@ session_alice.check_partner_half(answer, after_half, tip_bob, now(), merged);
 
 ## 17. История изменений
 
+- **v0.4** — отзыв без даты (2026-10-30, `blockchain.md §6.7`): `compromised_since` убран из `RevocationPayload`, `RevocationState` и `revoke_node`.
 - **v0.3** — рождение узла блоком (2026-10-30, `blockchain.md §11.2`): `BlockType::BIRTH`, `BirthRef`, `BirthPayload`; `Node::created_at` убран; `KeyPath`, `RevocationCertificate`, `BranchTipInfo` несут `births`.
 - **v0.2** — подпись партнёра в слиянии стала блоком (2026-10-30, `blockchain.md §6.4`): `MergeSession` переписан под `write_half` и `check_partner_half`; убраны `Block::co_signature`, `Seal`, `SealMode`, `SealManager`, таблица `seals`, `validate_seal`, `validate_co_signature`. Разделы 5.8 и 11 закрыты, их номера не переиспользуются.
 - **v0.1** — первая версия API. Покрывает MVP-операции: идентичность, дерево узлов, ветки, слияние, ротация ключа, отзыв, валидация, пломбы.

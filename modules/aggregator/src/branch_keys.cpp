@@ -34,21 +34,44 @@ std::vector<PublicKey> own_line(const KeyPath& kp) {
 
 } // namespace
 
-bool BranchKeys::admits(const std::vector<Record>& records,
-                        const std::vector<PublicKey>& epoch, const Block& b) {
+namespace {
+
+// Whether `b` lies on the owner's line ending at `line`: prev_hash back through
+// the blocks kept here. Where they are not here, the number decides — up to
+// the line's end the block is taken for the owner's (a filter, not a proof;
+// readers walk the line themselves).
+bool on_line(const AggregatorStorage* storage, const Block& b, const LastGood& line) {
+    if (line.index == EMPTY_BRANCH_INDEX || b.address.block_index > line.index) return false;
+    const Hash mine = Crypto::hash_block(b);
+    if (b.address.block_index == line.index) return mine == line.hash;
+    if (!storage) return true;                               // nothing to walk: by the number
+    Hash at = line.hash;
+    for (BlockIndex i = line.index; i > b.address.block_index; --i) {
+        const auto step = storage->get_block_by_hash(at);
+        if (!step) return true;                              // not here: by the number
+        if (step->address.node_index != b.address.node_index ||
+            step->address.block_index != i)
+            return false;
+        at = step->prev_hash;
+    }
+    return at == mine;
+}
+
+} // namespace
+
+bool BranchKeys::admits(const std::vector<Record>& records, const std::vector<PublicKey>& epoch,
+                        const Block& b, const AggregatorStorage* storage) {
     bool                    revoked = false;
-    Timestamp               since   = std::numeric_limits<Timestamp>::max();
     std::optional<LastGood> line;
     for (const Record& r : records) {
         if (std::find(epoch.begin(), epoch.end(), r.revoked) == epoch.end()) continue;
         revoked = true;
-        since   = std::min(since, r.since);
         if (r.last_good.has_value()) line = r.last_good;   // the latest word on the line
     }
-    if (!revoked || b.timestamp_claimed <= since) return true;
-    // The owner's line: up to its last valid block — that very block at its end.
-    if (!line.has_value() || b.address.block_index > line->index) return false;
-    return b.address.block_index < line->index || Crypto::hash_block(b) == line->hash;
+    if (!revoked) return true;
+    // Only the block's place decides, never the date its author wrote; a
+    // revocation with no line named yet is a full stop.
+    return line.has_value() && on_line(storage, b, *line);
 }
 
 UserId BranchKeys::learn_path(const KeyPath& kp) {
@@ -103,7 +126,7 @@ void BranchKeys::learn_revocation(const RevocationCertificate& cert) {
     const auto     p     = RevocationCert::payload(cert);
     const Key      k{cert.block.address.user_id, p.revoked_node_index};
     const uint32_t depth = node_depth(cert.block.address.node_index);
-    const Record   rec{cert.block.address.block_index, p.revoked_pubkey, p.compromised_since,
+    const Record   rec{cert.block.address.block_index, p.revoked_pubkey,
                        p.replacement_pubkey, p.last_good, cert.block,
                        cert.path.back().working_pubkey};
     std::lock_guard<std::mutex> lock(mu_);
@@ -156,36 +179,11 @@ BranchKeys::Verdict BranchKeys::check(const Block& b, const AggregatorStorage* s
     for (const auto& epoch : epochs)
         for (const auto& key : epoch)
             if (signed_by(b, key)) {
-                if (admits(records, epoch, b)) return Verdict::signed_by_branch;
+                if (admits(records, epoch, b, storage)) return Verdict::signed_by_branch;
                 revoked = true;
             }
     return revoked ? Verdict::revoked_key : Verdict::foreign_signature;
 }
-
-namespace {
-
-// Whether `b` lies on the owner's line ending at `line`: prev_hash back through
-// the blocks kept here. Where they are not here, the number decides — up to
-// the line's end the block is taken for the owner's (a filter, not a proof;
-// readers walk the line themselves).
-bool on_line(const AggregatorStorage* storage, const Block& b, const LastGood& line) {
-    if (b.address.block_index > line.index) return false;
-    const Hash mine = Crypto::hash_block(b);
-    if (b.address.block_index == line.index) return mine == line.hash;
-    if (!storage) return true;                               // nothing to walk: by the number
-    Hash at = line.hash;
-    for (BlockIndex i = line.index; i > b.address.block_index; --i) {
-        const auto step = storage->get_block_by_hash(at);
-        if (!step) return true;                              // not here: by the number
-        if (step->address.node_index != b.address.node_index ||
-            step->address.block_index != i)
-            return false;
-        at = step->prev_hash;
-    }
-    return at == mine;
-}
-
-} // namespace
 
 std::vector<BranchKeys::Record> BranchKeys::counting(const UserId& chain, const Revocation& rev,
                                                      const AggregatorStorage* storage,
@@ -239,18 +237,7 @@ BranchKeys::Whose BranchKeys::whose_locked(const Block& b, const std::vector<Pub
     for (const auto* epoch : epochs)
         for (const auto& key : *epoch) {
             if (!signed_by(b, key)) continue;
-            bool                    revoked = false;
-            Timestamp               since   = std::numeric_limits<Timestamp>::max();
-            std::optional<LastGood> line;
-            for (const Record& r : records) {
-                if (std::find(epoch->begin(), epoch->end(), r.revoked) == epoch->end()) continue;
-                revoked = true;
-                since   = std::min(since, r.since);
-                if (r.last_good) line = r.last_good;
-            }
-            if (!revoked) return Whose::owner;
-            if (line) return on_line(storage, b, *line) ? Whose::owner : Whose::not_owner;
-            return b.timestamp_claimed <= since ? Whose::owner : Whose::not_owner;
+            return admits(records, *epoch, b, storage) ? Whose::owner : Whose::not_owner;
         }
     return Whose::not_owner;   // a key no counting record gave this branch
 }

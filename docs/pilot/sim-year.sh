@@ -375,7 +375,7 @@ ok_revokes=0
 for s in 0 1 2 3 4; do
     a=$(( (s*41+7) % POP ))
     [[ -z "${CID[$a]}" ]] && continue
-    ftbc "p$a" revoke create --node 2147483647 --replace --via "$VIA" >/dev/null 2>&1 && ((ok_revokes++))
+    ftbc "p$a" revoke create --node 2147483647 --replace --last-good tip --via "$VIA" >/dev/null 2>&1 && ((ok_revokes++))
 done
 log "▶ отзывов ключей: $ok_revokes"
 

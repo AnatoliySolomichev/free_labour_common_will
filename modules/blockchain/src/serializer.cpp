@@ -115,13 +115,12 @@ void enc_merge_payload(Buf& out, const MergePayload& mp) {
 }
 
 void enc_revocation_payload(Buf& out, const RevocationPayload& rp) {
-    // Map of 3 fields (emergency stop), plus the replacement (key 3) and the
+    // Map of 2 fields (emergency stop), plus the replacement (key 3) and the
     // last valid block (key 4) when given — blockchain.md §6.7.
-    w_map(out, 3 + (rp.replacement_pubkey.has_value() ? 1 : 0)
+    w_map(out, 2 + (rp.replacement_pubkey.has_value() ? 1 : 0)
                  + (rp.last_good.has_value() ? 1 : 0));
     w_uint(out, 0); w_uint(out, rp.revoked_node_index);
     w_uint(out, 1); w_fixed(out, rp.revoked_pubkey.bytes);
-    w_uint(out, 2); w_int64(out, rp.compromised_since);
     if (rp.replacement_pubkey.has_value()) {
         w_uint(out, 3); w_fixed(out, rp.replacement_pubkey->bytes);
     }
@@ -381,15 +380,14 @@ MergePayload dec_merge_payload(CborReader& r) {
 
 RevocationPayload dec_revocation_payload(CborReader& r) {
     const uint64_t n = r.r_map();
-    if (n < 3 || n > 5)
-        throw SerializationError("RevocationPayload: expected 3 to 5 fields");
+    if (n < 2 || n > 4)
+        throw SerializationError("RevocationPayload: expected 2 to 4 fields");
     RevocationPayload rp{};
     expect_key(r, 0); rp.revoked_node_index = static_cast<NodeIndex>(r.r_uint());
     expect_key(r, 1); r.r_fixed(rp.revoked_pubkey.bytes);
-    expect_key(r, 2); rp.compromised_since = r.r_int();
     // Optional fields, each at most once, in ascending key order.
-    uint64_t prev_key = 2;
-    for (uint64_t i = 3; i < n; ++i) {
+    uint64_t prev_key = 2;     // key 2 was the date of compromise; retired 2026-10-30
+    for (uint64_t i = 2; i < n; ++i) {
         const uint64_t key = r.r_uint();
         if (key <= prev_key)
             throw SerializationError("CBOR: unexpected map key (non-canonical or wrong schema)");

@@ -309,7 +309,6 @@ TEST(Serializer, RevocationPayloadRoundTripStop) {
     RevocationPayload rp{};
     rp.revoked_node_index = 47;
     rp.revoked_pubkey.bytes.fill(0xAB);
-    rp.compromised_since  = 1'720'000'000LL;
     // no replacement: emergency stop → 3-field map
 
     auto enc = Serializer::encode(rp);
@@ -317,7 +316,6 @@ TEST(Serializer, RevocationPayloadRoundTripStop) {
 
     EXPECT_EQ(d.revoked_node_index, 47u);
     EXPECT_EQ(d.revoked_pubkey, rp.revoked_pubkey);
-    EXPECT_EQ(d.compromised_since, rp.compromised_since);
     EXPECT_FALSE(d.replacement_pubkey.has_value());
 }
 
@@ -325,7 +323,6 @@ TEST(Serializer, RevocationPayloadRoundTripReplacement) {
     RevocationPayload rp{};
     rp.revoked_node_index = 0x7FFF'FFFFu;
     rp.revoked_pubkey.bytes.fill(0x11);
-    rp.compromised_since  = -1LL; // pre-epoch timestamps must survive
     PublicKey repl{};
     repl.bytes.fill(0x22);
     rp.replacement_pubkey = repl;
@@ -335,7 +332,6 @@ TEST(Serializer, RevocationPayloadRoundTripReplacement) {
 
     EXPECT_EQ(d.revoked_node_index, rp.revoked_node_index);
     EXPECT_EQ(d.revoked_pubkey, rp.revoked_pubkey);
-    EXPECT_EQ(d.compromised_since, -1LL);
     ASSERT_TRUE(d.replacement_pubkey.has_value());
     EXPECT_EQ(*d.replacement_pubkey, repl);
 }
@@ -344,7 +340,6 @@ TEST(Serializer, RevocationPayloadDeterministic) {
     RevocationPayload rp{};
     rp.revoked_node_index = 7;
     rp.revoked_pubkey.bytes.fill(0x33);
-    rp.compromised_since  = 42;
 
     EXPECT_EQ(Serializer::encode(rp), Serializer::encode(rp));
     // Stop form is strictly shorter than the replacement form.
@@ -358,7 +353,6 @@ TEST(Serializer, RevocationPayloadRoundTripLastGood) {
     RevocationPayload rp{};
     rp.revoked_node_index = 7;
     rp.revoked_pubkey.bytes.fill(0x44);
-    rp.compromised_since  = 1'000LL;
     LastGood last{12, {}};
     last.hash.bytes.fill(0x55);
     rp.last_good = last; // stop with the owner's line, no replacement yet
@@ -384,18 +378,17 @@ TEST(Serializer, RevocationPayloadRejectsUnknownAndRepeatedKeys) {
     RevocationPayload rp{};
     rp.revoked_node_index = 7;
     rp.revoked_pubkey.bytes.fill(0x44);
-    rp.compromised_since  = 1'000LL;
     rp.last_good = LastGood{};
     auto enc = Serializer::encode(rp);
-    // The optional key sits right after the 3 fixed fields: 0xA4 map, then
-    // key 4 at offset 1 + (1 + 1) + (1 + 2 + 32) + (1 + 3) = 42.
-    ASSERT_EQ(enc[0], 0xA4);
-    ASSERT_EQ(enc[42], 0x04);
+    // The optional key sits right after the 2 fixed fields: 0xA3 map, then
+    // key 4 at offset 1 + (1 + 1) + (1 + 2 + 32) = 38.
+    ASSERT_EQ(enc[0], 0xA3);
+    ASSERT_EQ(enc[38], 0x04);
     auto bad = enc;
-    bad[42] = 0x05;                  // unknown field
+    bad[38] = 0x05;                  // unknown field
     EXPECT_THROW(Serializer::decode_revocation_payload(bad.data(), bad.size()),
                  SerializationError);
-    bad[42] = 0x02;                  // not ascending
+    bad[38] = 0x02;                  // not ascending
     EXPECT_THROW(Serializer::decode_revocation_payload(bad.data(), bad.size()),
                  SerializationError);
 }
