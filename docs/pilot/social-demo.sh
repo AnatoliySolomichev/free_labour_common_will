@@ -186,6 +186,24 @@ bcx boris revoke create --node 2147483647 --replace --last-good tip --via "$VIA"
 SHOW_LINE="$(bcx anna social show "$VIDEO" --via "$VIA")"
 printf '%s\n' "$SHOW_LINE" | head -3 | sed 's/^/   /'
 
+hr "украли ключ родителя Веры: вор отзывает её рабочий ключ и ставит дизлайк (blockchain.md §6.7, правило 10)"
+cp -a "$work/vera" "$work/thief2"
+bcx thief2 revoke create --node 2147483647 --replace --via "$VIA" >/dev/null 2>&1
+post thief2 social dislike "$VIDEO"
+SHOW_HIJACK="$(bcx anna social show "$VIDEO" --via "$VIA")"
+printf '%s\n' "$SHOW_HIJACK" | head -3 | sed 's/^/   /'
+hr "Вера пишет комментарий, а агрегатор его не берёт: он верит подложному отзыву"
+sleep 1
+OUT_VERA="$(bcx vera social comment "$VIDEO" "Пересмотрела, всё верно" --via "$VIA" 2>&1 || true)"
+printf '%s\n' "$OUT_VERA" | grep -i "refused" | sed 's/^/   vera: /'
+hr "старший ключ отзывает родителя — подложный отзыв не считается; Вера выкладывает блоки заново"
+bcx vera revoke create --node 1073741823 --replace --since $(( $(date +%s) - 3600 )) --via "$VIA" 2>&1 \
+    | grep -E "revoked node" | sed 's/^/   vera: /'
+PUSH_VERA="$(bcx vera block push --via "$VIA" 2>&1)"
+printf '%s\n' "$PUSH_VERA" | sed 's/^/   vera: /'
+SHOW_BACK="$(bcx anna social show "$VIDEO" --via "$VIA")"
+printf '%s\n' "$SHOW_BACK" | head -3 | sed 's/^/   /'
+
 hr "пост Telegram: комментарий с одной ссылки, лайк — с другой"
 post vera  social comment "$TG1" "Важный пост, перечитайте"
 post boris social like    "$TG2"
@@ -234,6 +252,14 @@ check "дизлайк вора с ключом Бориса — последне
       "$(line "$SHOW_STOLEN" 'реакции круга')" "реакции круга: +2 −1   (вы +1 · шаг 1 +1 −1)"
 check "отзыв с линией Бориса снял дизлайк вора, лайк Бориса вернулся" \
       "$(line "$SHOW_LINE" 'реакции круга')" "реакции круга: +3   (вы +1 · шаг 1 +2)"
+check "подложный отзыв от ключа родителя: дизлайк вора — последнее слово Веры" \
+      "$(line "$SHOW_HIJACK" 'реакции круга')" "реакции круга: +2 −1   (вы +1 · шаг 1 +1 −1)"
+check "агрегатор отверг блок Веры, пока верил подложному отзыву" \
+      "$(printf '%s\n' "$OUT_VERA" | grep -c 'revoked key')" "1"
+check "после отзыва родителя дизлайк вора снят, лайк Веры вернулся" \
+      "$(line "$SHOW_BACK" 'реакции круга')" "реакции круга: +3   (вы +1 · шаг 1 +2)"
+check "комментарий Веры выложен заново и виден" \
+      "$(printf '%s\n' "$SHOW_BACK" | grep -c 'Пересмотрела, всё верно')" "1"
 check "пост Telegram сошёлся с двух ссылок" \
       "$(line "$SHOW_TG" 'реакции круга')" "реакции круга: +1   (вы — · шаг 1 +1)"
 check "лента не видит ферму" "$(printf '%s\n' "$FEED" | grep -c 'крутое видео')" "0"

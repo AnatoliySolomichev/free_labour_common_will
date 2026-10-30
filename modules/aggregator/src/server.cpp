@@ -343,7 +343,7 @@ void AggregatorServer::setup_routes() {
             const auto& body = req.body;
             Block b = Serializer::decode_block(
                 reinterpret_cast<const uint8_t*>(body.data()), body.size());
-            switch (keys_.check(b)) {
+            switch (keys_.check(b, &storage_)) {
                 case BranchKeys::Verdict::unknown_branch:
                     res.status = 428;
                     res.set_content("{\"error\":\"no key path\",\"chain\":\""
@@ -1538,6 +1538,19 @@ void AggregatorServer::setup_routes() {
                                 "application/json");
                 return;
             }
+            // Deals of this chain written outside the owner's line (blockchain.md §6.7).
+            std::size_t disowned = 0;
+            {
+                const auto table = deals_on_table(storage_);
+                for (const auto& e : table->all) {
+                    if (!(e.payer == uid)) continue;
+                    Hash block_hash{};
+                    block_hash.bytes = e.hash;
+                    if (const auto blk = storage_.get_block_by_hash(block_hash);
+                        blk && keys_.whose(*blk, storage_) == BranchKeys::Whose::not_owner)
+                        ++disowned;
+                }
+            }
             std::string holders;
             bool first = true;
             for (const auto& h : fp->holders) {
@@ -1570,6 +1583,7 @@ void AggregatorServer::setup_routes() {
                 + ",\"unbacked_units\":"       + std::to_string(fp->unbacked_units)
                 + ",\"false_reversals\":"      + std::to_string(fp->false_reversals)
                 + ",\"future_blocks\":"        + std::to_string(fp->future_blocks)
+                + ",\"disowned_deals\":"       + std::to_string(disowned)
                 + ",\"overdrawn\":["           + overdrawn + "]"
                 + ",\"counterparties\":"      + std::to_string(fp->counterparties)
                 + ",\"internal_turnover\":"   + std::to_string(fp->internal_turnover)
@@ -2205,6 +2219,15 @@ void AggregatorServer::setup_routes() {
                 + ",\"from_future\":" + (deals.from_future.count(d->hash) ? "true" : "false");
             if (const auto w = deals.unbacked_why.find(d->hash); w != deals.unbacked_why.end())
                 body += ",\"unbacked_why\":\"" + json_escape(w->second) + "\"";
+            // Written outside the owner's line (blockchain.md §6.7 rules 10, 12): the deal
+            // stays on the table — rule 5 decides whether it stands — and is marked.
+            {
+                Hash block_hash{};
+                block_hash.bytes = d->hash;
+                if (const auto blk = storage_.get_block_by_hash(block_hash);
+                    blk && keys_.whose(*blk, storage_) == BranchKeys::Whose::not_owner)
+                    body += ",\"disowned\":true";
+            }
             if (const auto* r = deals.counted_reply(d->hash)) {
                 body += ",\"reply\":{\"ref\":\"" + to_hex(r->seen.author) + "/" + to_hex(r->hash)
                       + "\",\"accepted\":" + (r->seen.reply.accepted ? "true" : "false")
@@ -2778,7 +2801,7 @@ void AggregatorServer::sync_with_peer(const std::string& peer_url) {
             const auto& data = blk_res->body;
             Block b = Serializer::decode_block(
                 reinterpret_cast<const uint8_t*>(data.data()), data.size());
-            if (keys_.check(b) != BranchKeys::Verdict::signed_by_branch) continue;
+            if (keys_.check(b, &storage_) != BranchKeys::Verdict::signed_by_branch) continue;
             if (storage_.add_block(b)) {
                 ++pulled;
                 if (b.type == BlockType::KEY_ROTATION) keys_.learn_rotation(b);

@@ -338,7 +338,7 @@ TEST(BranchKeys, WhoseFollowsTheOwnersLine) {
         EXPECT_EQ(keys.whose(b1, storage), BranchKeys::Whose::owner);
         EXPECT_EQ(keys.whose(b2, storage), BranchKeys::Whose::not_owner);
         EXPECT_EQ(keys.whose(after, storage), BranchKeys::Whose::owner);
-        EXPECT_EQ(keys.whose(forged(after), storage), BranchKeys::Whose::unknown);
+        EXPECT_EQ(keys.whose(forged(after), storage), BranchKeys::Whose::not_owner);
     }
     std::filesystem::remove_all(db);
 }
@@ -393,12 +393,17 @@ TEST(BranchKeys, AStolenParentsRecordDoesNotCount) {
         keys.learn_revocation(RevocationCert::build(*a.storage, hijack.address));
         EXPECT_EQ(keys.whose(by_kx, storage), BranchKeys::Whose::owner);       // пока работает
         EXPECT_EQ(keys.whose(by_k1, storage), BranchKeys::Whose::not_owner);
+        EXPECT_EQ(keys.check(by_kx, &storage), BranchKeys::Verdict::signed_by_branch);
+        EXPECT_EQ(keys.check(by_k1, &storage), BranchKeys::Verdict::revoked_key);
 
         const Block g = a.bc->revoke_node(a.uid, parent, 1, std::nullopt, grand, a.keys.at(grand),
                                           ++a.now, Crypto::hash_block(r1));
         keys.learn_revocation(RevocationCert::build(*a.storage, g.address));
+        // И на входе: блок хозяина снова проходит, блок вора — нет.
+        EXPECT_EQ(keys.check(by_k1, &storage), BranchKeys::Verdict::signed_by_branch);
+        EXPECT_EQ(keys.check(by_kx, &storage), BranchKeys::Verdict::foreign_signature);
         EXPECT_EQ(keys.whose(by_k1, storage), BranchKeys::Whose::owner);
-        EXPECT_EQ(keys.whose(by_kx, storage), BranchKeys::Whose::unknown);
+        EXPECT_EQ(keys.whose(by_kx, storage), BranchKeys::Whose::not_owner);
     }
     std::filesystem::remove_all(db);
 }

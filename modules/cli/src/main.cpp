@@ -7433,6 +7433,31 @@ static void upload_block(Context& ctx, const std::string& via, const Block& bloc
         std::cerr << "upload to " << via << " failed — receiver can't fetch it yet\n";
 }
 
+// bc block push [--leaf L] --via URL
+// Every block of the branch to the aggregator, oldest first. What it refused
+// while a record written with a stolen ancestor key stood comes in once that
+// record stops counting (blockchain.md §6.7 rules 10, 12); what it holds it
+// answers as a duplicate.
+static int cmd_block_push(const fs::path& data_dir, int argc, char** argv) {
+    const NodeIndex leaf = parse_leaf_index(argc, argv);
+    const auto      via  = flag_val(argc, argv, "--via");
+    if (via.empty()) {
+        std::cerr << "Usage: bc block push [--leaf L] --via URL\n";
+        return 1;
+    }
+    Context     ctx(data_dir, leaf);
+    std::size_t fresh = 0, known = 0, refused = 0;
+    for (const auto& b : ctx.bc.get_branch(ctx.user_id, leaf)) {
+        std::string answer;
+        if (send_block(ctx, via, b, &answer) != 200) ++refused;
+        else if (answer.find("duplicate") != std::string::npos) ++known;
+        else ++fresh;
+    }
+    std::cout << "ветка 0x" << std::hex << leaf << std::dec << ": выложено " << fresh
+              << ", уже там " << known << ", отказано " << refused << "\n";
+    return refused ? 1 : 0;
+}
+
 static void print_portions(const records::Transfer& t, const std::string& me_hex,
                            const std::string& to_hex_s) {
     for (const auto& o : t.origins) {
@@ -7942,6 +7967,9 @@ static void print_footprint(Context& ctx,
         std::cout << "  ФЛАГ: пыталась платить бумагой, которой у неё не было: " << n
                   << " раз(а) на " << jnum(o, "unbacked_units") << "h — такие сделки "
                      "ничего не сдвинули\n";
+    if (const auto n = static_cast<int>(jnum(o, "disowned_deals")); n > 0)
+        std::cout << "  сделок вне линии хозяина: " << n << " — написаны отозванным ключом "
+                     "(blockchain.md §6.7)\n";
     if (const auto n = static_cast<int>(jnum(o, "false_reversals")); n > 0)
         std::cout << "  ФЛАГ: сторно сделок, которые продавец принял: " << n
                   << " — долг, объявленный прочь (records.md §11.5)\n";
@@ -10673,6 +10701,8 @@ Identity:
 
 Branches:
   branch init <leaf_index>         Init a new branch (decimal or 0x hex)
+  block push [--leaf L] --via URL   Upload every block of the branch (what the aggregator
+                                     refused before a revocation settled comes in now)
   block stub [--via URL]           Append an empty stub block (bootstrap merge / time anchor;
                                      --via: on the aggregator, for the next merge to fix)
 
@@ -11116,6 +11146,7 @@ int main(int argc, char** argv) {
         else if (cmd == "material"  && subcmd == "show")    return cmd_tool_show(data_dir, argc, argv);
         else if (cmd == "branch"    && subcmd == "init")    return cmd_branch_init(data_dir, argc, argv);
         else if (cmd == "block"     && subcmd == "stub")    return cmd_block_stub(data_dir, argc, argv);
+        else if (cmd == "block"     && subcmd == "push")    return cmd_block_push(data_dir, argc, argv);
         else if (cmd == "list")                             return cmd_list(data_dir, argc, argv);
         else if (cmd == "merge"     && subcmd == "prepare") return cmd_merge_prepare(data_dir, argc, argv);
         else if (cmd == "merge"     && subcmd == "create")  return cmd_merge_create(data_dir, argc, argv);

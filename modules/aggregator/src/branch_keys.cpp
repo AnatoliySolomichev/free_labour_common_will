@@ -126,9 +126,9 @@ void BranchKeys::learn_revocation(const RevocationCertificate& cert) {
         cur.lines.push_back({*rec.replacement});
 }
 
-BranchKeys::Verdict BranchKeys::check(const Block& b) const {
+BranchKeys::Verdict BranchKeys::check(const Block& b, const AggregatorStorage* storage) const {
     std::vector<std::vector<PublicKey>> epochs;   // the own line, then each replacement line
-    std::vector<Record>                 records;
+    std::vector<Record>                 records;  // only those that count (rule 10)
     {
         std::lock_guard<std::mutex> lock(mu_);
         const Key  k{b.address.user_id, b.address.node_index};
@@ -137,8 +137,12 @@ BranchKeys::Verdict BranchKeys::check(const Block& b) const {
         if (br == branches_.end() && rev == revocations_.end()) return Verdict::unknown_branch;
         if (br != branches_.end()) epochs.push_back(br->second.own);
         if (rev != revocations_.end()) {
-            epochs.insert(epochs.end(), rev->second.lines.begin(), rev->second.lines.end());
-            records = rev->second.records;
+            records = counting(k.first, rev->second, storage, 0);
+            for (const auto& line : rev->second.lines)
+                if (std::any_of(records.begin(), records.end(), [&](const Record& r) {
+                        return r.replacement && *r.replacement == line.front();
+                    }))
+                    epochs.push_back(line);
         }
     }
     bool revoked = false;
@@ -172,13 +176,14 @@ namespace {
 // the blocks kept here. Where they are not here, the number decides — up to
 // the line's end the block is taken for the owner's (a filter, not a proof;
 // readers walk the line themselves).
-bool on_line(const AggregatorStorage& storage, const Block& b, const LastGood& line) {
+bool on_line(const AggregatorStorage* storage, const Block& b, const LastGood& line) {
     if (b.address.block_index > line.index) return false;
     const Hash mine = Crypto::hash_block(b);
     if (b.address.block_index == line.index) return mine == line.hash;
+    if (!storage) return true;                               // nothing to walk: by the number
     Hash at = line.hash;
     for (BlockIndex i = line.index; i > b.address.block_index; --i) {
-        const auto step = storage.get_block_by_hash(at);
+        const auto step = storage->get_block_by_hash(at);
         if (!step) return true;                              // not here: by the number
         if (step->address.node_index != b.address.node_index ||
             step->address.block_index != i)
@@ -191,7 +196,7 @@ bool on_line(const AggregatorStorage& storage, const Block& b, const LastGood& l
 } // namespace
 
 std::vector<BranchKeys::Record> BranchKeys::counting(const UserId& chain, const Revocation& rev,
-                                                     const AggregatorStorage& storage,
+                                                     const AggregatorStorage* storage,
                                                      int depth) const {
     std::vector<Record> out;
     for (const Record& r : rev.records) {
@@ -208,11 +213,12 @@ std::vector<BranchKeys::Record> BranchKeys::counting(const UserId& chain, const 
 }
 
 BranchKeys::Whose BranchKeys::whose_locked(const Block& b, const std::vector<PublicKey>* own,
-                                           const AggregatorStorage& storage, int depth) const {
+                                           const AggregatorStorage* storage, int depth) const {
     if (depth > 64) return Whose::unknown;                   // deeper than any tree
     const Key  k{b.address.user_id, b.address.node_index};
     const auto br  = branches_.find(k);
     const auto rev = revocations_.find(k);
+    if (br == branches_.end() && rev == revocations_.end() && !own) return Whose::unknown;
     std::vector<Record> records;
     if (rev != revocations_.end()) records = counting(k.first, rev->second, storage, depth);
     // The epochs: the own line, then each replacement a counting record named.
@@ -241,12 +247,12 @@ BranchKeys::Whose BranchKeys::whose_locked(const Block& b, const std::vector<Pub
             if (line) return on_line(storage, b, *line) ? Whose::owner : Whose::not_owner;
             return b.timestamp_claimed <= since ? Whose::owner : Whose::not_owner;
         }
-    return Whose::unknown;
+    return Whose::not_owner;   // a key no counting record gave this branch
 }
 
 BranchKeys::Whose BranchKeys::whose(const Block& b, const AggregatorStorage& storage) const {
     std::lock_guard<std::mutex> lock(mu_);
-    return whose_locked(b, nullptr, storage, 0);
+    return whose_locked(b, nullptr, &storage, 0);
 }
 
 std::optional<KeyPath> BranchKeys::path(const UserId& chain, NodeIndex node) const {

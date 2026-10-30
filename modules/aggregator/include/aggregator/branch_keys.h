@@ -19,8 +19,10 @@
 // revocation named, with that key's own changes. A key of a revoked epoch
 // signs only up to the moment of compromise — or, past it, the owner's line
 // up to the last valid block the revocation named (rule 12): the owner's late
-// uploads come in, the thief's do not. The author-validity filter of rule 10
-// is the readers' job — the aggregator takes every named replacement.
+// uploads come in, the thief's do not. A revocation counts only if its own
+// block is its author's (rule 10): a record written with a stolen ancestor key
+// stops counting the moment that ancestor is revoked, both here at the door
+// and in what the views show. Readers check every block again all the same.
 
 #include "aggregator.h"
 
@@ -63,7 +65,9 @@ public:
     // Throws: SignatureError, ChainIntegrityError, RevocationError, SerializationError.
     void learn_revocation(const RevocationCertificate& cert);
 
-    Verdict check(const Block& b) const;
+    // `storage` — where the owner's line is walked (rule 10, for an author under
+    // revocation); without it the block's number against the line's decides.
+    Verdict check(const Block& b, const AggregatorStorage* storage = nullptr) const;
 
     // Whether one of the branch's keys signed `message` (a block hash, as a merge
     // partner co-signs it, blockchain.md §6.4).
@@ -76,12 +80,13 @@ public:
 
     // Whose a block is — for the views (blockchain.md §6.7 rules 5, 9, 10, 12): the owner's
     // (a key of an epoch not revoked, or before its compromise, or on the
-    // owner's line named for it), not the owner's (a revoked key past both:
-    // one-sided records lose weight), or unknown (a key the branch is not
-    // known to have). A revocation record counts only if its own block is its
-    // author's — the author itself may be under revocation (rule 10), checked
-    // up to the root. The owner's line is walked through `storage`; where its
-    // blocks are not there, the block's number against the line's decides.
+    // owner's line named for it), not the owner's (a revoked key past both, or
+    // a key no counting record gave the branch: one-sided records lose weight),
+    // or unknown (nothing is known of this branch). A revocation record counts
+    // only if its own block is its author's — the author itself may be under
+    // revocation (rule 10), checked up to the root. The owner's line is walked
+    // through `storage`; where its blocks are not there, the block's number
+    // against the line's decides.
     enum class Whose { owner, not_owner, unknown };
     Whose whose(const Block& b, const AggregatorStorage& storage) const;
 
@@ -117,11 +122,11 @@ private:
     // whose(), under mu_: `own` — the branch's own line when its path has not
     // come (an author known only from a certificate).
     Whose whose_locked(const Block& b, const std::vector<PublicKey>* own,
-                       const AggregatorStorage& storage, int depth) const;
+                       const AggregatorStorage* storage, int depth) const;
     // The records of `rev` that count: their author not under revocation, or
     // the record its author's own (rule 10).
     std::vector<Record> counting(const UserId& chain, const Revocation& rev,
-                                 const AggregatorStorage& storage, int depth) const;
+                                 const AggregatorStorage* storage, int depth) const;
 
     mutable std::mutex         mu_;
     std::map<Key, Branch>      branches_;
