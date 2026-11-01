@@ -78,6 +78,7 @@ add_executable(aggregator_tests
     tests/test_branch_keys.cpp
     tests/test_finality.cpp
     tests/test_notes_view.cpp
+    tests/test_branch_keys_thefts.cpp
 )
 
 target_link_libraries(aggregator_tests PRIVATE

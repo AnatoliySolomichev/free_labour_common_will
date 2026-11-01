@@ -59,6 +59,7 @@ add_executable(blockchain_tests
     tests/test_blockchain.cpp
     tests/test_key_path.cpp
     tests/test_merge_session.cpp
+    tests/test_theft_recovery.cpp
 )
 
 target_link_libraries(blockchain_tests PRIVATE
