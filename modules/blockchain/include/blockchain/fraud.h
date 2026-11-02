@@ -20,7 +20,7 @@ enum class FraudVerdict {
 struct FraudProofData {
     ExternalRef       leaf;         // disputed participant: (chain, node, block, committed hash)
     MerkleTree::Proof merkle_path;  // inclusion of leaf_hash(leaf) under merkle_root
-    std::vector<Node> node_path;    // nodes root..leaf.node of leaf.chain (→ working_pubkey)
+    KeyPath           path;         // key path root..leaf.node of leaf.chain (blockchain.md §7.5)
     Block             evidence;     // bad_sig: the committed block; hash_mismatch: the real block
 };
 

@@ -82,14 +82,17 @@ void enc_ext_ref(Buf& out, const ExternalRef& r) {
 }
 
 void enc_node(Buf& out, const Node& n) {
-    w_map(out, 6);
+    // Keys 3 (parent_hash) and 4 (parent_sig) retired 2026-11-02: a node is
+    // signed once, by its parent in the birth block (blockchain.md §11.2).
+    w_map(out, 5);
     w_uint(out, 0); w_uint(out,  n.index);
     w_uint(out, 1); w_fixed(out, n.structural_pubkey.bytes);
     w_uint(out, 2); w_fixed(out, n.working_pubkey.bytes);
-    w_uint(out, 3); w_fixed(out, n.parent_hash.bytes);
-    w_uint(out, 4); w_fixed(out, n.parent_sig.bytes);
     w_uint(out, 5); w_arr(out, 2); w_uint(out, n.birth.index); w_fixed(out, n.birth.hash.bytes);
+    w_uint(out, 6); w_fixed(out, n.root_sig.bytes);
 }
+
+void enc_blocks(Buf& out, const std::vector<Block>& blocks);
 
 void enc_block(Buf& out, const Block& b) {
     w_map(out, 7);
@@ -132,30 +135,34 @@ void enc_revocation_payload(Buf& out, const RevocationPayload& rp) {
     }
 }
 
-void enc_revocation_cert(Buf& out, const RevocationCertificate& c) {
-    w_map(out, 3);
-    w_uint(out, 0); enc_block(out, c.block);
-    w_uint(out, 1);
-    w_arr(out, c.path.size());
-    for (const auto& n : c.path) enc_node(out, n);
-    w_uint(out, 2);
-    w_arr(out, c.births.size());
-    for (const auto& b : c.births) enc_block(out, b);
+void enc_blocks(Buf& out, const std::vector<Block>& blocks) {
+    w_arr(out, blocks.size());
+    for (const auto& b : blocks) enc_block(out, b);
 }
 
 void enc_key_path(Buf& out, const KeyPath& kp) {
-    // Ключ 1 — звенья смены рабочего ключа (blockchain.md §6.6); без них путь
-    // приводит к первоначальному ключу узла.
-    w_map(out, 3);
-    w_uint(out, 0);
-    w_arr(out, kp.path.size());
-    for (const auto& n : kp.path) enc_node(out, n);
-    w_uint(out, 1);
-    w_arr(out, kp.rotations.size());
-    for (const auto& b : kp.rotations) enc_block(out, b);
-    w_uint(out, 2);
-    w_arr(out, kp.births.size());
-    for (const auto& b : kp.births) enc_block(out, b);
+    // Keys 0 (nodes) and 1 (rotations) retired 2026-11-02: nodes are what the
+    // births say, and the key changes of every path node go under key 4
+    // (blockchain.md §7.5).
+    w_map(out, 4);
+    w_uint(out, 2); enc_blocks(out, kp.births);
+    w_uint(out, 3); enc_node(out, kp.root);
+    w_uint(out, 4); enc_blocks(out, kp.changes);
+    w_uint(out, 5); enc_blocks(out, kp.records);
+}
+
+void enc_revocation_cert(Buf& out, const RevocationCertificate& c) {
+    // Keys 1 (nodes) and 2 (births) retired 2026-11-02: key 3 — the key path
+    // to the author.
+    w_map(out, 2);
+    w_uint(out, 0); enc_block(out, c.block);
+    w_uint(out, 3); enc_key_path(out, c.path);
+}
+
+void enc_replacement_payload(Buf& out, const ReplacementPayload& p) {
+    w_map(out, 2);
+    w_uint(out, 0); enc_address(out, p.record_address);
+    w_uint(out, 1); w_fixed(out, p.record_hash.bytes);
 }
 
 void enc_merkle_proof(Buf& out, const MerkleTree::Proof& p) {
@@ -169,13 +176,12 @@ void enc_merkle_proof(Buf& out, const MerkleTree::Proof& p) {
 }
 
 void enc_fraud_proof(Buf& out, const FraudProofData& d) {
+    // Key 2 (nodes) retired 2026-11-02: key 4 — the key path.
     w_map(out, 4);
     w_uint(out, 0); enc_ext_ref(out, d.leaf);
     w_uint(out, 1); enc_merkle_proof(out, d.merkle_path);
-    w_uint(out, 2);
-    w_arr(out, d.node_path.size());
-    for (const auto& n : d.node_path) enc_node(out, n);
     w_uint(out, 3); enc_block(out, d.evidence);
+    w_uint(out, 4); enc_key_path(out, d.path);
 }
 
 void enc_snapshot(Buf& out, const MergeSnapshot& s) {
@@ -185,12 +191,10 @@ void enc_snapshot(Buf& out, const MergeSnapshot& s) {
 }
 
 void enc_tip(Buf& out, const BranchTipInfo& t) {
-    w_map(out, 5);
+    // Keys 2 (nodes) and 4 (births) retired 2026-11-02: key 5 — the key path.
+    w_map(out, 4);
     w_uint(out, 0); enc_address(out, t.tip_address);
     w_uint(out, 1); w_fixed(out, t.tip_hash.bytes);
-    w_uint(out, 2);
-    w_arr(out, t.path.size());
-    for (const auto& n : t.path) enc_node(out, n);
     w_uint(out, 3);
     if (t.tip_block.has_value()) {
         Buf block_bytes;
@@ -199,9 +203,7 @@ void enc_tip(Buf& out, const BranchTipInfo& t) {
     } else {
         w_bytes(out, nullptr, 0);
     }
-    w_uint(out, 4);
-    w_arr(out, t.births.size());
-    for (const auto& b : t.births) enc_block(out, b);
+    w_uint(out, 5); enc_key_path(out, t.path);
 }
 
 // ── CBOR reader ───────────────────────────────────────────────────────────────
@@ -335,17 +337,16 @@ ExternalRef dec_ext_ref(CborReader& r) {
 }
 
 Node dec_node(CborReader& r) {
-    if (r.r_map() != 6) throw SerializationError("Node: expected 6 fields");
+    if (r.r_map() != 5) throw SerializationError("Node: expected 5 fields");
     Node n{};
     expect_key(r, 0); n.index = static_cast<NodeIndex>(r.r_uint());
     expect_key(r, 1); r.r_fixed(n.structural_pubkey.bytes);
     expect_key(r, 2); r.r_fixed(n.working_pubkey.bytes);
-    expect_key(r, 3); r.r_fixed(n.parent_hash.bytes);
-    expect_key(r, 4); r.r_fixed(n.parent_sig.bytes);
     expect_key(r, 5);
     if (r.r_arr() != 2) throw SerializationError("Node: birth must be [index, hash]");
-    n.birth.index = r.r_uint();
+    n.birth.index = static_cast<BlockIndex>(r.r_uint());
     r.r_fixed(n.birth.hash.bytes);
+    expect_key(r, 6); r.r_fixed(n.root_sig.bytes);
     return n;
 }
 
@@ -410,37 +411,38 @@ RevocationPayload dec_revocation_payload(CborReader& r) {
     return rp;
 }
 
-RevocationCertificate dec_revocation_cert(CborReader& r) {
-    if (r.r_map() != 3) throw SerializationError("RevocationCertificate: expected 3 fields");
-    RevocationCertificate c{};
-    expect_key(r, 0); c.block = dec_block(r);
-    expect_key(r, 1);
+std::vector<Block> dec_blocks(CborReader& r) {
     const uint64_t n = r.r_arr();
-    c.path.reserve(static_cast<size_t>(n));
-    for (uint64_t i = 0; i < n; ++i) c.path.push_back(dec_node(r));
-    expect_key(r, 2);
-    const uint64_t m = r.r_arr();
-    c.births.reserve(static_cast<size_t>(m));
-    for (uint64_t i = 0; i < m; ++i) c.births.push_back(dec_block(r));
-    return c;
+    std::vector<Block> out;
+    out.reserve(static_cast<size_t>(std::min<uint64_t>(n, 4096)));
+    for (uint64_t i = 0; i < n; ++i) out.push_back(dec_block(r));
+    return out;
 }
 
 KeyPath dec_key_path(CborReader& r) {
-    if (r.r_map() != 3) throw SerializationError("KeyPath: expected 3 fields");
+    if (r.r_map() != 4) throw SerializationError("KeyPath: expected 4 fields");
     KeyPath kp{};
-    expect_key(r, 0);
-    const uint64_t n = r.r_arr();
-    kp.path.reserve(static_cast<size_t>(n));
-    for (uint64_t i = 0; i < n; ++i) kp.path.push_back(dec_node(r));
-    expect_key(r, 1);
-    const uint64_t m = r.r_arr();
-    kp.rotations.reserve(static_cast<size_t>(m));
-    for (uint64_t i = 0; i < m; ++i) kp.rotations.push_back(dec_block(r));
-    expect_key(r, 2);
-    const uint64_t b = r.r_arr();
-    kp.births.reserve(static_cast<size_t>(b));
-    for (uint64_t i = 0; i < b; ++i) kp.births.push_back(dec_block(r));
+    expect_key(r, 2); kp.births  = dec_blocks(r);
+    expect_key(r, 3); kp.root    = dec_node(r);
+    expect_key(r, 4); kp.changes = dec_blocks(r);
+    expect_key(r, 5); kp.records = dec_blocks(r);
     return kp;
+}
+
+RevocationCertificate dec_revocation_cert(CborReader& r) {
+    if (r.r_map() != 2) throw SerializationError("RevocationCertificate: expected 2 fields");
+    RevocationCertificate c{};
+    expect_key(r, 0); c.block = dec_block(r);
+    expect_key(r, 3); c.path  = dec_key_path(r);
+    return c;
+}
+
+ReplacementPayload dec_replacement_payload(CborReader& r) {
+    if (r.r_map() != 2) throw SerializationError("ReplacementPayload: expected 2 fields");
+    ReplacementPayload p{};
+    expect_key(r, 0); p.record_address = dec_address(r);
+    expect_key(r, 1); r.r_fixed(p.record_hash.bytes);
+    return p;
 }
 
 MerkleTree::Proof dec_merkle_proof(CborReader& r) {
@@ -462,11 +464,8 @@ FraudProofData dec_fraud_proof(CborReader& r) {
     FraudProofData d{};
     expect_key(r, 0); d.leaf        = dec_ext_ref(r);
     expect_key(r, 1); d.merkle_path = dec_merkle_proof(r);
-    expect_key(r, 2);
-    const uint64_t nn = r.r_arr();
-    d.node_path.reserve(static_cast<size_t>(nn));
-    for (uint64_t i = 0; i < nn; ++i) d.node_path.push_back(dec_node(r));
-    expect_key(r, 3); d.evidence = dec_block(r);
+    expect_key(r, 3); d.evidence    = dec_block(r);
+    expect_key(r, 4); d.path        = dec_key_path(r);
     return d;
 }
 
@@ -482,25 +481,17 @@ MergeSnapshot dec_snapshot(CborReader& r) {
 }
 
 BranchTipInfo dec_tip(CborReader& r) {
-    if (r.r_map() != 5) throw SerializationError("BranchTipInfo: expected 5 fields");
+    if (r.r_map() != 4) throw SerializationError("BranchTipInfo: expected 4 fields");
     BranchTipInfo t{};
     expect_key(r, 0); t.tip_address = dec_address(r);
     expect_key(r, 1); r.r_fixed(t.tip_hash.bytes);
-    expect_key(r, 2);
-    const uint64_t path_count = r.r_arr();
-    t.path.reserve(static_cast<size_t>(path_count));
-    for (uint64_t i = 0; i < path_count; ++i)
-        t.path.push_back(dec_node(r));
     expect_key(r, 3);
     std::vector<uint8_t> block_bytes = r.r_bytes();
     if (!block_bytes.empty()) {
         CborReader br(block_bytes.data(), block_bytes.size());
         t.tip_block = dec_block(br);
     }
-    expect_key(r, 4);
-    const uint64_t birth_count = r.r_arr();
-    t.births.reserve(static_cast<size_t>(birth_count));
-    for (uint64_t i = 0; i < birth_count; ++i) t.births.push_back(dec_block(r));
+    expect_key(r, 5); t.path = dec_key_path(r);
     return t;
 }
 
@@ -530,6 +521,14 @@ Block Serializer::decode_block(const uint8_t* data, size_t len) {
 
 BranchTipInfo Serializer::decode_tip(const uint8_t* data, size_t len) {
     CborReader r(data, len); return dec_tip(r);
+}
+
+std::vector<uint8_t> Serializer::encode(const ReplacementPayload& payload) {
+    Buf out; enc_replacement_payload(out, payload); return out;
+}
+
+ReplacementPayload Serializer::decode_replacement_payload(const uint8_t* data, size_t len) {
+    CborReader r(data, len); return dec_replacement_payload(r);
 }
 
 std::vector<uint8_t> Serializer::encode(const BirthPayload& payload) {

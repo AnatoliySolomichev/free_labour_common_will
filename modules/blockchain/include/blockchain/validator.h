@@ -62,8 +62,10 @@ public:
 
     // ── Node checks (invariants 1, 3, 6) ─────────────────────────────────────
 
-    // Verify node signature against parent key (or self-signature for root).
-    // Throws: SignatureError, NodeNotFoundError (if parent absent).
+    // The root: its record is signed by itself. Any other node: its birth block
+    // (own or imported) is the one it names, says what the node says, and is
+    // signed by the parent's key in force at its place (blockchain.md §11.2).
+    // Throws: SignatureError, ChainIntegrityError, NodeNotFoundError, BlockNotFoundError.
     void validate_node(const Node& node, const UserId& user_id) const;
 
     // Verify the full path from root to leaf_index.
@@ -112,6 +114,11 @@ public:
     // broken branch).
     BranchRevocationStatus branch_revocation_status(
         const UserId& user_id, NodeIndex node_index) const;
+
+    // The key a branch signs with at `place` (blockchain.md §6.6, blockchain.md §6.7 rule 9):
+    // its node's key carried through the key changes of the stored blocks
+    // before that place. Throws: NodeNotFoundError, SignatureError.
+    PublicKey key_at(const UserId& user_id, NodeIndex node_index, BlockIndex place) const;
 
     // Whether `more` continues the branch as this storage holds it, before
     // anything is stored — blocks of an own branch learned elsewhere, by the

@@ -91,7 +91,7 @@ public:
 private:
     using Key = std::pair<UserId, NodeIndex>;
     struct Branch {
-        KeyPath                path;   // nodes root → node; the branch's own key changes in order
+        KeyPath                path;   // root → node, with every key change known
         std::vector<PublicKey> own;    // its own line: the node key, then each change
     };
     // One record of the deciding author (blockchain.md §6.7), in its branch order.
@@ -101,7 +101,7 @@ private:
         std::optional<PublicKey> replacement;
         std::optional<LastGood>  last_good;
         Block                    written;       // the REVOCATION block itself (rule 10)
-        PublicKey                author_key{};  // its author's node key, from the certificate's path
+        PublicKey                author_key{};  // its author's key at its place, from the certificate's path
     };
     // The revocations that decide a branch: the highest author's records, and
     // the replacement lines they opened — each replacement, then its own changes.

@@ -1,6 +1,6 @@
 # API модуля блокчейна
 
-**Статус:** черновик v0.5  
+**Статус:** черновик v0.6  
 **Основание:** [docs/blockchain.md](blockchain.md)  
 **Язык реализации:** C++17  
 **Внешние зависимости:** libsodium, LMDB (CBOR реализован вручную, без внешней библиотеки)
@@ -140,17 +140,16 @@ struct ExternalRef {
 
 ### 5.3. Узел дерева
 
-Служебная сущность; пользовательских данных не содержит (blockchain.md §3.3).
+Служебная сущность; пользовательских данных не содержит (blockchain.md §3.3). С 2026-11-02 узел — вывод из блока рождения (у корня — его собственная запись) и отдельно не подписывается: `node_born(birth)`.
 
 ```cpp
 struct Node {
     NodeIndex  index;               // heap-индекс в дереве
     PublicKey  structural_pubkey;   // структурный ключ (в MVP = working_pubkey)
-    PublicKey  working_pubkey;      // рабочий ключ ветки
+    PublicKey  working_pubkey;      // рабочий ключ из рождения (до смен ключа)
 
-    Hash       parent_hash;         // хеш родительского узла (Hash::zero() для корня)
-    Signature  parent_sig;          // подпись родительским ключом (самоподпись для корня)
     BirthRef   birth;               // блок рождения в ветке родителя: номер и хеш (нули у корня)
+    Signature  root_sig;            // самоподпись корня; у остальных — нули
 
     // Вычисляемые свойства (не хранятся отдельно)
     uint32_t  depth()             const noexcept;  // ⌊log₂(index + 1)⌋
@@ -168,7 +167,7 @@ struct Node {
 ```cpp
 struct Block {
     BlockAddress             address;
-    Hash                     prev_hash;          // хеш пред. блока или хеш листового узла (для index 0)
+    Hash                     prev_hash;          // хеш пред. блока; у index 0 — отпечаток блока рождения (у корня — его записи)
     Timestamp                timestamp_claimed;  // время, заявленное автором
     BlockType                type;
     std::vector<uint8_t>     payload;            // CBOR-payload (структура зависит от type)
@@ -228,9 +227,28 @@ struct RevocationPayload {
 
 ```cpp
 struct BranchTipInfo {
-    BlockAddress      tip_address;  // адрес последнего блока (или NodeIndex с block_index=−1 если ветка пуста)
-    Hash              tip_hash;     // hash(последнего блока) или hash(листового узла) если ветка пуста
-    std::vector<Node> path;         // узлы от корня до листа включительно (для верификации)
+    BlockAddress         tip_address;  // адрес последнего блока (или NodeIndex с block_index=−1 если ветка пуста)
+    Hash                 tip_hash;     // hash(последнего блока) или отпечаток блока рождения, если ветка пуста
+    KeyPath              path;         // путь ключа до узла ветки (для верификации), см. ниже
+    std::optional<Block> tip_block;    // последний блок, если есть
+};
+
+// Путь ключа (blockchain.md §7.5): узлы не передаются, каждый — то, что говорит
+// его блок рождения.
+struct KeyPath {
+    Node               root;      // запись корня, подписанная им самим
+    std::vector<Block> births;    // BIRTH каждого узла пути ниже корня
+    std::vector<Block> changes;   // смены ключа узлов пути: KEY_ROTATION, KEY_REPLACEMENT
+    std::vector<Block> records;   // REVOCATION-записи, которые называют блоки замены
+};
+
+class KeyPathCert {
+    static KeyPath   build(const IStorage&, const UserId& chain, NodeIndex node);
+    static UserId    verify(const KeyPath&);            // корень, рождения, смены ключа
+    static std::vector<Node> nodes(const KeyPath&);     // корень → узел ветки
+    static NodeIndex node(const KeyPath&);              // узел ветки
+    static PublicKey key_at(const KeyPath&, NodeIndex node, BlockIndex place);
+    static PublicKey signer_key(const KeyPath&);        // key_at(узел ветки, сейчас)
 };
 ```
 
@@ -318,8 +336,8 @@ public:
                        const Signature& sig,
                        const PublicKey& key) noexcept;
 
-    // Хеш узла (по канонической CBOR-сериализации без полей, зависящих от родителя)
-    // Используется как parent_hash в дочерних узлах
+    // Хеш узла (по канонической CBOR-сериализации). С 2026-11-02 нужен только корню:
+    // отпечаток его записи — начало ветки корня (branch_origin)
     static Hash hash_node(const Node& node);
 
     // Хеш блока (по канонической CBOR-сериализации, с подписью)
@@ -460,9 +478,9 @@ public:
 
     // --- Проверка узлов (инварианты 1, 3, 6) ---
 
-    // Проверить подпись узла родительским ключом.
-    // Для корневого узла (index == 0) проверяет самоподпись.
-    // Бросает: SignatureError, NodeNotFoundError (если родитель не найден)
+    // Корень: самоподпись записи. Остальные: блок рождения тот, что назван,
+    // говорит то же, что узел, и подписан ключом родителя на своём месте (key_at).
+    // Бросает: SignatureError, ChainIntegrityError, NodeNotFoundError
     void validate_node(const Node& node, const UserId& user_id) const;
 
     // Проверить полный путь от корня до узла leaf_index.
@@ -480,6 +498,11 @@ public:
     void validate_block(const Block& block,
                         const Hash& expected_prev_hash,
                         const PublicKey& expected_working_pubkey) const;
+
+    // Ключ ветки на месте `place`: ключ узла, проведённый через смены ключа
+    // блоков до этого места (blockchain.md §6.6, blockchain.md §6.7, правило 9).
+    // Бросает: NodeNotFoundError, SignatureError
+    PublicKey key_at(const UserId& user_id, NodeIndex node_index, BlockIndex place) const;
 
     // Проверить всю ветку от блока 0 до конца.
     // Читает блоки из хранилища; отслеживает KEY_ROTATION.
@@ -794,6 +817,7 @@ session_alice.check_partner_half(answer, after_half, tip_bob, now(), merged);
 
 ## 17. История изменений
 
+- **v0.6** — узел без подписи (решение участника 2026-11-02, `blockchain.md §11.2`): `Node::parent_hash` и `Node::parent_sig` убраны, `Node::root_sig` — самоподпись корня; узел — вывод из блока рождения (`node_born`), начало ветки — `branch_origin`. `KeyPath` = {root, births, changes, records}, `RevocationCertificate` и `BranchTipInfo` несут его; `KeyPathCert::key_at`, `Validator::key_at`. `BlockType::KEY_REPLACEMENT`, `ReplacementPayload`. `verify_node_path` и `check_birth` убраны.
 - **v0.5** — линия без своей копии ветки (2026-11-02, `blockchain.md §6.7`, правило 12): `Validator::check_continuation`, `Blockchain::restore_branch`.
 - **v0.4** — отзыв без даты (2026-10-30, `blockchain.md §6.7`): `compromised_since` убран из `RevocationPayload`, `RevocationState` и `revoke_node`.
 - **v0.3** — рождение узла блоком (2026-10-30, `blockchain.md §11.2`): `BlockType::BIRTH`, `BirthRef`, `BirthPayload`; `Node::created_at` убран; `KeyPath`, `RevocationCertificate`, `BranchTipInfo` несут `births`.

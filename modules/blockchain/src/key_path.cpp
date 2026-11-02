@@ -9,22 +9,129 @@
 namespace blockchain {
 
 namespace {
-bool signed_by(const Block& block, const PublicKey& key);
+
+bool signed_by(const Block& block, const PublicKey& key) {
+    Block to_verify = block;
+    to_verify.signature = Signature::null();
+    const auto bytes = Serializer::encode(to_verify);
+    return Crypto::verify(bytes.data(), bytes.size(), block.signature, key);
 }
 
-void check_birth(const Block& birth, const Node& child, const Node& parent, const UserId& chain) {
+// Новый рабочий ключ из payload блока смены (blockchain.md §6.6): 32 сырых байта.
+std::optional<PublicKey> rotated_key(const Block& b) {
+    if (b.type != BlockType::KEY_ROTATION || b.payload.size() < 32)
+        return std::nullopt;
+    PublicKey k{};
+    std::copy(b.payload.begin(), b.payload.begin() + 32, k.bytes.begin());
+    return k;
+}
+
+// One path, walked: the nodes its births make and the keys its changes carry.
+class Walk {
+public:
+    Walk(const KeyPath& kp, std::vector<Node> nodes)
+        : kp_(kp), chain_(kp.root.structural_pubkey), nodes_(std::move(nodes)) {}
+
+    const Node* find(NodeIndex idx) const {
+        for (const Node& n : nodes_) if (n.index == idx) return &n;
+        return nullptr;
+    }
+
+    // The key `idx` signs with at `place` of its branch, every change before
+    // that place checked (blockchain.md §6.6, blockchain.md §6.7 rule 9).
+    PublicKey key_at(NodeIndex idx, BlockIndex place, int depth) const {
+        if (depth > 64) throw ChainIntegrityError("key path: records refer in a loop");
+        const Node* n = find(idx);
+        if (!n) throw ChainIntegrityError("key path: node " + std::to_string(idx) +
+                                          " is not on the path");
+        PublicKey              key = n->working_pubkey;
+        std::vector<PublicKey> epoch{key};   // keys of the epoch in force
+        std::optional<BlockIndex> prev;
+        for (const Block& c : kp_.changes) {
+            if (c.address.node_index != idx) continue;
+            if (!(c.address.user_id == chain_))
+                throw ChainIntegrityError("key path: a key change of another chain");
+            if (prev && c.address.block_index <= *prev)
+                throw ChainIntegrityError("key path: key changes out of branch order");
+            prev = c.address.block_index;
+            if (c.address.block_index >= place) break;
+
+            if (c.type == BlockType::KEY_ROTATION) {
+                if (!signed_by(c, key))
+                    throw SignatureError("key path: a key rotation not signed by the key before it");
+                const auto next = rotated_key(c);
+                if (!next) throw ChainIntegrityError("key path: a key rotation names no key");
+                key = *next;
+                epoch.push_back(key);
+            } else if (c.type == BlockType::KEY_REPLACEMENT) {
+                key = replacement(c, idx, epoch, depth);
+                epoch = {key};
+            } else {
+                throw ChainIntegrityError("key path: a change that is not a key change");
+            }
+        }
+        return key;
+    }
+
+private:
+    // A replacement block checks against the record it names; returns the key it brings.
+    PublicKey replacement(const Block& c, NodeIndex idx, const std::vector<PublicKey>& epoch,
+                          int depth) const {
+        const ReplacementPayload p =
+            Serializer::decode_replacement_payload(c.payload.data(), c.payload.size());
+        const auto rec = std::find_if(kp_.records.begin(), kp_.records.end(), [&](const Block& r) {
+            return r.address == p.record_address && Crypto::hash_block(r) == p.record_hash;
+        });
+        if (rec == kp_.records.end())
+            throw ChainIntegrityError("key path: the record a replacement names is not carried");
+        if (rec->type != BlockType::REVOCATION || !(rec->address.user_id == chain_))
+            throw ChainIntegrityError("key path: a replacement names no revocation of this chain");
+        const NodeIndex author = rec->address.node_index;
+        if (!is_ancestor(author, idx))
+            throw ChainIntegrityError("key path: a record's author is not an ancestor of the node");
+        const RevocationPayload rp =
+            Serializer::decode_revocation_payload(rec->payload.data(), rec->payload.size());
+        if (rp.revoked_node_index != idx || !rp.replacement_pubkey.has_value())
+            throw ChainIntegrityError("key path: the record assigns no replacement to this node");
+        if (std::find(epoch.begin(), epoch.end(), rp.revoked_pubkey) == epoch.end())
+            throw ChainIntegrityError("key path: the record revokes a key the node did not have");
+        if (!signed_by(c, *rp.replacement_pubkey))
+            throw SignatureError("key path: a replacement block not signed by the replacement");
+        if (rp.last_good.has_value()) {
+            const LastGood&  line = *rp.last_good;
+            const BlockIndex at   = line.index == EMPTY_BRANCH_INDEX ? 0 : line.index + 1;
+            if (c.address.block_index != at || c.prev_hash != line.hash)
+                throw ChainIntegrityError(
+                    "key path: a replacement block not right after the line its record names");
+        }
+        if (!signed_by(*rec, key_at(author, rec->address.block_index, depth + 1)))
+            throw SignatureError("key path: a record not signed by its author's key at its place");
+        return *rp.replacement_pubkey;
+    }
+
+    const KeyPath&    kp_;
+    UserId            chain_;
+    std::vector<Node> nodes_;
+};
+
+} // namespace
+
+Hash branch_origin(const Node& node) {
+    return node.index == 0 ? Crypto::hash_node(node) : node.birth.hash;
+}
+
+Node node_born(const Block& birth) {
     if (birth.type != BlockType::BIRTH)
-        throw ChainIntegrityError("node path: birth is not a BIRTH block");
-    if (!(birth.address.user_id == chain) || birth.address.node_index != parent.index ||
-        birth.address.block_index != child.birth.index ||
-        Crypto::hash_block(birth) != child.birth.hash)
-        throw ChainIntegrityError("node path: birth block is not the one the node names");
-    const BirthPayload p = Serializer::decode_birth_payload(birth.payload.data(), birth.payload.size());
-    if (p.child_index != child.index || !(p.structural_pubkey == child.structural_pubkey) ||
-        !(p.working_pubkey == child.working_pubkey))
-        throw ChainIntegrityError("node path: birth names another node");
-    if (!signed_by(birth, parent.working_pubkey))
-        throw SignatureError("node path: birth is not signed by the parent's key");
+        throw InvalidArgumentError("node_born: not a BIRTH block");
+    const BirthPayload p =
+        Serializer::decode_birth_payload(birth.payload.data(), birth.payload.size());
+    Node n{};
+    n.index             = p.child_index;
+    n.structural_pubkey = p.structural_pubkey;
+    n.working_pubkey    = p.working_pubkey;
+    n.birth             = BirthRef{birth.address.block_index, Crypto::hash_block(birth)};
+    n.root_sig          = Signature::null();
+    return n;
 }
 
 std::vector<Block> births_of(const IStorage& storage, const UserId& chain, NodeIndex node) {
@@ -39,117 +146,102 @@ std::vector<Block> births_of(const IStorage& storage, const UserId& chain, NodeI
     return out;
 }
 
-UserId verify_node_path(const std::vector<Node>& path, const std::vector<Block>& births) {
-    if (path.empty())
-        throw ChainIntegrityError("node path: empty");
-
-    const Node& root = path.front();
-    if (root.index != 0)
-        throw ChainIntegrityError("node path: does not start at the root");
-    if (root.parent_hash != Hash::zero())
-        throw ChainIntegrityError("node path: root parent_hash is not zero");
-
-    for (size_t k = 0; k < path.size(); ++k) {
-        const Node& n = path[k];
-        Node to_sign = n;
-        to_sign.parent_sig = Signature::null();
-        const auto bytes = Serializer::encode(to_sign);
-
-        if (k == 0) {
-            if (!Crypto::verify(bytes.data(), bytes.size(), n.parent_sig,
-                                n.structural_pubkey))
-                throw SignatureError("node path: root self-signature invalid");
-            continue;
-        }
-        const Node& parent = path[k - 1];
-        if (n.parent_index() != parent.index)
-            throw ChainIntegrityError("node path: indices are not parent→child");
-        if (n.parent_hash != Crypto::hash_node(parent))
-            throw ChainIntegrityError("node path: parent_hash mismatch");
-        if (!Crypto::verify(bytes.data(), bytes.size(), n.parent_sig,
-                            parent.working_pubkey))
-            throw SignatureError("node path: signature by parent key invalid");
-        if (births.size() != path.size() - 1)
-            throw ChainIntegrityError("node path: a node without its birth block");
-        check_birth(births[k - 1], n, parent, root.structural_pubkey);
+std::vector<Block> key_changes_of(const IStorage& storage, const UserId& chain, NodeIndex node) {
+    std::vector<Block> out;
+    const auto tip = storage.branch_tip_index(chain, node);
+    if (!tip.has_value()) return out;
+    for (BlockIndex i = 0; i <= *tip; ++i) {
+        const BlockAddress at{chain, node, i};
+        if (!storage.has_block(at)) continue;                 // a gap is no trouble
+        Block b = storage.get_block(at);
+        if (b.type == BlockType::KEY_ROTATION || b.type == BlockType::KEY_REPLACEMENT)
+            out.push_back(std::move(b));
     }
-    return root.structural_pubkey;
+    return out;
 }
-
-namespace {
-
-// Новый рабочий ключ из payload блока смены (blockchain.md §6.6): 32 сырых байта.
-std::optional<PublicKey> rotated_key(const Block& b) {
-    if (b.type != BlockType::KEY_ROTATION || b.payload.size() < 32)
-        return std::nullopt;
-    PublicKey k{};
-    std::copy(b.payload.begin(), b.payload.begin() + 32, k.bytes.begin());
-    return k;
-}
-
-bool signed_by(const Block& block, const PublicKey& key) {
-    Block to_verify = block;
-    to_verify.signature = Signature::null();
-    const auto bytes = Serializer::encode(to_verify);
-    return Crypto::verify(bytes.data(), bytes.size(), block.signature, key);
-}
-
-} // namespace
 
 KeyPath KeyPathCert::build(const IStorage& storage, const UserId& chain, NodeIndex node) {
     KeyPath kp{};
-    for (NodeIndex idx : path_indices(node))
-        kp.path.push_back(storage.get_node(chain, idx));  // NodeNotFoundError
+    kp.root   = storage.get_node(chain, 0);                   // NodeNotFoundError
     kp.births = births_of(storage, chain, node);
-
-    // Звенья смены рабочего ключа этой ветки — по порядку блоков. Без них путь
-    // привёл бы к первоначальному ключу узла, а подписывает ветка уже новым
-    // (blockchain.md §6.6).
-    if (const auto tip = storage.branch_tip_index(chain, node)) {
-        for (BlockIndex i = 0; i <= *tip; ++i) {
-            try {
-                const Block b = storage.get_block({chain, node, i});
-                if (b.type == BlockType::KEY_ROTATION) kp.rotations.push_back(b);
-            } catch (const BlockchainError&) { continue; }  // пробел в ветке — не беда
+    for (NodeIndex idx : path_indices(node))
+        for (Block& c : key_changes_of(storage, chain, idx)) {
+            if (c.type == BlockType::KEY_REPLACEMENT) {
+                // The record that assigned the key goes along (blockchain.md §6.7 rule 9).
+                try {
+                    const ReplacementPayload p =
+                        Serializer::decode_replacement_payload(c.payload.data(), c.payload.size());
+                    const BlockAddress& at = p.record_address;
+                    if (storage.has_block(at) || storage.has_external_block(at)) {
+                        Block rec = storage.has_block(at) ? storage.get_block(at)
+                                                          : storage.get_external_block(at);
+                        const bool known = std::any_of(kp.records.begin(), kp.records.end(),
+                            [&](const Block& r) { return r.address == rec.address; });
+                        if (!known && Crypto::hash_block(rec) == p.record_hash)
+                            kp.records.push_back(std::move(rec));
+                    }
+                } catch (const SerializationError&) {}         // the reader refuses it anyway
+            }
+            kp.changes.push_back(std::move(c));
         }
-    }
     return kp;
 }
 
-UserId KeyPathCert::verify(const KeyPath& kp) {
-    const UserId chain = verify_node_path(kp.path, kp.births);
+std::vector<Node> KeyPathCert::nodes(const KeyPath& kp) {
+    std::vector<Node> out{kp.root};
+    for (const Block& b : kp.births) out.push_back(node_born(b));
+    return out;
+}
 
-    // Звенья смены ключа: каждое подписано ПРЕЖНИМ ключом и называет новый.
-    const Node& tip = kp.path.back();
-    PublicKey   key = tip.working_pubkey;
-    bool        first = true;
-    BlockIndex  prev_index = 0;
-    for (const Block& b : kp.rotations) {
-        if (b.type != BlockType::KEY_ROTATION)
-            throw ChainIntegrityError("key path: не блок смены ключа");
-        if (!(b.address.user_id == chain) || b.address.node_index != tip.index)
-            throw ChainIntegrityError("key path: смена ключа из чужой ветки");
-        if (!first && b.address.block_index <= prev_index)
-            throw ChainIntegrityError("key path: смены ключа не по порядку");
-        if (!signed_by(b, key))
-            throw SignatureError("key path: смена ключа не подписана прежним ключом");
-        const auto next = rotated_key(b);
-        if (!next)
-            throw ChainIntegrityError("key path: в смене ключа нет нового ключа");
-        key        = *next;
-        prev_index = b.address.block_index;
-        first      = false;
+NodeIndex KeyPathCert::node(const KeyPath& kp) {
+    return kp.births.empty() ? kp.root.index : node_born(kp.births.back()).index;
+}
+
+UserId KeyPathCert::verify(const KeyPath& kp) {
+    const Node& root = kp.root;
+    if (root.structural_pubkey == PublicKey{})
+        throw ChainIntegrityError("key path: empty — no root's record");
+    if (root.index != 0 || !(root.birth == BirthRef{}))
+        throw ChainIntegrityError("key path: does not start at the root's record");
+    Node to_sign = root;
+    to_sign.root_sig = Signature::null();
+    const auto bytes = Serializer::encode(to_sign);
+    if (!Crypto::verify(bytes.data(), bytes.size(), root.root_sig, root.structural_pubkey))
+        throw SignatureError("key path: root self-signature invalid");
+    const UserId chain = root.structural_pubkey;
+
+    // Births, top down: each one signed by its parent's key at its place.
+    std::vector<Node> path{root};
+    for (const Block& birth : kp.births) {
+        const Node& parent = path.back();
+        if (birth.type != BlockType::BIRTH)
+            throw ChainIntegrityError("key path: a birth that is not a BIRTH block");
+        if (!(birth.address.user_id == chain) || birth.address.node_index != parent.index)
+            throw ChainIntegrityError("key path: a birth outside the parent's branch");
+        const Node child = node_born(birth);                 // SerializationError
+        if (child.index == 0 || child.parent_index() != parent.index)
+            throw ChainIntegrityError("key path: indices are not parent→child");
+        const Walk w(kp, path);
+        if (!signed_by(birth, w.key_at(parent.index, birth.address.block_index, 0)))
+            throw SignatureError("key path: a birth not signed by the parent's key at its place");
+        path.push_back(child);
     }
+
+    // Every key change belongs to a node of the path and checks through.
+    const Walk w(kp, path);
+    for (const Block& c : kp.changes)
+        if (!w.find(c.address.node_index))
+            throw ChainIntegrityError("key path: a key change of a node off the path");
+    for (const Node& n : path) w.key_at(n.index, kNow, 0);
     return chain;
 }
 
+PublicKey KeyPathCert::key_at(const KeyPath& kp, NodeIndex node, BlockIndex place) {
+    return Walk(kp, nodes(kp)).key_at(node, place, 0);
+}
+
 PublicKey KeyPathCert::signer_key(const KeyPath& kp) {
-    if (kp.path.empty())
-        throw ChainIntegrityError("key path: empty");
-    PublicKey key = kp.path.back().working_pubkey;
-    for (const Block& b : kp.rotations)
-        if (const auto next = rotated_key(b)) key = *next;
-    return key;
+    return key_at(kp, node(kp), kNow);
 }
 
 } // namespace blockchain

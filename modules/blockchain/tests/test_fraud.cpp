@@ -1,6 +1,7 @@
 #include "blockchain/fraud.h"
 #include "blockchain/blockchain.h"
 #include "blockchain/crypto.h"
+#include "blockchain/key_path.h"
 #include "blockchain/merkle.h"
 #include "blockchain/serializer.h"
 #include <gtest/gtest.h>
@@ -14,7 +15,7 @@ static constexpr NodeIndex LEAF = 0x7FFF'FFFFu;
 static Hash make_hash(uint8_t fill) { Hash h; h.bytes.fill(fill); return h; }
 
 // Builds one participant chain with a signed block-0 at LEAF, and exposes the
-// node path + block used to construct fraud proofs.
+// key path + block used to construct fraud proofs.
 class FraudTest : public ::testing::Test {
 protected:
     std::filesystem::path        db_;
@@ -26,7 +27,7 @@ protected:
     KeyPair                      leaf_kp_;
     std::map<NodeIndex, KeyPair> keys_;
     Block                        block_;   // signed block-0
-    std::vector<Node>            path_;    // root..leaf nodes
+    KeyPath                      path_;    // root..leaf key path
 
     void SetUp() override {
         static int cnt = 0;
@@ -45,7 +46,7 @@ protected:
         leaf_kp_ = keys_.at(LEAF);
 
         block_ = bc_->append_data_block(root_kp_.pub, LEAF, {0x01, 0x02}, leaf_kp_, 1'000LL);
-        path_  = bc_->get_path(root_kp_.pub, LEAF);
+        path_  = KeyPathCert::build(*storage_, root_kp_.pub, LEAF);
     }
 
     void TearDown() override {
@@ -88,8 +89,8 @@ TEST_F(FraudTest, BadSigFabricatedWrongRoot) {
 TEST_F(FraudTest, BadSigFabricatedBrokenNodePath) {
     Block bad = corrupt_sig(block_);
     ExternalRef leaf = ref_with_hash(Crypto::hash_block(bad));
-    std::vector<Node> broken = path_;
-    broken[0].parent_sig.bytes[0] ^= 0xFF;   // corrupt root self-signature
+    KeyPath broken = path_;
+    broken.root.root_sig.bytes[0] ^= 0xFF;   // corrupt root self-signature
     FraudProofData d{leaf, MerkleTree::Proof{}, broken, bad};
     EXPECT_EQ(FraudProof::verify_bad_sig(single_root(leaf), d), FraudVerdict::REFUTED_FABRICATED);
 }
@@ -115,6 +116,19 @@ TEST_F(FraudTest, BadSigConfirmedWithNonEmptyMerklePath) {
 
     FraudProofData d{leaf, proof, path_, bad};
     EXPECT_EQ(FraudProof::verify_bad_sig(root, d), FraudVerdict::CONFIRMED);
+}
+
+// A block signed after a key rotation is checked by the key in force at its
+// place (blockchain.md §7.5): the path carries the rotation, and an honest block
+// is not «proven» fraudulent.
+TEST_F(FraudTest, BadSigRefutedForABlockAfterAKeyRotation) {
+    const KeyPair next = Crypto::generate_keypair();
+    bc_->rotate_key(root_kp_.pub, LEAF, leaf_kp_, next, 2'000LL);
+    const Block later = bc_->append_data_block(root_kp_.pub, LEAF, {0x03}, next, 3'000LL);
+    const KeyPath kp  = KeyPathCert::build(*storage_, root_kp_.pub, LEAF);
+    const ExternalRef leaf{later.address, Crypto::hash_block(later)};
+    FraudProofData d{leaf, MerkleTree::Proof{}, kp, later};
+    EXPECT_EQ(FraudProof::verify_bad_sig(single_root(leaf), d), FraudVerdict::REFUTED_HONEST);
 }
 
 // ── hash_mismatch ─────────────────────────────────────────────────────────────
@@ -156,7 +170,7 @@ TEST_F(FraudTest, ProofDataSerializationRoundTrip) {
 
     EXPECT_EQ(d2.leaf,        d.leaf);
     EXPECT_EQ(d2.merkle_path, d.merkle_path);
-    ASSERT_EQ(d2.node_path.size(), d.node_path.size());
+    ASSERT_EQ(d2.path.births.size(), d.path.births.size());
     EXPECT_EQ(d2.evidence.address,   d.evidence.address);
     EXPECT_EQ(d2.evidence.signature, d.evidence.signature);
 

@@ -40,8 +40,8 @@ protected:
         n.index             = idx;
         n.structural_pubkey = make_uid(fill);
         n.working_pubkey    = make_uid(static_cast<uint8_t>(fill + 1));
-        n.parent_hash       = make_hash(fill);
-        n.parent_sig        = make_sig(fill);
+        n.birth             = BirthRef{fill, make_hash(fill)};
+        n.root_sig          = make_sig(fill);
 
         return n;
     }

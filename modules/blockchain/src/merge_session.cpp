@@ -14,15 +14,12 @@ MergeSession::MergeSession(IStorage& storage, Validator& validator)
 BranchTipInfo MergeSession::prepare_tip(const UserId& user_id,
                                          NodeIndex leaf_index) const {
     BranchTipInfo info{};
-
-    for (NodeIndex idx : path_indices(leaf_index))
-        info.path.push_back(storage_.get_node(user_id, idx));
-    info.births = births_of(storage_, user_id, leaf_index);
+    info.path = KeyPathCert::build(storage_, user_id, leaf_index);
 
     auto tip_opt = storage_.branch_tip_index(user_id, leaf_index);
     if (!tip_opt.has_value()) {
         info.tip_address = {user_id, leaf_index, EMPTY_BRANCH_INDEX};
-        info.tip_hash    = Crypto::hash_node(info.path.back());
+        info.tip_hash    = branch_origin(storage_.get_node(user_id, leaf_index));
     } else {
         info.tip_address  = {user_id, leaf_index, *tip_opt};
         Block tip_block   = storage_.get_block(info.tip_address);
@@ -36,16 +33,21 @@ BranchTipInfo MergeSession::prepare_tip(const UserId& user_id,
 // ── Step 1b ───────────────────────────────────────────────────────────────────
 
 void MergeSession::verify_partner_tip(const BranchTipInfo& partner_tip) const {
-    // Путь узлов партнёра — та же проверка, что у сертификата отзыва и пути
-    // ключа (blockchain.md §7.5): корень self-signed, звенья связаны хешем и
-    // подписаны ключом родителя. Отсюда и право доверять сохранённым узлам:
-    // в хранилище попадают только проверенные пути.
+    // Путь ключа партнёра — та же проверка, что у сертификата отзыва
+    // (blockchain.md §7.5): корень подписан сам собой, каждое рождение — ключом
+    // родителя на своём месте, смены ключа по порядку. Отсюда и право доверять
+    // сохранённым узлам: в хранилище попадают только проверенные пути.
     try {
-        verify_node_path(partner_tip.path, partner_tip.births);
+        const UserId chain = KeyPathCert::verify(partner_tip.path);
+        if (!(chain == partner_tip.tip_address.user_id) ||
+            KeyPathCert::node(partner_tip.path) != partner_tip.tip_address.node_index)
+            throw ChainIntegrityError("does not lead to the tip's branch");
     } catch (const ChainIntegrityError& e) {
         throw ChainIntegrityError(std::string("partner path: ") + e.what());
     } catch (const SignatureError& e) {
         throw SignatureError(std::string("partner path: ") + e.what());
+    } catch (const SerializationError& e) {
+        throw ChainIntegrityError(std::string("partner path: ") + e.what());
     }
 
     // If partner included their tip block, verify its hash matches tip_hash.
@@ -194,18 +196,20 @@ Block MergeSession::write_half(
 // ── Step 4 (optional) ─────────────────────────────────────────────────────────
 
 void MergeSession::import_partner_data(const BranchTipInfo& partner_tip) {
-    if (partner_tip.path.empty()) return;
+    const UserId partner_id = partner_tip.path.root.structural_pubkey;
 
-    const UserId partner_id = partner_tip.path.front().structural_pubkey;
-
-    for (const Node& node : partner_tip.path) {
+    for (const Node& node : KeyPathCert::nodes(partner_tip.path)) {
         if (!storage_.has_node(partner_id, node.index))
             storage_.put_node(partner_id, node);
     }
 
-    for (const Block& birth : partner_tip.births)
-        if (!storage_.has_block(birth.address) && !storage_.has_external_block(birth.address))
-            storage_.put_external_block(birth);
+    // Births, key changes and the records behind replacements: what a later
+    // check of this chain walks (blockchain.md §7.5).
+    for (const auto* blocks : {&partner_tip.path.births, &partner_tip.path.changes,
+                               &partner_tip.path.records})
+        for (const Block& b : *blocks)
+            if (!storage_.has_block(b.address) && !storage_.has_external_block(b.address))
+                storage_.put_external_block(b);
 
     if (partner_tip.tip_block.has_value()) {
         const Block& block = *partner_tip.tip_block;

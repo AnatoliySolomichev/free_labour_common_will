@@ -18,29 +18,30 @@ bool block_signed_by(const Block& block, const PublicKey& key) {
 Validator::Validator(const IStorage& storage) : storage_(storage) {}
 
 void Validator::validate_node(const Node& node, const UserId& user_id) const {
-    // Signing bytes = canonical CBOR with parent_sig zeroed.
-    Node to_sign = node;
-    to_sign.parent_sig = Signature::null();
-    auto bytes = Serializer::encode(to_sign);
-
     if (node.index == 0) {
-        // Root: self-signed; parent_hash must be zero.
-        if (node.parent_hash != Hash::zero())
-            throw ChainIntegrityError("root node must have zero parent_hash");
-        if (!Crypto::verify(bytes.data(), bytes.size(), node.parent_sig, node.structural_pubkey))
+        // The root: its own record, signed by itself (blockchain.md §6.1).
+        if (!(node.birth == BirthRef{}))
+            throw ChainIntegrityError("root node names a birth");
+        Node to_sign = node;
+        to_sign.root_sig = Signature::null();
+        const auto bytes = Serializer::encode(to_sign);
+        if (!Crypto::verify(bytes.data(), bytes.size(), node.root_sig, node.structural_pubkey))
             throw SignatureError("root node self-signature invalid");
-    } else {
-        NodeIndex parent_idx = (node.index - 1) / 2;
-        Node parent = storage_.get_node(user_id, parent_idx); // throws NodeNotFoundError
-        Hash expected_ph = Crypto::hash_node(parent);
-        if (node.parent_hash != expected_ph)
-            throw ChainIntegrityError("node parent_hash does not match stored parent");
-        if (!Crypto::verify(bytes.data(), bytes.size(), node.parent_sig, parent.working_pubkey))
-            throw SignatureError("node signature by parent key is invalid");
-        const BlockAddress at{user_id, parent_idx, node.birth.index};
-        check_birth(storage_.has_block(at) ? storage_.get_block(at) : storage_.get_external_block(at),
-                    node, parent, user_id);
+        return;
     }
+    // Any other node is what its birth block says, and the birth is signed by
+    // the parent's key in force at its place (blockchain.md §11.2).
+    const NodeIndex    parent = node.parent_index();
+    const BlockAddress at{user_id, parent, node.birth.index};
+    if (!storage_.has_node(user_id, parent)) throw NodeNotFoundError(parent);
+    const Block birth = storage_.has_block(at) ? storage_.get_block(at)
+                                               : storage_.get_external_block(at);
+    if (Crypto::hash_block(birth) != node.birth.hash)
+        throw ChainIntegrityError("node: its birth block is not the one it names");
+    if (!(node_born(birth) == node))
+        throw ChainIntegrityError("node: differs from what its birth block says");
+    if (!block_signed_by(birth, key_at(user_id, parent, node.birth.index)))
+        throw SignatureError("node: birth is not signed by the parent's key at its place");
 }
 
 void Validator::validate_path(const UserId& user_id, NodeIndex leaf_index) const {
@@ -82,8 +83,8 @@ void Validator::validate_branch(const UserId& user_id, NodeIndex leaf_index) con
     }
     const auto st = branch_revocation_status(user_id, leaf_index);
 
-    // First block references the hash of the leaf node.
-    Hash prev_hash    = Crypto::hash_node(leaf);
+    // Block #0 grows from the node's birth (the root's own record) (blockchain.md §5.3).
+    Hash prev_hash    = branch_origin(leaf);
     Timestamp prev_ts = std::numeric_limits<Timestamp>::min();
 
     for (BlockIndex i = 0; i <= *tip_opt; ++i) {
@@ -154,11 +155,72 @@ std::optional<PublicKey> follow_replacements(const Records& records,
     }
 }
 
+// Pass 1 of the branch walk (blockchain.md §6.7 rules 3, 9): every block of the
+// branch, stored and then `more`, up to `upto`, attributed to a key epoch — the
+// node key with its rotations, then each replacement from its first use.
+struct Seen { size_t epoch; bool old_key; Timestamp ts; Hash hash; };
+
+struct Attribution {
+    std::vector<std::vector<PublicKey>> epochs;
+    std::vector<PublicKey>              retired;   // keys of the epochs left behind
+    PublicKey                           current{}; // lineage tip of the current epoch
+    std::vector<Seen>                   seen;
+};
+
+Attribution attribute(const IStorage& storage, const UserId& user_id, NodeIndex node_index,
+                      const Records& records, const std::vector<Block>& more, BlockIndex upto) {
+    Attribution a;
+    const Node node = storage.get_node(user_id, node_index);
+    a.epochs  = {{node.working_pubkey}};
+    a.current = node.working_pubkey;
+
+    const auto       tip_opt = storage.branch_tip_index(user_id, node_index);
+    const BlockIndex stored  = tip_opt.has_value() ? *tip_opt + 1 : 0;
+    const BlockIndex total   = std::min<BlockIndex>(stored + static_cast<BlockIndex>(more.size()),
+                                                    upto);
+    a.seen.reserve(total);
+    for (BlockIndex i = 0; i < total; ++i) {
+        const Block b = i < stored ? storage.get_block({user_id, node_index, i})
+                                   : more[i - stored];
+        bool old_key = false;
+        if (!block_signed_by(b, a.current)) {
+            // The first use of a replacement switches the key (rule 9) —
+            // possibly over replacements revoked before any use.
+            const auto next = follow_replacements(
+                records, epoch_revocation(records, a.epochs.back()),
+                [&](const PublicKey& k) { return block_signed_by(b, k); });
+            if (next.has_value() && block_signed_by(b, *next)) {
+                a.retired.insert(a.retired.end(), a.epochs.back().begin(), a.epochs.back().end());
+                a.epochs.push_back({*next});
+                a.current = *next;
+            } else if (std::any_of(a.retired.begin(), a.retired.end(),
+                           [&](const PublicKey& k) { return block_signed_by(b, k); })) {
+                old_key = true; // an old key resurfacing after the switch
+            } else {
+                throw SignatureError("block signed by none of the branch keys "
+                                     "(lineage, replacements)");
+            }
+        }
+        if (!old_key && b.type == BlockType::KEY_ROTATION && b.payload.size() >= 32) {
+            std::copy(b.payload.begin(), b.payload.begin() + 32, a.current.bytes.begin());
+            a.epochs.back().push_back(a.current);
+        }
+        a.seen.push_back({a.epochs.size() - 1, old_key, b.timestamp_claimed,
+                          Crypto::hash_block(b)});
+    }
+    return a;
+}
+
 } // namespace
 
 BranchRevocationStatus Validator::branch_revocation_status(
     const UserId& user_id, NodeIndex node_index) const {
     return status_over(user_id, node_index, {});
+}
+
+PublicKey Validator::key_at(const UserId& user_id, NodeIndex node_index, BlockIndex place) const {
+    return attribute(storage_, user_id, node_index, winning_records(user_id, node_index), {},
+                     place).current;
 }
 
 void Validator::check_continuation(const UserId& user_id, NodeIndex node_index,
@@ -167,7 +229,7 @@ void Validator::check_continuation(const UserId& user_id, NodeIndex node_index,
     const Node node = storage_.get_node(user_id, node_index);
     const auto tip  = storage_.branch_tip_index(user_id, node_index);
     BlockIndex next    = tip.has_value() ? *tip + 1 : 0;
-    Hash       prev    = Crypto::hash_node(node);
+    Hash       prev    = branch_origin(node);
     Timestamp  prev_ts = std::numeric_limits<Timestamp>::min();
     if (tip.has_value()) {
         const Block last = storage_.get_block({user_id, node_index, *tip});
@@ -213,49 +275,11 @@ BranchRevocationStatus Validator::status_over(const UserId& user_id, NodeIndex n
     out.revocation = effective_revocation(user_id, node_index);
 
     // Pass 1: attribute every block to a key epoch (blockchain.md §6.7 rules 3, 9).
-    Node node = storage_.get_node(user_id, node_index);
-    std::vector<std::vector<PublicKey>> epochs{{node.working_pubkey}};
-    std::vector<PublicKey> retired;          // keys of the epochs left behind
-    PublicKey current = node.working_pubkey; // lineage tip of the current epoch
-
-    struct Seen { size_t epoch; bool old_key; Timestamp ts; Hash hash; };
-    std::vector<Seen> seen;
-
-    const auto       tip_opt = storage_.branch_tip_index(user_id, node_index);
-    const BlockIndex stored  = tip_opt.has_value() ? *tip_opt + 1 : 0;
-    const BlockIndex total   = stored + static_cast<BlockIndex>(more.size());
-    {
-        seen.reserve(total);
-        for (BlockIndex i = 0; i < total; ++i) {
-            const Block b = i < stored ? storage_.get_block({user_id, node_index, i})
-                                       : more[i - stored];
-            bool old_key = false;
-            if (!block_signed_by(b, current)) {
-                // The first use of a replacement switches the key (rule 9) —
-                // possibly over replacements revoked before any use.
-                const auto next = follow_replacements(
-                    records, epoch_revocation(records, epochs.back()),
-                    [&](const PublicKey& k) { return block_signed_by(b, k); });
-                if (next.has_value() && block_signed_by(b, *next)) {
-                    retired.insert(retired.end(), epochs.back().begin(), epochs.back().end());
-                    epochs.push_back({*next});
-                    current = *next;
-                } else if (std::any_of(retired.begin(), retired.end(),
-                               [&](const PublicKey& k) { return block_signed_by(b, k); })) {
-                    old_key = true; // an old key resurfacing after the switch
-                } else {
-                    throw SignatureError("block signed by none of the branch keys "
-                                         "(lineage, replacements)");
-                }
-            }
-            if (!old_key && b.type == BlockType::KEY_ROTATION && b.payload.size() >= 32) {
-                std::copy(b.payload.begin(), b.payload.begin() + 32, current.bytes.begin());
-                epochs.back().push_back(current);
-            }
-            seen.push_back({epochs.size() - 1, old_key, b.timestamp_claimed,
-                            Crypto::hash_block(b)});
-        }
-    }
+    const Attribution att = attribute(storage_, user_id, node_index, records, more,
+                                      std::numeric_limits<BlockIndex>::max());
+    const auto& epochs  = att.epochs;
+    const auto& seen    = att.seen;
+    const PublicKey& current = att.current;
 
     // Pass 2: classify. A revoked epoch splits by the named line (rule 12); with
     // no line named yet its blocks stay in question. Blocks past what is here
@@ -486,15 +510,15 @@ std::optional<RevocationState> Validator::effective_revocation(
 }
 
 void Validator::check_tip_against_revocations(const BranchTipInfo& tip) const {
-    if (tip.path.empty()) return;
-    const UserId chain = tip.path.front().structural_pubkey;
+    const UserId chain = tip.path.root.structural_pubkey;
+    const auto   nodes = KeyPathCert::nodes(tip.path);
 
     // Fake subtrees (blockchain.md §6.7 rule 6): an edge created under a revoked parent key
     // after its compromise poisons everything below. Nodes come from the tip
     // itself — the partner's tree need not be in storage.
-    for (size_t k = 1; k < tip.path.size(); ++k) {
-        auto st = effective_revocation(chain, tip.path[k - 1].index);
-        if (st.has_value() && k - 1 < tip.births.size() && !birth_stands(tip.births[k - 1], *st))
+    for (size_t k = 1; k < nodes.size(); ++k) {
+        auto st = effective_revocation(chain, nodes[k - 1].index);
+        if (st.has_value() && !birth_stands(tip.path.births[k - 1], *st))
             throw RevocationError(
                 "partner path node was created under a revoked key (blockchain.md §6.7 rule 6)");
     }

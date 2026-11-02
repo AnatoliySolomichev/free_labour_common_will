@@ -64,7 +64,7 @@ TEST_F(BlockchainTest, CreateIdentityStoresRoot) {
     Node n = storage_->get_node(root_kp_.pub, 0);
     EXPECT_EQ(n.index, 0u);
     EXPECT_EQ(n.structural_pubkey, root_kp_.pub);
-    EXPECT_EQ(n.parent_hash, Hash::zero());
+    EXPECT_EQ(n.birth, BirthRef{});   // the root is born of no one
 }
 
 TEST_F(BlockchainTest, CreateIdentityRootSelfSigValid) {
@@ -113,8 +113,8 @@ TEST_F(BlockchainTest, BranchOnIntermediateNode) {
                                             keys.at(5), 1'000LL);
     EXPECT_EQ(b0.address.node_index, 5u);
     EXPECT_EQ(b0.address.block_index, 0u);
-    // Block 0 chains to the node's own hash.
-    EXPECT_EQ(b0.prev_hash, Crypto::hash_node(storage_->get_node(root_kp_.pub, 5)));
+    // Block 0 grows from the node's birth (blockchain.md §5.3).
+    EXPECT_EQ(b0.prev_hash, storage_->get_node(root_kp_.pub, 5).birth.hash);
 
     // The same node still parents deeper structure: 5 → 11 works alongside.
     bc_->ensure_path(root_kp_.pub, 11, key_for);
@@ -153,10 +153,10 @@ TEST_F(BlockchainTest, GetPathMissingNodeThrows) {
 
 // ── branch_tip_hash ───────────────────────────────────────────────────────────
 
-TEST_F(BlockchainTest, BranchTipHashEmptyBranchEqualsNodeHash) {
+TEST_F(BlockchainTest, BranchTipHashEmptyBranchIsItsBirth) {
     setup_leaf_path();
     Node leaf     = storage_->get_node(root_kp_.pub, LEAF);
-    Hash expected = Crypto::hash_node(leaf);
+    Hash expected = leaf.birth.hash;
     EXPECT_EQ(bc_->branch_tip_hash(root_kp_.pub, LEAF), expected);
 }
 
@@ -218,7 +218,7 @@ TEST_F(BlockchainTest, AppendDataBlockPrevHashLinked) {
     Node leaf = storage_->get_node(root_kp_.pub, LEAF);
     Block b0  = bc_->append_data_block(root_kp_.pub, LEAF, {0x01}, leaf_kp, 1'000LL);
     Block b1  = bc_->append_data_block(root_kp_.pub, LEAF, {0x02}, leaf_kp, 2'000LL);
-    EXPECT_EQ(b0.prev_hash, Crypto::hash_node(leaf));
+    EXPECT_EQ(b0.prev_hash, leaf.birth.hash);
     EXPECT_EQ(b1.prev_hash, Crypto::hash_block(b0));
 }
 
@@ -494,10 +494,10 @@ TEST_F(RevocationTest, AStopLeavesBlocksInQuestionUntilTheLine) {
     EXPECT_EQ(st.blocks[1], BlockRevocationStatus::OUTSIDE_LINE);
 }
 
-// Ни одного верного блока: отзыв называет точку до блока №0 — отпечаток узла.
+// Ни одного верного блока: отзыв называет точку до блока №0 — отпечаток блока рождения.
 TEST_F(RevocationTest, ALineCanEndBeforeTheFirstBlock) {
     bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 1'000LL);
-    const Hash before = Crypto::hash_node(storage_->get_node(root_kp_.pub, 7));
+    const Hash before = storage_->get_node(root_kp_.pub, 7).birth.hash;
     bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, kp3_, 2'000LL, before);
     const auto st = validator_->branch_revocation_status(root_kp_.pub, 7);
     ASSERT_EQ(st.blocks.size(), 1u);
@@ -671,7 +671,7 @@ TEST_F(RevocationTest, CertificateBuildAndVerify) {
     Block b = bc_->revoke_node(root_kp_.pub, 7, repl.pub, 3, kp3_, 2'000LL);
 
     auto cert = RevocationCert::build(*storage_, b.address);
-    EXPECT_EQ(cert.path.size(), 3u); // nodes 0 → 1 → 3
+    EXPECT_EQ(cert.path.births.size(), 2u); // nodes 0 → 1 → 3
     EXPECT_NO_THROW(RevocationCert::verify(cert));
 
     auto rp = RevocationCert::payload(cert);
@@ -689,21 +689,21 @@ TEST_F(RevocationTest, CertificateSurvivesSerialization) {
     auto dec = Serializer::decode_revocation_cert(enc.data(), enc.size());
 
     EXPECT_NO_THROW(RevocationCert::verify(dec));
-    EXPECT_EQ(dec.path.size(), cert.path.size()); // grandparent author: 0 → 1
+    EXPECT_EQ(dec.path.births.size(), cert.path.births.size()); // grandparent author: 0 → 1
     EXPECT_EQ(Crypto::hash_block(dec.block), Crypto::hash_block(cert.block));
 }
 
 TEST_F(RevocationTest, CertificateTamperedNodeRejected) {
     Block b = bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, kp3_, 2'000LL);
     auto cert = RevocationCert::build(*storage_, b.address);
-    cert.path[1].birth.index += 1; // breaks node 1's own parent signature
+    cert.path.births[0].payload.back() ^= 0x01; // node 1's keys, not what the root signed
     EXPECT_THROW(RevocationCert::verify(cert), SignatureError);
 }
 
 TEST_F(RevocationTest, CertificateTruncatedPathRejected) {
     Block b = bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, kp3_, 2'000LL);
     auto cert = RevocationCert::build(*storage_, b.address);
-    cert.path.pop_back(); // tip no longer matches the block's node
+    cert.path.births.pop_back(); // tip no longer matches the block's node
     EXPECT_THROW(RevocationCert::verify(cert), ChainIntegrityError);
 }
 
@@ -734,10 +734,8 @@ TEST_F(RevocationTest, CertificateNonAncestorRejected) {
     Block b = craft_revocation(4, kp4, rp, 2'000LL);
 
     RevocationCertificate cert{};
-    cert.births = births_of(*storage_, root_kp_.pub, 4);
     cert.block = b;
-    for (NodeIndex idx : path_indices(4))
-        cert.path.push_back(storage_->get_node(root_kp_.pub, idx));
+    cert.path  = KeyPathCert::build(*storage_, root_kp_.pub, 4);
     EXPECT_THROW(RevocationCert::verify(cert), RevocationError);
 }
 
@@ -773,7 +771,7 @@ TEST_F(RevocationTest, ImportedForeignRevocationIsEffective) {
 
         // Import into OUR storage (as bc revoke fetch does).
         const UserId chain = recv.block.address.user_id;
-        for (const auto& node : recv.path)
+        for (const auto& node : KeyPathCert::nodes(recv.path))
             if (!storage_->has_node(chain, node.index))
                 storage_->put_node(chain, node);
         storage_->put_external_block(recv.block);
@@ -831,7 +829,7 @@ static void import_certificate(LmdbStorage& into, const ForeignChain& f,
     auto bytes = Serializer::encode(cert);
     auto recv  = Serializer::decode_revocation_cert(bytes.data(), bytes.size());
     RevocationCert::verify(recv);
-    for (const auto& node : recv.path)
+    for (const auto& node : KeyPathCert::nodes(recv.path))
         if (!into.has_node(f.uid(), node.index))
             into.put_node(f.uid(), node);
     into.put_external_block(recv.block);

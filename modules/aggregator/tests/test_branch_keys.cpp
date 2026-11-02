@@ -140,7 +140,8 @@ TEST(BranchKeys, ABranchIsKnownByItsPath) {
 TEST(BranchKeys, APathThatDoesNotCheckIsRefused) {
     Chain   a("bad_path");
     KeyPath kp = a.path();
-    kp.path.back().working_pubkey = Crypto::generate_keypair().pub;
+    const KeyPair stranger = Crypto::generate_keypair();
+    kp.births.back().payload = Serializer::encode(BirthPayload{kLeaf, stranger.pub, stranger.pub});
     BranchKeys keys;
     EXPECT_THROW(keys.learn_path(kp), std::exception);
     EXPECT_EQ(keys.check(a.write(a.keys.at(kLeaf))), BranchKeys::Verdict::unknown_branch);
@@ -159,7 +160,7 @@ TEST(BranchKeys, AKeyChangeCarriesTheBranch) {
     EXPECT_EQ(keys.check(after), BranchKeys::Verdict::foreign_signature);
     keys.learn_rotation(rotated);
     EXPECT_EQ(keys.check(after), BranchKeys::Verdict::signed_by_branch);
-    EXPECT_EQ(keys.path(a.uid, kLeaf)->rotations.size(), 1u);
+    EXPECT_EQ(keys.path(a.uid, kLeaf)->changes.size(), 1u);
 
     BranchKeys fresh_keys;                                   // путь со сменой — то же самое
     fresh_keys.learn_path(a.path());
@@ -477,7 +478,7 @@ TEST(BranchKeys, ALongerDivergingLineDoesNotWin) {
     const KeyPath known = a.path();
     const KeyPair k2 = Crypto::generate_keypair();
     const KeyPair k3 = Crypto::generate_keypair();
-    Block r1 = known.rotations.front();
+    Block r1 = known.changes.front();
     std::copy(k2.pub.bytes.begin(), k2.pub.bytes.end(), r1.payload.begin());
     r1 = resigned(r1, a.keys.at(kLeaf));
     Block r2 = r1;
@@ -486,12 +487,12 @@ TEST(BranchKeys, ALongerDivergingLineDoesNotWin) {
     std::copy(k3.pub.bytes.begin(), k3.pub.bytes.end(), r2.payload.begin());
     r2 = resigned(r2, k2);
     KeyPath diverging = known;
-    diverging.rotations = {r1, r2};
+    diverging.changes = {r1, r2};
     ASSERT_EQ(KeyPathCert::verify(diverging), a.uid);       // сама по себе она сходится
     keys.learn_path(diverging);
     EXPECT_EQ(keys.check(a.write(k3)), BranchKeys::Verdict::foreign_signature);
     EXPECT_EQ(keys.check(a.write(k1)), BranchKeys::Verdict::signed_by_branch);
-    EXPECT_EQ(keys.path(a.uid, kLeaf)->rotations.size(), 1u);
+    EXPECT_EQ(keys.path(a.uid, kLeaf)->changes.size(), 1u);
 
     const KeyPair k4 = Crypto::generate_keypair();           // продолжение известной — берут
     a.bc->rotate_key(a.uid, kLeaf, k1, k4, ++a.now);
@@ -696,19 +697,22 @@ TEST(BranchKeys, AFakeChildDiesWithItsBirth) {
     EXPECT_EQ(keys.check(real), BranchKeys::Verdict::signed_by_branch);
 }
 
-// Ветка не старше своего рождения; путь без блоков рождения не проверяется.
+// Ветка не старше своего рождения; путь без последнего рождения ведёт к родителю.
 TEST(BranchKeys, ABranchIsNotOlderThanItsBirth) {
     Chain   a("birth_time");
     KeyPath kp = a.path();
     BranchKeys keys;
     Block   b{};
     b.address = {a.uid, kLeaf, 0};
-    b.prev_hash = Crypto::hash_node(kp.path.back());
+    b.prev_hash = Crypto::hash_block(kp.births.back());   // block #0 grows from the birth
     b.timestamp_claimed = -1;
     b.type = BlockType::DATA;
     b.payload = {0x80};
     keys.learn_path(kp);
     EXPECT_EQ(keys.check(resigned(b, a.keys.at(kLeaf))), BranchKeys::Verdict::before_birth);
+    // Without its last birth the path is simply the parent's: nodes are what
+    // the births say (решение участника 2026-11-02).
     kp.births.pop_back();
-    EXPECT_THROW(KeyPathCert::verify(kp), ChainIntegrityError);
+    EXPECT_EQ(KeyPathCert::verify(kp), a.uid);
+    EXPECT_EQ(KeyPathCert::node(kp), (kLeaf - 1) / 2);
 }

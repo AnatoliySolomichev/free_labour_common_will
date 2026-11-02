@@ -3,6 +3,7 @@
 #include "blockchain/serializer.h"
 #include "blockchain/storage.h"
 #include "blockchain/errors.h"
+#include "blockchain/key_path.h"
 #include <gtest/gtest.h>
 #include <filesystem>
 
@@ -15,38 +16,28 @@ static Node make_signed_root(const KeyPair& kp) {
     n.index             = 0;
     n.structural_pubkey = kp.pub;
     n.working_pubkey    = kp.pub;
-    n.parent_hash       = Hash::zero();
-    n.parent_sig        = Signature::null();
+    n.root_sig          = Signature::null();
     auto b              = Serializer::encode(n);
-    n.parent_sig        = Crypto::sign(b.data(), b.size(), kp.sec);
+    n.root_sig          = Crypto::sign(b.data(), b.size(), kp.sec);
     return n;
 }
 
-static Node make_signed_child(NodeIndex idx, const KeyPair& kp,
-                               const Node& parent, const KeyPair& parent_kp,
-                               IStorage* storage = nullptr, const UserId& chain = UserId{}) {
-    Node n{};
-    n.index             = idx;
-    n.structural_pubkey = kp.pub;
-    n.working_pubkey    = kp.pub;
-    n.parent_hash       = Crypto::hash_node(parent);
-    if (storage) {   // its birth, the first block of the parent's branch
-        Block bb{};
-        bb.address           = {chain, parent.index, 0};
-        bb.prev_hash         = Crypto::hash_node(parent);
-        bb.timestamp_claimed = 0;
-        bb.type              = BlockType::BIRTH;
-        bb.payload           = Serializer::encode(BirthPayload{idx, kp.pub, kp.pub});
-        bb.signature         = Signature::null();
-        auto bytes           = Serializer::encode(bb);
-        bb.signature         = Crypto::sign(bytes.data(), bytes.size(), parent_kp.sec);
-        storage->put_block(bb);
-        n.birth = BirthRef{0, Crypto::hash_block(bb)};
-    }
-    n.parent_sig        = Signature::null();
-    auto b              = Serializer::encode(n);
-    n.parent_sig        = Crypto::sign(b.data(), b.size(), parent_kp.sec);
-    return n;
+// The child is what its birth says: a BIRTH block at `at` of the parent's
+// branch, signed by `signer` (the parent's key, unless a test forges it).
+static Node make_signed_child(NodeIndex idx, const KeyPair& kp, const Node& parent,
+                              const KeyPair& signer, IStorage& storage, const UserId& chain,
+                              BlockIndex at = 0, const Hash* prev = nullptr) {
+    Block bb{};
+    bb.address           = {chain, parent.index, at};
+    bb.prev_hash         = prev ? *prev : branch_origin(parent);
+    bb.timestamp_claimed = 0;
+    bb.type              = BlockType::BIRTH;
+    bb.payload           = Serializer::encode(BirthPayload{idx, kp.pub, kp.pub});
+    bb.signature         = Signature::null();
+    auto bytes           = Serializer::encode(bb);
+    bb.signature         = Crypto::sign(bytes.data(), bytes.size(), signer.sec);
+    storage.put_block(bb);
+    return node_born(bb);
 }
 
 static Block make_signed_block(const BlockAddress& addr, const Hash& prev_hash,
@@ -91,8 +82,8 @@ protected:
         child3_kp_ = Crypto::generate_keypair();
 
         root_   = make_signed_root(root_kp_);
-        child1_ = make_signed_child(1, child1_kp_, root_,   root_kp_,   storage_.get(), root_kp_.pub);
-        child3_ = make_signed_child(3, child3_kp_, child1_, child1_kp_, storage_.get(), root_kp_.pub);
+        child1_ = make_signed_child(1, child1_kp_, root_,   root_kp_,   *storage_, root_kp_.pub);
+        child3_ = make_signed_child(3, child3_kp_, child1_, child1_kp_, *storage_, root_kp_.pub);
 
         storage_->put_node(root_kp_.pub, root_);
         storage_->put_node(root_kp_.pub, child1_);
@@ -122,26 +113,33 @@ TEST_F(ValidatorTest, ValidateGrandchildOk) {
 
 TEST_F(ValidatorTest, ValidateRootBadSig) {
     Node bad = root_;
-    bad.parent_sig.bytes[0] ^= 0xFF; // corrupt
+    bad.root_sig.bytes[0] ^= 0xFF; // corrupt
     EXPECT_THROW(validator_->validate_node(bad, root_kp_.pub), SignatureError);
 }
 
+// A birth signed by someone else than the parent makes no child (blockchain.md §11.2).
 TEST_F(ValidatorTest, ValidateChildBadSig) {
-    Node bad = child1_;
-    bad.parent_sig.bytes[5] ^= 0xFF;
+    const KeyPair stranger = Crypto::generate_keypair();
+    const KeyPair kp2      = Crypto::generate_keypair();
+    const Hash    after    = Crypto::hash_block(storage_->get_block({root_kp_.pub, 0, 0}));
+    const Node    bad = make_signed_child(2, kp2, root_, stranger, *storage_, root_kp_.pub, 1, &after);
     EXPECT_THROW(validator_->validate_node(bad, root_kp_.pub), SignatureError);
 }
 
-TEST_F(ValidatorTest, ValidateRootNonZeroParentHash) {
+TEST_F(ValidatorTest, ValidateRootNamesNoBirth) {
     Node bad = root_;
-    bad.parent_hash.bytes[0] = 0xAB;
+    bad.birth = BirthRef{3, Crypto::hash_node(child1_)};
     EXPECT_THROW(validator_->validate_node(bad, root_kp_.pub), ChainIntegrityError);
 }
 
-TEST_F(ValidatorTest, ValidateChildWrongParentHash) {
-    Node bad = child1_;
-    bad.parent_hash.bytes[0] ^= 0xFF; // corrupt hash
-    EXPECT_THROW(validator_->validate_node(bad, root_kp_.pub), ChainIntegrityError);
+// A node is what its birth says: other keys, or another birth, do not pass.
+TEST_F(ValidatorTest, ValidateChildDiffersFromItsBirth) {
+    Node other_keys = child1_;
+    other_keys.working_pubkey = child3_kp_.pub;
+    EXPECT_THROW(validator_->validate_node(other_keys, root_kp_.pub), ChainIntegrityError);
+    Node other_birth = child1_;
+    other_birth.birth.hash.bytes[0] ^= 0xFF;
+    EXPECT_THROW(validator_->validate_node(other_birth, root_kp_.pub), ChainIntegrityError);
 }
 
 TEST_F(ValidatorTest, ValidateChildParentMissing) {
@@ -165,14 +163,14 @@ TEST_F(ValidatorTest, ValidatePathMissingNode) {
 // ── validate_block ────────────────────────────────────────────────────────────
 
 TEST_F(ValidatorTest, ValidateBlockOk) {
-    Hash ph = Crypto::hash_node(child3_);
+    Hash ph = branch_origin(child3_);
     Block b = make_signed_block({root_kp_.pub, 3, 0}, ph, 2'000'000LL,
                                  BlockType::DATA, {0x01}, child3_kp_);
     EXPECT_NO_THROW(validator_->validate_block(b, ph, child3_kp_.pub));
 }
 
 TEST_F(ValidatorTest, ValidateBlockWrongPrevHash) {
-    Hash ph   = Crypto::hash_node(child3_);
+    Hash ph   = branch_origin(child3_);
     Hash fake = ph;
     fake.bytes[0] ^= 0xFF;
     Block b = make_signed_block({root_kp_.pub, 3, 0}, ph, 2'000'000LL,
@@ -181,7 +179,7 @@ TEST_F(ValidatorTest, ValidateBlockWrongPrevHash) {
 }
 
 TEST_F(ValidatorTest, ValidateBlockBadSignature) {
-    Hash ph = Crypto::hash_node(child3_);
+    Hash ph = branch_origin(child3_);
     Block b = make_signed_block({root_kp_.pub, 3, 0}, ph, 2'000'000LL,
                                  BlockType::DATA, {0x01}, child3_kp_);
     b.signature.bytes[0] ^= 0xFF;
@@ -189,7 +187,7 @@ TEST_F(ValidatorTest, ValidateBlockBadSignature) {
 }
 
 TEST_F(ValidatorTest, ValidateBlockWrongKey) {
-    Hash ph   = Crypto::hash_node(child3_);
+    Hash ph   = branch_origin(child3_);
     Block b   = make_signed_block({root_kp_.pub, 3, 0}, ph, 2'000'000LL,
                                    BlockType::DATA, {0x01}, child3_kp_);
     EXPECT_THROW(validator_->validate_block(b, ph, child1_kp_.pub), SignatureError);
@@ -203,7 +201,7 @@ TEST_F(ValidatorTest, ValidateBranchEmpty) {
 }
 
 TEST_F(ValidatorTest, ValidateBranchSingleBlock) {
-    Hash ph = Crypto::hash_node(child3_);
+    Hash ph = branch_origin(child3_);
     Block b = make_signed_block({root_kp_.pub, 3, 0}, ph, 2'000'000LL,
                                  BlockType::DATA, {0xAA}, child3_kp_);
     storage_->put_block(b);
@@ -211,7 +209,7 @@ TEST_F(ValidatorTest, ValidateBranchSingleBlock) {
 }
 
 TEST_F(ValidatorTest, ValidateBranchMultipleBlocks) {
-    Hash ph0 = Crypto::hash_node(child3_);
+    Hash ph0 = branch_origin(child3_);
     Block b0 = make_signed_block({root_kp_.pub, 3, 0}, ph0, 1'000LL,
                                   BlockType::DATA, {0x01}, child3_kp_);
     storage_->put_block(b0);
@@ -225,7 +223,7 @@ TEST_F(ValidatorTest, ValidateBranchMultipleBlocks) {
 }
 
 TEST_F(ValidatorTest, ValidateBranchBadBlockSig) {
-    Hash ph = Crypto::hash_node(child3_);
+    Hash ph = branch_origin(child3_);
     Block b = make_signed_block({root_kp_.pub, 3, 0}, ph, 1'000LL,
                                  BlockType::DATA, {0x01}, child3_kp_);
     b.signature.bytes[0] ^= 0xFF;
@@ -234,7 +232,7 @@ TEST_F(ValidatorTest, ValidateBranchBadBlockSig) {
 }
 
 TEST_F(ValidatorTest, ValidateBranchTimestampViolation) {
-    Hash ph0 = Crypto::hash_node(child3_);
+    Hash ph0 = branch_origin(child3_);
     Block b0 = make_signed_block({root_kp_.pub, 3, 0}, ph0, 5'000LL,
                                   BlockType::DATA, {0x01}, child3_kp_);
     storage_->put_block(b0);
@@ -250,7 +248,7 @@ TEST_F(ValidatorTest, ValidateBranchTimestampViolation) {
 TEST_F(ValidatorTest, ValidateBranchKeyRotation) {
     KeyPair new_kp = Crypto::generate_keypair();
 
-    Hash ph0 = Crypto::hash_node(child3_);
+    Hash ph0 = branch_origin(child3_);
     // KEY_ROTATION block: payload = new pubkey (32 bytes), signed by OLD key.
     std::vector<uint8_t> rot_payload(new_kp.pub.bytes.begin(), new_kp.pub.bytes.end());
     Block b0 = make_signed_block({root_kp_.pub, 3, 0}, ph0, 1'000LL,
@@ -269,7 +267,7 @@ TEST_F(ValidatorTest, ValidateBranchKeyRotation) {
 TEST_F(ValidatorTest, ValidateBranchKeyRotationWrongSubsequentKey) {
     KeyPair new_kp = Crypto::generate_keypair();
 
-    Hash ph0 = Crypto::hash_node(child3_);
+    Hash ph0 = branch_origin(child3_);
     std::vector<uint8_t> rot_payload(new_kp.pub.bytes.begin(), new_kp.pub.bytes.end());
     Block b0 = make_signed_block({root_kp_.pub, 3, 0}, ph0, 1'000LL,
                                   BlockType::KEY_ROTATION, rot_payload, child3_kp_);

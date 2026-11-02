@@ -33,12 +33,12 @@ void lcheck(int rc, const char* op) {
 
 std::vector<uint8_t> encode_leaf_record(const LeafRecord& r) {
     return Serializer::encode(
-        FraudProofData{r.ref, MerkleTree::Proof{}, r.node_path, r.evidence});
+        FraudProofData{r.ref, MerkleTree::Proof{}, r.path, r.evidence});
 }
 
 LeafRecord decode_leaf_record(const uint8_t* data, size_t len) {
     FraudProofData p = Serializer::decode_fraud_proof(data, len);
-    return LeafRecord{p.leaf, std::move(p.node_path), std::move(p.evidence)};
+    return LeafRecord{p.leaf, std::move(p.path), std::move(p.evidence)};
 }
 
 struct ParticipantCache::Persistence {
@@ -227,7 +227,7 @@ ParticipantCache::build_proof(const Hash& target_root,
     auto path = merkle_path(target_root, leaf_hash);
     if (!path) return std::nullopt;
     return blockchain::FraudProofData{
-        leaf->ref, std::move(*path), std::move(leaf->node_path),
+        leaf->ref, std::move(*path), std::move(leaf->path),
         std::move(leaf->evidence)};
 }
 

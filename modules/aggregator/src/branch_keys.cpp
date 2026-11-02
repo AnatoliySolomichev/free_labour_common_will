@@ -22,14 +22,33 @@ bool signed_by(const Block& block, const PublicKey& key) {
 
 namespace {
 
+// The key changes of the path's own node, in branch order.
+std::vector<const Block*> node_changes(const KeyPath& kp) {
+    const NodeIndex node = KeyPathCert::node(kp);
+    std::vector<const Block*> out;
+    for (const Block& c : kp.changes)
+        if (c.address.node_index == node) out.push_back(&c);
+    return out;
+}
+
+// The branch's own line: the key its birth names, then each rotation — up to
+// the first replacement block; replacements come from the revocations.
 std::vector<PublicKey> own_line(const KeyPath& kp) {
-    std::vector<PublicKey> line{kp.path.back().working_pubkey};
-    for (const Block& r : kp.rotations) {
+    std::vector<PublicKey> line{KeyPathCert::nodes(kp).back().working_pubkey};
+    for (const Block* c : node_changes(kp)) {
+        if (c->type != BlockType::KEY_ROTATION || c->payload.size() < 32) break;
         PublicKey next{};
-        std::copy(r.payload.begin(), r.payload.begin() + 32, next.bytes.begin());
+        std::copy(c->payload.begin(), c->payload.begin() + 32, next.bytes.begin());
         line.push_back(next);
     }
     return line;
+}
+
+// Whether two paths end at the same node: the same birth (or both at the root).
+bool same_node(const KeyPath& a, const KeyPath& b) {
+    if (a.births.empty() || b.births.empty())
+        return a.births.empty() && b.births.empty() && a.root == b.root;
+    return Crypto::hash_block(a.births.back()) == Crypto::hash_block(b.births.back());
 }
 
 } // namespace
@@ -76,7 +95,7 @@ bool BranchKeys::admits(const std::vector<Record>& records, const std::vector<Pu
 
 UserId BranchKeys::learn_path(const KeyPath& kp) {
     const UserId chain = KeyPathCert::verify(kp);   // throws on a path that does not check
-    const Key    k{chain, kp.path.back().index};
+    const Key    k{chain, KeyPathCert::node(kp)};
     std::lock_guard<std::mutex> lock(mu_);
     auto [it, fresh] = branches_.try_emplace(k);
     auto& known = it->second;
@@ -86,11 +105,11 @@ UserId BranchKeys::learn_path(const KeyPath& kp) {
         // fork of the branch — the same rank either way: the first stays, and an
         // ancestor's revocation decides. A path replaces the known one only by
         // carrying it further.
-        if (!(kp.path.back().working_pubkey == known.path.path.back().working_pubkey)) return chain;
-        if (kp.rotations.size() <= known.path.rotations.size()) return chain;
-        for (std::size_t i = 0; i < known.path.rotations.size(); ++i)
-            if (Crypto::hash_block(kp.rotations[i]) != Crypto::hash_block(known.path.rotations[i]))
-                return chain;
+        if (!same_node(kp, known.path)) return chain;
+        const auto mine = node_changes(kp), theirs = node_changes(known.path);
+        if (mine.size() <= theirs.size()) return chain;
+        for (std::size_t i = 0; i < theirs.size(); ++i)
+            if (Crypto::hash_block(*mine[i]) != Crypto::hash_block(*theirs[i])) return chain;
     }
     known.path = kp;
     known.own  = own_line(kp);
@@ -113,11 +132,13 @@ void BranchKeys::learn_rotation(const Block& b) {
     const auto it = branches_.find(k);
     if (it == branches_.end()) return;
     auto& br = it->second;
-    if (!br.path.rotations.empty() &&
-        b.address.block_index <= br.path.rotations.back().address.block_index)
+    const auto changes = node_changes(br.path);
+    if (!changes.empty() && b.address.block_index <= changes.back()->address.block_index)
         return;                                              // known already, or out of turn
+    if (!changes.empty() && changes.back()->type != BlockType::KEY_ROTATION)
+        return;                                              // past a replacement: its line is the revocation's
     if (!signed_by(b, br.own.back())) return;
-    br.path.rotations.push_back(b);
+    br.path.changes.push_back(b);
     br.own.push_back(next);
 }
 
@@ -128,7 +149,8 @@ void BranchKeys::learn_revocation(const RevocationCertificate& cert) {
     const uint32_t depth = node_depth(cert.block.address.node_index);
     const Record   rec{cert.block.address.block_index, p.revoked_pubkey,
                        p.replacement_pubkey, p.last_good, cert.block,
-                       cert.path.back().working_pubkey};
+                       KeyPathCert::key_at(cert.path, cert.block.address.node_index,
+                                           cert.block.address.block_index)};
     std::lock_guard<std::mutex> lock(mu_);
     auto [it, fresh] = revocations_.try_emplace(k);
     auto& cur = it->second;
@@ -203,11 +225,13 @@ std::vector<BranchKeys::Record> BranchKeys::counting(const UserId& chain, const 
 }
 
 bool BranchKeys::born(const Branch& br, const AggregatorStorage* storage, int depth) const {
-    const auto& path = br.path.path;
+    const auto path = KeyPathCert::nodes(br.path);
     for (std::size_t k = 0; k < br.path.births.size() && k + 1 < path.size(); ++k) {
         const Block& birth = br.path.births[k];
         if (!revocations_.count({birth.address.user_id, path[k].index})) continue;
-        const std::vector<PublicKey> own{path[k].working_pubkey};
+        // The parent signs with its key in force at the birth's place (blockchain.md §11.2).
+        const std::vector<PublicKey> own{
+            KeyPathCert::key_at(br.path, path[k].index, birth.address.block_index)};
         if (whose_locked(birth, &own, storage, depth + 1) == Whose::not_owner) return false;
     }
     return true;
@@ -260,7 +284,7 @@ void BranchKeys::load(const AggregatorStorage& storage, const std::set<UserId>* 
         for (const auto& bytes : storage.get_keypath_bytes(key)) {
             try {
                 const KeyPath kp = Serializer::decode_key_path(bytes.data(), bytes.size());
-                if (!kp.path.empty() && wanted(kp.path.front().structural_pubkey)) learn_path(kp);
+                if (wanted(kp.root.structural_pubkey)) learn_path(kp);
             } catch (const std::exception&) {}               // stored before the filter: skip
         }
     for (const auto& chain : storage.all_revoked_chains()) {

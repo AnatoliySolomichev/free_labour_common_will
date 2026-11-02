@@ -29,8 +29,8 @@ static Node make_node(NodeIndex idx, uint8_t fill = 0xAB) {
     n.index              = idx;
     n.structural_pubkey  = make_pubkey(fill);
     n.working_pubkey     = make_pubkey(static_cast<uint8_t>(fill + 1));
-    n.parent_hash        = make_hash(fill);
-    n.parent_sig         = make_sig(fill);
+    n.birth              = BirthRef{fill, make_hash(fill)};
+    n.root_sig           = make_sig(fill);
     return n;
 }
 
@@ -61,13 +61,13 @@ static Block make_data_block(NodeIndex ni, BlockIndex bi) {
 
 TEST(Serializer, NodeIndexInlineEncoding) {
     // Encode a node with index=0.  The first field key is 0 and the value is 0.
-    // In the CBOR map header (6 fields = 0xa6) the key 0 → 0x00 (1 byte inline).
+    // In the CBOR map header (5 fields = 0xa5) the key 0 → 0x00 (1 byte inline).
     Node n = make_node(0);
     auto bytes = Serializer::encode(n);
 
-    // First byte: map(6) = 0xa6
+    // First byte: map(5) = 0xa5
     ASSERT_FALSE(bytes.empty());
-    EXPECT_EQ(bytes[0], 0xa6u);
+    EXPECT_EQ(bytes[0], 0xa5u);
 
     // Second byte: key 0 = 0x00  (inline, not 0x18 0x00)
     ASSERT_GE(bytes.size(), 2u);
@@ -82,7 +82,7 @@ TEST(Serializer, LargeNodeIndex) {
     // node_index = 256 → must be encoded as 0x19 0x01 0x00 (3 bytes)
     Node n = make_node(256);
     auto bytes = Serializer::encode(n);
-    // map(6), key(0), uint(256): bytes[0]=0xa6, [1]=0x00, [2]=0x19, [3]=0x01, [4]=0x00
+    // map(5), key(0), uint(256): bytes[0]=0xa5, [1]=0x00, [2]=0x19, [3]=0x01, [4]=0x00
     ASSERT_GE(bytes.size(), 5u);
     EXPECT_EQ(bytes[2], 0x19u);
     EXPECT_EQ(bytes[3], 0x01u);
@@ -196,17 +196,17 @@ TEST(Serializer, BranchTipInfoRoundTrip) {
     BranchTipInfo t{};
     t.tip_address = make_addr(5, 10);
     t.tip_hash    = make_hash(0x77);
-    t.path.push_back(make_node(0, 0x10));
-    t.path.push_back(make_node(1, 0x20));
+    t.path.root   = make_node(0, 0x10);
+    t.path.births.push_back(make_data_block(0, 3));
 
     auto enc = Serializer::encode(t);
     BranchTipInfo d = Serializer::decode_tip(enc.data(), enc.size());
 
     EXPECT_EQ(d.tip_address, t.tip_address);
     EXPECT_EQ(d.tip_hash,    t.tip_hash);
-    ASSERT_EQ(d.path.size(), 2u);
-    EXPECT_EQ(d.path[0], t.path[0]);
-    EXPECT_EQ(d.path[1], t.path[1]);
+    EXPECT_EQ(d.path.root,   t.path.root);
+    ASSERT_EQ(d.path.births.size(), 1u);
+    EXPECT_EQ(Serializer::encode(d.path.births[0]), Serializer::encode(t.path.births[0]));
     EXPECT_FALSE(d.tip_block.has_value());
 }
 
@@ -217,7 +217,8 @@ TEST(Serializer, BranchTipInfoEmptyPath) {
 
     auto enc = Serializer::encode(t);
     BranchTipInfo d = Serializer::decode_tip(enc.data(), enc.size());
-    EXPECT_TRUE(d.path.empty());
+    EXPECT_TRUE(d.path.births.empty());
+    EXPECT_TRUE(d.path.changes.empty());
     EXPECT_EQ(d.tip_address.block_index, EMPTY_BRANCH_INDEX);
     EXPECT_FALSE(d.tip_block.has_value());
 }
@@ -228,7 +229,7 @@ TEST(Serializer, BranchTipInfoWithTipBlockRoundTrip) {
     BranchTipInfo t{};
     t.tip_address = blk.address;
     t.tip_hash    = make_hash(0xAB);
-    t.path.push_back(make_node(0, 0x10));
+    t.path.root   = make_node(0, 0x10);
     t.tip_block   = blk;
 
     auto enc = Serializer::encode(t);
@@ -239,6 +240,32 @@ TEST(Serializer, BranchTipInfoWithTipBlockRoundTrip) {
     EXPECT_EQ(d.tip_block->address,           blk.address);
     EXPECT_EQ(d.tip_block->timestamp_claimed, blk.timestamp_claimed);
     EXPECT_EQ(d.tip_block->payload,           blk.payload);
+}
+
+// ── Key path and replacement (blockchain.md §7.5, blockchain.md §6.7 rule 9) ─────
+
+TEST(Serializer, KeyPathRoundTrip) {
+    KeyPath kp{};
+    kp.root = make_node(0, 0x10);
+    kp.births.push_back(make_data_block(0, 1));
+    kp.changes.push_back(make_data_block(1, 4));
+    kp.changes.push_back(make_data_block(1, 9));
+    kp.records.push_back(make_data_block(0, 6));
+    const auto enc = Serializer::encode(kp);
+    const KeyPath d = Serializer::decode_key_path(enc.data(), enc.size());
+    EXPECT_EQ(d.root, kp.root);
+    ASSERT_EQ(d.births.size(), 1u);
+    ASSERT_EQ(d.changes.size(), 2u);
+    ASSERT_EQ(d.records.size(), 1u);
+    EXPECT_EQ(Serializer::encode(d), enc);
+}
+
+TEST(Serializer, ReplacementPayloadRoundTrip) {
+    const ReplacementPayload p{make_addr(3, 7), make_hash(0x5A)};
+    const auto enc = Serializer::encode(p);
+    const ReplacementPayload d = Serializer::decode_replacement_payload(enc.data(), enc.size());
+    EXPECT_EQ(d.record_address, p.record_address);
+    EXPECT_EQ(d.record_hash, p.record_hash);
 }
 
 // ── MergePayload round-trip ───────────────────────────────────────────────────

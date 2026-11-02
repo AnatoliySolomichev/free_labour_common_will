@@ -2,6 +2,7 @@
 
 #include <blockchain/blockchain.h>
 #include <blockchain/crypto.h>
+#include <blockchain/key_path.h>
 #include <blockchain/merge_snapshot.h>
 
 #include <gtest/gtest.h>
@@ -22,7 +23,7 @@ struct Participant {
     KeyPair           root_kp;
     KeyPair           leaf_kp;
     Block             block0;   // validly signed block-0
-    std::vector<Node> path;     // root..leaf nodes
+    KeyPath           path;     // root..leaf key path
 
     ExternalRef honest_ref() const {
         return ExternalRef{block0.address, Crypto::hash_block(block0)};
@@ -74,7 +75,7 @@ protected:
         p.leaf_kp = keys.at(LEAF);
         p.block0  = bc_->append_data_block(p.root_kp.pub, LEAF, {seed},
                                            p.leaf_kp, 1'000LL + seed);
-        p.path    = bc_->get_path(p.root_kp.pub, LEAF);
+        p.path    = KeyPathCert::build(*storage_, p.root_kp.pub, LEAF);
         return p;
     }
 
@@ -230,7 +231,7 @@ TEST_F(ParticipantCacheTest, PutLeafIsIdempotentAndKeyed) {
     ASSERT_TRUE(rec.has_value());
     EXPECT_EQ(rec->ref, p.honest_ref());
     EXPECT_EQ(rec->evidence.signature, p.block0.signature);
-    EXPECT_EQ(rec->node_path.size(), p.path.size());
+    EXPECT_EQ(rec->path.births.size(), p.path.births.size());
 }
 
 TEST_F(ParticipantCacheTest, MissingPiecesYieldNullopt) {

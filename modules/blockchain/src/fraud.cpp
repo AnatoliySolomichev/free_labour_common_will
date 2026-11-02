@@ -1,40 +1,10 @@
 #include "blockchain/fraud.h"
 #include "blockchain/crypto.h"
 #include "blockchain/serializer.h"
+#include "blockchain/key_path.h"
 
 namespace blockchain {
 namespace {
-
-// Verify a node path (root..leaf_node) exactly as Validator does, but over an
-// in-proof vector rather than storage. On success yields the leaf's working key.
-bool node_path_valid(const std::vector<Node>& path,
-                     const UserId& chain, NodeIndex leaf_node) {
-    // Path must be exactly the canonical root→leaf index sequence.
-    std::vector<NodeIndex> expected = path_indices(leaf_node);
-    if (path.size() != expected.size()) return false;
-    for (size_t i = 0; i < path.size(); ++i)
-        if (path[i].index != expected[i]) return false;
-
-    const Node& root = path.front();
-    if (!(root.structural_pubkey == chain)) return false;   // chain == root public key
-    if (root.parent_hash != Hash::zero())   return false;
-    {
-        Node ts = root; ts.parent_sig = Signature::null();
-        auto b = Serializer::encode(ts);
-        if (!Crypto::verify(b.data(), b.size(), root.parent_sig, root.structural_pubkey))
-            return false;
-    }
-    for (size_t i = 1; i < path.size(); ++i) {
-        const Node& parent = path[i - 1];
-        const Node& child  = path[i];
-        if (child.parent_hash != Crypto::hash_node(parent)) return false;
-        Node ts = child; ts.parent_sig = Signature::null();
-        auto cb = Serializer::encode(ts);
-        if (!Crypto::verify(cb.data(), cb.size(), child.parent_sig, parent.working_pubkey))
-            return false;
-    }
-    return true;
-}
 
 // Verify block.signature against working_pubkey (canonical convention: encode with
 // the signature field zeroed).
@@ -45,15 +15,18 @@ bool block_sig_valid(const Block& block, const PublicKey& working_pubkey) {
     return Crypto::verify(bytes.data(), bytes.size(), block.signature, working_pubkey);
 }
 
-// Shared structural check: Merkle inclusion of the leaf + valid node path.
-// Returns false → fabricated; on true, sets working_pubkey from the leaf node.
+// Shared structural check: Merkle inclusion of the leaf + a valid key path of
+// the leaf's chain to its node (blockchain.md §7.5). Returns false → fabricated;
+// on true, sets working_pubkey to the node's key at the leaf's place. A path
+// that does not check throws — the callers count that as fabricated too.
 bool structural_ok(const Hash& merkle_root, const FraudProofData& d,
                    PublicKey& working_pubkey) {
     Hash lh = MerkleTree::leaf_hash(d.leaf);
     if (!MerkleTree::verify(lh, d.merkle_path, merkle_root)) return false;
-    if (!node_path_valid(d.node_path, d.leaf.address.user_id, d.leaf.address.node_index))
-        return false;
-    working_pubkey = d.node_path.back().working_pubkey;
+    if (!(KeyPathCert::verify(d.path) == d.leaf.address.user_id)) return false;
+    if (KeyPathCert::node(d.path) != d.leaf.address.node_index) return false;
+    working_pubkey = KeyPathCert::key_at(d.path, d.leaf.address.node_index,
+                                         d.leaf.address.block_index);
     return true;
 }
 

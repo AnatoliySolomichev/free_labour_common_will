@@ -3,14 +3,17 @@
 #include "blockchain/crypto.h"
 #include "blockchain/serializer.h"
 #include "blockchain/errors.h"
+#include "blockchain/revocation.h"
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <filesystem>
 #include <map>
 
 using namespace blockchain;
 
 // Attribution of a signing key to a chain (blockchain.md §7.5): the reader gets
-// a node path and checks it alone — nobody is trusted for the answer.
+// a key path — the root's record, the births, every key change — and checks it
+// alone; nobody is trusted for the answer.
 
 class KeyPathTest : public ::testing::Test {
 protected:
@@ -50,12 +53,38 @@ protected:
         bc_.reset(); validator_.reset(); storage_.reset();
         std::filesystem::remove_all(db_path_);
     }
+
+    std::size_t changes_of(const KeyPath& kp, NodeIndex node) const {
+        return static_cast<std::size_t>(std::count_if(kp.changes.begin(), kp.changes.end(),
+            [&](const Block& c) { return c.address.node_index == node; }));
+    }
+    static Block resigned(Block b, const KeyPair& kp) {
+        b.signature      = Signature::null();
+        const auto bytes = Serializer::encode(b);
+        b.signature      = Crypto::sign(bytes.data(), bytes.size(), kp.sec);
+        return b;
+    }
+    // A replacement block crafted by hand: right after `after` in `node`'s branch,
+    // naming `record`, signed by `kp`.
+    Block replacement_block(NodeIndex node, const Block& after, const Block& record,
+                            const KeyPair& kp) {
+        Block k{};
+        k.address           = {chain_, node, after.address.block_index + 1};
+        k.prev_hash         = Crypto::hash_block(after);
+        k.timestamp_claimed = after.timestamp_claimed;
+        k.type              = BlockType::KEY_REPLACEMENT;
+        k.payload           = Serializer::encode(
+            ReplacementPayload{record.address, Crypto::hash_block(record)});
+        return resigned(k, kp);
+    }
 };
 
 TEST_F(KeyPathTest, BuiltPathNamesTheChainAndTheSigningKey) {
     const KeyPath kp = KeyPathCert::build(*storage_, chain_, kLeaf);
 
-    EXPECT_EQ(kp.path.size(), 32u);           // root (depth 0) … leaf (depth 31)
+    EXPECT_EQ(kp.births.size(), 31u);          // root (depth 0) … leaf (depth 31)
+    EXPECT_EQ(KeyPathCert::nodes(kp).size(), 32u);
+    EXPECT_EQ(KeyPathCert::node(kp), kLeaf);
     EXPECT_EQ(KeyPathCert::verify(kp), chain_);
     EXPECT_EQ(KeyPathCert::signer_key(kp), keys_[kLeaf].pub);
 }
@@ -65,7 +94,7 @@ TEST_F(KeyPathTest, SurvivesCborRoundTrip) {
     const auto    bytes = Serializer::encode(kp);
     const KeyPath back  = Serializer::decode_key_path(bytes.data(), bytes.size());
 
-    EXPECT_EQ(back.path, kp.path);
+    EXPECT_EQ(Serializer::encode(back), bytes);
     EXPECT_EQ(KeyPathCert::verify(back), chain_);
 }
 
@@ -73,16 +102,18 @@ TEST_F(KeyPathTest, PathOfAnInnerNodeIsShorterAndStillValid) {
     const NodeIndex inner = 7;  // depth 3, on the path to the leaf
     const KeyPath   kp    = KeyPathCert::build(*storage_, chain_, inner);
 
-    EXPECT_EQ(kp.path.size(), 4u);
+    EXPECT_EQ(kp.births.size(), 3u);
     EXPECT_EQ(KeyPathCert::verify(kp), chain_);
     EXPECT_EQ(KeyPathCert::signer_key(kp), keys_[inner].pub);
 }
 
 // A forged path — a stranger's key grafted onto someone else's root — fails:
-// the parent signature does not cover the substituted node.
+// the parent's signature on the birth does not cover the substituted key.
 TEST_F(KeyPathTest, GraftedKeyIsRejected) {
     KeyPath kp = KeyPathCert::build(*storage_, chain_, kLeaf);
-    kp.path.back().working_pubkey = Crypto::generate_keypair().pub;
+    const KeyPair stranger = Crypto::generate_keypair();
+    kp.births.back().payload =
+        Serializer::encode(BirthPayload{kLeaf, stranger.pub, stranger.pub});
 
     EXPECT_THROW(KeyPathCert::verify(kp), SignatureError);
 }
@@ -91,20 +122,20 @@ TEST_F(KeyPathTest, GraftedKeyIsRejected) {
 // self-signature covers structural_pubkey.
 TEST_F(KeyPathTest, ForeignRootIsRejected) {
     KeyPath kp = KeyPathCert::build(*storage_, chain_, kLeaf);
-    kp.path.front().structural_pubkey = Crypto::generate_keypair().pub;
+    kp.root.structural_pubkey = Crypto::generate_keypair().pub;
 
     EXPECT_THROW(KeyPathCert::verify(kp), SignatureError);
 }
 
 TEST_F(KeyPathTest, BrokenLinkIsRejected) {
     KeyPath kp = KeyPathCert::build(*storage_, chain_, kLeaf);
-    kp.path.erase(kp.path.begin() + 5);
+    kp.births.erase(kp.births.begin() + 5);
 
     EXPECT_THROW(KeyPathCert::verify(kp), ChainIntegrityError);
 }
 
 TEST_F(KeyPathTest, EmptyPathIsRejected) {
-    EXPECT_THROW(KeyPathCert::verify(KeyPath{}), ChainIntegrityError);
+    EXPECT_THROW(KeyPathCert::verify(KeyPath{}), ChainIntegrityError);   // no root's record
 }
 
 // The reader finds the key among nodes it already holds — own and partners'
@@ -147,7 +178,7 @@ TEST_F(KeyPathTest, RotatedBranchIsStillAttributable) {
     bc_->rotate_key(chain_, kLeaf, keys_[kLeaf], fresh, 1'000);
 
     const KeyPath kp = KeyPathCert::build(*storage_, chain_, kLeaf);
-    ASSERT_EQ(kp.rotations.size(), 1u);
+    ASSERT_EQ(changes_of(kp, kLeaf), 1u);
     EXPECT_EQ(KeyPathCert::verify(kp), chain_);
     EXPECT_EQ(KeyPathCert::signer_key(kp), fresh.pub);   // уже новый, не узловой
 }
@@ -159,7 +190,7 @@ TEST_F(KeyPathTest, ChainOfRotationsWalksToTheNewestKey) {
     bc_->rotate_key(chain_, kLeaf, second,       third,  2'000);
 
     const KeyPath kp = KeyPathCert::build(*storage_, chain_, kLeaf);
-    ASSERT_EQ(kp.rotations.size(), 2u);
+    ASSERT_EQ(changes_of(kp, kLeaf), 2u);
     EXPECT_EQ(KeyPathCert::verify(kp), chain_);
     EXPECT_EQ(KeyPathCert::signer_key(kp), third.pub);
 }
@@ -172,7 +203,7 @@ TEST_F(KeyPathTest, RotationsSurviveCborRoundTrip) {
     const auto    bytes = Serializer::encode(kp);
     const KeyPath back  = Serializer::decode_key_path(bytes.data(), bytes.size());
 
-    ASSERT_EQ(back.rotations.size(), 1u);
+    ASSERT_EQ(changes_of(back, kLeaf), 1u);
     EXPECT_EQ(KeyPathCert::verify(back), chain_);
     EXPECT_EQ(KeyPathCert::signer_key(back), fresh.pub);
 }
@@ -184,25 +215,92 @@ TEST_F(KeyPathTest, RotationSignedByAStrangerIsRejected) {
     bc_->rotate_key(chain_, kLeaf, keys_[kLeaf], fresh, 1'000);
 
     KeyPath kp = KeyPathCert::build(*storage_, chain_, kLeaf);
-    ASSERT_EQ(kp.rotations.size(), 1u);
-    const KeyPair stranger = Crypto::generate_keypair();
-    Block forged = kp.rotations[0];
-    forged.signature = Signature::null();
-    const auto bytes = Serializer::encode(forged);
-    forged.signature = Crypto::sign(bytes.data(), bytes.size(), stranger.sec);
-    kp.rotations[0]  = forged;
+    ASSERT_EQ(kp.changes.size(), 1u);
+    kp.changes[0] = resigned(kp.changes[0], Crypto::generate_keypair());
 
     EXPECT_THROW(KeyPathCert::verify(kp), SignatureError);
 }
 
-// Звено смены из другой ветки той же цепи к этому пути не относится.
+// Звено смены ветки, которой нет на пути, к этому пути не относится.
 TEST_F(KeyPathTest, RotationFromAnotherBranchIsRejected) {
     const KeyPair fresh = Crypto::generate_keypair();
     bc_->rotate_key(chain_, kLeaf, keys_[kLeaf], fresh, 1'000);
 
     KeyPath kp = KeyPathCert::build(*storage_, chain_, kLeaf);
-    ASSERT_EQ(kp.rotations.size(), 1u);
-    kp.rotations[0].address.node_index = 7;     // путь ведёт к листу, не к узлу 7
+    ASSERT_EQ(kp.changes.size(), 1u);
+    kp.changes[0].address.node_index = 2;       // путь ведёт к листу через 1, не через 2
 
     EXPECT_THROW(KeyPathCert::verify(kp), ChainIntegrityError);
+}
+
+// ── История ключа родителя (blockchain.md §11.2, решение 2026-11-02) ──────────
+//
+// Подпись узла на месте i его ветки проверяется ключом, действующим там: ключ из
+// рождения, проведённый через смены ключа до i.
+
+// Родитель сменил ключ и рождает новым; потомок, рождённый до смены, стоит со
+// старым. Вор со старым ключом после смены не родит.
+TEST_F(KeyPathTest, ARotatedParentGivesBirth) {
+    const KeyPair fresh = Crypto::generate_keypair();
+    bc_->rotate_key(chain_, 1, keys_[1], fresh, 1'000);
+    keys_[4] = Crypto::generate_keypair();
+    bc_->ensure_path(chain_, 4, [&](NodeIndex i) { return i == 1 ? fresh : keys_.at(i); }, 2'000);
+
+    const KeyPath kp = KeyPathCert::build(*storage_, chain_, 4);
+    EXPECT_EQ(KeyPathCert::verify(kp), chain_);
+    EXPECT_EQ(KeyPathCert::key_at(kp, 1, 0), keys_[1].pub);      // до смены
+    EXPECT_EQ(KeyPathCert::key_at(kp, 1, KeyPathCert::kNow), fresh.pub);
+    EXPECT_NO_THROW(validator_->validate_path(chain_, 4));
+    EXPECT_NO_THROW(validator_->validate_path(chain_, kLeaf));   // родившиеся раньше
+
+    KeyPath forged = kp;   // рождение после смены, подписанное старым ключом
+    forged.births.back() = resigned(forged.births.back(), keys_[1]);
+    EXPECT_THROW(KeyPathCert::verify(forged), SignatureError);
+}
+
+// Ключ родителя заменён записью деда; блок замены стоит сразу за линией и называет
+// запись. Заменённый родитель рождает и отзывает — путь и сертификат проходят.
+TEST_F(KeyPathTest, AReplacedParentGivesBirthAndRevokes) {
+    const Block   line = storage_->get_block({chain_, 3, 0});   // рождение узла 7
+    const KeyPair repl = Crypto::generate_keypair();
+    const Block   rec  = bc_->revoke_node(chain_, 3, repl.pub, 1, keys_[1], 1'000,
+                                          Crypto::hash_block(line));
+    storage_->put_block(replacement_block(3, line, rec, repl));
+    keys_[8] = Crypto::generate_keypair();
+    bc_->ensure_path(chain_, 8, [&](NodeIndex i) { return i == 3 ? repl : keys_.at(i); }, 2'000);
+
+    const KeyPath kp = KeyPathCert::build(*storage_, chain_, 8);
+    ASSERT_EQ(kp.records.size(), 1u);
+    EXPECT_EQ(KeyPathCert::verify(kp), chain_);
+    EXPECT_EQ(KeyPathCert::key_at(kp, 3, KeyPathCert::kNow), repl.pub);
+    EXPECT_NO_THROW(validator_->validate_path(chain_, 8));
+
+    // Отзыв ключа потомка 7 тем же заменённым родителем.
+    const Block r7 = bc_->revoke_node(chain_, 7, std::nullopt, 3, repl, 3'000);
+    const auto cert = RevocationCert::build(*storage_, r7.address);
+    EXPECT_NO_THROW(RevocationCert::verify(cert));
+}
+
+// Подделки блока замены: чужая подпись, не то место, запись не приложена.
+TEST_F(KeyPathTest, AForgedReplacementIsRejected) {
+    const Block   line = storage_->get_block({chain_, 3, 0});
+    const KeyPair repl = Crypto::generate_keypair();
+    const Block   rec  = bc_->revoke_node(chain_, 3, repl.pub, 1, keys_[1], 1'000,
+                                          Crypto::hash_block(line));
+    storage_->put_block(replacement_block(3, line, rec, repl));
+    const KeyPath good = KeyPathCert::build(*storage_, chain_, 3);
+    ASSERT_EQ(KeyPathCert::verify(good), chain_);
+
+    KeyPath thief = good;   // ключ вора вместо замены
+    thief.changes.back() = resigned(thief.changes.back(), keys_[3]);
+    EXPECT_THROW(KeyPathCert::verify(thief), SignatureError);
+
+    KeyPath elsewhere = good;   // не сразу за линией
+    elsewhere.changes.back().address.block_index = 5;
+    elsewhere.changes.back() = resigned(elsewhere.changes.back(), repl);
+    EXPECT_THROW(KeyPathCert::verify(elsewhere), ChainIntegrityError);
+
+    KeyPath bare = good;   // без записи деда
+    bare.records.clear();
+    EXPECT_THROW(KeyPathCert::verify(bare), ChainIntegrityError);
 }

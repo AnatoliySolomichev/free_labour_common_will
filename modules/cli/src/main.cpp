@@ -543,7 +543,7 @@ static RevFetchResult fetch_import_revocations(LmdbStorage& storage,
             if (!(cert.block.address.user_id == chain))
                 throw RevocationError("certificate belongs to another chain");
 
-            for (const auto& node : cert.path)
+            for (const auto& node : KeyPathCert::nodes(cert.path))
                 if (!storage.has_node(chain, node.index))
                     storage.put_node(chain, node);
             if (!storage.has_block(cert.block.address) &&
@@ -686,8 +686,8 @@ static bool signed_by_branch(Context& ctx, const std::string& via, const Block& 
             try {
                 const KeyPath kp = Serializer::decode_key_path(
                     reinterpret_cast<const uint8_t*>(res->body.data()), res->body.size());
-                if (KeyPathCert::verify(kp) == chain && kp.path.back().index == node) {
-                    for (const Node& n : kp.path)
+                if (KeyPathCert::verify(kp) == chain && KeyPathCert::node(kp) == node) {
+                    for (const Node& n : KeyPathCert::nodes(kp))
                         if (!ctx.storage.has_node(chain, n.index)) ctx.storage.put_node(chain, n);
                     got = kp;
                 }
@@ -696,11 +696,11 @@ static bool signed_by_branch(Context& ctx, const std::string& via, const Block& 
         it = asked.emplace(std::make_pair(chain, node), got).first;
     }
     if (it != asked.end() && it->second) {
-        PublicKey key = it->second->path.back().working_pubkey;
-        for (const Block& r : it->second->rotations)
-            if (r.address.block_index < b.address.block_index && r.payload.size() >= 32)
-                std::copy(r.payload.begin(), r.payload.begin() + 32, key.bytes.begin());
-        if (by(key)) return true;
+        // The key at this block's place: the node's, carried through the key
+        // changes before it (blockchain.md §7.5).
+        try {
+            if (by(KeyPathCert::key_at(*it->second, node, b.address.block_index))) return true;
+        } catch (const std::exception&) {}
     }
     return revoked && revoked->replacement_pubkey && by(*revoked->replacement_pubkey);
 }
@@ -1750,7 +1750,7 @@ private:
 
                 // Путь проверен — его узлы можно держать у себя: дальше этот
                 // ключ узнаётся без склада.
-                for (const Node& n : kp.path)
+                for (const Node& n : KeyPathCert::nodes(kp))
                     if (!storage_.has_node(chain, n.index))
                         storage_.put_node(chain, n);
                 known_.emplace(key, chain);
@@ -6434,7 +6434,7 @@ static int cmd_merge_create(const fs::path& data_dir, int argc, char** argv) {
     state.peer_snap_cbor   = snap_cbor;
     save_merge_state(data_dir, leaf, state);
 
-    const auto pid = to_hex(partner_tip.path.front().structural_pubkey.bytes);
+    const auto pid = to_hex(partner_tip.path.root.structural_pubkey.bytes);
     std::cerr << "Partner verified: " << pid.substr(0, 16) << "...\n";
     std::cerr << "MERGE half #" << half.address.block_index << " written.\n";
     const auto half_bytes = Serializer::encode(half);
@@ -10081,7 +10081,8 @@ static int cmd_keypath_publish(const fs::path& data_dir, int argc, char** argv) 
     }
     std::cout << "ключ:  " << to_hex(KeyPathCert::signer_key(kp).bytes) << "\n"
               << "цепь:  " << to_hex(ctx.user_id.bytes) << "\n"
-              << "узлов в пути: " << kp.path.size() << "  → " << via << "\n"
+              << "узлов в пути: " << kp.births.size() + 1 << ", смен ключа: " << kp.changes.size()
+              << "  → " << via << "\n"
               << "(агрегатор проверил путь, читатель проверит его снова)\n";
     return 0;
 }
@@ -10381,7 +10382,7 @@ static std::string block_gist(const Block& b) {
 // Whether `h` names a block of the branch in this storage, or the point before
 // its block #0 — the node itself, «no valid block».
 static bool known_here(LmdbStorage& storage, const UserId& uid, NodeIndex node, const Hash& h) {
-    if (h == Crypto::hash_node(storage.get_node(uid, node))) return true;
+    if (h == branch_origin(storage.get_node(uid, node))) return true;
     const auto tip = storage.branch_tip_index(uid, node);
     if (!tip.has_value()) return false;
     for (BlockIndex i = 0; i <= *tip; ++i)
@@ -10583,7 +10584,7 @@ static int cmd_revoke_create(const fs::path& data_dir, int argc, char** argv) {
         if (lg == "tip") {
             last_good = bc.branch_tip_hash(uid, revoked);    // of an empty branch: `none`
         } else if (lg == "none") {
-            last_good = Crypto::hash_node(storage.get_node(uid, revoked));
+            last_good = branch_origin(storage.get_node(uid, revoked));
         } else {
             Hash h{};
             if (!from_hex(lg, h.bytes.data(), h.bytes.size()))

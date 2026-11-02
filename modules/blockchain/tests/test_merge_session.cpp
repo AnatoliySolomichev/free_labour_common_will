@@ -1,4 +1,5 @@
 #include "blockchain/merge_session.h"
+#include "blockchain/key_path.h"
 #include "blockchain/blockchain.h"
 #include "blockchain/validator.h"
 #include "blockchain/crypto.h"
@@ -80,15 +81,14 @@ TEST_F(MergeSessionTest, PrepareTipEmptyBranch) {
     BranchTipInfo tip = alice_->ms->prepare_tip(alice_->root_kp.pub, LEAF);
 
     EXPECT_EQ(tip.tip_address.block_index, EMPTY_BRANCH_INDEX);
-    ASSERT_FALSE(tip.path.empty());
-    EXPECT_EQ(tip.path.front().index, 0u);
-    EXPECT_EQ(tip.path.back().index,  LEAF);
+    EXPECT_EQ(tip.path.root.index, 0u);
+    EXPECT_EQ(KeyPathCert::node(tip.path), LEAF);
     EXPECT_FALSE(tip.tip_block.has_value());
 
-    // tip_hash for empty branch == hash of leaf node
-    Node leaf     = alice_->storage->get_node(alice_->root_kp.pub, LEAF);
-    Hash expected = Crypto::hash_node(leaf);
-    EXPECT_EQ(tip.tip_hash, expected);
+    // tip_hash for an empty branch: where its block #0 will grow from — the birth
+    Node leaf = alice_->storage->get_node(alice_->root_kp.pub, LEAF);
+    EXPECT_EQ(tip.tip_hash, leaf.birth.hash);
+    EXPECT_EQ(tip.tip_hash, branch_origin(leaf));
 }
 
 TEST_F(MergeSessionTest, PrepareTipWithBlocks) {
@@ -119,17 +119,25 @@ TEST_F(MergeSessionTest, VerifyPartnerTipBadNodeSig) {
     alice_->setup_leaf();
     BranchTipInfo tip = alice_->ms->prepare_tip(alice_->root_kp.pub, LEAF);
 
-    // Corrupt the root node's self-signature
-    tip.path[0].parent_sig.bytes[0] ^= 0xFF;
+    // Corrupt the root's self-signature
+    tip.path.root.root_sig.bytes[0] ^= 0xFF;
     EXPECT_THROW(bob_->ms->verify_partner_tip(tip), SignatureError);
 }
 
-TEST_F(MergeSessionTest, VerifyPartnerTipBadParentHash) {
+TEST_F(MergeSessionTest, VerifyPartnerTipMissingBirth) {
     alice_->setup_leaf();
     BranchTipInfo tip = alice_->ms->prepare_tip(alice_->root_kp.pub, LEAF);
 
-    // Corrupt an intermediate node's parent_hash
-    tip.path[1].parent_hash.bytes[0] ^= 0xFF;
+    // Drop an intermediate birth: the path no longer links parent → child
+    tip.path.births.erase(tip.path.births.begin() + 1);
+    EXPECT_THROW(bob_->ms->verify_partner_tip(tip), ChainIntegrityError);
+}
+
+// A path to another branch than the tip's does not pass.
+TEST_F(MergeSessionTest, VerifyPartnerTipPathToAnotherBranch) {
+    alice_->setup_leaf();
+    BranchTipInfo tip = alice_->ms->prepare_tip(alice_->root_kp.pub, LEAF);
+    tip.path.births.pop_back();
     EXPECT_THROW(bob_->ms->verify_partner_tip(tip), ChainIntegrityError);
 }
 
@@ -205,7 +213,7 @@ TEST_F(MergeSessionTest, ImportPartnerDataEmptyBranch) {
     EXPECT_NO_THROW(bob_->ms->import_partner_data(alice_tip));
 
     // Alice's path nodes are now in Bob's storage under Alice's user_id
-    for (const Node& node : alice_tip.path)
+    for (const Node& node : KeyPathCert::nodes(alice_tip.path))
         EXPECT_TRUE(bob_->storage->has_node(alice_->root_kp.pub, node.index));
 
     // No external block stored (empty branch)
@@ -226,7 +234,7 @@ TEST_F(MergeSessionTest, ImportPartnerDataWithBlock) {
     bob_->ms->import_partner_data(alice_tip);
 
     // Path nodes imported
-    for (const Node& node : alice_tip.path)
+    for (const Node& node : KeyPathCert::nodes(alice_tip.path))
         EXPECT_TRUE(bob_->storage->has_node(alice_->root_kp.pub, node.index));
 
     // Tip block stored in external_blocks

@@ -27,7 +27,7 @@ namespace chainsync {
 // (blockchain.md §6.5.6) can be assembled for any cached participant of any
 // cached snapshot root.
 //
-// The cache is deliberately dumb storage: it does NOT validate node paths or
+// The cache is deliberately dumb storage: it does NOT validate key paths or
 // evidence signatures on ingestion — FraudProof::verify is the judge. What it
 // does guarantee is key consistency: leaf keys are recomputed from the record
 // (leaf_hash(ref)) and composition parents are recomputed from the children
@@ -40,7 +40,7 @@ namespace chainsync {
 // Everything the snapshot commitment omits about one participant (sync.md §5.1).
 struct LeafRecord {
     blockchain::ExternalRef       ref;        // (chain, node, block, committed hash)
-    std::vector<blockchain::Node> node_path;  // root..ref.node of ref.chain
+    blockchain::KeyPath           path;       // key path root..ref.node of ref.chain (blockchain.md §7.5)
     blockchain::Block             evidence;   // participant's block-0 (preimage of block_hash)
 };
 

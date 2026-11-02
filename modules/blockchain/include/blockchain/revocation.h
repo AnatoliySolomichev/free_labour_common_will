@@ -7,13 +7,13 @@
 namespace blockchain {
 
 // Self-verifying revocation certificate (blockchain.md §6.7 rule 8): the REVOCATION block
-// plus the node path from root to its author. Carries everything a third party
-// needs to check the revocation without access to the owner's chain;
-// distributed via the aggregator warehouse (sync.md §7.2, sync.md §10.3) and gossip.
+// plus the key path from the root to its author, with the author's key changes
+// (blockchain.md §7.5). Carries everything a third party needs to check the
+// revocation without access to the owner's chain; distributed via the
+// aggregator warehouse (sync.md §7.2, sync.md §10.3) and gossip.
 struct RevocationCertificate {
-    Block             block;  // the REVOCATION block in the author's branch
-    std::vector<Node> path;   // nodes root → author, inclusive
-    std::vector<Block> births; // BIRTH blocks of the path (blockchain.md §11.2)
+    Block   block;  // the REVOCATION block in the author's branch
+    KeyPath path;   // root → author, with every key change of the path's nodes
 };
 
 class RevocationCert {
@@ -27,13 +27,11 @@ public:
                                        const BlockAddress& revocation_block);
 
     // Autonomous verification — no storage access (blockchain.md §6.7 rule 8):
-    //  - path: starts at a self-signed root (index 0, zero parent_hash), every
-    //    next node is a child of the previous one, parent_hash and parent
-    //    signatures link up;
+    //  - path: KeyPathCert::verify;
     //  - identity: root structural key == block.address.user_id;
-    //  - author: the path tip is the block's node, and the block is signed by
-    //    the tip's working key (a rotated author branch needs a certificate
-    //    re-issued from a fresh block — MVP limitation);
+    //  - author: the path ends at the block's node, and the block is signed by
+    //    the author's key in force at its place — a rotated or replaced author
+    //    signs with its new key (blockchain.md §11.2, решение 2026-11-02);
     //  - payload: decodes, revoked node is valid, not the root, and a strict
     //    descendant of the author (self-revocation impossible).
     // What it cannot check without the revoked branch: that revoked_pubkey is

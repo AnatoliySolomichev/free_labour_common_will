@@ -2,26 +2,12 @@
 #include "blockchain/crypto.h"
 #include "blockchain/serializer.h"
 #include "blockchain/errors.h"
+#include "blockchain/key_path.h"
 #include <algorithm>
 
 namespace blockchain {
 namespace {
 
-// Build a signed node. parent_sec signs the canonical CBOR (with parent_sig zeroed).
-Node build_signed_node(NodeIndex idx, const KeyPair& kp,
-                       const Hash& parent_hash, const SecretKey& parent_sec,
-                       const BirthRef& birth) {
-    Node n{};
-    n.index              = idx;
-    n.structural_pubkey  = kp.pub;
-    n.working_pubkey     = kp.pub; // MVP: structural == working
-    n.parent_hash        = parent_hash;
-    n.birth              = birth;
-    n.parent_sig         = Signature::null();
-    auto bytes           = Serializer::encode(n);
-    n.parent_sig         = Crypto::sign(bytes.data(), bytes.size(), parent_sec);
-    return n;
-}
 
 // Build a signed block. signature covers the CBOR encoding with signature zeroed.
 Block build_signed_block(const BlockAddress& addr, const Hash& prev_hash,
@@ -51,8 +37,15 @@ Node Blockchain::create_identity(const KeyPair& root_keypair) {
     const UserId& uid = root_keypair.pub;
     if (storage_.has_node(uid, 0))
         throw InvalidArgumentError("identity already exists for this key");
-    // Root: parent_hash = zero, self-signed (parent_sec = own sec).
-    Node n = build_signed_node(0, root_keypair, Hash::zero(), root_keypair.sec, BirthRef{});
+    // The root has no parent: its record is signed by itself (blockchain.md §6.1).
+    Node n{};
+    n.index             = 0;
+    n.structural_pubkey = root_keypair.pub;
+    n.working_pubkey    = root_keypair.pub;   // MVP: structural == working
+    n.birth             = BirthRef{};
+    n.root_sig          = Signature::null();
+    const auto bytes    = Serializer::encode(n);
+    n.root_sig          = Crypto::sign(bytes.data(), bytes.size(), root_keypair.sec);
     storage_.put_node(uid, n);
     return n;
 }
@@ -80,8 +73,6 @@ std::vector<Node> Blockchain::ensure_path(
 
         KeyPair kp         = key_for(idx);
         NodeIndex par_idx  = (idx - 1) / 2;
-        Node parent        = storage_.get_node(user_id, par_idx);
-        Hash ph            = Crypto::hash_node(parent);
         KeyPair parent_kp  = key_for(par_idx);
 
         // Born by a block in the parent's branch (blockchain.md §11.2), wherever
@@ -97,8 +88,9 @@ std::vector<Node> Blockchain::ensure_path(
             Serializer::encode(BirthPayload{idx, kp.pub, kp.pub}), parent_kp.sec);
         storage_.put_block(birth);
 
-        Node n = build_signed_node(idx, kp, ph, parent_kp.sec,
-                                   BirthRef{at, Crypto::hash_block(birth)});
+        // The node is what its birth says, signed once — by the parent, in the
+        // birth block (решение участника 2026-11-02).
+        Node n = node_born(birth);
         storage_.put_node(user_id, n);
         created.push_back(n);
     }
@@ -124,10 +116,8 @@ std::vector<Node> Blockchain::get_path(const UserId& user_id,
 Hash Blockchain::branch_tip_hash(const UserId& user_id,
                                   NodeIndex leaf_index) const {
     auto tip_opt = storage_.branch_tip_index(user_id, leaf_index);
-    if (!tip_opt.has_value()) {
-        Node leaf = storage_.get_node(user_id, leaf_index);
-        return Crypto::hash_node(leaf);
-    }
+    if (!tip_opt.has_value())   // block #0 grows from the birth (blockchain.md §5.3)
+        return branch_origin(storage_.get_node(user_id, leaf_index));
     Block b = storage_.get_block({user_id, leaf_index, *tip_opt});
     return Crypto::hash_block(b);
 }
@@ -250,7 +240,7 @@ Block Blockchain::revoke_node(
     // rule 12): the last valid block must be one of its blocks.
     std::optional<LastGood> line;
     if (last_good.has_value() &&
-        *last_good == Crypto::hash_node(storage_.get_node(user_id, revoked_node_index))) {
+        *last_good == branch_origin(storage_.get_node(user_id, revoked_node_index))) {
         line = LastGood{EMPTY_BRANCH_INDEX, *last_good};   // no valid block at all
     } else if (last_good.has_value()) {
         if (auto tip = storage_.branch_tip_index(user_id, revoked_node_index); tip.has_value())
