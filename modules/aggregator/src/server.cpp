@@ -378,9 +378,15 @@ void AggregatorServer::setup_routes() {
             bool added = storage_.add_block(b);
             if (added && !contested && b.type == BlockType::KEY_ROTATION) keys_.learn_rotation(b);
             if (added && contested) settle_forks(storage_, keys_, b.address.user_id);
+            // A fork answer says whose block stands on the number now: the
+            // owner's upload takes it from a thief's once the line is named.
+            const auto now_in_place = contested ? storage_.get_block(b.address) : std::nullopt;
+            const bool took_place   = now_in_place.has_value()
+                && Crypto::hash_block(*now_in_place) == Crypto::hash_block(b);
             res.status = 200;
             res.set_content(!added   ? "{\"status\":\"duplicate\"}"
-                            : contested ? "{\"status\":\"fork\"}"
+                            : contested ? std::string("{\"status\":\"fork\",\"in_place\":")
+                                              + (took_place ? "true" : "false") + "}"
                                         : "{\"status\":\"accepted\"}",
                             "application/json");
         } catch (const SerializationError& e) {

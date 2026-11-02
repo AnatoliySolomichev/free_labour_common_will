@@ -113,6 +113,19 @@ public:
     BranchRevocationStatus branch_revocation_status(
         const UserId& user_id, NodeIndex node_index) const;
 
+    // Whether `more` continues the branch as this storage holds it, before
+    // anything is stored — blocks of an own branch learned elsewhere, by the
+    // owner without a copy of it (blockchain.md §6.7 rule 12): consecutive
+    // numbers from the next one, prev_hash links from the stored tip (from the
+    // node for an empty branch), no date before the previous one or before the
+    // birth (blockchain.md §11.2), each block signed by the branch's key at its
+    // place — the key epochs as branch_revocation_status follows them. Under a
+    // revocation the blocks may be in question or off a line: structure ≠ weight
+    // (rule 11). Throws: ChainIntegrityError, TimestampError, SignatureError,
+    // NodeNotFoundError.
+    void check_continuation(const UserId& user_id, NodeIndex node_index,
+                            const std::vector<Block>& more) const;
+
     // Whether a birth stands under a revocation of the parent (rule 6): on the
     // owner's line it names; with no line named nothing stands yet.
     bool birth_stands(const Block& birth, const RevocationState& st) const;
@@ -151,6 +164,10 @@ private:
     // by time, or when signed by the author's replacement.
     bool author_record_counts(const Block& record, bool own_branch,
                               const RevocationState& author_state) const;
+
+    // branch_revocation_status over the stored branch followed by `more`.
+    BranchRevocationStatus status_over(const UserId& user_id, NodeIndex node_index,
+                                       const std::vector<Block>& more) const;
 
     const IStorage& storage_;
 };

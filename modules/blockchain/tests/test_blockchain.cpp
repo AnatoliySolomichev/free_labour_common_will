@@ -1155,3 +1155,125 @@ TEST_F(BlockchainTest, ChildrenAreBornOneByOneAnywhereInTheBranch) {
     bc_->append_data_block(root_kp_.pub, 2, {0x80}, keys.at(2), 299LL);
     EXPECT_THROW(validator_->validate_branch(root_kp_.pub, 2), TimestampError);
 }
+
+// ── The owner without a copy of the branch (blockchain.md §6.7 rule 12) ─────────
+
+// Второе устройство того же хозяина — сейф с ключами предков: узлы и ветки предков
+// есть, ветки 7 нет. Её блоки приходят извне (агрегатор, партнёр).
+class RestoreTest : public RevocationTest {
+protected:
+    std::filesystem::path        safe_path_;
+    std::unique_ptr<LmdbStorage> safe_;
+    std::unique_ptr<Validator>   safe_validator_;
+    std::unique_ptr<Blockchain>  safe_bc_;
+
+    void SetUp() override {
+        RevocationTest::SetUp();
+        safe_path_ = db_path_.string() + "_safe";
+        std::filesystem::remove_all(safe_path_);
+        safe_           = std::make_unique<LmdbStorage>(safe_path_);
+        safe_validator_ = std::make_unique<Validator>(*safe_);
+        safe_bc_        = std::make_unique<Blockchain>(*safe_, *safe_validator_);
+        for (NodeIndex i : {0u, 1u, 3u, 7u})
+            safe_->put_node(root_kp_.pub, storage_->get_node(root_kp_.pub, i));
+        for (NodeIndex i : {0u, 1u, 3u})
+            for (const Block& b : bc_->get_branch(root_kp_.pub, i)) safe_->put_block(b);
+    }
+    void TearDown() override {
+        safe_bc_.reset(); safe_validator_.reset(); safe_.reset();
+        std::filesystem::remove_all(safe_path_);
+        RevocationTest::TearDown();
+    }
+    static Block resigned(Block b, const KeyPair& kp) {
+        b.signature      = Signature::null();
+        const auto bytes = Serializer::encode(b);
+        b.signature      = Crypto::sign(bytes.data(), bytes.size(), kp.sec);
+        return b;
+    }
+};
+
+// Линия называется по блокам, взятым извне, а замена продолжает сразу за ней.
+TEST_F(RestoreTest, AnOwnerWithoutACopyNamesTheLineFromBlocksTakenElsewhere) {
+    const Block b0 = bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 1'000LL);
+    const Block b1 = bc_->append_data_block(root_kp_.pub, 7, {0x02}, kp7_, 2'000LL);
+    bc_->append_data_block(root_kp_.pub, 7, {0x03}, kp7_, 3'000LL);   // вора, скажем
+
+    // Без самих блоков сейф линию не назовёт.
+    EXPECT_THROW(safe_bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, kp3_, 4'000LL,
+                                       Crypto::hash_block(b1)),
+                 InvalidArgumentError);
+
+    safe_bc_->restore_branch(root_kp_.pub, 7, {b0, b1});
+    EXPECT_EQ(safe_->branch_tip_index(root_kp_.pub, 7), std::optional<BlockIndex>(1u));
+
+    const KeyPair repl = Crypto::generate_keypair();
+    safe_bc_->revoke_node(root_kp_.pub, 7, repl.pub, 3, kp3_, 4'000LL, Crypto::hash_block(b1));
+    const Block next = safe_bc_->append_data_block(root_kp_.pub, 7, {0x04}, repl, 5'000LL);
+    EXPECT_EQ(next.address.block_index, 2u);
+    EXPECT_EQ(next.prev_hash, Crypto::hash_block(b1));
+
+    const auto st = safe_validator_->branch_revocation_status(root_kp_.pub, 7);
+    ASSERT_EQ(st.blocks.size(), 3u);
+    for (auto s : st.blocks) EXPECT_EQ(s, BlockRevocationStatus::CLEAN);
+    EXPECT_NO_THROW(safe_bc_->validate_branch(root_kp_.pub, 7));
+}
+
+// Стоп-кран сразу, линия потом: блоки под вопросом всё равно берутся, их вес
+// решает названная линия, а не приём (правило 11).
+TEST_F(RestoreTest, UnderAFullStopTheLineIsNamedLater) {
+    const Block b0 = bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 1'000LL);
+    safe_bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, kp3_, 2'000LL);
+    safe_bc_->restore_branch(root_kp_.pub, 7, {b0});
+    EXPECT_EQ(safe_validator_->branch_revocation_status(root_kp_.pub, 7).blocks.at(0),
+              BlockRevocationStatus::SUSPECT);
+
+    safe_bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, kp3_, 3'000LL, Crypto::hash_block(b0));
+    EXPECT_EQ(safe_validator_->branch_revocation_status(root_kp_.pub, 7).blocks.at(0),
+              BlockRevocationStatus::CLEAN);
+}
+
+// Своя копия кончается раньше: взятое продолжает её, и смена ключа внутри
+// взятого участка переключает ожидаемый ключ (blockchain.md §6.6).
+TEST_F(RestoreTest, TakenBlocksContinueTheCopyAndFollowAKeyChange) {
+    const Block   b0  = bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 1'000LL);
+    const KeyPair k2  = Crypto::generate_keypair();
+    const Block   rot = bc_->rotate_key(root_kp_.pub, 7, kp7_, k2, 2'000LL);
+    const Block   b2  = bc_->append_data_block(root_kp_.pub, 7, {0x02}, k2, 3'000LL);
+    safe_->put_block(b0);
+
+    EXPECT_NO_THROW(safe_validator_->check_continuation(root_kp_.pub, 7, {rot, b2}));
+    EXPECT_EQ(safe_->branch_tip_index(root_kp_.pub, 7), std::optional<BlockIndex>(0u));  // проверка не пишет
+
+    safe_bc_->restore_branch(root_kp_.pub, 7, {rot, b2});
+    EXPECT_EQ(safe_->branch_tip_index(root_kp_.pub, 7), std::optional<BlockIndex>(2u));
+    EXPECT_NO_THROW(safe_bc_->validate_branch(root_kp_.pub, 7));
+}
+
+// Что не продолжает ветку, не берётся — и тогда не берётся ничего из пачки.
+TEST_F(RestoreTest, WhatDoesNotContinueTheBranchIsNotTaken) {
+    const Block b0 = bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 1'000LL);
+    const Block b1 = bc_->append_data_block(root_kp_.pub, 7, {0x02}, kp7_, 2'000LL);
+    const auto take = [&](const std::vector<Block>& blocks) {
+        safe_bc_->restore_branch(root_kp_.pub, 7, blocks);
+    };
+
+    EXPECT_THROW(take({b1}), ChainIntegrityError);                         // пропуск №0
+    EXPECT_THROW(take({b1, b0}), ChainIntegrityError);                     // не по порядку
+    const Block other = bc_->append_data_block(root_kp_.pub, 3, {0x05}, kp3_, 1'500LL);
+    EXPECT_THROW(take({other}), ChainIntegrityError);                      // чужая ветка
+
+    const KeyPair stranger = Crypto::generate_keypair();
+    EXPECT_THROW(take({resigned(b0, stranger)}), SignatureError);           // чужая подпись
+    Block tampered = b1;
+    tampered.payload = {0x09};                                              // подмена после подписи
+    EXPECT_THROW(take({b0, tampered}), SignatureError);
+
+    Block early = b1;
+    early.timestamp_claimed = 500LL;
+    EXPECT_THROW(take({b0, resigned(early, kp7_)}), TimestampError);        // раньше предыдущего
+    Block before_birth = b0;
+    before_birth.timestamp_claimed = -5LL;
+    EXPECT_THROW(take({resigned(before_birth, kp7_)}), TimestampError);     // раньше рождения
+
+    EXPECT_FALSE(safe_->branch_tip_index(root_kp_.pub, 7).has_value());
+}

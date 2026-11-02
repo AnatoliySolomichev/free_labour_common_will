@@ -289,6 +289,12 @@ Block Blockchain::revoke_node(
     return b;
 }
 
+void Blockchain::restore_branch(const UserId& user_id, NodeIndex node_index,
+                                const std::vector<Block>& blocks) {
+    validator_.check_continuation(user_id, node_index, blocks);
+    for (const Block& b : blocks) storage_.put_block(b);
+}
+
 Block Blockchain::get_block(const BlockAddress& address) const {
     return storage_.get_block(address);
 }

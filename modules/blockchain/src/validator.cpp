@@ -158,6 +158,56 @@ std::optional<PublicKey> follow_replacements(const Records& records,
 
 BranchRevocationStatus Validator::branch_revocation_status(
     const UserId& user_id, NodeIndex node_index) const {
+    return status_over(user_id, node_index, {});
+}
+
+void Validator::check_continuation(const UserId& user_id, NodeIndex node_index,
+                                   const std::vector<Block>& more) const {
+    if (more.empty()) return;
+    const Node node = storage_.get_node(user_id, node_index);
+    const auto tip  = storage_.branch_tip_index(user_id, node_index);
+    BlockIndex next    = tip.has_value() ? *tip + 1 : 0;
+    Hash       prev    = Crypto::hash_node(node);
+    Timestamp  prev_ts = std::numeric_limits<Timestamp>::min();
+    if (tip.has_value()) {
+        const Block last = storage_.get_block({user_id, node_index, *tip});
+        prev    = Crypto::hash_block(last);
+        prev_ts = last.timestamp_claimed;
+    } else if (node_index != 0) {
+        // No branch is older than its birth (blockchain.md §11.2).
+        const BlockAddress at{user_id, (node_index - 1) / 2, node.birth.index};
+        prev_ts = (storage_.has_block(at) ? storage_.get_block(at)
+                                          : storage_.get_external_block(at)).timestamp_claimed;
+    }
+    for (const Block& b : more) {
+        if (!(b.address.user_id == user_id) || b.address.node_index != node_index ||
+            b.address.block_index != next)
+            throw ChainIntegrityError("block #" + std::to_string(b.address.block_index) +
+                                      " does not continue the branch: expected #" +
+                                      std::to_string(next) + " of node " +
+                                      std::to_string(node_index));
+        if (b.prev_hash != prev)
+            throw ChainIntegrityError("block #" + std::to_string(next) +
+                                      " does not continue the branch: prev_hash");
+        if (b.timestamp_claimed < prev_ts)
+            throw TimestampError(next == 0
+                ? "branch begins before its birth (blockchain.md §11.2)"
+                : "block timestamp is not monotonically non-decreasing");
+        prev    = Crypto::hash_block(b);
+        prev_ts = b.timestamp_claimed;
+        ++next;
+    }
+    // Signatures follow the key epochs (rules 3, 9), as in validate_branch: the
+    // walk attributes every block or throws SignatureError.
+    const auto st = status_over(user_id, node_index, more);
+    for (BlockIndex i = next - static_cast<BlockIndex>(more.size()); i < next; ++i)
+        if (st.blocks[i] == BlockRevocationStatus::INVALID_AFTER_REPLACEMENT)
+            throw SignatureError("block #" + std::to_string(i) + " signed by a key the "
+                                 "replacement took over from (blockchain.md §6.7 rule 9)");
+}
+
+BranchRevocationStatus Validator::status_over(const UserId& user_id, NodeIndex node_index,
+                                              const std::vector<Block>& more) const {
     BranchRevocationStatus out{};
     const Records records = winning_records(user_id, node_index);
     out.revocation = effective_revocation(user_id, node_index);
@@ -171,11 +221,14 @@ BranchRevocationStatus Validator::branch_revocation_status(
     struct Seen { size_t epoch; bool old_key; Timestamp ts; Hash hash; };
     std::vector<Seen> seen;
 
-    auto tip_opt = storage_.branch_tip_index(user_id, node_index);
-    if (tip_opt.has_value()) {
-        seen.reserve(*tip_opt + 1);
-        for (BlockIndex i = 0; i <= *tip_opt; ++i) {
-            Block b = storage_.get_block({user_id, node_index, i});
+    const auto       tip_opt = storage_.branch_tip_index(user_id, node_index);
+    const BlockIndex stored  = tip_opt.has_value() ? *tip_opt + 1 : 0;
+    const BlockIndex total   = stored + static_cast<BlockIndex>(more.size());
+    {
+        seen.reserve(total);
+        for (BlockIndex i = 0; i < total; ++i) {
+            const Block b = i < stored ? storage_.get_block({user_id, node_index, i})
+                                       : more[i - stored];
             bool old_key = false;
             if (!block_signed_by(b, current)) {
                 // The first use of a replacement switches the key (rule 9) —

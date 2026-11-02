@@ -7379,7 +7379,12 @@ static void attach_emission_link(Context& ctx, records::Transfer& t) {
 static void upload_block(Context& ctx, const std::string& via, const Block& block) {
     std::string answer;
     const int status = send_block(ctx, via, block, &answer);
-    if (status == 200 && answer.find("\"fork\"") != std::string::npos)
+    if (status == 200 && answer.find("\"fork\"") != std::string::npos &&
+        answer.find("\"in_place\":true") != std::string::npos)
+        std::cerr << "Uploaded to " << via << " — this block now holds its number; the "
+                     "other block on it is kept aside as evidence of the fork "
+                     "(blockchain.md §6.7 rule 13)\n";
+    else if (status == 200 && answer.find("\"fork\"") != std::string::npos)
         std::cerr << "Uploaded to " << via << " — another block already holds this "
                      "address: the branch is forked (blockchain.md §6.7 rule 13)\n";
     else if (status == 200)
@@ -10351,20 +10356,193 @@ static bool post_revocation_cert(const std::string& via, const UserId& chain,
     return res && res->status == 200;
 }
 
+// One line to recognize a block by: what it says, or what kind it is.
+static std::string block_gist(const Block& b) {
+    switch (b.type) {
+        case BlockType::MERGE:        return "[слияние]";
+        case BlockType::KEY_ROTATION: return "[смена ключа]";
+        case BlockType::REVOCATION:   return "[отзыв]";
+        case BlockType::BIRTH:        return "[рождение]";
+        case BlockType::DATA:         break;
+    }
+    if (b.payload.size() == 1 && b.payload[0] == 0x80) return "[заглушка]";
+    try {
+        return record_summary(Codec::decode(b.payload.data(), b.payload.size()));
+    } catch (const CodecError&) {}
+    try {
+        const auto batch = Codec::decode_list(b.payload.data(), b.payload.size());
+        std::string out  = "[список: " + std::to_string(batch.size()) + " зап.]";
+        if (!batch.empty()) out += " " + record_summary(batch.front());
+        return out;
+    } catch (const CodecError&) {}
+    return "[данные]";
+}
+
+// Whether `h` names a block of the branch in this storage, or the point before
+// its block #0 — the node itself, «no valid block».
+static bool known_here(LmdbStorage& storage, const UserId& uid, NodeIndex node, const Hash& h) {
+    if (h == Crypto::hash_node(storage.get_node(uid, node))) return true;
+    const auto tip = storage.branch_tip_index(uid, node);
+    if (!tip.has_value()) return false;
+    for (BlockIndex i = 0; i <= *tip; ++i)
+        if (Crypto::hash_block(storage.get_block({uid, node, i})) == h) return true;
+    return false;
+}
+
+// The owner without a copy of the branch names its last valid block from what
+// the aggregator holds (blockchain.md §6.7 rule 12). That block and every one
+// before it, down to where this storage's copy ends, come by hash along
+// prev_hash — the hash the owner named fixes them all, the aggregator only
+// carries them — and are stored as the branch's blocks once they check as its
+// continuation (Blockchain::restore_branch). The line is then named as from an
+// own copy, and a replacement continues right after it. Returns how many came.
+static std::size_t take_line_from(const std::string& via, LmdbStorage& storage,
+                                  Blockchain& bc, const UserId& uid, NodeIndex node,
+                                  const Hash& last) {
+    const auto tip  = storage.branch_tip_index(uid, node);
+    const Hash stop = bc.branch_tip_hash(uid, node);   // the copy's end, or the node
+    std::vector<Block> line;
+    Hash at = last;
+    while (at != stop) {
+        Ref ref{};
+        ref.chain = uid.bytes;
+        ref.hash  = at.bytes;
+        Block b;
+        try {
+            b = fetch_block_from(via, ref);
+        } catch (const std::exception& e) {
+            throw std::runtime_error(line.empty()
+                ? "--last-good: блока " + to_hex(at.bytes).substr(0, 12) + "… нет ни в этой "
+                  "базе, ни на " + via + " (" + e.what() + ")"
+                : "--last-good: на " + via + " нет блока перед №" +
+                  std::to_string(line.back().address.block_index) + " — линию не собрать");
+        }
+        const BlockIndex i = b.address.block_index;
+        if (b.address.node_index != node)
+            throw std::runtime_error("--last-good: блок " + to_hex(at.bytes).substr(0, 12) +
+                                     "… из ветки " + std::to_string(b.address.node_index) +
+                                     ", а не " + std::to_string(node));
+        if (!line.empty() && i + 1 != line.back().address.block_index)
+            throw std::runtime_error("--last-good: блоки на " + via + " идут не подряд");
+        if (tip.has_value() && i <= *tip)
+            throw std::runtime_error("--last-good: названный блок не продолжает копию ветки " +
+                                     std::to_string(node) + " в этой базе — здесь другой блок №" +
+                                     std::to_string(i));
+        line.push_back(b);
+        if (i == 0 && b.prev_hash != stop)
+            throw std::runtime_error("--last-good: блок №0 на " + via +
+                                     " начинается не от узла " + std::to_string(node));
+        at = b.prev_hash;
+    }
+    std::reverse(line.begin(), line.end());
+    bc.restore_branch(uid, node, line);
+    return line.size();
+}
+
+// bc revoke blocks --node N --via URL
+// The branch as the aggregator holds it, block by block — for the owner without
+// a copy of it to find the last block that is theirs (blockchain.md §6.7 rule 12)
+// and name it: bc revoke create --node N --last-good HASH --via URL. A second
+// block on one number (a fork, rule 13) is listed under the first one.
+static int cmd_revoke_blocks(const fs::path& data_dir, int argc, char** argv) {
+    const auto node_s = flag_val(argc, argv, "--node");
+    const auto via    = flag_val(argc, argv, "--via");
+    if (node_s.empty() || via.empty()) {
+        std::cerr << "Usage: bc revoke blocks --node N --via URL\n";
+        return 1;
+    }
+    const auto node = static_cast<NodeIndex>(std::stoull(node_s, nullptr, 0));
+    LmdbStorage  storage(data_dir / "db");
+    const UserId uid = load_user_id(data_dir);
+
+    httplib::Client cli(via);  // scheme-aware: plain host:port, http:// or https://
+    cli.set_connection_timeout(5);
+
+    std::map<BlockIndex, std::string> rivals;   // GET /forks/<chain>, this branch only
+    if (const auto res = cli.Get("/forks/" + to_hex(uid.bytes)); res && res->status == 200) {
+        try {
+            const auto v = records::json::Reader(res->body).read();
+            if (const auto* arr = v.is_object() ? jarr(v.object, "forks") : nullptr)
+                for (const auto& f : arr->array)
+                    if (f.is_object() && static_cast<NodeIndex>(jnum(f.object, "node")) == node)
+                        rivals[static_cast<BlockIndex>(jnum(f.object, "index"))] =
+                            jstr(f.object, "rival");
+        } catch (const records::json::JsonError&) {}
+    }
+
+    const auto show = [&](const Block& b, const std::string& lead, bool breaks) {
+        const Hash          h    = Crypto::hash_block(b);
+        const BlockAddress& a    = b.address;
+        const bool          here = storage.has_block(a) &&
+                                   Crypto::hash_block(storage.get_block(a)) == h;
+        std::cout << lead << "#" << a.block_index << "  " << utc_minute(b.timestamp_claimed)
+                  << "  " << block_gist(b) << (here ? "  (есть в этой базе)" : "")
+                  << (breaks ? "  (не продолжает блок выше)" : "") << "\n"
+                  << std::string(lead.size(), ' ') << "  " << to_hex(h.bytes) << "\n";
+    };
+
+    std::optional<Hash> above;
+    BlockIndex i = 0;
+    for (;; ++i) {
+        const auto res = cli.Get("/blocks/" + to_hex(uid.bytes) + "/" + std::to_string(node) +
+                                 "/" + std::to_string(i));
+        if (!res) {
+            std::cerr << "агрегатор " << via << " не отвечает\n";
+            return 1;
+        }
+        if (res->status == 404) break;
+        if (res->status != 200) {
+            std::cerr << "агрегатор ответил " << res->status << " на блок №" << i << "\n";
+            return 1;
+        }
+        const Block b = Serializer::decode_block(
+            reinterpret_cast<const uint8_t*>(res->body.data()), res->body.size());
+        if (!(b.address.user_id == uid) || b.address.node_index != node ||
+            b.address.block_index != i) {
+            std::cerr << "агрегатор отдал на №" << i << " блок с другим адресом\n";
+            return 1;
+        }
+        show(b, "", above.has_value() && b.prev_hash != *above);
+        above = Crypto::hash_block(b);
+        if (const auto it = rivals.find(i); it != rivals.end()) {
+            Ref ref{};
+            ref.chain = uid.bytes;
+            if (from_hex(it->second, ref.hash.data(), ref.hash.size())) {
+                try {
+                    show(fetch_block_from(via, ref), "  второй на том же номере: ", false);
+                    continue;
+                } catch (const std::exception&) {}
+            }
+            std::cout << "  второй на том же номере: " << it->second << " (не получен)\n";
+        }
+    }
+    if (i == 0) {
+        std::cout << "на " << via << " нет блоков ветки " << node << "\n";
+        return 0;
+    }
+    std::cout << "\nПоследний блок, который вы узнаёте как свой, назовите так:\n"
+                 "  bc revoke create --node " << node << " --last-good ХЕШ --via " << via << "\n"
+                 "Он и блоки до него лягут в эту базу, всё после него останется вне линии "
+                 "(blockchain.md §6.7 rule 12).\n";
+    return 0;
+}
+
 // bc revoke create --node N [--ancestor A] [--replace]
-//                   [--last-good HASH|tip|none] [--out FILE]
+//                   [--last-good HASH|tip|none] [--out FILE] [--via URL]
 // Writes a REVOCATION block into the ancestor's branch (default radius: parent)
 // and emits a self-verifying certificate. --replace generates a fresh key and
 // assigns it (the "second block" of the stop-then-replace flow when a stop
 // revocation already exists). --last-good names the owner's last valid block
 // of the revoked branch (blockchain.md §6.7 rule 12): a block hash, `tip` — the
-// branch tip in this storage, or `none` — no block of it is valid. Without it
-// the revocation is a full stop until a later one names the line.
+// branch tip in this storage, or `none` — no block of it is valid. A hash this
+// storage lacks comes from the aggregator --via names, with the blocks before
+// it (the owner without a copy of the branch; list: bc revoke blocks). Without
+// --last-good the revocation is a full stop until a later one names the line.
 static int cmd_revoke_create(const fs::path& data_dir, int argc, char** argv) {
     const auto node_s = flag_val(argc, argv, "--node");
     if (node_s.empty()) {
         std::cerr << "Usage: bc revoke create --node N [--ancestor A] "
-                     "[--replace] [--last-good HASH|tip|none] [--out FILE]\n";
+                     "[--replace] [--last-good HASH|tip|none] [--out FILE] [--via URL]\n";
         return 1;
     }
     const auto revoked = static_cast<NodeIndex>(std::stoull(node_s, nullptr, 0));
@@ -10395,6 +10573,11 @@ static int cmd_revoke_create(const fs::path& data_dir, int argc, char** argv) {
         replacement = fresh->pub;
     }
 
+    // Speed of propagation comes from the warehouse, not the record's height
+    // (blockchain.md §6.7 rule 1): with an aggregator the certificate goes out
+    // right away — and a line the owner has no copy of comes from it.
+    const auto via = flag_val(argc, argv, "--via");
+
     std::optional<Hash> last_good;
     if (const auto lg = flag_val(argc, argv, "--last-good"); !lg.empty()) {
         if (lg == "tip") {
@@ -10405,6 +10588,17 @@ static int cmd_revoke_create(const fs::path& data_dir, int argc, char** argv) {
             Hash h{};
             if (!from_hex(lg, h.bytes.data(), h.bytes.size()))
                 throw std::runtime_error("--last-good: expected a 64-hex block hash, `tip` or `none`");
+            if (!known_here(storage, uid, revoked, h)) {
+                if (via.empty())
+                    throw std::runtime_error(
+                        "--last-good: блока " + lg.substr(0, 12) + "… нет в этой базе. Без своей "
+                        "копии ветки его берут с агрегатора: добавьте --via URL (блоки ветки "
+                        "там: bc revoke blocks --node " + node_s + " --via URL)");
+                const auto n = take_line_from(via, storage, bc, uid, revoked, h);
+                std::cout << "line: " << n << " block(s) of branch " << revoked
+                          << " taken from " << via << " and stored here "
+                             "(blockchain.md §6.7 rule 12)\n";
+            }
             last_good = h;
         }
     }
@@ -10446,9 +10640,6 @@ static int cmd_revoke_create(const fs::path& data_dir, int argc, char** argv) {
         std::cout << "certificate hex: " << to_hex(bytes.data(), bytes.size()) << "\n";
     }
 
-    // Speed of propagation comes from the warehouse, not the record's height
-    // (blockchain.md §6.7 rule 1) — publish right away when an aggregator is given.
-    const auto via = flag_val(argc, argv, "--via");
     if (!via.empty())
         std::cerr << (post_revocation_cert(via, uid, bytes)
                           ? "Published to " : "publish failed: ")
@@ -10998,7 +11189,11 @@ Key revocation (blockchain.md §6.7; warehouse — sync.md §7.2):
     [--last-good HASH|tip|none]        a self-verifying certificate (CBOR);
     [--via URL]                        --via publishes it to the warehouse;
                                        --last-good names the owner's last valid
-                                       block (tip = this storage's branch tip)
+                                       block (tip = this storage's branch tip);
+                                       a HASH not stored here comes from --via
+                                       with the blocks before it
+  revoke blocks --node N --via URL Branch N on the aggregator, block by block —
+                                       find the last one that is yours
   revoke verify (--cert FILE | --hex HEX)  Check a certificate autonomously
   revoke status --node N           Effective revocation + per-block zones
   revoke publish --via URL         Push certificates to the warehouse
@@ -11128,6 +11323,7 @@ int main(int argc, char** argv) {
         else if (cmd == "revoke"    && subcmd == "status")  return cmd_revoke_status(data_dir, argc, argv);
         else if (cmd == "revoke"    && subcmd == "publish") return cmd_revoke_publish(data_dir, argc, argv);
         else if (cmd == "revoke"    && subcmd == "fetch")   return cmd_revoke_fetch(data_dir, argc, argv);
+        else if (cmd == "revoke"    && subcmd == "blocks")  return cmd_revoke_blocks(data_dir, argc, argv);
         else if (cmd == "cache"     && subcmd == "list")    return cmd_cache_list(data_dir);
         else if (cmd == "cache"     && subcmd == "publish") return cmd_cache_publish(data_dir, argc, argv);
         else if (cmd == "cache"     && subcmd == "complete")return cmd_cache_complete(data_dir, argc, argv);

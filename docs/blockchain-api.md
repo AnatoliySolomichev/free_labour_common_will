@@ -1,6 +1,6 @@
 # API модуля блокчейна
 
-**Статус:** черновик v0.4  
+**Статус:** черновик v0.5  
 **Основание:** [docs/blockchain.md](blockchain.md)  
 **Язык реализации:** C++17  
 **Внешние зависимости:** libsodium, LMDB (CBOR реализован вручную, без внешней библиотеки)
@@ -486,6 +486,16 @@ public:
     // Бросает: SignatureError, ChainIntegrityError, TimestampError,
     //          BlockNotFoundError, NodeNotFoundError
     void validate_branch(const UserId& user_id, NodeIndex leaf_index) const;
+
+    // Продолжает ли `more` ветку, как она лежит в хранилище, — до записи
+    // (блоки своей ветки, взятые извне хозяином без своей копии, blockchain.md §6.7,
+    // правило 12): номера подряд от следующего, prev_hash от верхушки (от узла
+    // для пустой ветки), даты не раньше предыдущей и не раньше рождения, подпись
+    // ключом ветки на своём месте — по эпохам ключей. Вес блоков не проверяется:
+    // под отзывом они могут быть под вопросом или вне линии (правило 11).
+    // Бросает: ChainIntegrityError, TimestampError, SignatureError, NodeNotFoundError
+    void check_continuation(const UserId& user_id, NodeIndex node_index,
+                            const std::vector<Block>& more) const;
 };
 ```
 
@@ -640,7 +650,8 @@ public:
     // Отзыв ключа узла записью в ветке предка (blockchain.md §6.7): по умолчанию —
     // родителя, выше — по желанию. replacement_pubkey нет — стоп-кран;
     // last_good — отпечаток последнего верного блока отзываемой ветки,
-    // он обязан быть в этом хранилище (правило 12).
+    // он обязан быть в этом хранилище (правило 12); без своей копии ветки
+    // его вместе с блоками до него приносит restore_branch.
     // Бросает: CryptoError, StorageError, NodeNotFoundError, RevocationError,
     //          InvalidArgumentError
     Block revoke_node(
@@ -652,6 +663,16 @@ public:
         Timestamp                       timestamp,
         const std::optional<Hash>&      last_good = std::nullopt
     );
+
+    // Блоки своей ветки, взятые извне (агрегатор, партнёр), — для хозяина без
+    // своей копии (blockchain.md §6.7, правило 12): линия до блока, который он
+    // узнаёт как последний верный. Блоки продолжают копию ветки в этом хранилище
+    // по порядку (с №0 для пустой); все проходят Validator::check_continuation,
+    // прежде чем записывается хоть один.
+    // Бросает: ChainIntegrityError, TimestampError, SignatureError,
+    //          NodeNotFoundError, StorageError
+    void restore_branch(const UserId& user_id, NodeIndex node_index,
+                        const std::vector<Block>& blocks);
 
     // ─── Чтение ───────────────────────────────────────────────────────────
 
@@ -773,6 +794,7 @@ session_alice.check_partner_half(answer, after_half, tip_bob, now(), merged);
 
 ## 17. История изменений
 
+- **v0.5** — линия без своей копии ветки (2026-11-02, `blockchain.md §6.7`, правило 12): `Validator::check_continuation`, `Blockchain::restore_branch`.
 - **v0.4** — отзыв без даты (2026-10-30, `blockchain.md §6.7`): `compromised_since` убран из `RevocationPayload`, `RevocationState` и `revoke_node`.
 - **v0.3** — рождение узла блоком (2026-10-30, `blockchain.md §11.2`): `BlockType::BIRTH`, `BirthRef`, `BirthPayload`; `Node::created_at` убран; `KeyPath`, `RevocationCertificate`, `BranchTipInfo` несут `births`.
 - **v0.2** — подпись партнёра в слиянии стала блоком (2026-10-30, `blockchain.md §6.4`): `MergeSession` переписан под `write_half` и `check_partner_half`; убраны `Block::co_signature`, `Seal`, `SealMode`, `SealManager`, таблица `seals`, `validate_seal`, `validate_co_signature`. Разделы 5.8 и 11 закрыты, их номера не переиспользуются.

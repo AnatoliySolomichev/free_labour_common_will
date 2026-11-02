@@ -98,7 +98,8 @@ public:
     // revoked_pubkey is filled from the revoked branch's current effective
     // working key (node key + KEY_ROTATION history, or the replacement in force).
     // last_good names the owner's last valid block of the revoked branch
-    // (blockchain.md §6.7 rule 12) — it must be a block of that branch in this storage.
+    // (blockchain.md §6.7 rule 12) — it must be a block of that branch in this
+    // storage; without an own copy restore_branch brings the line first.
     // Throws: CryptoError, StorageError, NodeNotFoundError,
     //         RevocationError (not an ancestor / root / self),
     //         InvalidArgumentError (ancestor keypair mismatch, unknown last_good).
@@ -111,6 +112,17 @@ public:
         Timestamp                       timestamp,
         const std::optional<Hash>&      last_good = std::nullopt
     );
+
+    // Own blocks of a branch learned elsewhere — the aggregator, a partner — for
+    // the owner without a copy of it (blockchain.md §6.7 rule 12): the line up to
+    // the block the owner recognizes as the last valid one, so that a revocation
+    // names it from this storage and a replacement continues right after it.
+    // `blocks` follow this storage's copy of the branch in order (from #0 for an
+    // empty one); all of them pass Validator::check_continuation before any is
+    // stored. Throws: ChainIntegrityError, TimestampError, SignatureError,
+    // NodeNotFoundError, StorageError.
+    void restore_branch(const UserId& user_id, NodeIndex node_index,
+                        const std::vector<Block>& blocks);
 
     // Current effective working key of a branch: the node's working_pubkey,
     // advanced by KEY_ROTATION blocks in the branch (blockchain.md §6.6).
