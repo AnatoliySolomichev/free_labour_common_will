@@ -137,6 +137,58 @@ void Blockchain::ensure_branch_writable(const UserId& user_id, NodeIndex node_in
         && st.next_key.has_value() && signing_pubkey != *st.next_key)
         throw RevocationError(
             "branch key was replaced by revocation; signing key is not the authorized one");
+    if (st.awaiting_replacement)
+        throw RevocationError(
+            "the replacement key starts with its replacement block right after the owner's "
+            "line — take_replacement first (blockchain.md §6.7 rule 9)");
+    if (st.continuation_off_line)
+        throw RevocationError(
+            "this branch's replacement block stands off the owner's line in force: it cannot "
+            "continue here (blockchain.md §6.7 rule 9)");
+}
+
+Block Blockchain::take_replacement(const UserId& user_id, NodeIndex node_index,
+                                   const KeyPair& replacement, Timestamp timestamp) {
+    const auto st = validator_.branch_revocation_status(user_id, node_index);
+    if (!st.awaiting_replacement || !st.next_key.has_value() || *st.next_key != replacement.pub)
+        throw RevocationError("take_replacement: no replacement awaits this key in this branch "
+                              "(blockchain.md §6.7 rule 9)");
+    if (!st.line.has_value())
+        throw RevocationError("take_replacement: no line named yet — the replacement starts "
+                              "right after the owner's last valid block (blockchain.md §6.7 rule 9)");
+    const LastGood& line = *st.line;
+    const auto tip = storage_.branch_tip_index(user_id, node_index);
+    const Hash end = branch_tip_hash(user_id, node_index);
+    const bool at_line = line.index == EMPTY_BRANCH_INDEX
+        ? !tip.has_value() && end == line.hash
+        : tip.has_value() && *tip == line.index && end == line.hash;
+    if (!at_line)
+        throw RevocationError("take_replacement: this copy of the branch does not end at the "
+                              "owner's line (#" +
+                              (line.index == EMPTY_BRANCH_INDEX ? std::string("none")
+                                                                : std::to_string(line.index)) +
+                              ") — the replacement block stands right after it "
+                              "(blockchain.md §6.7 rule 9)");
+    const auto record = validator_.replacement_record(user_id, node_index, replacement.pub);
+    if (!record.has_value())
+        throw RevocationError("take_replacement: the record that assigned this key is not here");
+
+    // Time only goes forward in a branch (blockchain.md §9.4), from its birth.
+    Timestamp ts = timestamp;
+    if (tip.has_value())
+        ts = std::max(ts, storage_.get_block({user_id, node_index, *tip}).timestamp_claimed);
+    else if (node_index != 0) {
+        const Node         n = storage_.get_node(user_id, node_index);
+        const BlockAddress at{user_id, (node_index - 1) / 2, n.birth.index};
+        ts = std::max(ts, (storage_.has_block(at) ? storage_.get_block(at)
+                                                  : storage_.get_external_block(at)).timestamp_claimed);
+    }
+    Block k = build_signed_block(
+        {user_id, node_index, tip.has_value() ? *tip + 1 : 0}, end, ts, BlockType::KEY_REPLACEMENT,
+        Serializer::encode(ReplacementPayload{record->address, Crypto::hash_block(*record)}),
+        replacement.sec);
+    storage_.put_block(k);
+    return k;
 }
 
 Block Blockchain::append_data_block(
@@ -197,18 +249,8 @@ Block Blockchain::rotate_key(
 
 PublicKey Blockchain::effective_working_pubkey(const UserId& user_id,
                                                NodeIndex node_index) const {
-    Node node = storage_.get_node(user_id, node_index);
-    PublicKey key = node.working_pubkey;
-
-    auto tip_opt = storage_.branch_tip_index(user_id, node_index);
-    if (!tip_opt.has_value()) return key;
-
-    for (BlockIndex i = 0; i <= *tip_opt; ++i) {
-        Block b = storage_.get_block({user_id, node_index, i});
-        if (b.type == BlockType::KEY_ROTATION && b.payload.size() >= 32)
-            std::copy(b.payload.begin(), b.payload.begin() + 32, key.bytes.begin());
-    }
-    return key;
+    // Rotations and replacement blocks alike (blockchain.md §6.6, blockchain.md §6.7 rule 9).
+    return validator_.key_at(user_id, node_index, KeyPathCert::kNow);
 }
 
 Block Blockchain::revoke_node(
@@ -228,11 +270,12 @@ Block Blockchain::revoke_node(
     if (!is_ancestor(ancestor_index, revoked_node_index))
         throw RevocationError("revocation author is not a strict ancestor of the revoked node");
 
-    // The exact key being revoked: the currently authorized key of the revoked
-    // branch (rotation lineage or an earlier replacement); for a frozen branch —
-    // the lineage tip of the epoch it froze in.
+    // The exact key being revoked: the key of the epoch in force — its lineage
+    // tip. A replacement that has not written its block yet is no epoch here:
+    // a new record for the same epoch overrides it (rule 3, "the last word"),
+    // and the line it names stays this epoch's (rule 9).
     auto target_st = validator_.branch_revocation_status(user_id, revoked_node_index);
-    PublicKey revoked_key = target_st.next_key.has_value()
+    PublicKey revoked_key = target_st.next_key.has_value() && !target_st.awaiting_replacement
         ? *target_st.next_key
         : target_st.current_key;
 
@@ -252,6 +295,13 @@ Block Blockchain::revoke_node(
             throw InvalidArgumentError(
                 "revoke_node: last_good is not a block of the revoked branch in this storage");
     }
+    // A replacement without a line named here keeps the line already in force,
+    // so that the record its replacement block names carries it (rule 9).
+    if (!line.has_value() && replacement_pubkey.has_value() && target_st.awaiting_replacement)
+        line = target_st.line;
+    else if (!line.has_value() && replacement_pubkey.has_value() &&
+             target_st.state == BranchRevocationState::FROZEN)
+        line = target_st.line;
 
     // The author branch itself must be writable with this keypair (it may have
     // been replaced by its own revocation — then only the replacement signs).
@@ -261,6 +311,9 @@ Block Blockchain::revoke_node(
     if (!author_st.next_key.has_value() || ancestor_keypair.pub != *author_st.next_key)
         throw InvalidArgumentError(
             "revoke_node: keypair does not match the ancestor branch working key");
+    if (author_st.awaiting_replacement || author_st.continuation_off_line)
+        throw RevocationError("revoke_node: the author's branch has not taken its replacement "
+                              "key yet (blockchain.md §6.7 rule 9)");
 
     Hash prev_hash = branch_tip_hash(user_id, ancestor_index);
     auto tip_opt   = storage_.branch_tip_index(user_id, ancestor_index);

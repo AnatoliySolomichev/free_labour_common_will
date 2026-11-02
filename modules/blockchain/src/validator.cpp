@@ -155,13 +155,53 @@ std::optional<PublicKey> follow_replacements(const Records& records,
     }
 }
 
+// The line a replacement continues after (blockchain.md §6.7 rules 9, 12): the
+// latest one named for the epoch it replaces — or for a replacement on the way
+// to it that was revoked before any use.
+std::optional<LastGood> line_before(const Records& records, const std::vector<PublicKey>& epoch,
+                                    const std::optional<PublicKey>& next) {
+    EpochRevocation er = epoch_revocation(records, epoch);
+    std::optional<LastGood> line = er.last_good;
+    std::vector<PublicKey>  passed;
+    while (er.replacement.has_value() && !(next.has_value() && *er.replacement == *next) &&
+           !has_key(passed, *er.replacement)) {
+        passed.push_back(*er.replacement);
+        er = epoch_revocation(records, {*er.replacement});
+        if (!er.any) break;
+        if (er.last_good.has_value()) line = er.last_good;
+    }
+    return line;
+}
+
+// Whether a KEY_REPLACEMENT block names a counting record that assigned `key`
+// (blockchain.md §6.7 rule 9): address and hash of the REVOCATION block.
+bool names_record(const IStorage& storage, const Records& records, const Block& k,
+                  const PublicKey& key) {
+    ReplacementPayload p{};
+    try {
+        p = Serializer::decode_replacement_payload(k.payload.data(), k.payload.size());
+    } catch (const SerializationError&) { return false; }
+    for (const auto& [addr, rp] : records) {
+        if (!(addr == p.record_address) || !rp.replacement_pubkey || *rp.replacement_pubkey != key)
+            continue;
+        const bool own = storage.has_block(addr);
+        if (!own && !storage.has_external_block(addr)) continue;
+        const Block rec = own ? storage.get_block(addr) : storage.get_external_block(addr);
+        if (Crypto::hash_block(rec) == p.record_hash) return true;
+    }
+    return false;
+}
+
 // Pass 1 of the branch walk (blockchain.md §6.7 rules 3, 9): every block of the
 // branch, stored and then `more`, up to `upto`, attributed to a key epoch — the
-// node key with its rotations, then each replacement from its first use.
-struct Seen { size_t epoch; bool old_key; Timestamp ts; Hash hash; };
+// node key with its rotations, then each replacement from its replacement
+// block: a KEY_REPLACEMENT signed by the replacement and naming the record that
+// assigned it (решение участника 2026-11-02).
+struct Seen { size_t epoch; bool old_key; Timestamp ts; Hash hash; Hash prev; };
 
 struct Attribution {
     std::vector<std::vector<PublicKey>> epochs;
+    std::vector<BlockIndex>             starts;    // where each epoch begins; 0 for the node's
     std::vector<PublicKey>              retired;   // keys of the epochs left behind
     PublicKey                           current{}; // lineage tip of the current epoch
     std::vector<Seen>                   seen;
@@ -172,6 +212,7 @@ Attribution attribute(const IStorage& storage, const UserId& user_id, NodeIndex 
     Attribution a;
     const Node node = storage.get_node(user_id, node_index);
     a.epochs  = {{node.working_pubkey}};
+    a.starts  = {0};
     a.current = node.working_pubkey;
 
     const auto       tip_opt = storage.branch_tip_index(user_id, node_index);
@@ -184,21 +225,25 @@ Attribution attribute(const IStorage& storage, const UserId& user_id, NodeIndex 
                                    : more[i - stored];
         bool old_key = false;
         if (!block_signed_by(b, a.current)) {
-            // The first use of a replacement switches the key (rule 9) —
+            // A replacement takes over at its replacement block (rule 9) —
             // possibly over replacements revoked before any use.
-            const auto next = follow_replacements(
-                records, epoch_revocation(records, a.epochs.back()),
-                [&](const PublicKey& k) { return block_signed_by(b, k); });
-            if (next.has_value() && block_signed_by(b, *next)) {
+            const auto next = b.type == BlockType::KEY_REPLACEMENT
+                ? follow_replacements(records, epoch_revocation(records, a.epochs.back()),
+                                      [&](const PublicKey& k) { return block_signed_by(b, k); })
+                : std::nullopt;
+            if (next.has_value() && block_signed_by(b, *next) &&
+                names_record(storage, records, b, *next)) {
                 a.retired.insert(a.retired.end(), a.epochs.back().begin(), a.epochs.back().end());
                 a.epochs.push_back({*next});
+                a.starts.push_back(i);
                 a.current = *next;
             } else if (std::any_of(a.retired.begin(), a.retired.end(),
                            [&](const PublicKey& k) { return block_signed_by(b, k); })) {
                 old_key = true; // an old key resurfacing after the switch
             } else {
-                throw SignatureError("block signed by none of the branch keys "
-                                     "(lineage, replacements)");
+                throw SignatureError("block signed by none of the branch keys (lineage, "
+                                     "replacements — a replacement starts with its "
+                                     "KEY_REPLACEMENT block, blockchain.md §6.7 rule 9)");
             }
         }
         if (!old_key && b.type == BlockType::KEY_ROTATION && b.payload.size() >= 32) {
@@ -206,7 +251,7 @@ Attribution attribute(const IStorage& storage, const UserId& user_id, NodeIndex 
             a.epochs.back().push_back(a.current);
         }
         a.seen.push_back({a.epochs.size() - 1, old_key, b.timestamp_claimed,
-                          Crypto::hash_block(b)});
+                          Crypto::hash_block(b), b.prev_hash});
     }
     return a;
 }
@@ -216,6 +261,18 @@ Attribution attribute(const IStorage& storage, const UserId& user_id, NodeIndex 
 BranchRevocationStatus Validator::branch_revocation_status(
     const UserId& user_id, NodeIndex node_index) const {
     return status_over(user_id, node_index, {});
+}
+
+std::optional<Block> Validator::replacement_record(const UserId& user_id, NodeIndex node_index,
+                                                   const PublicKey& key) const {
+    const auto records = winning_records(user_id, node_index);
+    for (auto it = records.rbegin(); it != records.rend(); ++it) {
+        const auto& [addr, rp] = *it;
+        if (!rp.replacement_pubkey || *rp.replacement_pubkey != key) continue;
+        if (storage_.has_block(addr))          return storage_.get_block(addr);
+        if (storage_.has_external_block(addr)) return storage_.get_external_block(addr);
+    }
+    return std::nullopt;
 }
 
 PublicKey Validator::key_at(const UserId& user_id, NodeIndex node_index, BlockIndex place) const {
@@ -291,12 +348,26 @@ BranchRevocationStatus Validator::status_over(const UserId& user_id, NodeIndex n
         if (revs.back().any && lg.has_value() && lg->index != EMPTY_BRANCH_INDEX)
             out.line_end = lg->index;
     }
+    // A replacement stands only from its block right after the line of the
+    // epoch it replaces (rule 9); a block elsewhere — the line moved, or none
+    // was named — takes its epoch and every later one off the owner's line.
+    std::size_t off_from = epochs.size();
+    for (std::size_t e = 1; e < epochs.size() && off_from == epochs.size(); ++e) {
+        const auto       line = line_before(records, epochs[e - 1], epochs[e].front());
+        const BlockIndex at   = att.starts[e];
+        const bool placed = line.has_value() && seen[at].prev == line->hash &&
+            (line->index == EMPTY_BRANCH_INDEX ? at == 0 : at == line->index + 1);
+        if (!placed) off_from = e;
+    }
+    out.continuation_off_line = off_from < epochs.size();
     out.blocks.reserve(seen.size());
     for (BlockIndex i = 0; i < seen.size(); ++i) {
         const Seen&            s  = seen[i];
         const EpochRevocation& er = revs[s.epoch];
         if (s.old_key)
             out.blocks.push_back(BlockRevocationStatus::INVALID_AFTER_REPLACEMENT);
+        else if (s.epoch >= off_from)
+            out.blocks.push_back(BlockRevocationStatus::OUTSIDE_LINE);
         else if (!er.any)
             out.blocks.push_back(BlockRevocationStatus::CLEAN);
         else if (!er.last_good.has_value())
@@ -325,6 +396,10 @@ BranchRevocationStatus Validator::status_over(const UserId& user_id, NodeIndex n
                                            [](const PublicKey&) { return false; });
         out.state    = out.next_key.has_value() ? BranchRevocationState::REPLACED
                                                 : BranchRevocationState::FROZEN;
+        // The epoch in force is revoked: its replacement, if any, has not
+        // written its block here yet, and starts right after this line.
+        out.awaiting_replacement = out.next_key.has_value();
+        out.line                 = line_before(records, epochs.back(), out.next_key);
     }
     return out;
 }

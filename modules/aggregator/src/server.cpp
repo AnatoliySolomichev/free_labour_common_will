@@ -36,6 +36,14 @@ namespace aggregator {
 
 namespace {
 
+// The blocks a checked key path carries are the chain's own: births, key
+// changes, the records behind replacements (blockchain.md §7.5) — kept like any
+// block, so that a replacement block known from a path counts at the door.
+void store_path_blocks(AggregatorStorage& storage, const KeyPath& kp) {
+    for (const auto* blocks : {&kp.births, &kp.changes, &kp.records})
+        for (const Block& b : *blocks) storage.add_block(b);
+}
+
 // A fork whose rival is the owner's while the block in place is not: the
 // owner's goes in place (blockchain.md §6.7 rules 9, 12) — the views read what stands.
 void settle_forks(AggregatorStorage& storage, const BranchKeys& keys, const UserId& chain) {
@@ -359,6 +367,13 @@ void AggregatorServer::setup_routes() {
                 case BranchKeys::Verdict::before_birth:
                     res.status = 403;
                     res.set_content("{\"error\":\"branch begins before its birth\"}",
+                                    "application/json");
+                    return;
+                case BranchKeys::Verdict::no_replacement_block:
+                    res.status = 403;
+                    res.set_content("{\"error\":\"replacement block first: a replacement key "
+                                    "starts with its block right after the owner's line "
+                                    "(blockchain.md §6.7 rule 9)\"}",
                                     "application/json");
                     return;
                 case BranchKeys::Verdict::revoked_key:
@@ -976,7 +991,8 @@ void AggregatorServer::setup_routes() {
                 if (!(KeyPathCert::signer_key(kp) == key))
                     throw ChainIntegrityError("path leads to another key");
                 keys_.learn_path(kp);
-                for (const Block& birth : kp.births) storage_.add_block(birth);
+                store_path_blocks(storage_, kp);
+                settle_forks(storage_, keys_, kp.root.structural_pubkey);
             } catch (const std::exception& e) {
                 res.status = 400;
                 res.set_content(std::string("{\"error\":\"key path does not check: ")
@@ -2637,7 +2653,8 @@ void AggregatorServer::sync_with_peer(const std::string& peer_url) {
                     static_cast<std::size_t>(len));
                 if (KeyPathCert::signer_key(kp) == key) {
                     keys_.learn_path(kp);                     // throws on a path that does not check
-                    for (const Block& birth : kp.births) storage_.add_block(birth);
+                    store_path_blocks(storage_, kp);
+                    settle_forks(storage_, keys_, kp.root.structural_pubkey);
                     if (storage_.put_keypath_bytes(
                             key, {body.begin() + pos, body.begin() + pos + len}))
                         ++gossiped;

@@ -304,6 +304,15 @@ protected:
                          [&](NodeIndex i) { return keys.at(i); });
     }
 
+    // The point before block #0 of a branch: its birth (blockchain.md §5.3).
+    Hash origin(NodeIndex node) const { return storage_->get_node(root_kp_.pub, node).birth.hash; }
+
+    // The replaced branch takes its key: the replacement block right after the
+    // line (blockchain.md §6.7 rule 9).
+    Block take(NodeIndex node, const KeyPair& repl, Timestamp ts) {
+        return bc_->take_replacement(root_kp_.pub, node, repl, ts);
+    }
+
     // Hand-craft a signed REVOCATION block in author's branch (bypasses the
     // creation-time checks of revoke_node; for negative validation tests).
     Block craft_revocation(NodeIndex author, const KeyPair& author_kp,
@@ -524,19 +533,28 @@ TEST_F(RevocationTest, AppendToFrozenBranchThrows) {
 
 TEST_F(RevocationTest, ReplacedBranchAcceptsOnlyReplacement) {
     KeyPair repl = Crypto::generate_keypair();
-    bc_->revoke_node(root_kp_.pub, 7, repl.pub, 3, kp3_, 2'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, repl.pub, 3, kp3_, 2'000LL, origin(7));   // no valid block
 
     EXPECT_THROW(
         bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 3'000LL),
         RevocationError);
+    // The replacement starts with its replacement block, nothing before it.
+    EXPECT_THROW(
+        bc_->append_data_block(root_kp_.pub, 7, {0x01}, repl, 3'000LL),
+        RevocationError);
+    const Block k = take(7, repl, 3'000LL);
+    EXPECT_EQ(k.address.block_index, 0u);
+    EXPECT_EQ(k.prev_hash, origin(7));          // right after the empty line: the birth
 
     Block b = bc_->append_data_block(root_kp_.pub, 7, {0x01}, repl, 3'000LL);
-    EXPECT_EQ(b.address.block_index, 0u);
+    EXPECT_EQ(b.address.block_index, 1u);
 
     auto st = validator_->branch_revocation_status(root_kp_.pub, 7);
     EXPECT_EQ(st.state, BranchRevocationState::REPLACED);
-    ASSERT_EQ(st.blocks.size(), 1u);
+    EXPECT_FALSE(st.awaiting_replacement);
+    ASSERT_EQ(st.blocks.size(), 2u);
     EXPECT_EQ(st.blocks[0], BlockRevocationStatus::CLEAN);
+    EXPECT_EQ(st.blocks[1], BlockRevocationStatus::CLEAN);
     ASSERT_TRUE(st.next_key.has_value());
     EXPECT_EQ(*st.next_key, repl.pub);
 
@@ -544,28 +562,40 @@ TEST_F(RevocationTest, ReplacedBranchAcceptsOnlyReplacement) {
     EXPECT_NO_THROW(bc_->validate_branch(root_kp_.pub, 7));
 }
 
+// Стоп-кран с заменой: замена ждёт линию (blockchain.md §6.7 правило 9). Линию
+// называют потом, вместе с той же заменой, — и замена встаёт сразу за ней.
 TEST_F(RevocationTest, SwitchAfterExistingBlocks) {
-    bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 1'000LL);
+    const Block b0 = bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 1'000LL);
     KeyPair repl = Crypto::generate_keypair();
     bc_->revoke_node(root_kp_.pub, 7, repl.pub, 3, kp3_, 2'000LL);
+    EXPECT_THROW(bc_->append_data_block(root_kp_.pub, 7, {0x02}, repl, 3'000LL),
+                 RevocationError);
+    EXPECT_THROW(take(7, repl, 2'500LL), RevocationError);          // no line yet
+    auto st = validator_->branch_revocation_status(root_kp_.pub, 7);
+    EXPECT_TRUE(st.awaiting_replacement);
+    EXPECT_FALSE(st.line.has_value());
+    EXPECT_EQ(st.blocks.at(0), BlockRevocationStatus::SUSPECT);
+
+    bc_->revoke_node(root_kp_.pub, 7, repl.pub, 3, kp3_, 2'600LL, Crypto::hash_block(b0));
+    take(7, repl, 3'000LL);
     bc_->append_data_block(root_kp_.pub, 7, {0x02}, repl, 3'000LL);
 
-    auto st = validator_->branch_revocation_status(root_kp_.pub, 7);
-    ASSERT_EQ(st.blocks.size(), 2u);
-    EXPECT_EQ(st.blocks[0], BlockRevocationStatus::SUSPECT); // ts 1000 > since 500
-    EXPECT_EQ(st.blocks[1], BlockRevocationStatus::CLEAN);   // signed by replacement
+    st = validator_->branch_revocation_status(root_kp_.pub, 7);
+    ASSERT_EQ(st.blocks.size(), 3u);
+    for (auto s : st.blocks) EXPECT_EQ(s, BlockRevocationStatus::CLEAN);
     EXPECT_NO_THROW(bc_->validate_branch(root_kp_.pub, 7));
 }
 
 TEST_F(RevocationTest, OldKeyAfterSwitchIsInvalid) {
     KeyPair repl = Crypto::generate_keypair();
-    bc_->revoke_node(root_kp_.pub, 7, repl.pub, 3, kp3_, 2'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, repl.pub, 3, kp3_, 2'000LL, origin(7));
+    take(7, repl, 3'000LL);
     bc_->append_data_block(root_kp_.pub, 7, {0x01}, repl, 3'000LL);
 
     // The thief appends with the old key after the switch (bypassing the facade).
     Hash prev = bc_->branch_tip_hash(root_kp_.pub, 7);
     Block b{};
-    b.address           = {root_kp_.pub, 7, 1};
+    b.address           = {root_kp_.pub, 7, 2};
     b.prev_hash         = prev;
     b.timestamp_claimed = 4'000LL;
     b.type              = BlockType::DATA;
@@ -576,14 +606,15 @@ TEST_F(RevocationTest, OldKeyAfterSwitchIsInvalid) {
     storage_->put_block(b);
 
     auto st = validator_->branch_revocation_status(root_kp_.pub, 7);
-    ASSERT_EQ(st.blocks.size(), 2u);
-    EXPECT_EQ(st.blocks[1], BlockRevocationStatus::INVALID_AFTER_REPLACEMENT);
+    ASSERT_EQ(st.blocks.size(), 3u);
+    EXPECT_EQ(st.blocks[2], BlockRevocationStatus::INVALID_AFTER_REPLACEMENT);
     EXPECT_THROW(bc_->validate_branch(root_kp_.pub, 7), SignatureError);
 }
 
 TEST_F(RevocationTest, RotationAfterReplacementContinues) {
     KeyPair repl = Crypto::generate_keypair();
-    bc_->revoke_node(root_kp_.pub, 7, repl.pub, 3, kp3_, 2'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, repl.pub, 3, kp3_, 2'000LL, origin(7));
+    take(7, repl, 3'000LL);
     bc_->append_data_block(root_kp_.pub, 7, {0x01}, repl, 3'000LL);
 
     KeyPair repl2 = Crypto::generate_keypair();
@@ -625,7 +656,12 @@ TEST_F(RevocationTest, ReplacedAuthorRevokesWithNewKey) {
     // Node 3 was revoked and replaced; the owner keeps administering 7 from 3 —
     // records signed by the replacement count (blockchain.md §6.7 rule 10).
     KeyPair repl3 = Crypto::generate_keypair();
-    bc_->revoke_node(root_kp_.pub, 3, repl3.pub, 1, kp1_, 6'000LL);
+    const Block line3 = storage_->get_block({root_kp_.pub, 3, 0});   // the birth of 7
+    bc_->revoke_node(root_kp_.pub, 3, repl3.pub, 1, kp1_, 6'000LL, Crypto::hash_block(line3));
+    // Before its replacement block the new key writes no record.
+    EXPECT_THROW(bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, repl3, 7'000LL),
+                 RevocationError);
+    take(3, repl3, 7'000LL);
     bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, repl3, 8'000LL);
 
     auto st = validator_->effective_revocation(root_kp_.pub, 7);
@@ -861,7 +897,9 @@ TEST_F(RevocationTest, TipCheckAcceptsReplacedTip) {
     ForeignChain f("replaced");
     f.bc->append_data_block(f.uid(), 7, {0x01}, f.kp7, 1'000LL);
     KeyPair repl = Crypto::generate_keypair();
-    Block rev = f.bc->revoke_node(f.uid(), 7, repl.pub, 3, f.kp3, 2'000LL);
+    Block rev = f.bc->revoke_node(f.uid(), 7, repl.pub, 3, f.kp3, 2'000LL,
+                                  f.bc->branch_tip_hash(f.uid(), 7));
+    f.bc->take_replacement(f.uid(), 7, repl, 2'500LL);
     f.bc->append_data_block(f.uid(), 7, {0x02}, repl, 3'000LL); // re-tip under R
     import_certificate(*storage_, f, rev);
 
@@ -929,6 +967,7 @@ TEST_F(RevocationTest, SecondTheftOfTheSameLeaf) {
     const Block b0 = bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 1'000LL);
     KeyPair k1 = Crypto::generate_keypair();
     bc_->revoke_node(root_kp_.pub, 7, k1.pub, 3, kp3_, 2'000LL, Crypto::hash_block(b0));
+    take(7, k1, 2'500LL);
     const Block b1 = bc_->append_data_block(root_kp_.pub, 7, {0x02}, k1, 3'000LL);
 
     // The replacement is stolen too: the parent revokes it in turn.
@@ -940,49 +979,55 @@ TEST_F(RevocationTest, SecondTheftOfTheSameLeaf) {
 
     EXPECT_THROW(bc_->append_data_block(root_kp_.pub, 7, {0x03}, k1, 5'000LL),
                  RevocationError);
+    take(7, k2, 4'500LL);
     bc_->append_data_block(root_kp_.pub, 7, {0x03}, k2, 5'000LL);
 
     auto st = validator_->branch_revocation_status(root_kp_.pub, 7);
     EXPECT_EQ(st.state, BranchRevocationState::REPLACED);
     ASSERT_TRUE(st.next_key.has_value());
     EXPECT_EQ(*st.next_key, k2.pub);
-    ASSERT_EQ(st.blocks.size(), 3u);
-    EXPECT_EQ(st.blocks[0], BlockRevocationStatus::CLEAN);   // K0, on its line
-    EXPECT_EQ(st.blocks[1], BlockRevocationStatus::CLEAN);   // K1, on its line
-    EXPECT_EQ(st.blocks[2], BlockRevocationStatus::CLEAN);   // K2, not revoked
+    ASSERT_EQ(st.blocks.size(), 5u);
+    for (auto s : st.blocks) EXPECT_EQ(s, BlockRevocationStatus::CLEAN);   // both lines, then K2
     EXPECT_NO_THROW(bc_->validate_branch(root_kp_.pub, 7));
 }
 
+// Замена, не начавшаяся в ветке, — не эпоха: новая запись о той же ветке
+// говорит о ключе в силе и перекрывает её (последнее слово, правило 3).
 TEST_F(RevocationTest, ReplacementRevokedBeforeUseIsSkipped) {
     KeyPair k1 = Crypto::generate_keypair();
-    bc_->revoke_node(root_kp_.pub, 7, k1.pub, 3, kp3_, 1'000LL);
-    // K1 is revoked before it signed anything: the chain goes on to K2.
+    bc_->revoke_node(root_kp_.pub, 7, k1.pub, 3, kp3_, 1'000LL, origin(7));
     KeyPair k2 = Crypto::generate_keypair();
     Block r2 = bc_->revoke_node(root_kp_.pub, 7, k2.pub, 3, kp3_, 2'000LL);
     auto rp2 = Serializer::decode_revocation_payload(r2.payload.data(), r2.payload.size());
-    EXPECT_EQ(rp2.revoked_pubkey, k1.pub);
+    EXPECT_EQ(rp2.revoked_pubkey, kp7_.pub);          // the epoch in force, not the unused K1
+    ASSERT_TRUE(rp2.last_good.has_value());           // and its line goes along
+    EXPECT_EQ(rp2.last_good->hash, origin(7));
 
+    EXPECT_THROW(take(7, k1, 3'000LL), RevocationError);
+    take(7, k2, 3'000LL);
     EXPECT_THROW(bc_->append_data_block(root_kp_.pub, 7, {0x01}, k1, 3'000LL),
                  RevocationError);
     bc_->append_data_block(root_kp_.pub, 7, {0x01}, k2, 3'000LL);
     auto st = validator_->branch_revocation_status(root_kp_.pub, 7);
     EXPECT_EQ(st.state, BranchRevocationState::REPLACED);
-    ASSERT_EQ(st.blocks.size(), 1u);
-    EXPECT_EQ(st.blocks[0], BlockRevocationStatus::CLEAN);
+    ASSERT_EQ(st.blocks.size(), 2u);
+    for (auto s : st.blocks) EXPECT_EQ(s, BlockRevocationStatus::CLEAN);
     EXPECT_NO_THROW(bc_->validate_branch(root_kp_.pub, 7));
 }
 
 TEST_F(RevocationTest, EarlierEpochKeyAfterSecondSwitchIsInvalid) {
     KeyPair k1 = Crypto::generate_keypair();
-    bc_->revoke_node(root_kp_.pub, 7, k1.pub, 3, kp3_, 1'000LL);
-    bc_->append_data_block(root_kp_.pub, 7, {0x01}, k1, 2'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, k1.pub, 3, kp3_, 1'000LL, origin(7));
+    take(7, k1, 1'500LL);
+    const Block b1 = bc_->append_data_block(root_kp_.pub, 7, {0x01}, k1, 2'000LL);
     KeyPair k2 = Crypto::generate_keypair();
-    bc_->revoke_node(root_kp_.pub, 7, k2.pub, 3, kp3_, 3'000LL);
+    bc_->revoke_node(root_kp_.pub, 7, k2.pub, 3, kp3_, 3'000LL, Crypto::hash_block(b1));
+    take(7, k2, 3'500LL);
     bc_->append_data_block(root_kp_.pub, 7, {0x02}, k2, 4'000LL);
 
     // The thief of K1 appends past the switch to K2 (bypassing the facade).
     Block b{};
-    b.address           = {root_kp_.pub, 7, 2};
+    b.address           = {root_kp_.pub, 7, 4};
     b.prev_hash         = bc_->branch_tip_hash(root_kp_.pub, 7);
     b.timestamp_claimed = 5'000LL;
     b.type              = BlockType::DATA;
@@ -993,8 +1038,8 @@ TEST_F(RevocationTest, EarlierEpochKeyAfterSecondSwitchIsInvalid) {
     storage_->put_block(b);
 
     auto st = validator_->branch_revocation_status(root_kp_.pub, 7);
-    ASSERT_EQ(st.blocks.size(), 3u);
-    EXPECT_EQ(st.blocks[2], BlockRevocationStatus::INVALID_AFTER_REPLACEMENT);
+    ASSERT_EQ(st.blocks.size(), 5u);
+    EXPECT_EQ(st.blocks[4], BlockRevocationStatus::INVALID_AFTER_REPLACEMENT);
     EXPECT_THROW(bc_->validate_branch(root_kp_.pub, 7), SignatureError);
 }
 
@@ -1022,12 +1067,11 @@ TEST_F(RevocationTest, LastGoodSplitsByLineNotByTime) {
     ASSERT_TRUE(st.revocation.has_value());
     ASSERT_TRUE(st.revocation->last_good.has_value());
 
-    // The replacement continues the branch; its blocks are the owner's.
-    bc_->append_data_block(root_kp_.pub, 7, {0x04}, k1, 5'000LL);
-    st = validator_->branch_revocation_status(root_kp_.pub, 7);
-    ASSERT_EQ(st.blocks.size(), 4u);
-    EXPECT_EQ(st.blocks[3], BlockRevocationStatus::CLEAN);
-    EXPECT_NO_THROW(bc_->validate_branch(root_kp_.pub, 7));
+    // The replacement continues right after the line, not past it: this copy
+    // holds a block after B1, so its replacement block has no place here
+    // (решение участника 2026-11-02).
+    EXPECT_THROW(take(7, k1, 5'000LL), RevocationError);
+    EXPECT_THROW(bc_->append_data_block(root_kp_.pub, 7, {0x04}, k1, 5'000LL), RevocationError);
 }
 
 TEST_F(RevocationTest, LastGoodMustBeABlockOfTheBranch) {
@@ -1097,11 +1141,13 @@ TEST_F(RevocationTest, ThreeTheftsInARow) {
     Block b2 = bc_->append_data_block(root_kp_.pub, 7, {0x02}, kp7_, 3'000LL);
     KeyPair k1 = Crypto::generate_keypair();
     bc_->revoke_node(root_kp_.pub, 7, k1.pub, 3, kp3_, 3'500LL, Crypto::hash_block(b2));
+    take(7, k1, 3'600LL);
 
     Block b3 = bc_->append_data_block(root_kp_.pub, 7, {0x03}, k1, 4'000LL);
     KeyPair k2 = Crypto::generate_keypair();
     Block r2 = bc_->revoke_node(root_kp_.pub, 7, k2.pub, 3, kp3_, 6'000LL,
                                 Crypto::hash_block(b3));
+    take(7, k2, 6'200LL);
     bc_->append_data_block(root_kp_.pub, 7, {0x04}, k2, 6'500LL);
 
     // The parent's key is stolen: the thief takes the branch over with Kx.
@@ -1124,7 +1170,7 @@ TEST_F(RevocationTest, ThreeTheftsInARow) {
 
     st = validator_->branch_revocation_status(root_kp_.pub, 7);
     EXPECT_EQ(st.state, BranchRevocationState::REPLACED);
-    ASSERT_EQ(st.blocks.size(), 5u);
+    ASSERT_EQ(st.blocks.size(), 7u);   // two lines, two replacement blocks, K2's records
     for (auto s : st.blocks) EXPECT_EQ(s, BlockRevocationStatus::CLEAN);
     EXPECT_NO_THROW(bc_->validate_branch(root_kp_.pub, 7));
 }
@@ -1206,12 +1252,13 @@ TEST_F(RestoreTest, AnOwnerWithoutACopyNamesTheLineFromBlocksTakenElsewhere) {
 
     const KeyPair repl = Crypto::generate_keypair();
     safe_bc_->revoke_node(root_kp_.pub, 7, repl.pub, 3, kp3_, 4'000LL, Crypto::hash_block(b1));
-    const Block next = safe_bc_->append_data_block(root_kp_.pub, 7, {0x04}, repl, 5'000LL);
-    EXPECT_EQ(next.address.block_index, 2u);
-    EXPECT_EQ(next.prev_hash, Crypto::hash_block(b1));
+    const Block k = safe_bc_->take_replacement(root_kp_.pub, 7, repl, 4'500LL);
+    EXPECT_EQ(k.address.block_index, 2u);
+    EXPECT_EQ(k.prev_hash, Crypto::hash_block(b1));
+    safe_bc_->append_data_block(root_kp_.pub, 7, {0x04}, repl, 5'000LL);
 
     const auto st = safe_validator_->branch_revocation_status(root_kp_.pub, 7);
-    ASSERT_EQ(st.blocks.size(), 3u);
+    ASSERT_EQ(st.blocks.size(), 4u);
     for (auto s : st.blocks) EXPECT_EQ(s, BlockRevocationStatus::CLEAN);
     EXPECT_NO_THROW(safe_bc_->validate_branch(root_kp_.pub, 7));
 }
@@ -1274,4 +1321,98 @@ TEST_F(RestoreTest, WhatDoesNotContinueTheBranchIsNotTaken) {
     EXPECT_THROW(take({resigned(before_birth, kp7_)}), TimestampError);     // раньше рождения
 
     EXPECT_FALSE(safe_->branch_tip_index(root_kp_.pub, 7).has_value());
+}
+
+// ── The replacement block (blockchain.md §6.7 rule 9, решение участника 2026-11-02) ──
+
+// Заменённый родитель: блок замены сразу за линией, затем рождение и отзыв новым
+// ключом — путь и сертификат проходят у любого проверяющего.
+TEST_F(RevocationTest, AReplacedParentTakesItsKeyAndGivesBirth) {
+    const Block   line3 = storage_->get_block({root_kp_.pub, 3, 0});   // the birth of 7
+    const KeyPair repl3 = Crypto::generate_keypair();
+    bc_->revoke_node(root_kp_.pub, 3, repl3.pub, 1, kp1_, 1'000LL, Crypto::hash_block(line3));
+    const Block k = take(3, repl3, 1'500LL);
+    EXPECT_EQ(k.type, BlockType::KEY_REPLACEMENT);
+    EXPECT_EQ(k.address.block_index, 1u);
+    EXPECT_EQ(k.prev_hash, Crypto::hash_block(line3));
+
+    const KeyPair kp8 = Crypto::generate_keypair();
+    std::map<NodeIndex, KeyPair> keys{{0, root_kp_}, {1, kp1_}, {3, repl3}, {8, kp8}};
+    bc_->ensure_path(root_kp_.pub, 8, [&](NodeIndex i) { return keys.at(i); }, 2'000LL);
+    EXPECT_NO_THROW(validator_->validate_path(root_kp_.pub, 8));
+    const KeyPath kp = KeyPathCert::build(*storage_, root_kp_.pub, 8);
+    EXPECT_EQ(KeyPathCert::verify(kp), root_kp_.pub);
+
+    const Block r7 = bc_->revoke_node(root_kp_.pub, 7, std::nullopt, 3, repl3, 3'000LL);
+    EXPECT_NO_THROW(RevocationCert::verify(RevocationCert::build(*storage_, r7.address)));
+    EXPECT_NO_THROW(bc_->validate_branch(root_kp_.pub, 3));
+}
+
+// Линия сдвинулась после блока замены: он больше не стоит сразу за ней, и его
+// эпоха вместе со всем после неё — вне линии; дальше эта копия не пишет.
+TEST_F(RevocationTest, AReplacementBlockOffTheLineTakesItsEpochOffTheLine) {
+    const Block   b0   = bc_->append_data_block(root_kp_.pub, 7, {0x01}, kp7_, 1'000LL);
+    const KeyPair repl = Crypto::generate_keypair();
+    bc_->revoke_node(root_kp_.pub, 7, repl.pub, 3, kp3_, 2'000LL, Crypto::hash_block(b0));
+    take(7, repl, 2'500LL);
+    bc_->append_data_block(root_kp_.pub, 7, {0x02}, repl, 3'000LL);
+
+    RevocationPayload moved{};                         // the same epoch, a line before #0
+    moved.revoked_node_index = 7;
+    moved.revoked_pubkey     = kp7_.pub;
+    moved.replacement_pubkey = repl.pub;
+    moved.last_good          = LastGood{EMPTY_BRANCH_INDEX, origin(7)};
+    storage_->put_block(craft_revocation(3, kp3_, moved, 4'000LL));
+
+    const auto st = validator_->branch_revocation_status(root_kp_.pub, 7);
+    EXPECT_TRUE(st.continuation_off_line);
+    ASSERT_EQ(st.blocks.size(), 3u);
+    for (auto s : st.blocks) EXPECT_EQ(s, BlockRevocationStatus::OUTSIDE_LINE);
+    EXPECT_THROW(bc_->append_data_block(root_kp_.pub, 7, {0x03}, repl, 5'000LL), RevocationError);
+}
+
+// Ключ замены без блока замены — не ключ ветки: такой блок ветку ломает.
+TEST_F(RevocationTest, AReplacementKeyBeforeItsBlockIsNoKeyOfTheBranch) {
+    const KeyPair repl = Crypto::generate_keypair();
+    bc_->revoke_node(root_kp_.pub, 7, repl.pub, 3, kp3_, 1'000LL, origin(7));
+    Block b{};
+    b.address           = {root_kp_.pub, 7, 0};
+    b.prev_hash         = origin(7);
+    b.timestamp_claimed = 2'000LL;
+    b.type              = BlockType::DATA;
+    b.payload           = {0x80};
+    b.signature         = Signature::null();
+    auto bytes          = Serializer::encode(b);
+    b.signature         = Crypto::sign(bytes.data(), bytes.size(), repl.sec);
+    storage_->put_block(b);
+    EXPECT_THROW(validator_->branch_revocation_status(root_kp_.pub, 7), SignatureError);
+}
+
+// Блок замены, называющий не ту запись, ключа не меняет.
+TEST_F(RevocationTest, AReplacementBlockNamingAnotherRecordDoesNotSwitch) {
+    const KeyPair repl = Crypto::generate_keypair();
+    const Block   rec  = bc_->revoke_node(root_kp_.pub, 7, repl.pub, 3, kp3_, 1'000LL, origin(7));
+    Block k{};
+    k.address           = {root_kp_.pub, 7, 0};
+    k.prev_hash         = origin(7);
+    k.timestamp_claimed = 2'000LL;
+    k.type              = BlockType::KEY_REPLACEMENT;
+    Hash wrong          = Crypto::hash_block(rec);
+    wrong.bytes[0] ^= 0xFF;
+    k.payload           = Serializer::encode(ReplacementPayload{rec.address, wrong});
+    k.signature         = Signature::null();
+    auto bytes          = Serializer::encode(k);
+    k.signature         = Crypto::sign(bytes.data(), bytes.size(), repl.sec);
+    storage_->put_block(k);
+    EXPECT_THROW(validator_->branch_revocation_status(root_kp_.pub, 7), SignatureError);
+}
+
+// Блок замены пишет только ожидаемая замена.
+TEST_F(RevocationTest, OnlyTheAwaitedReplacementWritesItsBlock) {
+    EXPECT_THROW(take(7, kp7_, 1'000LL), RevocationError);            // nothing revoked
+    const KeyPair repl = Crypto::generate_keypair();
+    bc_->revoke_node(root_kp_.pub, 7, repl.pub, 3, kp3_, 1'000LL, origin(7));
+    EXPECT_THROW(take(7, Crypto::generate_keypair(), 2'000LL), RevocationError);
+    take(7, repl, 2'000LL);
+    EXPECT_THROW(take(7, repl, 3'000LL), RevocationError);            // taken already
 }

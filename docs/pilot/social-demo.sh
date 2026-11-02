@@ -188,7 +188,9 @@ printf '%s\n' "$SHOW_LINE" | head -3 | sed 's/^/   /'
 
 hr "украли ключ родителя Веры: вор отзывает её рабочий ключ и ставит дизлайк (blockchain.md §6.7, правило 10)"
 cp -a "$work/vera" "$work/thief2"
-bcx thief2 revoke create --node 2147483647 --replace --via "$VIA" >/dev/null 2>&1
+# Замена начинается с блока замены сразу за линией (blockchain.md §6.7 правило 9):
+# вор называет линию по своей копии и ставит этот блок.
+bcx thief2 revoke create --node 2147483647 --replace --last-good tip --via "$VIA" >/dev/null 2>&1
 post thief2 social dislike "$VIDEO"
 SHOW_HIJACK="$(bcx anna social show "$VIDEO" --via "$VIA")"
 printf '%s\n' "$SHOW_HIJACK" | head -3 | sed 's/^/   /'

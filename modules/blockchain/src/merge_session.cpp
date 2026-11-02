@@ -132,6 +132,12 @@ void MergeSession::check_own_branch(const UserId& user_id, NodeIndex leaf_index,
     if (own_st.next_key.has_value() && own_working_keypair.pub != *own_st.next_key)
         throw RevocationError(
             "own branch key was replaced by revocation; use the replacement key (blockchain.md §6.7)");
+    if (own_st.awaiting_replacement)
+        throw RevocationError("own branch has not taken its replacement key yet: its replacement "
+                              "block comes first (blockchain.md §6.7 rule 9)");
+    if (own_st.continuation_off_line)
+        throw RevocationError("own branch continues off the owner's line in force "
+                              "(blockchain.md §6.7 rule 9)");
 }
 
 Block MergeSession::write_half(

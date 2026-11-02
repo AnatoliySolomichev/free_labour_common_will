@@ -47,6 +47,8 @@ public:
         revoked_key,        // a revoked key signed it off the owner's line,
                             // or its node's birth lies outside the owner's line (blockchain.md §11.2)
         before_birth,       // the branch's first block is dated before the node's birth
+        no_replacement_block,  // a replacement key's block before (or instead of) its
+                               // replacement block right after the line (blockchain.md §6.7 rule 9)
     };
 
     // Everything the storage already holds: key paths, key changes, revocations —
@@ -110,6 +112,19 @@ private:
         std::vector<Record>                 records;
         std::vector<std::vector<PublicKey>> lines;
     };
+
+    // The line a replacement continues after: the latest named for the epoch
+    // the record that assigned it revoked.
+    static std::optional<LastGood> line_for(const std::vector<Record>& records,
+                                            const PublicKey& replacement,
+                                            const std::vector<const std::vector<PublicKey>*>& epochs);
+    // Whether a block of a replacement line stands (blockchain.md §6.7 rule 9): it
+    // is that replacement's block, right after the line and naming a counting
+    // record that assigned it; or that block stands here already, before it.
+    static bool replacement_in_place(const Block& b, const PublicKey& replacement,
+                                     const std::vector<Record>& records,
+                                     const std::vector<const std::vector<PublicKey>*>& epochs,
+                                     const AggregatorStorage* storage);
 
     // Whether a block a key of `epoch` signed may come in: the epoch is not
     // revoked, or the block is on the owner's line.

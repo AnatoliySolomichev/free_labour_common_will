@@ -78,6 +78,49 @@ bool on_line(const AggregatorStorage* storage, const Block& b, const LastGood& l
 
 } // namespace
 
+std::optional<LastGood> BranchKeys::line_for(const std::vector<Record>& records,
+                                             const PublicKey& replacement,
+                                             const std::vector<const std::vector<PublicKey>*>& epochs) {
+    const Record* assigning = nullptr;                       // the last word on this replacement
+    for (const Record& r : records)
+        if (r.replacement && *r.replacement == replacement) assigning = &r;
+    if (!assigning) return std::nullopt;
+    std::vector<PublicKey> from{assigning->revoked};         // the epoch it took over from
+    for (const auto* ep : epochs)
+        if (std::find(ep->begin(), ep->end(), assigning->revoked) != ep->end()) from = *ep;
+    std::optional<LastGood> line;
+    for (const Record& r : records)
+        if (std::find(from.begin(), from.end(), r.revoked) != from.end() && r.last_good)
+            line = r.last_good;
+    return line;
+}
+
+bool BranchKeys::replacement_in_place(const Block& b, const PublicKey& replacement,
+                                      const std::vector<Record>& records,
+                                      const std::vector<const std::vector<PublicKey>*>& epochs,
+                                      const AggregatorStorage* storage) {
+    const auto line = line_for(records, replacement, epochs);
+    if (!line) return false;                                 // no line yet: the replacement waits
+    const BlockIndex at = line->index == EMPTY_BRANCH_INDEX ? 0 : line->index + 1;
+    if (b.type == BlockType::KEY_REPLACEMENT && b.address.block_index == at) {
+        if (b.prev_hash != line->hash || !signed_by(b, replacement)) return false;
+        ReplacementPayload p{};
+        try {
+            p = Serializer::decode_replacement_payload(b.payload.data(), b.payload.size());
+        } catch (const std::exception&) { return false; }
+        return std::any_of(records.begin(), records.end(), [&](const Record& r) {
+            return r.replacement && *r.replacement == replacement &&
+                   r.written.address == p.record_address &&
+                   Crypto::hash_block(r.written) == p.record_hash;
+        });
+    }
+    if (b.address.block_index <= at) return false;
+    if (!storage) return true;                               // nothing to look in: by its word
+    const auto k = storage->get_block({b.address.user_id, b.address.node_index, at});
+    return k && k->type == BlockType::KEY_REPLACEMENT && k->prev_hash == line->hash &&
+           signed_by(*k, replacement);
+}
+
 bool BranchKeys::admits(const std::vector<Record>& records, const std::vector<PublicKey>& epoch,
                         const Block& b, const AggregatorStorage* storage) {
     bool                    revoked = false;
@@ -173,6 +216,7 @@ void BranchKeys::learn_revocation(const RevocationCertificate& cert) {
 
 BranchKeys::Verdict BranchKeys::check(const Block& b, const AggregatorStorage* storage) const {
     std::vector<std::vector<PublicKey>> epochs;   // the own line, then each replacement line
+    std::vector<bool>                   replaced; // whether the epoch is a replacement line
     std::vector<Record>                 records;  // only those that count (rule 10)
     {
         std::lock_guard<std::mutex> lock(mu_);
@@ -187,23 +231,34 @@ BranchKeys::Verdict BranchKeys::check(const Block& b, const AggregatorStorage* s
                 return Verdict::before_birth;
             if (!born(br->second, storage, 0)) return Verdict::revoked_key;
             epochs.push_back(br->second.own);
+            replaced.push_back(false);
         }
         if (rev != revocations_.end()) {
             records = counting(k.first, rev->second, storage, 0);
             for (const auto& line : rev->second.lines)
                 if (std::any_of(records.begin(), records.end(), [&](const Record& r) {
                         return r.replacement && *r.replacement == line.front();
-                    }))
+                    })) {
                     epochs.push_back(line);
+                    replaced.push_back(true);
+                }
         }
     }
-    bool revoked = false;
-    for (const auto& epoch : epochs)
-        for (const auto& key : epoch)
+    std::vector<const std::vector<PublicKey>*> all;
+    for (const auto& e : epochs) all.push_back(&e);
+    bool revoked = false, waiting = false;
+    for (std::size_t i = 0; i < epochs.size(); ++i)
+        for (const auto& key : epochs[i])
             if (signed_by(b, key)) {
-                if (admits(records, epoch, b, storage)) return Verdict::signed_by_branch;
+                // A replacement starts with its block right after the line (rule 9).
+                if (replaced[i] && !replacement_in_place(b, epochs[i].front(), records, all, storage)) {
+                    waiting = true;
+                    continue;
+                }
+                if (admits(records, epochs[i], b, storage)) return Verdict::signed_by_branch;
                 revoked = true;
             }
+    if (waiting) return Verdict::no_replacement_block;
     return revoked ? Verdict::revoked_key : Verdict::foreign_signature;
 }
 
@@ -250,18 +305,24 @@ BranchKeys::Whose BranchKeys::whose_locked(const Block& b, const std::vector<Pub
     if (rev != revocations_.end()) records = counting(k.first, rev->second, storage, depth);
     // The epochs: the own line, then each replacement a counting record named.
     std::vector<const std::vector<PublicKey>*> epochs;
+    std::size_t                                own_lines = 0;
     if (br != branches_.end())  epochs.push_back(&br->second.own);
     else if (own)               epochs.push_back(own);
+    own_lines = epochs.size();
     if (rev != revocations_.end())
         for (const auto& line : rev->second.lines)
             if (std::any_of(records.begin(), records.end(), [&](const Record& r) {
                     return r.replacement && *r.replacement == line.front();
                 }))
                 epochs.push_back(&line);
-    for (const auto* epoch : epochs)
-        for (const auto& key : *epoch) {
+    for (std::size_t i = 0; i < epochs.size(); ++i)
+        for (const auto& key : *epochs[i]) {
             if (!signed_by(b, key)) continue;
-            return admits(records, *epoch, b, storage) ? Whose::owner : Whose::not_owner;
+            // A replacement's blocks are its owner's from its replacement block on (rule 9).
+            if (i >= own_lines &&
+                !replacement_in_place(b, epochs[i]->front(), records, epochs, storage))
+                return Whose::not_owner;
+            return admits(records, *epochs[i], b, storage) ? Whose::owner : Whose::not_owner;
         }
     return Whose::not_owner;   // a key no counting record gave this branch
 }

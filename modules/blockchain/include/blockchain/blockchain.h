@@ -113,6 +113,17 @@ public:
         const std::optional<Hash>&      last_good = std::nullopt
     );
 
+    // The replaced branch takes the key a revocation assigned (blockchain.md §6.7
+    // rule 9): its KEY_REPLACEMENT block, right after the owner's line (prev_hash
+    // of the last valid block, or of the birth for a line with no block), signed
+    // by the replacement and naming the record that assigned it. Nothing else of
+    // the replacement key comes before it. This storage's copy of the branch
+    // must end at the line. Throws: RevocationError (no replacement awaits this
+    // key, no line named yet, the copy does not end at the line, the record is
+    // not here), StorageError.
+    Block take_replacement(const UserId& user_id, NodeIndex node_index,
+                           const KeyPair& replacement, Timestamp timestamp);
+
     // Own blocks of a branch learned elsewhere — the aggregator, a partner — for
     // the owner without a copy of it (blockchain.md §6.7 rule 12): the line up to
     // the block the owner recognizes as the last valid one, so that a revocation

@@ -49,6 +49,14 @@ struct BranchRevocationStatus {
     // Index of the owner's last valid block of the latest revoked epoch, when
     // a revocation named it and the block is in the branch (rule 12).
     std::optional<BlockIndex>           line_end;
+    // The epoch in force is revoked and its replacement has not written its
+    // KEY_REPLACEMENT block here yet (rule 9): no other block may come first.
+    bool                                awaiting_replacement = false;
+    // The line that replacement continues after — nullopt under a full stop.
+    std::optional<LastGood>             line;
+    // A replacement block here stands off the owner's line in force (the line
+    // moved, or none was named): its epoch and every later one are off the line.
+    bool                                continuation_off_line = false;
 };
 
 // Verify a block's signature against a candidate key (canonical CBOR bytes
@@ -105,15 +113,22 @@ public:
         const UserId& user_id, NodeIndex node_index) const;
 
     // Classify a branch and each of its blocks against the effective revocation
-    // (blockchain.md §6.7 rules 5, 9, 11, 12): follows the key epochs — the
-    // first block of a replacement switches the key, over replacements revoked
-    // before any use; within a revoked epoch the owner's line (up to the named
+    // (blockchain.md §6.7 rules 5, 9, 11, 12): follows the key epochs — a
+    // replacement switches the key at its KEY_REPLACEMENT block, which names the
+    // record that assigned it, over replacements revoked before any use; that
+    // block stands right after the line of the epoch it replaces, or its epoch
+    // is OUTSIDE_LINE; within a revoked epoch the owner's line (up to the named
     // last valid block) is CLEAN and the rest OUTSIDE_LINE; with no line
     // named its blocks are SUSPECT. Throws: NodeNotFoundError, BlockNotFoundError,
     // SignatureError (block signed by none of the branch keys — structurally
     // broken branch).
     BranchRevocationStatus branch_revocation_status(
         const UserId& user_id, NodeIndex node_index) const;
+
+    // The REVOCATION record that assigned `key` as the node's replacement: the
+    // latest counting one of the deciding author (blockchain.md §6.7 rule 9).
+    std::optional<Block> replacement_record(const UserId& user_id, NodeIndex node_index,
+                                            const PublicKey& key) const;
 
     // The key a branch signs with at `place` (blockchain.md §6.6, blockchain.md §6.7 rule 9):
     // its node's key carried through the key changes of the stored blocks

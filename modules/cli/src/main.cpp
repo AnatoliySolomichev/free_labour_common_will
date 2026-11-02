@@ -7292,7 +7292,7 @@ static std::optional<Block> find_block(Context& ctx, const std::string& via, con
 // and asks once for the branch's key path: it is published from the nodes this
 // device holds — its own, or a partner's that a merge brought — and the block
 // goes again.
-static int send_block(Context& ctx, const std::string& via, const Block& block,
+static int send_block(const IStorage& storage, const std::string& via, const Block& block,
                       std::string* answer = nullptr) {
     httplib::Client cli(via);  // scheme-aware: plain host:port, http:// or https://
     cli.set_connection_timeout(5);
@@ -7305,9 +7305,14 @@ static int send_block(Context& ctx, const std::string& via, const Block& block,
     };
     int status = post();
     if (status == 428 &&
-        publish_key_path(via, ctx.storage, block.address.user_id, block.address.node_index))
+        publish_key_path(via, storage, block.address.user_id, block.address.node_index))
         status = post();
     return status;
+}
+
+static int send_block(Context& ctx, const std::string& via, const Block& block,
+                      std::string* answer = nullptr) {
+    return send_block(ctx.storage, via, block, answer);
 }
 
 // Upload without a word — for the blocks that only back another one.
@@ -7392,6 +7397,10 @@ static void upload_block(Context& ctx, const std::string& via, const Block& bloc
     else if (status == 403 && answer.find("revoked key") != std::string::npos)
         std::cerr << "upload to " << via << " refused: signed by a revoked key past its "
                      "compromise and the owner's line (blockchain.md §6.7)\n";
+    else if (status == 403 && answer.find("replacement block first") != std::string::npos)
+        std::cerr << "upload to " << via << " refused: the replacement key starts with its "
+                     "replacement block — upload the branch from it: bc block push "
+                     "(blockchain.md §6.7 rule 9)\n";
     else if (status == 403)
         std::cerr << "upload to " << via << " refused: the block is not signed by its "
                      "branch's key (sync.md §10.10)\n";
@@ -10120,6 +10129,8 @@ static int cmd_keypath_who(const fs::path& data_dir, int argc, char** argv) {
     return 0;
 }
 
+static std::string block_gist(const Block& b);
+
 static int cmd_list(const fs::path& data_dir, int argc, char** argv) {
     const NodeIndex leaf = parse_leaf_index(argc, argv);
     Context ctx(data_dir, leaf);
@@ -10145,7 +10156,7 @@ static int cmd_list(const fs::path& data_dir, int argc, char** argv) {
 
         if (block.type != BlockType::DATA) {
             std::cout << "#" << block.address.block_index
-                      << "  [non-data block type=" << static_cast<int>(block.type) << "]"
+                      << "  " << block_gist(block)
                       << "  hash:" << hash_str << "\n";
             continue;
         }
@@ -10364,6 +10375,7 @@ static std::string block_gist(const Block& b) {
         case BlockType::KEY_ROTATION: return "[смена ключа]";
         case BlockType::REVOCATION:   return "[отзыв]";
         case BlockType::BIRTH:        return "[рождение]";
+        case BlockType::KEY_REPLACEMENT: return "[замена ключа]";
         case BlockType::DATA:         break;
     }
     if (b.payload.size() == 1 && b.payload[0] == 0x80) return "[заглушка]";
@@ -10604,6 +10616,22 @@ static int cmd_revoke_create(const fs::path& data_dir, int argc, char** argv) {
         }
     }
 
+    // A replacement assigned before the line waits for it (blockchain.md §6.7
+    // rule 9): naming the line keeps that replacement when its key is here.
+    std::optional<KeyPair> kept;
+    if (!replacement.has_value() && last_good.has_value()) {
+        const auto st = validator.branch_revocation_status(uid, revoked);
+        if (st.awaiting_replacement && st.next_key.has_value()) {
+            try {
+                const KeyPair held = load_keypair(data_dir, revoked);
+                if (held.pub == *st.next_key) {
+                    kept        = held;
+                    replacement = held.pub;
+                }
+            } catch (const std::exception&) {}
+        }
+    }
+
     const Block b = bc.revoke_node(uid, revoked, replacement,
                                    ancestor, ancestor_kp, now, last_good);
 
@@ -10613,6 +10641,18 @@ static int cmd_revoke_create(const fs::path& data_dir, int argc, char** argv) {
         if (fs::exists(kp_path))
             fs::rename(kp_path, fs::path(kp_path.string() + ".revoked"));
         save_keypair(data_dir, revoked, *fresh);
+    }
+
+    // The replaced branch takes its key right after the owner's line, when this
+    // copy ends there (blockchain.md §6.7 rule 9).
+    std::optional<Block> taken;
+    std::string          not_taken;
+    if (const auto taker = fresh.has_value() ? fresh : kept; taker.has_value()) {
+        try {
+            taken = bc.take_replacement(uid, revoked, *taker, now);
+        } catch (const RevocationError& e) {
+            not_taken = e.what();
+        }
     }
 
     std::cout << "revocation block #" << b.address.block_index
@@ -10627,6 +10667,13 @@ static int cmd_revoke_create(const fs::path& data_dir, int argc, char** argv) {
     else
         std::cout << "no line named: every block of this key is in question until "
                      "--last-good names it\n";
+    if (taken.has_value())
+        std::cout << "replacement block #" << taken->address.block_index << " in branch "
+                  << revoked << ": the new key starts here (blockchain.md §6.7 rule 9)\n";
+    else if (replacement.has_value())
+        std::cout << "the new key waits: " << not_taken << "\n"
+                  << "  its replacement block comes when the line is named: bc revoke create "
+                     "--node " << revoked << " --last-good HASH\n";
 
     const auto cert  = RevocationCert::build(storage, b.address);
     const auto bytes = Serializer::encode(cert);
@@ -10641,10 +10688,23 @@ static int cmd_revoke_create(const fs::path& data_dir, int argc, char** argv) {
         std::cout << "certificate hex: " << to_hex(bytes.data(), bytes.size()) << "\n";
     }
 
-    if (!via.empty())
+    if (!via.empty()) {
         std::cerr << (post_revocation_cert(via, uid, bytes)
                           ? "Published to " : "publish failed: ")
                   << via << "\n";
+        // The replacement block after the certificate: the aggregator takes
+        // the new key's blocks only from it on (sync.md §10.10).
+        if (taken.has_value()) {
+            std::string answer;
+            const int status = send_block(storage, via, *taken, &answer);
+            std::cerr << (status == 200 ? "replacement block uploaded to "
+                                        : "replacement block upload failed (" +
+                                              std::to_string(status) + "): ")
+                      << via << (status == 200 ? "" : " — bc block push --leaf " +
+                                                       std::to_string(revoked))
+                      << "\n";
+        }
+    }
     return 0;
 }
 
@@ -10812,6 +10872,11 @@ static int cmd_revoke_status(const fs::path& data_dir, int argc, char** argv) {
         if (st.revocation->replacement_pubkey.has_value())
             std::cout << "  replacement: "
                       << short_hex(st.revocation->replacement_pubkey->bytes) << "\n";
+        if (st.awaiting_replacement)
+            std::cout << "  the replacement waits for its block right after the line "
+                         "(blockchain.md §6.7 rule 9)\n";
+        if (st.continuation_off_line)
+            std::cout << "  the replacement block stands off the owner's line in force\n";
         if (st.line_end.has_value())
             std::cout << "  owner's line: blocks #0..#" << *st.line_end
                       << " (blockchain.md §6.7 rule 12)\n";
@@ -11192,7 +11257,9 @@ Key revocation (blockchain.md §6.7; warehouse — sync.md §7.2):
                                        --last-good names the owner's last valid
                                        block (tip = this storage's branch tip);
                                        a HASH not stored here comes from --via
-                                       with the blocks before it
+                                       with the blocks before it; with a line the
+                                       new key starts at once — its replacement
+                                       block right after it (uploaded with --via)
   revoke blocks --node N --via URL Branch N on the aggregator, block by block —
                                        find the last one that is yours
   revoke verify (--cert FILE | --hex HEX)  Check a certificate autonomously

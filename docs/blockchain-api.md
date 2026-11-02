@@ -1,6 +1,6 @@
 # API модуля блокчейна
 
-**Статус:** черновик v0.6  
+**Статус:** черновик v0.7  
 **Основание:** [docs/blockchain.md](blockchain.md)  
 **Язык реализации:** C++17  
 **Внешние зависимости:** libsodium, LMDB (CBOR реализован вручную, без внешней библиотеки)
@@ -499,6 +499,11 @@ public:
                         const Hash& expected_prev_hash,
                         const PublicKey& expected_working_pubkey) const;
 
+    // Запись REVOCATION, назначившая `key` заменой узла: последняя считающаяся
+    // у решающего автора (blockchain.md §6.7, правило 9).
+    std::optional<Block> replacement_record(const UserId& user_id, NodeIndex node_index,
+                                            const PublicKey& key) const;
+
     // Ключ ветки на месте `place`: ключ узла, проведённый через смены ключа
     // блоков до этого места (blockchain.md §6.6, blockchain.md §6.7, правило 9).
     // Бросает: NodeNotFoundError, SignatureError
@@ -687,6 +692,14 @@ public:
         const std::optional<Hash>&      last_good = std::nullopt
     );
 
+    // Ветка берёт ключ, назначенный отзывом (blockchain.md §6.7, правило 9): блок
+    // KEY_REPLACEMENT сразу за линией хозяина, подписанный заменой и называющий
+    // запись. Копия ветки должна кончаться на линии.
+    // Бросает: RevocationError (замена не ждёт этого ключа, линии нет, копия не
+    //          кончается на линии, записи нет), StorageError
+    Block take_replacement(const UserId& user_id, NodeIndex node_index,
+                           const KeyPair& replacement, Timestamp timestamp);
+
     // Блоки своей ветки, взятые извне (агрегатор, партнёр), — для хозяина без
     // своей копии (blockchain.md §6.7, правило 12): линия до блока, который он
     // узнаёт как последний верный. Блоки продолжают копию ветки в этом хранилище
@@ -817,6 +830,7 @@ session_alice.check_partner_half(answer, after_half, tip_bob, now(), merged);
 
 ## 17. История изменений
 
+- **v0.7** — блок замены (решение участника 2026-11-02, `blockchain.md §6.7`, правило 9): `Blockchain::take_replacement`, `Validator::replacement_record`; в `BranchRevocationStatus` — `awaiting_replacement`, `line`, `continuation_off_line`; эпоха замены начинается только её блоком.
 - **v0.6** — узел без подписи (решение участника 2026-11-02, `blockchain.md §11.2`): `Node::parent_hash` и `Node::parent_sig` убраны, `Node::root_sig` — самоподпись корня; узел — вывод из блока рождения (`node_born`), начало ветки — `branch_origin`. `KeyPath` = {root, births, changes, records}, `RevocationCertificate` и `BranchTipInfo` несут его; `KeyPathCert::key_at`, `Validator::key_at`. `BlockType::KEY_REPLACEMENT`, `ReplacementPayload`. `verify_node_path` и `check_birth` убраны.
 - **v0.5** — линия без своей копии ветки (2026-11-02, `blockchain.md §6.7`, правило 12): `Validator::check_continuation`, `Blockchain::restore_branch`.
 - **v0.4** — отзыв без даты (2026-10-30, `blockchain.md §6.7`): `compromised_since` убран из `RevocationPayload`, `RevocationState` и `revoke_node`.
